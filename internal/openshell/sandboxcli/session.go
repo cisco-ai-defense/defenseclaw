@@ -421,7 +421,15 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 		return
 	}
 	text := "✗ DefenseClaw blocked " + hostPort(ev)
-	if why := firstNonEmpty(ev.Category, ev.Reason); why != "" {
+	switch why := firstNonEmpty(ev.Category, ev.Reason); {
+	case ev.Category == sandboxapi.CategoryLargeUpload:
+		// The large-upload block (egress.block_large_uploads) cut an
+		// upload there, or refused one after the cut.
+		text = "✗ DefenseClaw blocked a large upload to " + hostPort(ev)
+		if clause := sandboxapi.LargeUploadReason(ev.Reason); clause != "" {
+			text += " (" + clause + ")"
+		}
+	case why != "":
 		text += " (" + reasonText(why) + ")"
 	}
 	if ev.Unblockable {

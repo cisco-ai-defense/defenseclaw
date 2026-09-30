@@ -144,6 +144,19 @@ def reason_label(text: str) -> str:
     return REASON_LABELS.get(text, text.replace("_", " "))
 
 
+# sandboxapi.CategoryLargeUpload: the category of the egress.blocked events of
+# the large-upload block (egress.block_large_uploads).
+LARGE_UPLOAD_CATEGORY = "large_upload"
+
+
+def large_upload_blocked_text(reason: str) -> str:
+    """sandboxapi.LargeUploadBlockedText: the proxy's sentence, which names the threshold, as the block's words."""
+    clause = reason.strip().removesuffix(".")
+    if not clause:
+        return "large upload blocked"
+    return "large upload blocked: " + clause[:1].lower() + clause[1:]
+
+
 # How a sandbox tool verdict's reason starts (gateway.sandboxVerdictReason):
 # "Blocked by DefenseClaw rule ID: Title." or "Blocked by DefenseClaw
 # policy.", then advice written for the agent ("... or ask the user to ..."),
@@ -588,6 +601,8 @@ class ActivityRow:
     @property
     def why(self) -> str:
         """The block's category or reason in plain words ("webhook catcher")."""
+        if self.category == LARGE_UPLOAD_CATEGORY:
+            return large_upload_blocked_text(self.reason)
         return reason_label(self.category or self.reason)
 
     @property

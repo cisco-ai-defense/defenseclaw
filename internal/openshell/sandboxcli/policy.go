@@ -92,6 +92,11 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 			rows = append(rows, [2]string{key, withNote(listSummary(shown, 8), note)})
 		}
 	}
+	if settingValue(ex.Settings, "egress.block_large_uploads") == "true" {
+		rows = append(rows, [2]string{"egress.block_large_uploads", "true (an upload of more than " +
+			firstNonEmpty(settingValue(ex.Settings, "egress.large_upload_mb"), "?") +
+			" MiB to a host the sandbox had not contacted is cut)"})
+	}
 	// The key column fits the longest key: values never run into labels.
 	width := 0
 	for _, r := range rows {
@@ -337,6 +342,9 @@ func (a *App) adminConstraints() []string {
 	list("allowed_harnesses", ad.AllowedHarnesses)
 	list("egress_block", ad.EgressBlock)
 	list("egress_allow_only", ad.EgressAllowOnly)
+	if ad.BlockLargeUploads {
+		add("block_large_uploads", "true")
+	}
 	list("require_copy_for", ad.RequireCopyFor)
 	if r := ad.MaxResources; r.CPU != "" || r.Memory != "" {
 		add("max_resources", strings.TrimSpace(firstNonEmpty(r.CPU, "-")+" CPU, "+firstNonEmpty(r.Memory, "-")+" memory"))

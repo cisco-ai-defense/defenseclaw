@@ -216,6 +216,11 @@ struct SandboxModelTests {
         expect(private22.summary == "10.0.0.5:22 (private network)", "private summary")
         let lifecycle = SandboxDecoding.event(["seq": 1, "kind": "sandbox.lifecycle", "phase": "Stopped"])!
         expect(lifecycle.summary == "now stopped", "lifecycle summary")
+        // The large-upload block names the threshold the upload crossed.
+        let upload = SandboxActivity(kind: "egress.blocked", host: "files.example.net", category: "large_upload",
+                                     reason: "More than 10 MiB was sent to a destination this sandbox had not contacted before.")
+        expect(upload.summary == "files.example.net (large upload blocked: more than 10 MiB was sent to a destination "
+               + "this sandbox had not contacted before)", "large upload summary \(upload.summary)")
     }
 
     private static func decodesSandboxAPIErrorBodies() {
@@ -238,10 +243,10 @@ struct SandboxModelTests {
 
     private static func adminLocksMirrorThePythonEditor() {
         let keys = ["openshell.pack", "openshell.yolo", "openshell.profile", "openshell.egress.unblocked",
-                    "openshell.resources.cpu"]
+                    "openshell.resources.cpu", "openshell.egress.block_large_uploads"]
         let locks = SandboxAdminLocks.locks(
             admin: ["required_pack": "balanced", "allow_yolo": "false", "allow_unblock": false,
-                    "locked": ["resources"]],
+                    "block_large_uploads": "true", "locked": ["resources"]],
             managed: false,
             keys: keys
         )
@@ -250,6 +255,8 @@ struct SandboxModelTests {
         expect(locks["openshell.egress.unblocked"] == "unblocking and allow entries are not allowed", "unblock")
         expect(locks["openshell.resources.cpu"]?.contains("openshell.admin.locked: resources") == true, "locked")
         expect(locks["openshell.profile"] == nil, "profile stays editable")
+        expect(locks["openshell.egress.block_large_uploads"] == "your organization blocks large uploads to first-seen hosts",
+               "upload block")
         let managed = SandboxAdminLocks.locks(admin: [:], managed: true, keys: keys)
         expect(managed.count == keys.count, "managed_enterprise locks every key")
     }

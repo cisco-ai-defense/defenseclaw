@@ -53,6 +53,14 @@ type Principal struct {
 	// the sandbox. Re-registering the credential applies a new value to
 	// later tunnels and requests.
 	LargeUploadBytes int64
+	// BlockLargeUploads turns the large-upload block on for the sandbox
+	// (its resolved egress.block_large_uploads): the tunnel or request that
+	// crosses its threshold is cut, and further uploads to that destination
+	// are refused, as CounterOptions.BlockLargeUploads does for every
+	// sandbox. It needs a threshold: with the signal off there is nothing
+	// to block. Re-registering the credential applies a new value to later
+	// tunnels and requests.
+	BlockLargeUploads bool
 }
 
 // Authenticator maps a proxy credential to its principal. Implementations

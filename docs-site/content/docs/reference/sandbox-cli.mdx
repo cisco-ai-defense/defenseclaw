@@ -851,7 +851,12 @@ and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
 calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
 changes (a sandbox being created, becoming ready, stopping, or being deleted),
 and workspace events such as an undo or a copy-mode upload. A blocked
-destination that can be unblocked shows the `unblock` command to run. `-f`
+destination that can be unblocked shows the `unblock` command to run. A large
+upload is a ⚠ report, or, with
+[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+on, a ✗ that names the threshold, such as `✗ files.example.net (large upload
+blocked: more than 10 MiB was sent to a destination this sandbox had not
+contacted before)`, with its `unblock` command. `-f`
 keeps following the feed. The daemon keeps a bounded buffer of recent events. Each event has a
 sequence number, and `--since` starts after one.
 

@@ -705,22 +705,58 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			})
 		}
 	case egress.EventLargeUpload:
-		severity := "MEDIUM"
 		if e.Terminated {
-			severity = "HIGH"
+			m.largeUploadBlocked(ctx, ident, e)
+			return
 		}
 		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
-			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: severity,
+			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "MEDIUM",
 			Title:       "Large upload to a first-seen destination",
 			Description: fmt.Sprintf("%s sent %d bytes to %s, which it had not contacted before.", e.SandboxName, e.BytesUp, e.Host),
 			Evidence:    truncate(e.Reason, 512), TargetRef: e.Host,
-			Remediation: "Review what the agent uploaded; block the destination if it is not expected.",
-			Timestamp:   e.Time,
+			Remediation: "Review what the agent uploaded; block the destination if it is not expected " +
+				"(openshell.egress.block_large_uploads: true cuts such uploads).",
+			Timestamp: e.Time,
 		})
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: e.SandboxName,
-			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Severity: severity,
+			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Severity: "MEDIUM",
 			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%d bytes)", e.Host, e.BytesUp)})
 	}
+}
+
+// largeUploadBlocked records and shows an upload the large-upload block cut
+// (egress.block_large_uploads): a HIGH finding, a blocked egress record,
+// and a ✗ in the feed that names the threshold and, when an unblock lifts
+// the block, offers it. The proxy refuses the sandbox's later tunnels to
+// the destination with the same category, each an ordinary blocked event.
+func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
+	threshold := egress.FormatThreshold(e.Threshold)
+	remediation := "Review what the agent tried to upload. If the destination is expected, unblock it for the sandbox: " +
+		"defenseclaw sandbox unblock " + e.Host + " --sandbox " + e.SandboxName + "."
+	if !e.Unblockable {
+		remediation = "Review what the agent tried to upload. Your organization does not allow unblocks; " +
+			"ask your administrator if the destination is expected."
+	}
+	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "HIGH",
+		Title: "Large upload to a first-seen destination blocked",
+		Description: fmt.Sprintf("%s tried to send more than %s to %s, which it had not contacted before; "+
+			"the large-upload block cut the upload (%d bytes had been sent) and refuses further requests there.",
+			e.SandboxName, threshold, e.Host, e.BytesUp),
+		Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation, Timestamp: e.Time,
+	})
+	if err := m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
+		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
+		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
+		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
+	}); err != nil {
+		m.logf("egress telemetry: %v", err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
+		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
+		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),
+		Message: "✗ " + e.Host + " (" + sandboxapi.LargeUploadBlockedText(e.Reason) + ")"})
 }
 
 func egressScheme(e egress.Event) string {
@@ -768,6 +804,8 @@ func policyOutcome(e egress.Event) string {
 
 func categoryText(e egress.Event) string {
 	switch {
+	case e.Category == egress.CategoryLargeUpload:
+		return sandboxapi.LargeUploadBlockedText(e.Reason)
 	case e.Entry != "":
 		return strings.ReplaceAll(string(e.Category), "_", " ") + ": " + e.Entry
 	case e.Category != "":

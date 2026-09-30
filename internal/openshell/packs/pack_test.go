@@ -161,6 +161,7 @@ egress:
   block: [Paste.Example., "*.Ngrok.io", paste.example, 198.51.100.7/24, "2001:DB8:0::/32"]
   allow: ["[2001:db8::1]", "::ffff:203.0.113.7", 203.0.113.7]
   ports: [443, 443, 8443]
+  block_large_uploads: true
 workspace:
   mode: copy
   masks: [" .env ", .env]
@@ -184,8 +185,8 @@ hooks: {fail_mode: closed}
 	if !reflect.DeepEqual(pack.Egress.Allow, []string{"2001:db8::1", "203.0.113.7"}) {
 		t.Fatalf("allow = %v", pack.Egress.Allow)
 	}
-	if !reflect.DeepEqual(pack.Egress.Ports, []int{443, 8443}) || pack.Egress.LargeUploadMB != 25 {
-		t.Fatalf("ports %v large upload %d", pack.Egress.Ports, pack.Egress.LargeUploadMB)
+	if !reflect.DeepEqual(pack.Egress.Ports, []int{443, 8443}) || pack.Egress.LargeUploadMB != 25 || !pack.Egress.BlockLargeUploads {
+		t.Fatalf("ports %v large upload %d block %v", pack.Egress.Ports, pack.Egress.LargeUploadMB, pack.Egress.BlockLargeUploads)
 	}
 	if !reflect.DeepEqual(pack.Egress.Feeds, []string{FeedBuiltin}) {
 		t.Fatalf("absent feeds must default to builtin, got %v", pack.Egress.Feeds)
@@ -203,7 +204,7 @@ hooks: {fail_mode: closed}
 
 	defaults := mustParse(t, minimalPack)
 	if !reflect.DeepEqual(defaults.Egress.Ports, []int{80, 443}) || defaults.Workspace.MaxUploadMB != 500 ||
-		defaults.Egress.LargeUploadMB != 25 || defaults.Description != "" {
+		defaults.Egress.LargeUploadMB != 25 || defaults.Egress.BlockLargeUploads || defaults.Description != "" {
 		t.Fatalf("defaults = %+v", defaults)
 	}
 	noFeeds := mustParse(t, strings.Replace(minimalPack, "network: {mode: open}", "network: {mode: open}\negress: {feeds: []}", 1))
@@ -297,6 +298,7 @@ func TestParseRejects(t *testing.T) {
 		{"port zero", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: [0]}"), "invalid_value", "egress.ports[0]"},
 		{"no ports while open", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: []}"), "invalid_value", "egress.ports"},
 		{"negative large upload", replace("network: {mode: open}", "network: {mode: open}\negress: {large_upload_mb: -1}"), "invalid_value", "egress.large_upload_mb"},
+		{"string upload block", replace("network: {mode: open}", "network: {mode: open}\negress: {block_large_uploads: \"yes\"}"), "yaml_type", "egress.block_large_uploads"},
 		{"zero upload cap", replace("workspace: {mode: mount}", "workspace: {mode: mount, max_upload_mb: 0}"), "invalid_value", "workspace.max_upload_mb"},
 		{"absolute mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: [/etc/passwd]}"), "invalid_value", "workspace.masks[0]"},
 		{"home mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['~/.ssh/*']}"), "invalid_value", "workspace.masks[0]"},

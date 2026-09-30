@@ -81,6 +81,7 @@ _FULL_SECTION = {
         "allow": ["*.npmjs.org"],
         "ports": [443, 8443],
         "large_upload_mb": 10,
+        "block_large_uploads": True,
         "feed": "none",
         "unblocked": ["webhook.site"],
     },
@@ -102,6 +103,7 @@ _FULL_SECTION = {
         "allowed_harnesses": ["codex"],
         "egress_block": ["*.ngrok.io"],
         "egress_allow_only": ["*.corp.example"],
+        "block_large_uploads": True,
         "require_copy_for": ["/src/customer-*"],
         "max_resources": {"cpu": "500m", "memory": "8Gi"},
         "locked": ["profile", "yolo"],
@@ -140,6 +142,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.workdir.max_upload_mb, 0)
         self.assertEqual(oc.egress.ports, [])
         self.assertEqual(oc.egress.feed, "")
+        self.assertFalse(oc.egress.block_large_uploads)
         self.assertIsNone(oc.mcp.import_)
         self.assertEqual(oc.admin, OpenShellAdminConfig())
 
@@ -170,6 +173,8 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.egress.ports, [443, 8443])
         self.assertEqual(oc.egress.feed, "none")
         self.assertEqual(oc.egress.unblocked, ["webhook.site"])
+        self.assertTrue(oc.egress.block_large_uploads)
+        self.assertTrue(oc.admin.block_large_uploads)
         self.assertEqual(oc.image.harness_versions, {"codex": "0.146.0"})
         self.assertFalse(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.resources, OpenShellResourcesConfig(cpu="2", memory="4Gi"))

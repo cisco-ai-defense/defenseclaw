@@ -74,11 +74,14 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	// Pack-governed keys stay unset so the selected pack supplies them.
 	if o.Pack != "" || o.Profile != "" || o.Yolo != nil || o.Workdir.Mode != "" ||
 		o.Workdir.MaxUploadMB != 0 || len(o.Egress.Ports) != 0 || o.Egress.LargeUploadMB != 0 ||
-		o.Egress.Feed != "" || o.MCP.Import != nil {
+		o.Egress.BlockLargeUploads || o.Egress.Feed != "" || o.MCP.Import != nil {
 		t.Fatalf("pack-governed keys received loader defaults: %+v", o)
 	}
 	if !o.Admin.IsZero() {
 		t.Fatalf("admin defaults = %+v", o.Admin)
+	}
+	if (OpenShellAdminConfig{BlockLargeUploads: true}).IsZero() {
+		t.Fatal("admin.block_large_uploads alone must count as a constraint")
 	}
 	if got, want := cfg.OpenShellIngressPort(), DefaultGatewayAPIPort+1; got != want {
 		t.Fatalf("ingress port = %d, want %d", got, want)
@@ -139,7 +142,7 @@ openshell:
   llm: bedrock
   keep_headless: true
   workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep, undo_ignored: {enabled: true, max_mb: 64, dirs: [vendor]}}
-  egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, feed: none}
+  egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, block_large_uploads: true, feed: none}
   image: {base: 'registry.example/base@sha256:abc', harness_versions: {codex: 0.146.0}}
   approvals: {debounce_ms: 1500, agent_proposals: false}
   resources: {cpu: '2', memory: 4Gi}
@@ -157,6 +160,7 @@ openshell:
     allowed_harnesses: [codex]
     egress_block: ['*.ngrok.io']
     egress_allow_only: ['*.corp.example']
+    block_large_uploads: true
     require_copy_for: [/src/customer-*]
     max_resources: {cpu: 500m, memory: 8Gi}
     locked: [profile, yolo]
@@ -181,7 +185,7 @@ openshell:
 		KeepHeadless: true,
 		Workdir: OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep",
 			UndoIgnored: OpenShellUndoIgnoredConfig{Enabled: true, MaxMB: 64, Dirs: []string{"vendor"}}},
-		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
+		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, BlockLargeUploads: true, Feed: "none"},
 		Image:             OpenShellImageConfig{Base: "registry.example/base@sha256:abc", HarnessVersions: map[string]string{"codex": "0.146.0"}},
 		Approvals:         OpenShellApprovalsConfig{DebounceMs: 1500, AgentProposals: &f},
 		Resources:         OpenShellResourcesConfig{CPU: "2", Memory: "4Gi"},
@@ -192,16 +196,17 @@ openshell:
 		TokenDelivery:     "env",
 		UpstreamTelemetry: true,
 		Admin: OpenShellAdminConfig{
-			RequiredPack:     "strict",
-			MinProfile:       "balanced",
-			AllowYolo:        &f,
-			AllowMount:       &tr,
-			AllowedHarnesses: []string{"codex"},
-			EgressBlock:      []string{"*.ngrok.io"},
-			EgressAllowOnly:  []string{"*.corp.example"},
-			RequireCopyFor:   []string{"/src/customer-*"},
-			MaxResources:     OpenShellResourcesConfig{CPU: "500m", Memory: "8Gi"},
-			Locked:           []string{"profile", "yolo"},
+			RequiredPack:      "strict",
+			MinProfile:        "balanced",
+			AllowYolo:         &f,
+			AllowMount:        &tr,
+			AllowedHarnesses:  []string{"codex"},
+			EgressBlock:       []string{"*.ngrok.io"},
+			EgressAllowOnly:   []string{"*.corp.example"},
+			BlockLargeUploads: true,
+			RequireCopyFor:    []string{"/src/customer-*"},
+			MaxResources:      OpenShellResourcesConfig{CPU: "500m", Memory: "8Gi"},
+			Locked:            []string{"profile", "yolo"},
 		},
 	}
 	if !reflect.DeepEqual(o, want) {

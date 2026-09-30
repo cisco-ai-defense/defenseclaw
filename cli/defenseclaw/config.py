@@ -1007,6 +1007,9 @@ class OpenShellEgressConfig:
     allow: list[str] = field(default_factory=list)
     ports: list[int] = field(default_factory=list)
     large_upload_mb: int = 0
+    # Also cut the upload that crosses large_upload_mb, for every sandbox;
+    # False follows the pack's egress.block_large_uploads.
+    block_large_uploads: bool = False
     feed: str = ""
     # "Always" unblock and approval decisions the daemon writes; they lift
     # blocklist and allowlist refusals but never the private-address guard.
@@ -1068,6 +1071,8 @@ class OpenShellAdminConfig:
     allowed_harnesses: list[str] = field(default_factory=list)
     egress_block: list[str] = field(default_factory=list)
     egress_allow_only: list[str] = field(default_factory=list)
+    # True blocks large uploads to first-seen hosts for every sandbox.
+    block_large_uploads: bool = False
     require_copy_for: list[str] = field(default_factory=list)
     max_resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
     locked: list[str] = field(default_factory=list)
@@ -5148,6 +5153,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             allow=_openshell_str_list(egress.get("allow")),
             ports=_openshell_int_list(egress.get("ports")),
             large_upload_mb=_openshell_int(egress.get("large_upload_mb")),
+            block_large_uploads=_coerce_bool(egress.get("block_large_uploads", False)),
             feed=_openshell_str(egress.get("feed")),
             unblocked=_openshell_str_list(egress.get("unblocked")),
         ),
@@ -5181,6 +5187,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
             egress_block=_openshell_str_list(admin.get("egress_block")),
             egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
+            block_large_uploads=_coerce_bool(admin.get("block_large_uploads", False)),
             require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
             max_resources=_merge_openshell_resources(admin.get("max_resources")),
             locked=_openshell_str_list(admin.get("locked")),

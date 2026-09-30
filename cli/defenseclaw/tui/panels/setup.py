@@ -7583,6 +7583,8 @@ def openshell_admin_locks(cfg: object | Mapping[str, Any] | None) -> dict[str, s
     if _admin_value(admin, "allow_unblock") is False:
         reason = "unblocking and allow entries are not allowed"
         lock(("openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"), reason)
+    if _admin_value(admin, "block_large_uploads") is True:
+        lock(("openshell.egress.block_large_uploads",), "your organization blocks large uploads to first-seen hosts")
     for entry in _admin_value(admin, "locked", ()) or ():
         keys = _OPENSHELL_LOCKED_CONFIG_KEYS.get(str(entry).strip())
         if keys:
@@ -7621,6 +7623,8 @@ def _openshell_admin_summary(cfg: object | Mapping[str, Any] | None) -> str:
         value = _admin_value(admin, name)
         if isinstance(value, bool):
             parts.append(f"{name}={'true' if value else 'false'}")
+    if _admin_value(admin, "block_large_uploads") is True:
+        parts.append("block_large_uploads=true")
     for name in ("allowed_harnesses", "egress_block", "egress_allow_only", "require_copy_for", "locked"):
         values = [str(item) for item in (_admin_value(admin, name, ()) or ()) if str(item).strip()]
         if values:
@@ -7643,6 +7647,12 @@ def _openshell_locked_value(cfg: object | Mapping[str, Any] | None, key: str, va
         return f"{shown} → copy by policy"
     if key == "openshell.mcp.host_ports" and _admin_value(admin, "allow_host_ports") is False and value:
         return f"{shown} → none by policy"
+    if (
+        key == "openshell.egress.block_large_uploads"
+        and _admin_value(admin, "block_large_uploads") is True
+        and value != "true"
+    ):
+        return f"{shown} → on by policy"
     return f"{shown} (locked)"
 
 
@@ -7744,6 +7754,12 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         field("Egress Unblocked", "openshell.egress.unblocked", hint="'Always' unblocks the daemon wrote, comma-separated."),
         field("Egress Ports", "openshell.egress.ports", hint="Proxy ports, comma-separated; empty inherits."),
         field("Large Upload MB", "openshell.egress.large_upload_mb", "int", hint="First-seen-host upload alert; 0 inherits."),
+        field(
+            "Block Large Uploads",
+            "openshell.egress.block_large_uploads",
+            "bool",
+            hint="Also cut that upload and refuse the host until it is unblocked; off follows the pack.",
+        ),
         field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
         field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
         field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),

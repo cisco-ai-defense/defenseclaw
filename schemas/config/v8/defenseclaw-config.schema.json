@@ -961,6 +961,11 @@
           "minimum": 0,
           "maximum": 1048576
         },
+        "block_large_uploads": {
+          "description": "Also cut the upload that crosses large_upload_mb to a destination the sandbox had not contacted before, and refuse later requests there, for every sandbox; false follows the pack's egress.block_large_uploads. An unblock of the destination, or an allow entry naming it, lifts the block.",
+          "type": "boolean",
+          "default": false
+        },
         "feed": {
           "type": "string",
           "enum": [
@@ -1092,6 +1097,11 @@
         },
         "egress_allow_only": {
           "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "block_large_uploads": {
+          "description": "Block large uploads to first-seen destinations for every sandbox, whatever its pack and the user's openshell.egress.block_large_uploads say; a pack's large_upload_mb of 0 then takes the default threshold. false imposes nothing.",
+          "type": "boolean",
+          "default": false
         },
         "require_copy_for": {
           "$ref": "#/$defs/openShellGlobList"

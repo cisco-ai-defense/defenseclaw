@@ -796,6 +796,50 @@ func TestProxyLargeUploadBlock(t *testing.T) {
 	}
 }
 
+// A sandbox whose policy blocks large uploads (Principal.BlockLargeUploads)
+// has its upload cut at its own threshold while another sandbox on the same
+// proxy, whose policy only reports them, keeps uploading. The cut's event
+// carries the threshold it crossed and says an unblock lifts the block.
+func TestProxyLargeUploadBlockPerSandbox(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) { c.counter = &CounterOptions{LargeUploadBytes: 1 << 20} })
+	sinkAddr, received := startSink(t)
+	h.dialer.route(443, sinkAddr)
+	blocking := h.addPrincipal(Principal{BindingID: "binding-two", SandboxID: "sb-2", SandboxName: "sb-two",
+		LargeUploadBytes: 1024, BlockLargeUploads: true})
+
+	conn, br := h.openTunnelTo(blocking, "example.com:443")
+	upload(conn, br, 4096)
+	e := h.sink.wait(t, EventLargeUpload, 1)[0]
+	if e.SandboxName != "sb-two" || !e.Terminated || !e.Unblockable || e.Threshold != 1024 || e.BytesUp > 1024 ||
+		!strings.Contains(e.Reason, "More than 1024 bytes was sent") {
+		t.Errorf("large_upload event of the blocking sandbox = %+v", e)
+	}
+	if resp, b := h.refused(blocking, "example.com:443"); resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload {
+		t.Fatalf("tunnel after the block = %d %+v", resp.status, b)
+	}
+
+	before := received()
+	conn, br = h.openTunnelTo(h.cred, "example.com:443")
+	upload(conn, br, 4096)
+	eventually(t, "the reporting sandbox's upload to arrive", func() bool { return received()-before >= 4096 })
+	if got := h.sink.ofKind(EventLargeUpload); len(got) != 1 {
+		t.Errorf("large_upload events = %+v, want only the blocking sandbox's", got)
+	}
+}
+
+// openTunnelTo opens a CONNECT tunnel to target with cred and sends a TLS
+// ClientHello for its host, as a client's first flight, without waiting
+// for an answer (the upstream may only read).
+func (h *harness) openTunnelTo(cred Credential, target string) (net.Conn, *bufio.Reader) {
+	h.t.Helper()
+	host, _, _ := net.SplitHostPort(target)
+	conn, br, resp := h.connect(target, basicAuth(cred), helloFor(host))
+	if resp.status != http.StatusOK {
+		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
+	}
+	return conn, br
+}
+
 // upload sends n bytes up an established tunnel, half-closes it and waits
 // for the proxy to end it.
 func upload(conn net.Conn, br *bufio.Reader, n int) {

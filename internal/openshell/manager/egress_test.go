@@ -19,8 +19,10 @@
 package manager
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -563,6 +565,121 @@ func TestSandboxLargeUploadThresholdIsItsOwn(t *testing.T) {
 	}
 }
 
+// Each sandbox's proxy credential carries its policy's large-upload block,
+// which follows a configuration change; the running sandbox's feed says
+// that its uploads are now blocked.
+func TestSandboxLargeUploadBlockFollowsConfig(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "upbox"})
+	blocks := func() bool {
+		p, ok := e.m.creds.Lookup(e.binding("upbox").ID)
+		if !ok {
+			t.Fatal("upbox has no proxy credential")
+		}
+		return p.BlockLargeUploads
+	}
+	if blocks() {
+		t.Fatal("the open pack blocks large uploads")
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.BlockLargeUploads = true })
+	e.m.refreshEgress()
+	if !blocks() {
+		t.Fatal("openshell.egress.block_large_uploads did not reach the sandbox's credential")
+	}
+	if moved := e.events("upbox", sandboxapi.ActivityLifecycle, sandboxapi.ReasonPolicyChanged); len(moved) != 1 ||
+		!strings.Contains(moved[0].Message, "the sandbox policy changed: large uploads to first-seen hosts reported → blocked") {
+		t.Fatalf("policy-change feed = %+v", moved)
+	}
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Egress.BlockLargeUploads = false
+		c.OpenShell.Admin.BlockLargeUploads = true
+	})
+	e.m.refreshEgress()
+	if !blocks() {
+		t.Fatal("openshell.admin.block_large_uploads did not reach the sandbox's credential")
+	}
+	if moved := e.events("upbox", sandboxapi.ActivityLifecycle, sandboxapi.ReasonPolicyChanged); len(moved) != 1 {
+		t.Fatalf("an unchanged block was announced again: %+v", moved)
+	}
+}
+
+// With the block on, the upload that crosses the threshold is cut: the feed
+// shows a ✗ that names the threshold and offers the unblock, a HIGH finding
+// and a blocked egress record are written, later tunnels to the host are
+// refused, and an unblock of the host lifts the block.
+func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) {
+		c.OpenShell.Egress.LargeUploadMB = 1
+		c.OpenShell.Egress.BlockLargeUploads = true
+	})
+	e.run()
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "upbox"})
+	conn, br := proxy.open(t, "upbox", "example.org:80")
+	const size = 2 << 20
+	_, err := fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: example.org\r\nContent-Length: %d\r\n\r\n", size)
+	must(t, err)
+	chunk := bytes.Repeat([]byte("u"), 32<<10)
+	for sent := 0; sent < size; sent += len(chunk) {
+		if _, err := conn.Write(chunk); err != nil {
+			break // the proxy cut the tunnel
+		}
+	}
+	_, _ = io.Copy(io.Discard, br)
+
+	var ev sandboxapi.ActivityEvent
+	eventually(t, "the cut in the feed", func() bool {
+		for _, got := range e.events("upbox", sandboxapi.ActivityEgressBlocked, "") {
+			if got.Category == string(egress.CategoryLargeUpload) {
+				ev = got
+				return true
+			}
+		}
+		return false
+	})
+	if ev.Host != "example.org" || !ev.Unblockable || ev.Severity != "HIGH" || ev.BytesUp > 1<<20 ||
+		ev.Message != "✗ example.org (large upload blocked: more than 1 MiB was sent to a destination this sandbox had not contacted before)" {
+		t.Fatalf("feed event = %+v", ev)
+	}
+	if n := len(e.events("upbox", sandboxapi.ActivityEgressLargeUpload, "")); n != 0 {
+		t.Fatalf("the cut was also reported as %d unblocked large uploads", n)
+	}
+	eventually(t, "the finding and the blocked record", func() bool {
+		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
+			egressRecords(e, "upbox", func(r audit.SandboxEgressEvent) bool { return r.Blocked }) == 1
+	})
+	finding := e.tel.findingsOf(audit.SandboxFindingLargeUpload)[0]
+	if finding.Severity != "HIGH" || !strings.Contains(finding.Title, "blocked") || !strings.Contains(finding.Description, "more than 1 MiB") ||
+		!strings.Contains(finding.Remediation, "defenseclaw sandbox unblock example.org --sandbox upbox") {
+		t.Fatalf("finding = %+v", finding)
+	}
+	rec := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Blocked })[0]
+	if rec.DecisionCode != "SANDBOX_EGRESS_LARGE_UPLOAD" || rec.Severity != "HIGH" || rec.Host != "example.org" ||
+		!strings.Contains(rec.Reason, "More than 1 MiB") {
+		t.Fatalf("egress record = %+v", rec)
+	}
+
+	status, body := proxy.connect(t, "upbox", "example.org:443")
+	if status != http.StatusForbidden || body.Category != egress.CategoryLargeUpload || !body.Unblockable {
+		t.Fatalf("CONNECT after the cut = %d %+v", status, body)
+	}
+	eventually(t, "the refusal in the feed", func() bool {
+		for _, got := range e.events("upbox", sandboxapi.ActivityEgressBlocked, "") {
+			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" &&
+				strings.Contains(got.Message, "(large upload blocked: more than 1 MiB") {
+				return true
+			}
+		}
+		return false
+	})
+	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "example.org", Sandbox: "upbox"}); err != nil {
+		t.Fatalf("Unblock: %v", err)
+	}
+	if status, body := proxy.connect(t, "upbox", "example.org:443"); status != http.StatusOK {
+		t.Fatalf("CONNECT after the unblock = %d %+v", status, body)
+	}
+}
+
 func TestEgressSinkMapping(t *testing.T) {
 	e := newEnv(t, nil)
 	e.run()
@@ -578,7 +695,7 @@ func TestEgressSinkMapping(t *testing.T) {
 	blocked := mk(egress.EventBlocked, "webhook.site")
 	blocked.Category, blocked.Source, blocked.Entry, blocked.Reason, blocked.Unblockable = "webhook_catcher", egress.SourceFeed, "webhook.site", "exfil destination", true
 	upload := mk(egress.EventLargeUpload, "files.example.net")
-	upload.BytesUp, upload.Terminated = 30<<20, true
+	upload.BytesUp = 30 << 20
 	for _, ev := range []egress.Event{first, again, blocked, upload, {Kind: egress.EventAllowed, SandboxName: "unknown-box", Host: "x.example"}} {
 		sink.EgressEvent(ev)
 	}
@@ -595,7 +712,7 @@ func TestEgressSinkMapping(t *testing.T) {
 	if b := recs[2]; !b.Blocked || b.DecisionCode != "SANDBOX_EGRESS_WEBHOOK_CATCHER" || !strings.Contains(b.PolicyOutcome, "feed") {
 		t.Fatalf("blocked = %+v", b)
 	}
-	if finding.Severity != "HIGH" || finding.TargetRef != "files.example.net" {
+	if finding.Severity != "MEDIUM" || finding.TargetRef != "files.example.net" {
 		t.Fatalf("finding = %+v", finding)
 	}
 	// The feed shows first contact and blocks, not every tunnel.

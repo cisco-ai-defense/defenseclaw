@@ -249,6 +249,14 @@ type Egress struct {
 	AllowOnly     []string `json:"allow_only"`
 	Ports         []int    `json:"ports"`
 	LargeUploadMB int      `json:"large_upload_mb"`
+	// BlockLargeUploads cuts the upload that crosses LargeUploadMB to a
+	// first-seen destination and refuses later requests there
+	// (egress.Principal.BlockLargeUploads): the pack's
+	// egress.block_large_uploads, or openshell.egress.block_large_uploads,
+	// or openshell.admin.block_large_uploads, which also keeps LargeUploadMB
+	// above 0. Destinations an unblock, an allow entry or the administrator
+	// names are exempt.
+	BlockLargeUploads bool `json:"block_large_uploads"`
 }
 
 // MCP is the effective MCP posture.
@@ -327,7 +335,7 @@ var explainOrder = []string{
 	"workdir.mode", "workdir.masks", "workdir.unmask", "workdir.review", "workdir.max_upload_mb",
 	"workdir.git_depth", "workdir.on_exit",
 	"egress.feeds", "egress.block", "egress.admin_block", "egress.allow", "egress.allow_only",
-	"egress.ports", "egress.large_upload_mb",
+	"egress.ports", "egress.large_upload_mb", "egress.block_large_uploads",
 	"mcp.import", "mcp.host_port_access", "mcp.host_ports", "mcp.blocked_tools", "mcp.project_servers",
 	"resources.cpu", "resources.memory", "learn", "hooks.fail_mode", "hooks.on_tamper",
 }
@@ -1077,8 +1085,34 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 	if o.Egress.LargeUploadMB > 0 {
 		eg.LargeUploadMB, from = o.Egress.LargeUploadMB, layer{SourceUser, "openshell.egress.large_upload_mb"}
 	}
-	r.set("egress.large_upload_mb", strconv.Itoa(eg.LargeUploadMB), from)
+	if r.admin.BlockLargeUploads && eg.LargeUploadMB <= 0 {
+		// The block acts on the report: it cannot be turned off under it.
+		r.clamp("egress.large_upload_mb", strconv.Itoa(eg.LargeUploadMB), strconv.Itoa(defaultLargeUploadMB), from,
+			adminBlockUploadsConstraint, "your organization blocks large uploads to first-seen hosts, so the large-upload report stays on")
+		eg.LargeUploadMB = defaultLargeUploadMB
+	} else {
+		r.set("egress.large_upload_mb", strconv.Itoa(eg.LargeUploadMB), from)
+	}
+	r.resolveUploadBlock(o)
 	return nil
+}
+
+const adminBlockUploadsConstraint = "openshell.admin.block_large_uploads"
+
+// resolveUploadBlock turns the large-upload block on when the pack, the
+// user's openshell.egress.block_large_uploads or the administrator asks.
+// The user's key only turns it on: a pack that blocks keeps blocking.
+func (r *resolver) resolveUploadBlock(o config.OpenShellConfig) {
+	eg := &r.eff.Egress
+	block, from := r.eff.Pack.Egress.BlockLargeUploads, r.packLayer
+	if o.Egress.BlockLargeUploads && !block {
+		block, from = true, layer{SourceUser, "openshell.egress.block_large_uploads"}
+	}
+	if r.admin.BlockLargeUploads {
+		block, from = true, layer{SourceAdmin, adminBlockUploadsConstraint}
+	}
+	eg.BlockLargeUploads = block
+	r.set("egress.block_large_uploads", strconv.FormatBool(block), from)
 }
 
 // resolveAllow builds the egress allow list. DefenseClaw's curated entries

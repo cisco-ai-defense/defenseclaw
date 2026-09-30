@@ -17,6 +17,7 @@
 package sandboxapi
 
 import (
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -740,6 +741,36 @@ const (
 	// ActivityDropped tells a slow subscriber that events were skipped.
 	ActivityDropped = "dropped"
 )
+
+// CategoryLargeUpload is the Category of the egress.blocked events of the
+// large-upload block (egress.block_large_uploads): the upload that crossed
+// the threshold, which the block cut, and later requests to the destination,
+// which it refused. An unblock of the destination lifts the block.
+const CategoryLargeUpload = "large_upload"
+
+// LargeUploadBlockedText is how the feed words an egress.blocked event of
+// category large_upload, whose Reason is the egress proxy's sentence
+// ("More than 25 MiB was sent to a destination this sandbox had not
+// contacted before."): "large upload blocked: more than 25 MiB was sent to
+// …". The large-upload block (egress.block_large_uploads) cut the upload
+// that crossed the threshold, or refused a later one to the destination.
+func LargeUploadBlockedText(reason string) string {
+	if why := LargeUploadReason(reason); why != "" {
+		return "large upload blocked: " + why
+	}
+	return "large upload blocked"
+}
+
+// LargeUploadReason is the proxy's large-upload sentence as a clause: "more
+// than 25 MiB was sent to a destination this sandbox had not contacted
+// before". Empty for an empty reason.
+func LargeUploadReason(reason string) string {
+	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
+	if reason == "" {
+		return ""
+	}
+	return strings.ToLower(reason[:1]) + reason[1:]
+}
 
 // ReasonNestedRepo is the Reason of the finding events the nested-repository
 // guard publishes.

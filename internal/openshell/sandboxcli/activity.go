@@ -92,7 +92,11 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		b.WriteString(a.style("✓", ansiGreen) + " " + hostPort(ev))
 	case sandboxapi.ActivityEgressBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
-		if why := firstNonEmpty(ev.Category, ev.Reason); why != "" {
+		switch why := firstNonEmpty(ev.Category, ev.Reason); {
+		case ev.Category == sandboxapi.CategoryLargeUpload:
+			// The proxy's reason names the threshold the upload crossed.
+			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
+		case why != "":
 			b.WriteString(" (" + reasonText(why) + ")")
 		}
 		if ev.Unblockable && ev.Host != "" {

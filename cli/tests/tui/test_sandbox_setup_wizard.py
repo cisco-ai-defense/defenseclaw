@@ -726,11 +726,13 @@ def test_admin_constraints_make_their_keys_read_only_with_the_reason() -> None:
                 "allow_mount": False,
                 "allow_host_ports": False,
                 "allow_unblock": False,
+                "block_large_uploads": True,
                 "locked": ["resources", "mcp.import"],
             },
         }
     }
     locks = openshell_admin_locks(cfg)
+    assert locks["openshell.egress.block_large_uploads"] == "your organization blocks large uploads to first-seen hosts"
     assert locks["openshell.pack"] == "your organization requires the balanced pack"
     assert locks["openshell.yolo"] == "skip-permissions mode is not allowed"
     assert locks["openshell.workdir.mode"] == "your organization requires copy mode"
@@ -753,9 +755,11 @@ def test_admin_constraints_make_their_keys_read_only_with_the_reason() -> None:
     assert _field({**cfg, "openshell": {**cfg["openshell"], "yolo": False}}, "openshell.yolo").value == (
         "false (locked)"
     )
+    assert _field(cfg, "openshell.egress.block_large_uploads").value == "(unset) → on by policy"
     assert _field(cfg, "openshell.profile").interactive is True
     policy = _field(cfg, "openshell.admin")
     assert "required_pack=balanced" in policy.value and "allow_unblock=false" in policy.value
+    assert "block_large_uploads=true" in policy.value
 
 
 def test_a_locked_row_says_why_when_focused_or_edited() -> None:

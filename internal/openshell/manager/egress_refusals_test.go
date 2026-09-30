@@ -38,7 +38,7 @@ import (
 func TestEgressRefusalsReachTheBindingsAgentOnce(t *testing.T) {
 	e := newEnv(t, nil)
 	_, advance := e.fakeClock(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
-	proxy := startLiveProxyWith(t, e, e.m.EgressSink())
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
 	e.create(sandboxapi.CreateRequest{Name: "egbox"})
 	e.create(sandboxapi.CreateRequest{Name: "otherbox", Project: e.otherProject("other")})
 	eg, other := e.binding("egbox"), e.binding("otherbox")
@@ -117,7 +117,7 @@ func TestEgressRefusalRemedies(t *testing.T) {
 		c.OpenShell.Admin.EgressBlock = []string{"corp-banned.example"}
 		c.OpenShell.Egress.Block = []string{"drop.example.org"}
 	})
-	proxy := startLiveProxyWith(t, e, e.m.EgressSink())
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
 	e.create(sandboxapi.CreateRequest{Name: "rembox"})
 	b := e.binding("rembox")
 	for _, tc := range []struct {
