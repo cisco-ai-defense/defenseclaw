@@ -567,7 +567,7 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 		if snap.UndoneAt != nil {
 			info.UndoneAt = *snap.UndoneAt
 		}
-		if accepted.acceptedFor(snap) {
+		if accepted.acceptedFor(snap, v.Session) {
 			info.AcceptedAt = accepted.At
 		}
 		v.Snapshot = info

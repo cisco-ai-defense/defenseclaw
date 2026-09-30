@@ -239,11 +239,11 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	}
 	// The harness exits on its own first, so its end-of-session hook runs
 	// and its terminal ends as after /exit (graceful.go); a detached run
-	// the stop ends is marked interrupted, and its log is kept for `sandbox
-	// logs` of the stopped sandbox (runlog.go).
+	// the stop ends is marked interrupted, and once the stop is published
+	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
 	run := m.endHarness(ctx, gw, b)
-	m.keepRunLog(ctx, gw, b, run)
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	m.keepRunLog(ctx, gw, b, run)
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
@@ -438,7 +438,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
 		// Changes the user kept at the end of a session (Accept) are the
 		// base of the next one, as with --new-snapshot.
-		if kept, why := m.keepSnapshot(ctx, rec.Name, req.NewSnapshot || m.acceptedNow(rec)); kept {
+		snap, err := m.ws.LoadSnapshot(m.opts.DataDir, rec.Name)
+		if err != nil {
+			snap = nil
+		}
+		if kept, why := m.keepSnapshot(ctx, rec.Name, snap, req.NewSnapshot || rec.Accepted.acceptedFor(snap, rec.Sessions)); kept {
 			// Replacing it would take the earlier session's changes into the
 			// new baseline, and undo could never revert them.
 			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
@@ -459,10 +463,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// An acceptance covers the sessions before this start, not what the new
 	// one changes on top (a --no-snapshot start keeps the accepted
-	// snapshot).
-	if err := m.dropAcceptance(b); err != nil {
-		return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
-	}
+	// snapshot): it names the session it was given after (acceptedFor), so
+	// the new session ends it once the sandbox runs, and a start that fails
+	// before that leaves it in place.
 	// The harness starts with the sandbox: every tool call of the new
 	// session reaches this process, so its tool-call ledger is complete.
 	// The binding outlives the session, so the CONNECT refusals the last
@@ -518,17 +521,14 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 }
 
 // keepSnapshot reports whether a start must keep the sandbox's pre-session
-// snapshot instead of taking a fresh one, and why: the folder still holds
-// changes an earlier session made that were neither undone nor accepted
-// (newSnapshot). A fresh snapshot would make them part of the new
-// baseline, out of undo's reach. When the folder cannot be compared with
-// the snapshot, it is kept too: replacing it could lose the only way back.
-func (m *Manager) keepSnapshot(ctx context.Context, name string, newSnapshot bool) (bool, string) {
-	if newSnapshot {
-		return false, ""
-	}
-	snap, err := m.ws.LoadSnapshot(m.opts.DataDir, name)
-	if err != nil || snap == nil || snap.UndoneAt != nil {
+// snapshot snap (nil: none could be loaded) instead of taking a fresh one,
+// and why: the folder still holds changes an earlier session made that were
+// neither undone nor accepted (newSnapshot). A fresh snapshot would make
+// them part of the new baseline, out of undo's reach. When the folder
+// cannot be compared with the snapshot, it is kept too: replacing it could
+// lose the only way back.
+func (m *Manager) keepSnapshot(ctx context.Context, name string, snap *workspace.SnapshotRecord, newSnapshot bool) (bool, string) {
+	if newSnapshot || snap == nil || snap.UndoneAt != nil {
 		return false, ""
 	}
 	// Only whether anything changed matters here: no content scanners.

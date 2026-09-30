@@ -808,13 +808,13 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		return nil
 	}
 	switch run.State {
-	case runRunning:
+	case sandboxapi.RunRunning:
 		a.note("the run is still going (follow it with -f)")
 		if sb.Hooks.Unreachable {
 			a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 		}
 		return nil
-	case runInterrupted, runNone:
+	case sandboxapi.RunInterrupted, sandboxapi.RunNone:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
 		return nil
 	}
@@ -844,7 +844,7 @@ func (a *App) runLogWriter(sb *sandboxapi.Sandbox) (io.Writer, func() error) {
 
 // keptLogs prints the run log DefenseClaw kept when it stopped the sandbox.
 func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
-	kept, err := a.keptRunLog(ctx, api, sb, lines)
+	kept, legacy, err := a.keptRunLog(ctx, api, sb, lines)
 	if err != nil {
 		return err
 	}
@@ -856,13 +856,22 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 		return err
 	}
 	_ = flush()
-	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(kept.KeptAt)))
-	switch runState(kept.State) {
-	case runExited:
+	// Which run it is of: a stop that could not look at the run keeps the
+	// log an earlier stop kept.
+	what := "the log"
+	switch {
+	case legacy:
+		what = "the log an earlier DefenseClaw CLI"
+	case !kept.StartedAt.IsZero():
+		what = "the log of its detached run started " + a.clock(kept.StartedAt) + ","
+	}
+	a.note(fmt.Sprintf("%s is %s; this is %s kept when it stopped (%s)", sb.Name, sb.Phase, what, a.clock(kept.KeptAt)))
+	switch kept.State {
+	case sandboxapi.RunExited:
 		a.note("the run exited with status " + kept.Exit)
-	case runInterrupted:
+	case sandboxapi.RunInterrupted:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
-	case runRunning:
+	case sandboxapi.RunRunning:
 		a.note("the run was still going when the log was kept")
 	}
 	return nil
@@ -870,19 +879,27 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 
 // keptRunLog is the log of sb's latest detached run the daemon kept when it
 // stopped the sandbox, its last lines lines; failing that, one an earlier
-// CLI kept (legacyRunLog). nil when neither kept one.
-func (a *App) keptRunLog(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int) (*sandboxapi.RunLog, error) {
+// CLI kept (legacyRunLog, legacy true) while it is still the log of the
+// latest stop. nil when neither kept one.
+func (a *App) keptRunLog(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int) (*sandboxapi.RunLog, bool, error) {
 	kept, err := api.RunLog(ctx, sb.Name, lines)
 	if err == nil {
-		return kept, nil
+		return kept, false, nil
 	}
 	if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		return nil, apiError(err)
+		return nil, false, apiError(err)
+	}
+	if sb.Session > 0 {
+		// The daemon has seen the sandbox start since it began counting
+		// sessions, which is since it keeps run logs: every stop after that
+		// was its own, so a log an earlier CLI kept is older than the
+		// latest stop, which kept none.
+		return nil, false, nil
 	}
 	meta, log, err := a.legacyRunLog(sb)
 	if err != nil || meta == nil {
-		return nil, err
+		return nil, false, err
 	}
-	return &sandboxapi.RunLog{Name: sb.Name, State: string(meta.State), Exit: meta.Exit, KeptAt: meta.SavedAt,
-		Log: string(lastLines(log, lines))}, nil
+	return &sandboxapi.RunLog{Name: sb.Name, State: meta.State, Exit: meta.Exit, KeptAt: meta.SavedAt,
+		Log: string(harness.LastLines(log, lines))}, true, nil
 }

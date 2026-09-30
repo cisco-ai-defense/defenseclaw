@@ -686,10 +686,13 @@ deleted.
   sandbox marks a detached run still going interrupted (its runner is found
   by `latest.pid` and a command line naming `latest.exit`), says so on the
   activity feed (`run_interrupted`), and keeps the last 1 MiB of the run's
-  log under `<data_dir>/sandboxes/<name>/runlog/`; `sandbox logs` of a
+  log under `<data_dir>/sandboxes/<name>/runlog/` (reading only a regular
+  file, bounded, after it publishes `stopping`; a tamper stop neither
+  looks at the run nor keeps its log, so it waits on nothing the workload
+  controls); `sandbox logs` of a
   stopped sandbox reads it from the new `GET
-  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows a log an earlier
-  CLI kept. Keeping the changes at the end of a session is recorded through
+  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows (as such) a log an earlier
+  CLI kept, until the sandbox starts again. Keeping the changes at the end of a session is recorded through
   the new `POST /api/v1/sandbox/sandboxes/{name}/accept` instead of
   `cli/accepted.json` (one an earlier CLI wrote is honoured once), so the
   next start takes a new undo point whoever starts the sandbox, and the
@@ -697,7 +700,8 @@ deleted.
   so). The accept names the snapshot and the sandbox's `session` (a count of
   its starts) it reviewed, so a keep answered after another start, whose
   changes nobody reviewed, is refused. A start with `--no-snapshot` now uses the acceptance up, so that
-  session's changes keep the undo point at the next start. The CLI still
+  session's changes keep the undo point at the next start; a start that fails
+  before the sandbox runs keeps it. The CLI still
   asks before `sandbox stop` ends a run, and reads the same from the user's
   side. The Python client has `sandbox_run_log` and
   `accept_sandbox_changes`. Both drivers.

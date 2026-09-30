@@ -634,7 +634,7 @@ func (s *session) end(ctx context.Context) error {
 	if !s.started && after.Phase == "ready" {
 		// The sandbox was running before the session: a detached run may
 		// still be going in it.
-		if run, err := a.detachedRun(ctx, s.cli, after); err == nil && run.State == runRunning {
+		if run, err := a.detachedRun(ctx, s.cli, after); err == nil && run.State == sandboxapi.RunRunning {
 			s.liveRun = true
 		}
 	}

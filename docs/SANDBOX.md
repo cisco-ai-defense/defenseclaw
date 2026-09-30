@@ -1316,8 +1316,11 @@ session count, `record.Sessions`, which every transition to ready raises)
 once the session stopped the sandbox. The manager refuses an accept after
 another start: that session's changes sit on the same snapshot, and nobody
 reviewed them. Otherwise the record keeps the acceptance
-(`record.Accepted`), and the next start takes a fresh snapshot and drops it,
-as a `--no-snapshot` start does. `sandbox start --new-snapshot` accepts the changes and takes a
+(`record.Accepted`) with the session count it was given at, and it holds
+only while that count is unchanged: the next start takes a fresh snapshot,
+and any session after the acceptance ends it (a `--no-snapshot` start's,
+or one that ran although its start failed on DefenseClaw's side), while a
+start that never ran the sandbox leaves it in place. `sandbox start --new-snapshot` accepts the changes and takes a
 fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
 earlier CLI recorded in `cli/accepted.json` is honoured once, as
 `--new-snapshot`.
@@ -1331,14 +1334,28 @@ stop goes ahead whatever the sandbox answers. The same exec looks at the
 sandbox's latest detached run in `/sandbox/.defenseclaw/runs` first (the run
 is going while `latest.pid` is a live process whose command line names
 `latest.exit`, its runner's) and marks one that has not ended interrupted in
-`latest.exit`, which the runner keeps. When there is a run, the stop then
+`latest.exit`, which the runner keeps. The CLI reads a run with the same
+script (`harness.RunStateFunc`), so `sandbox stop`'s question and the stop
+agree. When there is a run, the stop then publishes the `stopping` phase and
 keeps the last 1 MiB of its log and how it stood under
 `<data_dir>/sandboxes/<name>/runlog/`, tied to the OpenShell sandbox id, and
 says on the feed when it ended one still going (`run_interrupted`); `GET
-…/logs` serves it, and `sandbox logs` of the stopped sandbox prints it. Every
-stop goes through this: the CLI's, the TUI's, the macOS app's, undo's and a
-tamper stop's. The CLI only asks first, on a terminal, before `sandbox stop`
-ends a run still going. In a git project undo:
+…/logs` serves it, and `sandbox logs` of the stopped sandbox prints it. The
+run directory is the workload's: every read opens a file read-write (which
+never waits on a FIFO), reads it only when what it opened is a regular file,
+and reads a bounded part of it, and the log read is bounded at ten seconds.
+Every stop goes through this: the CLI's, the TUI's, the macOS app's, undo's
+and a tamper stop's, except that a tamper stop neither looks at the run
+nor keeps its log, and forgets the log kept of an earlier run (it waits on
+nothing the workload controls, whose run files can hold an open). The
+stop's interrupted mark goes through a descriptor checked to be a regular
+file, after it has said how the run stands, so a FIFO swapped in for
+`latest.exit` gets no write. The CLI
+only asks first, on a terminal, before `sandbox stop` ends a run still
+going. `sandbox logs` names the run a kept log is of (its start), and still
+shows a log an earlier CLI kept in `cli/run.log`, said to be that CLI's,
+until the daemon sees the sandbox start again (its `session` count): every
+stop after that is the daemon's. In a git project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;

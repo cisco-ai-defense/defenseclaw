@@ -27,9 +27,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -308,38 +311,148 @@ func TestEndHarnessScriptReportsTheDetachedRun(t *testing.T) {
 	goneRunner(t, finished)
 	gone := detachedRunDir(t, "x\n", "")
 	goneRunner(t, gone)
+	// A runner still alive after its run recorded a status: the run is over
+	// (the CLI reads it the same way, harness.RunStateFunc).
+	recorded := detachedRunDir(t, "x\n", "0\n")
+	liveRunner(t, recorded)
 	for _, c := range []struct {
 		name string
 		runs string
-		want detachedRun
+		want harness.DetachedRun
 	}{
-		{"going", going, detachedRun{State: runRunning, Started: 1790000000}},
-		{"finished", finished, detachedRun{State: runExited, Exit: "3", Started: 1790000000}},
-		{"gone", gone, detachedRun{State: runInterrupted, Started: 1790000000}},
-		{"none", t.TempDir(), detachedRun{State: runNone}},
+		{"going", going, harness.DetachedRun{State: sandboxapi.RunRunning, Started: 1790000000}},
+		{"finished", finished, harness.DetachedRun{State: sandboxapi.RunExited, Exit: "3", Started: 1790000000}},
+		{"gone", gone, harness.DetachedRun{State: sandboxapi.RunInterrupted, Started: 1790000000}},
+		{"going, its status recorded", recorded, harness.DetachedRun{State: sandboxapi.RunExited, Exit: "0", Started: 1790000000}},
+		{"none", t.TempDir(), harness.DetachedRun{State: sandboxapi.RunNone}},
 	} {
 		if got := end(c.runs); got.Harness != "none" || got.Run != c.want {
 			t.Fatalf("%s: %+v, want %+v", c.name, got, c.want)
 		}
 	}
-	for dir, want := range map[string]string{going: "interrupted\n", finished: "3\n", gone: "interrupted\n"} {
+	for dir, want := range map[string]string{going: "interrupted\n", finished: "3\n", gone: "interrupted\n", recorded: "0\n"} {
 		if data, err := os.ReadFile(filepath.Join(dir, "latest.exit")); err != nil || string(data) != want {
 			t.Fatalf("latest.exit = %q, %v; want %q", data, err, want)
 		}
 	}
 	// What the workload writes there is read as a status, not as output.
 	odd := detachedRunDir(t, "x\n", "0 run=running\n")
-	if got := end(odd); got.Run.State != runExited || got.Run.Exit != "0runrunning" {
+	if got := end(odd); got.Run.State != sandboxapi.RunExited || got.Run.Exit != "0runrunning" {
 		t.Fatalf("odd status: %+v", got.Run)
 	}
 }
 
 func TestParseHarnessEnd(t *testing.T) {
 	got := parseHarnessEnd([]byte("run_exit=0\nrun=exited\nrun_started=12\nexited\nsynced\n"))
-	if got.Harness != "exited" || !got.Synced || got.Run != (detachedRun{State: runExited, Exit: "0", Started: 12}) {
+	if got.Harness != "exited" || !got.Synced || got.Run != (harness.DetachedRun{State: sandboxapi.RunExited, Exit: "0", Started: 12}) {
 		t.Fatalf("parsed %+v", got)
 	}
-	if got := parseHarnessEnd([]byte("running\n")); got.Harness != "running" || got.Synced || got.Run.State != runNone {
+	if got := parseHarnessEnd([]byte("running\n")); got.Harness != "running" || got.Synced || got.Run.State != sandboxapi.RunNone {
 		t.Fatalf("parsed %+v", got)
+	}
+}
+
+// A tamper stop does not wait on anything the workload controls: the run
+// it ends, its log and its marks are in the workload's run directory,
+// whose files can hold a read or an open (here the read never answers), so
+// the stop neither looks at the run nor reads its log, and no earlier
+// run's log is shown for it.
+func TestATamperStopDoesNotReadTheRunLog(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "tamperlog", Pack: "balanced"})
+	going := detachedRunDir(t, "working\n", "")
+	liveRunner(t, going)
+	b := e.boxOf("tamperlog")
+	e.m.mu.Lock()
+	id := b.sandboxID()
+	e.m.mu.Unlock()
+	must(t, e.m.saveRunLog("tamperlog", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
+		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
+	var reads atomic.Int32
+	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if slices.Contains(call.Command, "defenseclaw-run-log") {
+			reads.Add(1)
+			<-ctx.Done()
+			return openshelltest.ExecResponse{Err: ctx.Err()}
+		}
+		return runOnHost(ctx, call, going)
+	})
+	d := e.decider("tamperlog", "Bash")
+	began := time.Now()
+	e.m.ObserveHookDecision(d("PostToolUse", "toolu_1", "allow"))
+	if !stopped(t, e, "tamperlog") {
+		t.Fatal("the tampered sandbox did not stop")
+	}
+	if took := time.Since(began); reads.Load() != 0 || took > 10*time.Second {
+		t.Fatalf("the tamper stop read the run log %d times and took %s", reads.Load(), took)
+	}
+	if _, err := os.Stat(filepath.Join(going, "latest.exit")); !os.IsNotExist(err) {
+		t.Fatalf("the tamper stop wrote into the run directory: %v", err)
+	}
+	if _, err := e.m.RunLog(t.Context(), "tamperlog", 0); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("run log after the tamper stop = %v, want none", err)
+	}
+}
+
+// A stop is published (phase stopping) before it reads the run's log, so
+// the feed, the TUI and the app see the stop DefenseClaw decided on while
+// it keeps the log.
+func TestStopIsPublishedBeforeTheRunLogIsRead(t *testing.T) {
+	e := liveEnv(t, "orderbox", nil)
+	going := detachedRunDir(t, "working\n", "")
+	liveRunner(t, going)
+	b := e.boxOf("orderbox")
+	var atRead audit.SandboxPhase
+	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if slices.Contains(call.Command, "defenseclaw-run-log") {
+			e.m.mu.Lock()
+			atRead = b.phase
+			e.m.mu.Unlock()
+		}
+		return runOnHost(ctx, call, going)
+	})
+	e.stopBox("orderbox")
+	if atRead != audit.SandboxPhaseStopping {
+		t.Fatalf("phase while the run log was read = %q, want stopping", atRead)
+	}
+	if log, err := e.m.RunLog(t.Context(), "orderbox", 0); err != nil || log.Log != "working\n" {
+		t.Fatalf("run log = %+v, %v", log, err)
+	}
+}
+
+// The log is read only as a regular file, whatever latest.log names by the
+// time it is opened: a FIFO or a device neither holds the read nor feeds it
+// without end, and a link to the dated log (as a run leaves it) is read.
+func TestRunLogScriptReadsOnlyARegularFile(t *testing.T) {
+	read := func(t *testing.T, d string) (string, int, time.Duration) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		began := time.Now()
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", runLogScript, "defenseclaw-run-log", d, "5")
+		out, err := cmd.Output()
+		code := 0
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return string(out), code, time.Since(began)
+	}
+	regular := detachedRunDir(t, "0123456789\n", "")
+	if out, code, _ := read(t, regular); code != 0 || out != "6789\n" {
+		t.Fatalf("regular log: %q, exit %d", out, code)
+	}
+	if _, code, _ := read(t, t.TempDir()); code != 3 {
+		t.Fatalf("no log: exit %d, want 3", code)
+	}
+	fifo := t.TempDir()
+	must(t, syscall.Mkfifo(filepath.Join(fifo, "latest.log"), 0o600))
+	zero := t.TempDir()
+	must(t, os.Symlink("/dev/zero", filepath.Join(zero, "latest.log")))
+	for name, d := range map[string]string{"a FIFO": fifo, "a device": zero} {
+		if out, code, took := read(t, d); code == 0 || out != "" || took > 5*time.Second {
+			t.Fatalf("%s: %q, exit %d after %s; want a refusal at once", name, out, code, took)
+		}
 	}
 }

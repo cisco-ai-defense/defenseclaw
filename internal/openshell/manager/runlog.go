@@ -17,7 +17,6 @@
 package manager
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,25 +45,6 @@ import (
 // logs` of a stopped sandbox reads it there (GET /sandboxes/{name}/logs).
 // The next stop that finds a run replaces it, and a delete removes it.
 
-// runState is the state of a sandbox's latest detached run.
-type runState string
-
-const (
-	runNone        runState = "none"
-	runRunning     runState = "running"
-	runExited      runState = "exited"
-	runInterrupted runState = "interrupted"
-)
-
-// detachedRun is what a sandbox's latest detached run left in harness.RunDir.
-type detachedRun struct {
-	State runState
-	// Exit is the exit status of an exited run.
-	Exit string
-	// Started is the epoch second the run started (0: unknown).
-	Started int64
-}
-
 // runLogDirName is the directory under <data_dir>/sandboxes/<name> where a
 // stop keeps the log of the sandbox's latest detached run.
 const runLogDirName = "runlog"
@@ -76,25 +56,30 @@ const (
 )
 
 // runLogScript prints the end of the latest run's log in the run
-// directory $1, at most $2 bytes (exit 3: there is no log). The run
-// directory is the workload's: only a regular file is read.
-const runLogScript = `d=$1
-[ -f "$d/latest.log" ] || exit 3
-exec tail -c "$2" "$d/latest.log" 2>/dev/null
+// directory $1, at most $2 bytes (exit 3: there is no log; another status:
+// latest.log names something other than a regular file, or it could not be
+// opened). The run directory is the workload's: only what is a regular file
+// as it is opened is read (harness.RunReadFunc), and no more than $2 bytes
+// of it however it grows.
+const runLogScript = harness.RunReadFunc + `d=$1; n=$2
+[ -e "$d/latest.log" ] || exit 3
+[ -f "$d/latest.log" ] && rs_open "$d/latest.log" || exit 4
+/usr/bin/tail -c "$n" <&3 2>/dev/null | /usr/bin/head -c "$n"
 `
 
-// runLogWait bounds the read of a run's log at a stop.
-const runLogWait = 30 * time.Second
+// runLogWait bounds the read of a run's log at a stop: at most
+// sandboxapi.MaxRunLogBytes of a regular file.
+const runLogWait = 10 * time.Second
 
 // keptRun describes a kept run log (runLogMetaFile).
 type keptRun struct {
 	// SandboxID ties the log to the OpenShell sandbox it came from: a later
 	// sandbox of the name never shows it.
-	SandboxID string    `json:"sandbox_id,omitempty"`
-	State     string    `json:"state"`
-	Exit      string    `json:"exit,omitempty"`
-	StartedAt time.Time `json:"started_at,omitzero"`
-	KeptAt    time.Time `json:"kept_at"`
+	SandboxID string              `json:"sandbox_id,omitempty"`
+	State     sandboxapi.RunState `json:"state"`
+	Exit      string              `json:"exit,omitempty"`
+	StartedAt time.Time           `json:"started_at,omitzero"`
+	KeptAt    time.Time           `json:"kept_at"`
 }
 
 func (m *Manager) runLogDir(name string) string {
@@ -116,22 +101,34 @@ func (b *box) sandboxID() string {
 // keepRunLog keeps the end of the log of the detached run a stop found in
 // a ready sandbox (endHarness), with how the run stood: a run still going
 // is interrupted by the stop, and the feed says so. Best effort: the stop
-// goes ahead whatever happens here.
-func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detachedRun) {
-	if run.State == runNone {
-		return
-	}
+// goes ahead whatever happens here. A stop of a sandbox whose hooks were
+// tampered with (hooks.on_tamper: stop) keeps no log: the log is the
+// workload's, and that stop waits on nothing the workload controls, so it
+// does not look at the run either (endHarness), and the log kept of an
+// earlier run goes, since it may not be the latest run's.
+func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harness.DetachedRun) {
 	m.mu.Lock()
 	name, id := b.rec.Name, b.sandboxID()
+	tamper := b.tamperStop
 	m.mu.Unlock()
+	if tamper {
+		if err := m.dropRunLogMeta(name); err != nil {
+			m.logf("sandbox %s: forget the log kept of an earlier detached run: %v", name, err)
+		}
+		m.logf("sandbox %s: the log of a detached run is not kept: the stop is for hook tampering", name)
+		return
+	}
+	if run.State == sandboxapi.RunNone {
+		return
+	}
 	meta := keptRun{SandboxID: id, State: sandboxapi.RunInterrupted, KeptAt: m.now().UTC()}
-	if run.State == runExited {
+	if run.State == sandboxapi.RunExited {
 		meta.State, meta.Exit = sandboxapi.RunExited, run.Exit
 	}
 	if run.Started > 0 {
 		meta.StartedAt = time.Unix(run.Started, 0).UTC()
 	}
-	if run.State != runRunning && m.keptAlready(name, meta) {
+	if run.State != sandboxapi.RunRunning && m.keptAlready(name, meta) {
 		// A run that was over at an earlier stop (a session since, or a
 		// pull that started the sandbox): its log is kept as it is.
 		return
@@ -142,14 +139,15 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
 	}
 	kept := m.readRunLog(ctx, gw, name, meta)
-	if run.State != runRunning {
+	if run.State != sandboxapi.RunRunning {
 		return
 	}
 	m.logf("sandbox %s: the stop ends its detached run, which was still going", name)
 	msg := "sandbox " + name + "'s detached run was still going; the stop ended it unfinished"
-	if kept {
+	switch {
+	case kept:
 		msg += ", and its log is kept (`defenseclaw sandbox logs " + name + "`)"
-	} else {
+	default:
 		msg += "; its log could not be kept"
 	}
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "run_interrupted", Message: msg})
@@ -242,8 +240,11 @@ func (m *Manager) removeRunLog(name string) error {
 	return nil
 }
 
-// RunLog returns the log of the latest detached run the daemon kept when
-// it last stopped the sandbox; lines > 0 keeps its last lines lines.
+// RunLog returns the log of a detached run the daemon kept when it stopped
+// the sandbox, with the run's start (StartedAt) to say which run it is of: a
+// stop that finds a run replaces it (or drops it when it cannot keep the new
+// one), and one that could not look at the run leaves it. lines > 0 keeps
+// its last lines lines.
 func (m *Manager) RunLog(_ context.Context, name string, lines int) (*sandboxapi.RunLog, error) {
 	b, err := m.box(name)
 	if err != nil {
@@ -276,25 +277,8 @@ func (m *Manager) RunLog(_ context.Context, name string, lines int) (*sandboxapi
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "read the kept run log of %s: %v", name, err)
 	}
 	if lines > 0 {
-		log = lastLines(log, lines)
+		log = harness.LastLines(log, lines)
 	}
 	return &sandboxapi.RunLog{Name: name, State: meta.State, Exit: meta.Exit, StartedAt: meta.StartedAt, KeptAt: meta.KeptAt,
 		Log: strings.ToValidUTF8(string(log), "\uFFFD")}, nil
-}
-
-// lastLines returns the last n lines of data.
-func lastLines(data []byte, n int) []byte {
-	data = bytes.TrimRight(data, "\n")
-	if len(data) == 0 {
-		return nil
-	}
-	for i := len(data) - 1; i >= 0; i-- {
-		if data[i] == '\n' {
-			n--
-			if n == 0 {
-				return append(data[i+1:len(data):len(data)], '\n')
-			}
-		}
-	}
-	return append(data[:len(data):len(data)], '\n')
 }

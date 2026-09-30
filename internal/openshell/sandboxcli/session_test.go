@@ -741,7 +741,7 @@ func TestKeepQuestionCtrlCSaysWhatIsLeft(t *testing.T) {
 
 func TestLogsChecksTheRunsHooks(t *testing.T) {
 	started := time.Now().Add(-time.Minute)
-	exited := fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", started.Unix())
+	exited := fmt.Sprintf("run_started=%d\nrun=exited\nrun_exit=0\n", started.Unix())
 	for _, c := range []struct {
 		name    string
 		status  string // the run-state script's answer
@@ -755,10 +755,10 @@ func TestLogsChecksTheRunsHooks(t *testing.T) {
 		{"never a hook, the daemon knows why", exited,
 			sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "OpenShell refused the hooks' connections"}, ExitHooksUnreachable,
 			"(OpenShell refused the hooks' connections). Run: defenseclaw sandbox doctor"},
-		{"run of an older version, no start", "started=\nstate=exited\nexit=0\n", sandboxapi.HookCoverage{}, ExitHooksUnreachable,
+		{"run of an older version, no start", "run_started=\nrun=exited\nrun_exit=0\n", sandboxapi.HookCoverage{}, ExitHooksUnreachable,
 			"every tool call is being blocked"},
-		{"run of an older version with hooks", "state=exited\nexit=0\n", sandboxapi.HookCoverage{HookRequests: 1, LastHookAt: time.Now()}, 0, ""},
-		{"still going, unreachable", "started=1\nstate=running\n", sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "no hook request"}, 0,
+		{"run of an older version with hooks", "run=exited\nrun_exit=0\n", sandboxapi.HookCoverage{HookRequests: 1, LastHookAt: time.Now()}, 0, ""},
+		{"still going, unreachable", "run_started=1\nrun=running\n", sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "no hook request"}, 0,
 			"every tool call is being blocked (no hook request)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -784,22 +784,6 @@ func TestLogsChecksTheRunsHooks(t *testing.T) {
 				has(t, ta.output(), "DefenseClaw hooks are not reaching the daemon", c.warning)
 			}
 		})
-	}
-}
-
-func TestParseDetachedRun(t *testing.T) {
-	for in, want := range map[string]detachedRun{
-		"state=none\n":                          {State: runNone},
-		"started=1790000000\nstate=running\n":   {State: runRunning, Started: 1790000000},
-		"started=\nstate=exited\nexit=3\n":      {State: runExited, Exit: "3"},
-		"started=17\nstate=interrupted\n":       {State: runInterrupted, Started: 17},
-		" state=exited \n exit=0 \n garbage \n": {State: runExited, Exit: "0"},
-		"state=bogus\n":                         {State: runNone},
-		"":                                      {State: runNone},
-	} {
-		if got := parseDetachedRun(in); got != want {
-			t.Errorf("parseDetachedRun(%q) = %+v, want %+v", in, got, want)
-		}
 	}
 }
 
@@ -844,15 +828,15 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 		want               []string
 		detached           bool // no undo and no keep question under the run
 	}{
-		{name: "detached run going", phase: "ready", state: "started=1790000000\nstate=running\n", detached: true,
+		{name: "detached run going", phase: "ready", state: "run_started=1790000000\nrun=running\n", detached: true,
 			want: []string{"Sandbox m1-b keeps running: its detached run is still going", "logs m1-b -f",
 				"the detached run in m1-b is still going; review or undo once it ends"}},
-		{name: "detached run going, --rm", phase: "ready", state: "state=running\n", rm: true, detached: true,
+		{name: "detached run going, --rm", phase: "ready", state: "run=running\n", rm: true, detached: true,
 			want: []string{"m1-b is not deleted (--rm): its detached run is still going"}},
-		{name: "running, no run", phase: "ready", state: "state=none\n", want: []string{"Sandbox m1-b keeps running (it was running when you connected)",
+		{name: "running, no run", phase: "ready", state: "", want: []string{"Sandbox m1-b keeps running (it was running when you connected)",
 			"m1-b is still running (it was running when you connected); changes it makes after this point are not in this review",
 			"Keep changes?", "the undo point stays, since m1-b keeps running"}},
-		{name: "stopped before the session", phase: "stopped", state: "state=none\n", stops: 1,
+		{name: "stopped before the session", phase: "stopped", state: "", stops: 1,
 			want: []string{"Sandbox kept (stopped) → resume: defenseclaw sandbox connect m1-b"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -882,7 +866,7 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 // from the TUI, the macOS app or a tamper stop keeps it the same way.
 func TestStopWithALiveDetachedRun(t *testing.T) {
 	const log = "working on it\nstill working\n"
-	going := "started=1790000000\nstate=running\n"
+	going := "run_started=1790000000\nrun=running\n"
 	daemonKeeps := func(ta *testApp) {
 		ta.daemon.stopRunLogs["box"] = &sandboxapi.RunLog{State: sandboxapi.RunInterrupted, StartedAt: time.Unix(1790000000, 0), Log: log}
 	}
@@ -923,7 +907,9 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 			ta.out.Reset()
 			ta.stream.runs = nil
 			ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
-			has(t, ta.output(), "still working", "the log kept when it stopped", "the run did not finish")
+			// It says which run the log is of: the one that started then.
+			has(t, ta.output(), "still working", "the log of its detached run started "+ta.clock(time.Unix(1790000000, 0))+", kept when it stopped",
+				"the run did not finish")
 			lacks(t, ta.output(), "working on it")
 			if len(ta.stream.runs) != 0 {
 				t.Fatalf("logs of a stopped sandbox ran %q in it", ta.stream.commands())
@@ -937,8 +923,11 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 
 // A stopped sandbox without a kept log says how to read its log; a log an
 // earlier CLI kept on this machine (before the daemon kept them) is still
-// shown, for its own sandbox only, and the daemon's wins over it. Without
-// the kept marker, a run whose process is gone reads "did not finish", not
+// shown, said to be that CLI's, for its own sandbox only, and the daemon's
+// wins over it. Once the daemon has seen the sandbox start since (its
+// session count), every stop since was the daemon's: the earlier CLI's log
+// is older than the latest stop and is not shown as its log. Without the
+// kept marker, a run whose process is gone reads "did not finish", not
 // "still going".
 func TestLogsOfAStoppedSandbox(t *testing.T) {
 	ta := newTestApp(t, "")
@@ -950,8 +939,14 @@ func TestLogsOfAStoppedSandbox(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "run.json"), `{"state":"exited","exit":"0","sandbox_id":"sb-box","name":"box","saved_at":"2026-09-29T10:00:00Z"}`)
 	writeFile(t, filepath.Join(dir, "run.log"), "earlier\ndone\n")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
-	has(t, ta.output(), "done", "the log kept when it stopped", "the run exited with status 0")
-	lacks(t, ta.output(), "earlier")
+	has(t, ta.output(), "done", "the log an earlier DefenseClaw CLI kept when it stopped", "the run exited with status 0")
+	lacks(t, ta.output(), "earlier\n")
+	ta.out.Reset()
+	started := sb
+	started.Session = 1
+	ta.daemon.add(started)
+	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
+	ta.daemon.add(sb)
 	ta.out.Reset()
 	ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "newer\n"}
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))
@@ -965,13 +960,13 @@ func TestLogsOfAStoppedSandbox(t *testing.T) {
 	ta = newTestApp(t, "")
 	ta.IO.TTY = false
 	ta.daemon.add(sampleSandbox("box"))
-	runAnswers(ta, "started=1790000000\nstate=interrupted\n", "partial\n")
+	runAnswers(ta, "run_started=1790000000\nrun=interrupted\n", "partial\n")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))
 	has(t, ta.output(), "the run did not finish")
 	lacks(t, ta.output(), "still going")
 	// The pid check is the run-state script's; -f stops once the run is gone.
-	has(t, runStateScript, `kill -0 "$pid"`, "/proc/$pid/cmdline", "grep -q latest.exit", "state=interrupted")
-	has(t, runFollowScript, `while alive && [ ! -s "$d/latest.exit" ]`, `kill "$t"`)
+	has(t, runStateScript, `kill -0 "$rs_pid"`, "/proc/$rs_pid/cmdline", "grep -q latest.exit", "run=interrupted")
+	has(t, runFollowScript, `while run_alive "$d" && [ ! -s "$d/latest.exit" ]`, `kill "$t"`)
 }
 
 // A detached Claude Code run streams its events, which `logs` renders; a

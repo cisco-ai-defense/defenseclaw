@@ -292,7 +292,7 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 		sb := sampleSandbox("m1-b")
 		sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: time.Now().Add(-time.Hour)}
 		ta.daemon.add(sb)
-		runAnswers(ta, "state=none\n", "")
+		runAnswers(ta, "", "")
 		defer ta.holdSession("m1-b")()
 		ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-b", Rm: true}))
 		check(t, ta, "m1-b")
@@ -306,7 +306,7 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 	// The offer to resume a sandbox another session is attached to says so.
 	ta := newTestApp(t, "y\ny\n")
 	ta.daemon.add(folderSandbox(ta, "ready"))
-	runAnswers(ta, "state=none\n", "")
+	runAnswers(ta, "", "")
 	defer ta.holdSession("proj-0a1b")()
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	has(t, ta.output(), "Sandbox proj-0a1b (ready, mount) already holds this folder, and 1 session is attached to it. Resume it? [Y/n]")

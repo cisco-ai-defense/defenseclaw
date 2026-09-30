@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -138,7 +139,7 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	// restore): say so, and what it ends, before asking.
 	sb, _ := api.Get(ctx, o.Name)
 	running := sb != nil && sb.Phase == "ready"
-	run := detachedRun{State: runNone}
+	run := harness.DetachedRun{State: sandboxapi.RunNone}
 	if running {
 		if gateway, err := a.gatewayName(ctx); err == nil {
 			if r, err := a.detachedRun(ctx, a.cli(gateway), sb); err == nil {
@@ -146,7 +147,7 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 			}
 		}
 		ends := "its harness session ends"
-		if run.State == runRunning {
+		if run.State == sandboxapi.RunRunning {
 			ends = "its detached run" + a.startedText(run.Started) + " ends unfinished"
 		}
 		a.line("  stop " + o.Name + " first (" + ends + ")")
