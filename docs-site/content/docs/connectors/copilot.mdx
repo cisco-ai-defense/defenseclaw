@@ -276,8 +276,9 @@ replaces that list, so name every harness you want:
 - **Model sign-in.** `sandbox run` uses Copilot's bring-your-own-provider
   mode. `--llm auto` (the default) shares `ANTHROPIC_API_KEY` from your shell
   as Copilot's provider key for the Anthropic Messages API (pick a model with
-  `-- --model <model>`); `--llm bedrock` shares a short-term Amazon Bedrock API
-  key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic
+  `-- --model <model>`); `--llm bedrock`, and `auto` without it, shares a
+  short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the
+  Bedrock Mantle Anthropic
   endpoint (default model Claude Haiku 4.5). OpenShell holds the secret, and
   the sandbox gets a placeholder that works only at that endpoint. Both run
   Copilot in offline mode, which skips GitHub sign-in, telemetry, web tools,

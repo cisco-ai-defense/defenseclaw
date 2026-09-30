@@ -221,7 +221,10 @@ type Manager struct {
 	unblocks   *egress.MemoryUnblocks
 	batcher    *triage.Batcher
 	sink       *egressSink
-	toolCalls  *hookTamperTracker
+	// refusals keeps each binding's recent CONNECT refusals for its agent
+	// (EgressRefusals).
+	refusals  *refusalMemory
+	toolCalls *hookTamperTracker
 	// tamperStops tracks the stops hook tamper started.
 	tamperStops sync.WaitGroup
 
@@ -341,6 +344,7 @@ func New(opts Options) (*Manager, error) {
 		egressFeed: newRateGate(feedBurst, feedRate),
 		creds:      egress.NewCredentialStore(),
 		unblocks:   unblocks,
+		refusals:   newRefusalMemory(),
 		toolCalls:  newHookTamperTracker(),
 		boxes:      map[string]*box{},
 		approvals:  map[string]*approval{},
@@ -694,6 +698,17 @@ func (m *Manager) config() *config.Config {
 		cfg = &config.Config{}
 	}
 	return cfg
+}
+
+// keepIgnored is what a mounted project's undo point keeps a copy of
+// (openshell.workdir.undo_ignored): the directory names and the cap on the
+// copies, or nothing while the key is off.
+func (m *Manager) keepIgnored() ([]string, int64) {
+	u := m.config().OpenShell.Workdir.UndoIgnored
+	if !u.Enabled {
+		return nil, 0
+	}
+	return u.EffectiveDirs(), u.EffectiveMaxBytes()
 }
 
 // configLoop re-resolves policies and the egress decider when the

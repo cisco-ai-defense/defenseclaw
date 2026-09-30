@@ -23,6 +23,12 @@
     "tr (runtime)"
   ],
   "files": {
+    "/sandbox/.gemini/antigravity-cli/cache/onboarding.json": {
+      "mode": "-rw-------",
+      "owner": "user",
+      "size": 112,
+      "sha256": "58810efcb9364ce357092871a38507c05b1a6c56c8106a62f383db0624f335ec"
+    },
     "/sandbox/.gemini/config/hooks.json": {
       "mode": "-rw-------",
       "owner": "user",

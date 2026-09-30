@@ -451,7 +451,8 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 		t.Fatalf("feed = %+v", got)
 	}
 
-	// The exec failed: the flush is tried once more, on its own.
+	// The exec failed: the flush is tried once more, on its own (after a
+	// look at the detached run, which the failed exec did not report).
 	e.startBox("flushbox", sandboxapi.StartRequest{})
 	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if call.Command[0] == "/bin/sync" {
@@ -462,7 +463,7 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 	before := len(e.fake.ExecCalls())
 	e.stopBox("flushbox")
 	calls = e.fake.ExecCalls()[before:]
-	if len(calls) != 2 || !slices.Equal(calls[1].Command, []string{"/bin/sync"}) {
+	if len(calls) != 3 || !slices.Contains(calls[1].Command, "defenseclaw-run-probe") || !slices.Equal(calls[2].Command, []string{"/bin/sync"}) {
 		t.Fatalf("exec calls = %+v", calls)
 	}
 	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 {

@@ -2726,7 +2726,9 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 //
 // Standalone short-circuit: when the active connector + host pair
 // indicates no OpenClaw fleet is configured (hook-only connector,
-// codex/claudecode + loopback gateway.host, or unknown connector), we publish
+// codex/claudecode + loopback gateway.host, unknown connector, or an
+// openclaw connector implied only by claw.mode on a machine without
+// OpenClaw, reported as "OpenClaw is not installed"), we publish
 // StateDisabled with an explanatory hint and park on ctx.Done()
 // instead of looping ConnectWithRetry. This mirrors the
 // observability-only branch in runGuardrail (sidecar.go::1283-1294)
@@ -2756,18 +2758,24 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		// per-connector roster is the status command's "Agents" section, so
 		// we deliberately do NOT re-enumerate connector names here.
 		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
+		why := "no OpenClaw fleet to dial"
 		if s.currentConfig().StandaloneEnterprise() {
 			details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
 			details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
 			connName = "managed standalone"
+		} else if openClawImpliedButNotInstalled(s.currentConfig()) {
+			details["summary"] = fleetOffSummaryOpenClawNotInstalled
+			details["hint"] = fleetOffHintOpenClawNotInstalled
+			details["reason"] = fleetOffReasonOpenClawNotInstalled
+			why = "OpenClaw is not installed (claw.mode defaults to openclaw, no openclaw.json or openclaw binary found)"
 		} else if connName == "openclaw" && openClawNotInstalledLocally(s.currentConfig()) {
 			details["summary"] = "OpenClaw is not installed (standalone mode)"
 			details["hint"] = "hooks and the local audit continue; after installing OpenClaw, run 'defenseclaw setup openclaw' to connect to its gateway"
 		}
 		s.health.SetGateway(StateDisabled, "", details)
 		fmt.Fprintf(os.Stderr,
-			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
-			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode)
+			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — %s. Hooks + local audit continue normally.\n",
+			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode, why)
 		<-ctx.Done()
 		s.health.SetGateway(StateStopped, "", nil)
 		return nil
@@ -5581,13 +5589,21 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 // Heuristic (intentionally connector- + host-derived, no new config
 // field):
 //
-//	openclaw / zeptoclaw       → always dial. The WS upstream is the
+//	openclaw / zeptoclaw       → dial. The WS upstream is the
 //	                             whole point of these connectors;
 //	                             skipping it would break every
-//	                             existing OpenClaw install. The one
-//	                             exception is openclaw + loopback host
-//	                             where agent discovery found no
-//	                             OpenClaw: nothing can listen there.
+//	                             existing OpenClaw install. Two
+//	                             exceptions, both → SKIP: openclaw
+//	                             comes only from claw.mode, the host
+//	                             is loopback, fleet_mode is unset and
+//	                             OpenClaw is not installed (no
+//	                             openclaw.json, no binary), reported
+//	                             as "OpenClaw is not installed"
+//	                             (openClawImpliedButNotInstalled);
+//	                             and openclaw + loopback host where
+//	                             agent discovery found no OpenClaw:
+//	                             nothing can listen there
+//	                             (openClawNotInstalledLocally).
 //	codex / claudecode + loopback host
 //	                           → SKIP. These connectors emit telemetry
 //	                             through hooks/native telemetry +
@@ -5650,7 +5666,10 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	}
 	switch configuredConnectorName(cfg) {
 	case "openclaw":
-		return !openClawNotInstalledLocally(cfg)
+		// Skip when claw.mode alone implies OpenClaw and nothing on this
+		// machine is OpenClaw (#958; see openClawImpliedButNotInstalled), or
+		// when discovery found no OpenClaw behind a loopback host.
+		return !openClawImpliedButNotInstalled(cfg) && !openClawNotInstalledLocally(cfg)
 	case "zeptoclaw":
 		return true
 	case "codex", "claudecode":

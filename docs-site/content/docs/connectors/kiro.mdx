@@ -21,6 +21,34 @@ rewrites DefenseClaw's entries the first time it starts after an upgrade, and
 `defenseclaw setup kiro` rewrites them too. Hook entries you added yourself
 are not changed.
 
+Each of the agent's hooks also sets `timeout_ms` 30000. Kiro ignores a hook
+that has not answered within its timeout and runs the tool, and its default
+is about ten seconds: measured on kiro-cli 2.24.1, a `preToolUse` hook that
+took 12 seconds to block did not stop the tool. Earlier releases set no
+timeout, so a DefenseClaw verdict that took longer than that (a slow scan or
+judge) let the tool run. The gateway adds the timeout to DefenseClaw's
+entries the first time it starts after an upgrade. The `.kiro/hooks` file
+already set `"timeout": 30`.
+
+`kiro-cli --v3` offers to upgrade 2.0 agent configs at start ("Enable
+auto-upgrade"), and `/upgrade-agent` does the same. Either rewrites the
+agent's hooks into one list that both engines read, with a `trigger` per
+entry, the matcher unchanged and `"timeout": 10`, and keeps the old file as
+`defenseclaw.json.bak`. DefenseClaw keeps such an agent in that form: setup
+replaces only its own entries (with `"timeout": 30`) and keeps yours, and
+teardown removes only its own. Releases before this fix replaced the whole
+list, so hooks you had added to an upgraded agent were lost, and teardown
+left DefenseClaw's upgraded entries behind.
+
+The `.kiro/hooks` file keeps the matcher `.*` on purpose. Kiro IDE and the
+v3 engine of `kiro-cli --v3` read a matcher as a regular expression, so `.*`
+matches every tool there, and `*` is not a valid regular expression: a hook
+with it never runs. Measured on kiro-cli 2.24.1: with `--v3`, the
+`PreToolUse` and `PostToolUse` hooks with `.*` (or with no matcher) fire for
+every tool call, and the agent's `*` tool hooks do not, so each tool call
+reaches DefenseClaw once. Bare `kiro-cli` (the 2.x engine) does not read
+`.kiro/hooks` at all.
+
 ## What each surface can veto
 
 In action mode DefenseClaw vetoes wherever Kiro honors the veto, and records a

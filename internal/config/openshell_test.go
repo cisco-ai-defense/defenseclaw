@@ -56,20 +56,32 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	if o.Workdir.GitDepth != 200 || o.Workdir.OnExit != "ask" {
 		t.Fatalf("workdir defaults = %+v", o.Workdir)
 	}
+	if u := o.Workdir.UndoIgnored; u.Enabled || u.MaxMB != 500 || strings.Join(u.Dirs, ",") != "node_modules,.venv,venv" {
+		t.Fatalf("undo_ignored defaults = %+v", u)
+	}
+	if u := (OpenShellUndoIgnoredConfig{}); u.EffectiveMaxBytes() != 500<<20 || strings.Join(u.EffectiveDirs(), ",") != "node_modules,.venv,venv" {
+		t.Fatalf("undo_ignored effective defaults = %d, %v", u.EffectiveMaxBytes(), u.EffectiveDirs())
+	}
 	if o.Approvals.DebounceMs != 3000 || !o.Approvals.AgentProposalsEnabled() {
 		t.Fatalf("approvals defaults = %+v", o.Approvals)
 	}
 	if o.TokenDelivery != "provider" {
 		t.Fatalf("token_delivery = %q", o.TokenDelivery)
 	}
+	if o.LLM != "auto" {
+		t.Fatalf("llm = %q, want auto", o.LLM)
+	}
 	// Pack-governed keys stay unset so the selected pack supplies them.
 	if o.Pack != "" || o.Profile != "" || o.Yolo != nil || o.Workdir.Mode != "" ||
 		o.Workdir.MaxUploadMB != 0 || len(o.Egress.Ports) != 0 || o.Egress.LargeUploadMB != 0 ||
-		o.Egress.Feed != "" || o.MCP.Import != nil {
+		o.Egress.BlockLargeUploads || o.Egress.Feed != "" || o.MCP.Import != nil {
 		t.Fatalf("pack-governed keys received loader defaults: %+v", o)
 	}
 	if !o.Admin.IsZero() {
 		t.Fatalf("admin defaults = %+v", o.Admin)
+	}
+	if (OpenShellAdminConfig{BlockLargeUploads: true}).IsZero() {
+		t.Fatal("admin.block_large_uploads alone must count as a constraint")
 	}
 	if got, want := cfg.OpenShellIngressPort(), DefaultGatewayAPIPort+1; got != want {
 		t.Fatalf("ingress port = %d, want %d", got, want)
@@ -127,8 +139,10 @@ openshell:
   pack_dir: '`+packDir+`'
   profile: strict
   yolo: false
-  workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep}
-  egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, feed: none}
+  llm: bedrock
+  keep_headless: true
+  workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep, undo_ignored: {enabled: true, max_mb: 64, dirs: [vendor]}}
+  egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, block_large_uploads: true, feed: none}
   image: {base: 'registry.example/base@sha256:abc', harness_versions: {codex: 0.146.0}}
   approvals: {debounce_ms: 1500, agent_proposals: false}
   resources: {cpu: '2', memory: 4Gi}
@@ -146,6 +160,7 @@ openshell:
     allowed_harnesses: [codex]
     egress_block: ['*.ngrok.io']
     egress_allow_only: ['*.corp.example']
+    block_large_uploads: true
     require_copy_for: [/src/customer-*]
     max_resources: {cpu: 500m, memory: 8Gi}
     locked: [profile, yolo]
@@ -158,16 +173,19 @@ openshell:
 	f := false
 	tr := true
 	want := OpenShellConfig{
-		Enabled:           true,
-		Binary:            binary,
-		Gateway:           OpenShellGatewayConfig{Name: "openshell", Workspace: "team"},
-		EgressPort:        19500,
-		Pack:              "balanced",
-		PackDir:           packDir,
-		Profile:           "strict",
-		Yolo:              &f,
-		Workdir:           OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep"},
-		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
+		Enabled:      true,
+		Binary:       binary,
+		Gateway:      OpenShellGatewayConfig{Name: "openshell", Workspace: "team"},
+		EgressPort:   19500,
+		Pack:         "balanced",
+		PackDir:      packDir,
+		Profile:      "strict",
+		Yolo:         &f,
+		LLM:          "bedrock",
+		KeepHeadless: true,
+		Workdir: OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep",
+			UndoIgnored: OpenShellUndoIgnoredConfig{Enabled: true, MaxMB: 64, Dirs: []string{"vendor"}}},
+		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, BlockLargeUploads: true, Feed: "none"},
 		Image:             OpenShellImageConfig{Base: "registry.example/base@sha256:abc", HarnessVersions: map[string]string{"codex": "0.146.0"}},
 		Approvals:         OpenShellApprovalsConfig{DebounceMs: 1500, AgentProposals: &f},
 		Resources:         OpenShellResourcesConfig{CPU: "2", Memory: "4Gi"},
@@ -178,16 +196,17 @@ openshell:
 		TokenDelivery:     "env",
 		UpstreamTelemetry: true,
 		Admin: OpenShellAdminConfig{
-			RequiredPack:     "strict",
-			MinProfile:       "balanced",
-			AllowYolo:        &f,
-			AllowMount:       &tr,
-			AllowedHarnesses: []string{"codex"},
-			EgressBlock:      []string{"*.ngrok.io"},
-			EgressAllowOnly:  []string{"*.corp.example"},
-			RequireCopyFor:   []string{"/src/customer-*"},
-			MaxResources:     OpenShellResourcesConfig{CPU: "500m", Memory: "8Gi"},
-			Locked:           []string{"profile", "yolo"},
+			RequiredPack:      "strict",
+			MinProfile:        "balanced",
+			AllowYolo:         &f,
+			AllowMount:        &tr,
+			AllowedHarnesses:  []string{"codex"},
+			EgressBlock:       []string{"*.ngrok.io"},
+			EgressAllowOnly:   []string{"*.corp.example"},
+			BlockLargeUploads: true,
+			RequireCopyFor:    []string{"/src/customer-*"},
+			MaxResources:      OpenShellResourcesConfig{CPU: "500m", Memory: "8Gi"},
+			Locked:            []string{"profile", "yolo"},
 		},
 	}
 	if !reflect.DeepEqual(o, want) {
@@ -233,7 +252,11 @@ func TestOpenShellValidate(t *testing.T) {
 		{"on exit", func(o *OpenShellConfig) { o.Workdir.OnExit = "delete" }, "workdir.on_exit"},
 		{"feed", func(o *OpenShellConfig) { o.Egress.Feed = "custom" }, "egress.feed"},
 		{"token delivery", func(o *OpenShellConfig) { o.TokenDelivery = "file" }, "token_delivery"},
+		{"llm", func(o *OpenShellConfig) { o.LLM = "vertex" }, "llm"},
 		{"negative upload", func(o *OpenShellConfig) { o.Workdir.MaxUploadMB = -1 }, "max_upload_mb"},
+		{"undo_ignored cap", func(o *OpenShellConfig) { o.Workdir.UndoIgnored.MaxMB = -1 }, "workdir.undo_ignored.max_mb"},
+		{"undo_ignored path", func(o *OpenShellConfig) { o.Workdir.UndoIgnored.Dirs = []string{"node_modules", "web/node_modules"} }, "workdir.undo_ignored.dirs[1]"},
+		{"undo_ignored git", func(o *OpenShellConfig) { o.Workdir.UndoIgnored.Dirs = []string{".git"} }, "workdir.undo_ignored.dirs[0]"},
 		{"absolute mask", func(o *OpenShellConfig) { o.Workdir.Masks = []string{".env", "/srv/app/.env"} }, "workdir.masks[1]"},
 		{"escaping unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"../../secrets/app.key"} }, "workdir.unmask[0]"},
 		{"proxy port zero", func(o *OpenShellConfig) { o.Egress.Ports = []int{0} }, "egress.ports[0]"},
@@ -378,6 +401,27 @@ func TestValidateOpenShellProjectGlob(t *testing.T) {
 	if err := ValidateOpenShellProjectGlobs("workdir.unmask", []string{".env.example", "/x"}); err == nil ||
 		!strings.HasPrefix(err.Error(), "workdir.unmask[1]: ") {
 		t.Fatalf("list error = %v", err)
+	}
+}
+
+// #946: a host name on openshell.admin.egress_block covers its subdomains.
+func TestOpenShellAdminBlockPatterns(t *testing.T) {
+	for _, tc := range []struct {
+		in, want []string
+	}{
+		{nil, []string{}},
+		{[]string{"example.net"}, []string{"example.net", "*.example.net"}},
+		{[]string{" Example.NET. ", "*.example.net", "example.net"}, []string{"example.net", "*.example.net"}},
+		{[]string{"*.ngrok.io"}, []string{"*.ngrok.io"}},
+		{[]string{"www.example.org"}, []string{"www.example.org", "*.www.example.org"}},
+		{[]string{"203.0.113.7", "[2001:db8::1]", "198.51.100.0/24"}, []string{"203.0.113.7", "2001:db8::1", "198.51.100.0/24"}},
+		// Validation refuses these; they are kept as written, not widened.
+		{[]string{"x.example/path", ""}, []string{"x.example/path"}},
+	} {
+		got := OpenShellAdminBlockPatterns(tc.in)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") || got == nil {
+			t.Errorf("OpenShellAdminBlockPatterns(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

@@ -810,6 +810,10 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	meta := hookLLMEventMeta(ctx, "claudecode", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
 	meta.ToolID = req.ToolUseID
 	meta.ToolName = claudeCodeToolName(req)
+	var batchCalls []claudeCodeBatchCall
+	if req.HookEventName == "PostToolBatch" && strings.TrimSpace(req.ToolName) == "" {
+		batchCalls, meta.ToolName, meta.ToolID = claudeCodeToolBatch(req)
+	}
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
@@ -882,7 +886,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), hookSpawnIntentFailed, arguments, output)
 		completionContext := a.emitHookToolSpan(ctx, meta, claudeCodeToolName(req), arguments, output, nil)
 		a.emitToolInvocationEventV8(completionContext, meta, "result", claudeCodeToolName(req), arguments, output, nil)
-	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
+	case "PostToolUse", "PostToolUseFailure":
 		meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
 		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
@@ -892,9 +896,26 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		if req.HookEventName == "PostToolUseFailure" {
 			spawnPhase = hookSpawnIntentFailed
 		}
-		a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), spawnPhase, arguments, output)
+		if child := claudeCodeSpawnedAgentID(req); child != "" && a.hookAgentStateKnown("claudecode", req.SessionID, child) {
+			// The subagent this Agent call ran has started: its SubagentStart
+			// took the call's spawn intent. A completed intent left behind
+			// would claim the next subagent of the session.
+			a.forgetHookSpawnIntent(meta)
+		} else {
+			a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), spawnPhase, arguments, output)
+		}
 		completionContext := a.emitHookToolSpan(ctx, meta, claudeCodeToolName(req), arguments, output, nil)
 		a.emitToolInvocationEventV8(completionContext, meta, "result", claudeCodeToolName(req), "", output, nil)
+	case "PostToolBatch":
+		// A tool_batch record listing its calls (claudeCodeToolBatch). It
+		// spawns nothing: the Agent calls it lists had their own PreToolUse
+		// and PostToolUse.
+		meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)
+		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, meta.ToolName)
+		arguments := claudeCodeToolBatchArguments(batchCalls)
+		output := redactReturnedCredentialTelemetry(claudeCodeToolOutput(req))
+		completionContext := a.emitHookToolSpan(ctx, meta, meta.ToolName, arguments, output, nil)
+		a.emitToolInvocationEventV8(completionContext, meta, "result", meta.ToolName, arguments, output, nil)
 	case "StopFailure":
 		if strings.TrimSpace(req.LastAssistantMessage) != "" {
 			meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)

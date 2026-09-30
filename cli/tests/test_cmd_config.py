@@ -131,6 +131,44 @@ class ValidateConfigTests(unittest.TestCase):
             self.assertFalse(res.ok)
             self.assertTrue(any("scanner_mode" in e for e in res.errors))
 
+    def test_unplaced_go_refusal_names_the_field(self):
+        """Go's runtime-loader refusals reach the wire only at "$".
+
+        The Go decision stands; the Python mirror of the openshell checks
+        names the field and what it takes (the #1019 retest).
+        """
+        generic = ConfigInspectError(
+            "candidate field=$; reason=configuration could not be compiled safely",
+            field_path="$",
+            reason="configuration could not be compiled safely",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 8\nopenshell:\n  binary: bin/openshell\n", encoding="utf-8")
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=generic):
+                res = cmd_config.validate_config()
+            self.assertFalse(res.ok)
+            self.assertEqual(
+                res.errors,
+                ["candidate field=$.openshell.binary; reason=[semantic] use a command name on PATH or an absolute path"],
+            )
+
+            # Nothing the mirror finds: Go's own words.
+            env.config_path.write_text("config_version: 8\n", encoding="utf-8")
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=generic):
+                res = cmd_config.validate_config()
+            self.assertEqual(res.errors, [str(generic)])
+
+            # A refusal Go placed is left as it is.
+            placed = ConfigInspectError(
+                "candidate field=$.openshell.llm; reason=[config_schema_invalid] …",
+                field_path="$.openshell.llm",
+                reason="[config_schema_invalid] …",
+            )
+            env.config_path.write_text("config_version: 8\nopenshell:\n  binary: bin/openshell\n", encoding="utf-8")
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=placed):
+                res = cmd_config.validate_config()
+            self.assertEqual(res.errors, [str(placed)])
+
     def test_gateway_port_clash_is_warning_not_error(self):
         with _IsolatedHome() as env:
             env.config_path.write_text(

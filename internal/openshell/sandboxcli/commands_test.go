@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,6 +101,12 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// The verdicts per hook event, the most frequent first (#956).
+		{"events", func(h *sandboxapi.HookCoverage) {
+			h.Events = map[string]int64{"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "UserPromptSubmit": 3}
+			h.OtherEvents = 1
+		}, "4 calls, 1 blocked", []string{
+			"Hook events   PreToolUse 12 · PostToolUse 11 · UserPromptSubmit 3 · SessionStart 2 · Stop 2 · other events 1\n"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -110,6 +117,15 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			has(t, ta.output(), c.list)
 			ta.ok(t, ta.fresh().Status(bg, "box", OutputText))
 			has(t, ta.output(), c.status...)
+			if sb.Hooks.Events == nil {
+				lacks(t, ta.output(), "Hook events")
+			}
+			ta.ok(t, ta.fresh().Status(bg, "box", OutputJSON))
+			var got sandboxapi.Sandbox
+			if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || !maps.Equal(got.Hooks.Events, sb.Hooks.Events) ||
+				got.Hooks.OtherEvents != sb.Hooks.OtherEvents {
+				t.Fatalf("status json hooks = %+v (%v), want events %v and %d other", got.Hooks, err, sb.Hooks.Events, sb.Hooks.OtherEvents)
+			}
 		})
 	}
 }
@@ -135,6 +151,20 @@ func TestActivityRendering(t *testing.T) {
 		{Seq: 11, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 429 Too Many Requests",
 			Message: "✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)"},
 		{Seq: 12, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 403 Forbidden"},
+		// The large-upload block names the threshold the upload crossed.
+		{Seq: 13, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "files.example.net", Category: sandboxapi.CategoryLargeUpload,
+			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true},
+		// Reported as it crossed the threshold (RT U4: the line gave the
+		// bytes sent then, 1.0 MiB of an upload of 1.9 MiB); an older
+		// daemon's report names no threshold.
+		{Seq: 14, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "drop.example.net", BytesUp: 30 << 20},
+		{Seq: 15, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "httpbin.io", BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		// After a cut, an HTTPS and a plain-HTTP request to the host read as
+		// one line twice (PR 1022 live retest N3): the port tells them apart.
+		{Seq: 16, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 443, Method: "CONNECT",
+			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
+		{Seq: 17, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 80, Method: "GET",
+			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -151,6 +181,12 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2",
 		"12:01:02 ✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)",
 		"12:01:02 ✗ a hook call failed (HTTP 403 Forbidden), so the harness's action was blocked",
+		"12:01:02 ✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)" +
+			"  → unblock: defenseclaw sandbox unblock files.example.net --sandbox box",
+		"12:01:02 ⚠ large upload to drop.example.net (30.0 MiB)",
+		"12:01:02 ⚠ large upload to httpbin.io (more than 1 MiB)",
+		"12:01:02 ✗ httpbin.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
+		"12:01:02 ✗ httpbin.org:80 (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -231,6 +267,11 @@ func TestUndo(t *testing.T) {
 	deps := workspace.IgnoredChange{Path: "node_modules/", Modified: 1, Executables: []string{"node_modules/.bin/tool"}, ExecutableCount: 1,
 		Dependencies: true, Remedy: "delete it and reinstall the packages (for example `npm ci`)"}
 	cache := workspace.IgnoredChange{Path: "calc/__pycache__/", Added: 1, Modified: 1, Removed: true, Remedy: "delete it; Python rebuilds it"}
+	restoredDeps, overCap, vendor := deps, deps, deps
+	restoredDeps.Restored, overCap.OverCap, vendor.Path = true, true, "vendor/"
+	undoIgnoredOn := func(ta *testApp) {
+		ta.Cfg.OpenShell.Workdir.UndoIgnored = config.OpenShellUndoIgnoredConfig{Enabled: true, MaxMB: 64}
+	}
 	readme := []workspace.TreeChange{{Path: "README.md", Status: "M"}}
 	before, after := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	for _, c := range []struct {
@@ -239,6 +280,7 @@ func TestUndo(t *testing.T) {
 		undo        *workspace.UndoResult
 		undos       int
 		stopped     bool // -o json: stdout is the restore's response
+		setup       func(*testApp)
 		want, not   []string
 	}{
 		{name: "restore", input: "y\n", undos: 2, want: []string{"revert  README.md", "restored: 1 file restored"}},
@@ -250,6 +292,22 @@ func TestUndo(t *testing.T) {
 			undos: 2, want: []string{"remove  2 files the session wrote to calc/__pycache__/ (a Python bytecode cache)",
 				"undo cannot restore node_modules/", "restored: 1 file restored, except node_modules/ (see above)"},
 			not: []string{"undo cannot restore calc/__pycache__/"}},
+		// Off, a dependency directory undo cannot restore names the key that
+		// makes the next undo point keep a copy of it (#944).
+		{name: "the key that keeps a copy", undo: &workspace.UndoResult{Preview: true, Ignored: []workspace.IgnoredChange{deps}}, undos: 1,
+			want: []string{"openshell.workdir.undo_ignored.enabled: true in ", "config.yaml makes each undo point keep a copy of " +
+				"node_modules, .venv, venv (up to 500 MB), so undo restores them; it applies from the next session's start"}},
+		{name: "a directory the key does not name", setup: undoIgnoredOn,
+			undo: &workspace.UndoResult{Preview: true, Ignored: []workspace.IgnoredChange{vendor}}, undos: 1,
+			want: []string{"add vendor to openshell.workdir.undo_ignored.dirs in "}, not: []string{"undo_ignored.enabled: true"}},
+		{name: "a kept copy is restored", input: "y\n", undo: &workspace.UndoResult{Changes: readme, Ignored: []workspace.IgnoredChange{restoredDeps}},
+			undos: 2, want: []string{"restore node_modules/ from the copy the undo point keeps (1 file added or changed during the session)",
+				"restored: 1 file restored (node_modules/ too, from the copy the undo point keeps)"},
+			not: []string{"undo cannot restore", "undo_ignored"}},
+		{name: "a copy past the cap", setup: undoIgnoredOn, undo: &workspace.UndoResult{Preview: true, Ignored: []workspace.IgnoredChange{overCap}}, undos: 1,
+			want: []string{"undo cannot restore node_modules/ (1 file added or changed during the session, including .bin/tool): " +
+				"delete it and reinstall the packages (for example `npm ci`) (its copy would pass openshell.workdir.undo_ignored.max_mb, 64 MB)"},
+			not: []string{"makes each undo point keep a copy"}},
 		{name: "commits", opts: UndoOptions{Preview: true}, undos: 1,
 			undo: &workspace.UndoResult{Preview: true, HeadBefore: before, HeadAfter: after, BranchBefore: "main", BranchAfter: "main",
 				RefChanges: []workspace.RefChange{{Ref: "refs/heads/fix", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
@@ -263,6 +321,9 @@ func TestUndo(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, c.input)
 			ta.daemon.add(sampleSandbox("box"))
+			if c.setup != nil {
+				c.setup(ta)
+			}
 			if c.undo != nil {
 				r := *c.undo
 				r.Project = ta.project
@@ -401,6 +462,8 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta.copy.pending = map[string]workspace.CopyWork{"live": workspace.CopyWorkUnpulled}
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"live"}}))
 	lacks(t, ta.output(), "never pulled")
+	// Its undo point goes with it unless kept; a copy has none to name.
+	has(t, ta.output(), "Delete sandbox live (its providers, credentials and, unless --keep-snapshot, its undo point)? [y/N]")
 	// Teardown lists it in its plan (a dry run changes nothing).
 	ta = newTestApp(t, "", copySandbox("fix-tests"))
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
@@ -536,7 +599,7 @@ func TestExecAndLogs(t *testing.T) {
 			return 0, "log line\nmore\n"
 		case isRunStatus(cmd):
 			// The run started a minute ago; the sandbox's last hook is now.
-			return 0, fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", time.Now().Add(-time.Minute).Unix())
+			return 0, fmt.Sprintf("run_started=%d\nrun=exited\nrun_exit=0\n", time.Now().Add(-time.Minute).Unix())
 		case cmd[0] == "false":
 			return 7, ""
 		}
@@ -617,7 +680,7 @@ func TestLogsCannotDriveTheTerminal(t *testing.T) {
 				ta.daemon.add(sb)
 				ta.stream.answer = func(argv []string) (int, string) {
 					if isRunStatus(sandboxCommand(argv)) {
-						return 0, "state=running\n"
+						return 0, "run=running\n"
 					}
 					return 0, c.log
 				}
@@ -716,7 +779,8 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	if n := ta.calls("POST", "copybox/stop"); n != 1 || !strings.Contains(ta.output(), "stopped copybox again") {
 		t.Fatalf("the sandbox the pull started was not stopped again (%d):\n%s", n, ta.output())
 	}
-	if !slices.Equal(ta.copy.steps, []string{"pull copybox", "apply branch"}) {
+	// Where the work goes is checked before the sandbox starts.
+	if !slices.Equal(ta.copy.steps, []string{"check branch", "pull copybox", "apply branch"}) {
 		t.Fatalf("steps = %v", ta.copy.steps)
 	}
 	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 1 || !strings.Contains(r[0], `"pull_mode":"branch"`) || !strings.Contains(r[0], `"lines_added":4`) {
@@ -742,6 +806,152 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
 	has(t, ta.output(), "nothing to apply: ", "already has these changes")
 	lacks(t, ta.output(), "applied 0 changes")
+}
+
+// `sandbox pull --branch` and `--patch-out FILE` are checked against the
+// project before the sandbox is started: a branch that holds other work, a
+// patch file that exists and a folder without git are refused before
+// "starting …". A branch that holds the work already takes nothing new, so
+// nothing is asked about its sensitive changes (#965).
+func TestPullChecksWhereTheWorkGoesFirst(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	for _, c := range []struct {
+		o    PullOptions
+		err  error
+		want string
+	}{
+		{PullOptions{Name: "copybox", Branch: true}, errors.New("workspace: branch dc/copybox already exists"),
+			"bring back copybox's changes: branch dc/copybox already exists; pass --branch-name NAME for another branch, or --force to move this one"},
+		{PullOptions{Name: "copybox", PatchOut: "copybox.patch"}, errors.New("workspace: /tmp/copybox.patch already exists"),
+			"pass another --patch-out FILE, or --force to overwrite this one"},
+		{PullOptions{Name: "copybox", BranchAs: "fix"}, workspace.ErrNotGitProject, "not a git repository, so there is no branch to put its changes on"},
+		{PullOptions{Name: "copybox", Apply: true}, workspace.ErrCopyNotFound, "pull copybox: copy-mode record not found"},
+	} {
+		ta.copy.checkErr = c.err
+		wantErr(t, ta.Pull(bg, c.o), c.want)
+	}
+	ta.wantCalls(t, 0, "POST", "copybox/start")
+	lacks(t, ta.output(), "starting copybox")
+	if len(ta.copy.checks) != 4 || !filepath.IsAbs(ta.copy.checks[1].PatchPath) || ta.copy.checks[2].Branch != "fix" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+	// A preview has nowhere to go.
+	ta.copy.checkErr = nil
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	if len(ta.copy.checks) != 4 {
+		t.Fatalf("a preview checked %+v", ta.copy.checks[4:])
+	}
+
+	ta = newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.IO.TTY = false
+	ta.copy.held = true
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Effective: "e1", Changes: []workspace.TreeChange{{Path: ".envrc", Status: "A"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: ".envrc", Label: ".envrc", Severity: workspace.SeverityHigh}}}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, UpToDate: true, Branch: "dc/copybox"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	has(t, ta.output(), "nothing to do: branch dc/copybox already has these changes (your checkout is unchanged)")
+	lacks(t, ta.output(), "--accept-sensitive", "Bring them back anyway?")
+}
+
+// A branch that holds only the sandbox's earlier pull is refused before the
+// boot when the stopped sandbox has run since (the #1019 retest: `pull
+// --branch` started it, pulled, stopped it and only then refused), naming
+// that pull. The check is told whether the pull starts the sandbox and
+// which pull it would reuse; a running sandbox starts nothing.
+func TestPullRefusesABranchOfEarlierWorkBeforeTheBoot(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.checkErr = &workspace.EarlierPullError{Branch: "dc/copybox", PulledAt: ta.Now().Add(-time.Hour)}
+	wantErr(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}),
+		"bring back copybox's changes: branch dc/copybox already exists: it holds copybox's pull at "+ta.clock(ta.Now().Add(-time.Hour))+
+			", and copybox has run since, so its work may have changed; pass --branch-name NAME for another branch, or --force to move this one")
+	ta.wantCalls(t, 0, "POST", "copybox/start")
+	lacks(t, ta.output(), "starting copybox")
+	if len(ta.copy.checks) != 1 || !ta.copy.checks[0].Starts || ta.copy.checks[0].Reuse != "" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+
+	// Stopped by a pull that read it: the next pull would reuse that one.
+	ta.copy.checkErr = nil
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),
+		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+	if len(ta.copy.checks) != 3 || !ta.copy.checks[2].Starts || ta.copy.checks[2].Reuse != "r1" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+
+	// A running sandbox is read as it is.
+	ta = newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	if len(ta.copy.checks) == 0 || ta.copy.checks[0].Starts || ta.copy.checks[0].Reuse != "" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+}
+
+// A pull of a stopped copy-mode sandbox that has not run since its last
+// pull read its copy is made from that pull: the second `pull --branch`
+// starts nothing and finds the branch done. A pull the workspace cannot
+// reuse, or a sandbox started since, is read again (#965).
+func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),
+		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 4}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, Applied: true, Branch: "dc/copybox"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+
+	ta.fresh()
+	ta.copy.steps = nil
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, UpToDate: true, Branch: "dc/copybox"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+	has(t, ta.output(), "copybox's copy has not changed since its last pull at "+ta.clock(ta.Now())+"; using that pull instead of starting it",
+		"copybox: 1 file changed (+4 −0)", "nothing to do: branch dc/copybox already has these changes")
+	lacks(t, ta.output(), "starting copybox", "stopped copybox again")
+	if !slices.Equal(ta.copy.steps, []string{"check branch", "reuse copybox r1", "apply branch"}) {
+		t.Fatalf("steps = %v", ta.copy.steps)
+	}
+	// The review of it reads nothing either.
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox"}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+
+	// A pull the workspace cannot reuse starts it.
+	ta.copy.reuseErr = errors.New("another pull since")
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	ta.wantCalls(t, 2, "POST", "copybox/start")
+	// So does a sandbox that started since (and was stopped outside the
+	// CLI: nothing marked it again).
+	ta.copy.reuseErr = nil
+	ta.ok(t, ta.Start(bg, "copybox", StartOptions{}))
+	ta.daemon.add(copySandbox("copybox"))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	ta.wantCalls(t, 4, "POST", "copybox/start")
+}
+
+// After a start and a stop whose look found the copy as the last pull read
+// it, that pull is reused, and the note says what holds: the copy has not
+// changed since that pull (it said the sandbox "has not run since" the pull,
+// which it had, the #1019 retest).
+func TestPullReuseNoteAfterAStartAndAStop(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	pulledAt := ta.Now().Add(-time.Hour)
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: pulledAt,
+		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	ta.ok(t, ta.Start(bg, "copybox", StartOptions{}))
+	ta.copy.pending, ta.copy.pendingPulled = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnpulled}, map[string]string{"copybox": "r1"}
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "copybox"}))
+	ta.ok(t, ta.fresh().Pull(bg, PullOptions{Name: "copybox"}))
+	ta.wantCalls(t, 2, "POST", "copybox/start")
+	has(t, ta.output(), "copybox's copy has not changed since its last pull at "+ta.clock(pulledAt)+"; using that pull instead of starting it")
+	lacks(t, ta.output(), "has not run since", "starting copybox")
 }
 
 // An apply that had fewer paths to write than the pull changed says the
@@ -925,8 +1135,9 @@ func TestPullWithNothingToBringBackSaysSo(t *testing.T) {
 // `policy allow|block` edits config.yaml. A refused entry writes nothing: a
 // catch-all, any edit of a managed install, and a host the organization's
 // policy keeps closed, whatever the entry says (manual test M10: "✓ added"
-// for a host the organization blocks). The bare-domain blocklist entries
-// that leave subdomains open are named.
+// for a host the organization blocks). A host name on the organization's
+// blocklist covers its subdomains (#946), so the doctor no longer warns
+// that it leaves them open.
 func TestPolicyEdit(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")
@@ -948,6 +1159,10 @@ func TestPolicyEdit(t *testing.T) {
 		{"egress_block", config.OpenShellAdminConfig{EgressBlock: []string{"example.net"}}, "example.net",
 			"blocked by your organization's DefenseClaw policy: egress.allow — example.net is on your organization's blocklist (example.net) (openshell.admin.egress_block)"},
 		{"egress_block wildcard", config.OpenShellAdminConfig{EgressBlock: []string{"*.example.net"}}, "*.api.example.net", "openshell.admin.egress_block"},
+		{"egress_block subdomain", config.OpenShellAdminConfig{EgressBlock: []string{"example.net"}}, "www.example.net",
+			"www.example.net is on your organization's blocklist (example.net) (openshell.admin.egress_block)"},
+		{"egress_block subdomain wildcard", config.OpenShellAdminConfig{EgressBlock: []string{"Example.NET."}}, "*.cdn.example.net",
+			"*.cdn.example.net is on your organization's blocklist (Example.NET.) (openshell.admin.egress_block)"},
 		{"egress_allow_only", config.OpenShellAdminConfig{EgressAllowOnly: []string{"*.github.com"}}, "example.com",
 			"example.com is not on your organization's list of allowed destinations (openshell.admin.egress_allow_only)"},
 		{"allow_unblock", config.OpenShellAdminConfig{AllowUnblock: &off}, "example.com",
@@ -971,12 +1186,11 @@ func TestPolicyEdit(t *testing.T) {
 	writeConfig(t, ta, "")
 	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{EgressAllowOnly: []string{"*.github.com"}, EgressBlock: []string{"example.net", "*.example.org", "example.org"}}
 	ta.ok(t, ta.PolicyEdit(bg, "allow", []string{"api.github.com"}))
-	warnings := ta.adminWarnings()
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "openshell.admin.egress_block example.net blocks example.net itself, not its subdomains") ||
-		!strings.Contains(warnings[0], "add *.example.net") {
-		t.Fatalf("warnings = %q", warnings)
-	}
-	if c := ta.adminCheck(); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "add *.example.net") {
+	// Only the organization's blocklist widens: an allow entry for a
+	// subdomain of a bare allow-only name is still refused.
+	ta.Cfg.OpenShell.Admin.EgressAllowOnly = []string{"github.com"}
+	wantErr(t, ta.PolicyEdit(bg, "allow", []string{"api.github.com"}), "api.github.com is not on your organization's list of allowed destinations")
+	if c := ta.adminCheck(); c.Status != openshell.StatusPass || strings.Contains(c.Detail, "subdomains") {
 		t.Fatalf("doctor check = %+v", c)
 	}
 }
@@ -1113,6 +1327,25 @@ func TestPolicyOutputFormatting(t *testing.T) {
 		"egress.allow: 1 entry outside the organization's allow-only list: not reachable")
 }
 
+// `policy show` says when large uploads to first-seen hosts are cut, and at
+// what size; `policy explain` lists the administrator's block among the
+// organization constraints.
+func TestPolicyShowsTheLargeUploadBlock(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
+		sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "10", Source: "pack", Origin: "pack balanced"},
+		sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "false", Source: "pack", Origin: "pack balanced"})
+	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{}))
+	lacks(t, ta.output(), "egress.block_large_uploads")
+	ta.Cfg.OpenShell.Admin.BlockLargeUploads = true
+	ta.daemon.explain.Settings[len(ta.daemon.explain.Settings)-1] = sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true",
+		Source: "admin", Origin: "openshell.admin.block_large_uploads"}
+	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "egress.block_large_uploads  true (an upload of more than 10 MiB to a host the sandbox had not contacted is cut)")
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "openshell.admin.block_large_uploads", "Organization constraints (openshell.admin)", "block_large_uploads    true")
+}
+
 func TestPackCommands(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.Cfg.OpenShell.PackDir = filepath.Join(ta.Cfg.DataDir, "policies", "sandbox")
@@ -1239,7 +1472,15 @@ func TestDetectLLM(t *testing.T) {
 		{"claude api key", claude, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
 		{"claude oauth", claude, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "", "auto", profiles.ClaudeOAuthID, "CLAUDE_CODE_OAUTH_TOKEN", false},
 		{"claude bedrock", claude, map[string]string{EnvBedrockToken: "b", "AWS_REGION": "us-west-2"}, "", "bedrock", profiles.ClaudeBedrockMantleID, EnvBedrockToken, false},
-		{"bedrock not automatic", claude, map[string]string{EnvBedrockToken: "b"}, "", "auto", "", "", false},
+		// auto takes an Amazon Bedrock key when it is the one set, and
+		// every other credential before it (#955).
+		{"claude bedrock under auto", claude, map[string]string{EnvBedrockToken: "b"}, "", "auto", profiles.ClaudeBedrockMantleID, EnvBedrockToken, false},
+		{"claude api key before bedrock", claude, map[string]string{EnvBedrockToken: "b", "ANTHROPIC_API_KEY": "k"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
+		{"codex bedrock under auto", codex, map[string]string{EnvBedrockToken: "b"}, "", "", profiles.CodexBedrockMantleID, EnvBedrockToken, false},
+		{"codex auth.json before bedrock", codex, map[string]string{EnvBedrockToken: "b"}, `{"OPENAI_API_KEY":"from-file"}`, "", profiles.OpenAIID, "~/.codex/auth.json", false},
+		{"copilot bedrock under auto", get("copilot"), map[string]string{EnvBedrockToken: "b"}, "", "", profiles.CopilotBedrockMantleID, EnvBedrockToken, false},
+		{"hermes bedrock under auto", hermes, map[string]string{EnvBedrockToken: "b"}, "", "", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
+		{"antigravity has no bedrock", get("antigravity"), map[string]string{EnvBedrockToken: "b"}, "", "", "", "", false},
 		{"codex env", codex, map[string]string{"CODEX_API_KEY": "c"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"codex auth.json", codex, nil, `{"OPENAI_API_KEY":"from-file"}`, "", profiles.OpenAIID, "~/.codex/auth.json", false},
 		{"codex chatgpt login", codex, nil, `{"OPENAI_API_KEY":null,"tokens":{"id_token":"x"}}`, "", "", "", false},
@@ -1272,7 +1513,7 @@ func TestDetectLLM(t *testing.T) {
 			if c.auth != "" {
 				writeFile(t, filepath.Join(ta.home, ".codex", "auth.json"), c.auth)
 			}
-			got, err := ta.detectLLM(c.spec, c.choice, "", nil)
+			got, err := ta.detectLLM(c.spec, c.choice, "", "", nil)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("detectLLM err = %v, want error %t", err, c.wantErr)
 			}
@@ -1320,7 +1561,7 @@ func TestDetectLLMNotes(t *testing.T) {
 			if c.setup != nil {
 				c.setup(ta)
 			}
-			got, err := ta.detectLLM(c.spec, c.choice, "", c.bound)
+			got, err := ta.detectLLM(c.spec, c.choice, "", "", c.bound)
 			if err != nil || got.Credential != nil {
 				t.Fatalf("detectLLM = %+v, %v", got, err)
 			}
@@ -1330,7 +1571,7 @@ func TestDetectLLMNotes(t *testing.T) {
 			}
 		})
 	}
-	_, err := newTestApp(t, "").detectLLM(claude, "claude-oauth", "", nil)
+	_, err := newTestApp(t, "").detectLLM(claude, "claude-oauth", "", "", nil)
 	wantErr(t, err, "claude setup-token")
 }
 

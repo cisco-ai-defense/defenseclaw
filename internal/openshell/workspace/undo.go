@@ -90,10 +90,12 @@ type UndoResult struct {
 	// SavedRefs are the post-session ref tips saved under refs/defenseclaw/post-refs/<name>/
 	// before restoring the pre-session state, so the session's branch work is recoverable.
 	SavedRefs []string `json:"saved_refs,omitempty"`
-	// Ignored are changes where the snapshot holds no copy: files git
-	// ignores or, in a folder that is not a git repository, the dependency
-	// directories it skips. Undo deletes what the session wrote to Python
-	// bytecode caches (Removed) and leaves the rest, each with a Remedy.
+	// Ignored are changes where the snapshot holds no copy of the files:
+	// what git ignores or, in a folder that is not a git repository, the
+	// dependency directories it skips. Undo deletes what the session wrote
+	// to Python bytecode caches (Removed), restores the directories the
+	// undo point keeps a copy of (Restored, SnapshotOptions.KeepIgnored) and
+	// leaves the rest, each with a Remedy.
 	Ignored []IgnoredChange `json:"ignored,omitempty"`
 	// QuarantineRemoved are the quarantined .git entries of the session
 	// (UndoOptions.Quarantined) undo removed.
@@ -113,16 +115,30 @@ func (r *UndoResult) Empty() bool {
 func (r *UndoResult) Unrestored() []IgnoredChange {
 	var out []IgnoredChange
 	for _, c := range r.Ignored {
-		if !c.Removed {
+		if !c.Removed && !c.Restored {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
+// RestoredIgnored are the places undo puts back from the copies its undo
+// point keeps (IgnoredChange.Restored).
+func (r *UndoResult) RestoredIgnored() []IgnoredChange {
+	var out []IgnoredChange
+	for _, c := range r.Ignored {
+		if c.Restored {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// removesIgnored reports an ignored place undo changes: a bytecode cache it
+// empties or a kept directory it restores.
 func (r *UndoResult) removesIgnored() bool {
 	for _, c := range r.Ignored {
-		if c.Removed {
+		if c.Removed || c.Restored {
 			return true
 		}
 	}
@@ -349,26 +365,36 @@ func newUnreadable(rec *SnapshotRecord, now *sentinelScan) []string {
 }
 
 // undoIgnored fills res.Ignored from the snapshot's ignored manifest, if it
-// has one; nowRoots are the ignored places now and changes the snapshot's
-// own comparison.
-func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes []TreeChange, res *UndoResult) {
+// has one, and returns the manifest; nowRoots are the ignored places now and
+// changes the snapshot's own comparison.
+func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes []TreeChange, res *UndoResult) *ignoredManifest {
 	man, err := loadIgnored(dataDir, rec.Name)
 	if err != nil {
 		res.Warnings = append(res.Warnings, "the record of the files the undo point does not copy is unreadable ("+err.Error()+"); undo cannot say what changed there")
-		return
+		return nil
 	}
 	if man == nil {
-		return
+		return nil
 	}
 	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, changedPaths(changes))
 	if err != nil {
 		res.Warnings = append(res.Warnings, "could not check the files the undo point does not copy: "+err.Error())
-		return
+		return nil
 	}
 	res.Ignored = irep.Changes
 	if w := ignoredWarning(irep, rec.Kind == SnapshotGit); w != "" {
 		res.Warnings = append(res.Warnings, w)
 	}
+	return man
+}
+
+// restoreIgnored puts back the kept directories (restoreKept) and deletes
+// what the session wrote to bytecode caches (removeIgnored).
+func restoreIgnored(rec *SnapshotRecord, dataDir string, man *ignoredManifest, res *UndoResult) {
+	if lay, err := newLayout(dataDir); err == nil {
+		res.Warnings = append(res.Warnings, restoreKept(lay, rec.Name, rec.Project, man, res.Ignored)...)
+	}
+	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
 }
 
 func skipList(rec *SnapshotRecord) []string {
@@ -422,7 +448,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	// A file that was ignored before the session and shows up now because
 	// the agent removed its ignore rule is kept as it is on disk, so any
 	// change the session made to it is one undo cannot put back.
-	undoIgnored(rec, opts.DataDir, nowIgnored, res.Changes, res)
+	man := undoIgnored(rec, opts.DataDir, nowIgnored, res.Changes, res)
 	needed := map[string]struct{}{}
 	for _, oid := range gs.Refs {
 		needed[oid] = struct{}{}
@@ -565,7 +591,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	if warning != "" {
 		res.Warnings = append(res.Warnings, warning)
 	}
-	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
+	restoreIgnored(rec, opts.DataDir, man, res)
 	if err := exportToProject(ctx, st.sh, st.proj, postRef); err != nil {
 		res.Warnings = append(res.Warnings, "the session's version of the folder is kept by DefenseClaw only ("+err.Error()+")")
 	}
@@ -943,14 +969,14 @@ func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
 		// A snapshot from before the ignored manifest: say what undo skips.
 		res.Warnings = append(res.Warnings, "left as the session left them: "+strings.Join(firstN(rec.Copy.Opaque, 5), ", "))
 	}
-	undoIgnored(rec, opts.DataDir, now.heavy, changes, res)
+	man := undoIgnored(rec, opts.DataDir, now.heavy, changes, res)
 	if opts.Preview {
 		return nil
 	}
 	if err := restoreTree(rec.Project, changes, before); err != nil {
 		return err
 	}
-	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
+	restoreIgnored(rec, opts.DataDir, man, res)
 	if len(nested) == 0 {
 		return nil
 	}

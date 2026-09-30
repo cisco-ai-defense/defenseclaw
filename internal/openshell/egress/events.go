@@ -81,7 +81,9 @@ type Event struct {
 	FeedVersion string
 	Entry       string
 	// Unblockable reports a blocked event an unblock decision could lift
-	// (Decision.Unblockable).
+	// (Decision.Unblockable), or a large_upload event whose upload the
+	// block cut (Terminated) when an unblock of the destination would lift
+	// the block.
 	Unblockable bool
 	// Status is the HTTP status the proxy returned to the sandbox (200 for
 	// an established tunnel, the upstream status for forwarded requests).
@@ -90,15 +92,20 @@ type Event struct {
 	// the destination. For large_upload they are the destination totals.
 	BytesUp   int64
 	BytesDown int64
+	// Threshold is the large-upload threshold in bytes that BytesUp
+	// crossed (large_upload), the sandbox's own.
+	Threshold int64
 	Duration  time.Duration
 	// FirstSeen marks the first contact with the destination by this
 	// binding (allowed), or a destination that was first-seen when the
 	// large upload happened (large_upload).
 	FirstSeen bool
-	// Terminated marks a tunnel or request cut by the large-upload block, by
-	// the tunnel idle timeout, refused inside the tunnel (its TLS server
-	// name or its plaintext content), or ended by a recheck (Proxy.Recheck:
-	// its credential was revoked or its policy now refuses it).
+	// Terminated marks a tunnel or request cut by the large-upload block
+	// (a large_upload event, whose Unblockable says whether an unblock of
+	// the destination lifts the block), by the tunnel idle timeout, refused
+	// inside the tunnel (its TLS server name or its plaintext content), or
+	// ended by a recheck (Proxy.Recheck: its credential was revoked or its
+	// policy now refuses it).
 	Terminated bool
 	// Error is a bounded failure description for failed events.
 	Error string

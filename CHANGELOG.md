@@ -494,6 +494,31 @@ rest also reach per-user installs.
   earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
   only the `hooks` mapping, keeping every byte outside it, and removes all of
   DefenseClaw's approvals.
+- **`defenseclaw version` checks the OpenClaw plugin only for OpenClaw.** A
+  Hermes-only or other hook-only install showed `plugin (not installed)
+  missing`. Unless OpenClaw is an enabled active connector, the rule doctor
+  already used, the plugin row reads `(not used)` and `skipped` and has no
+  drift check; a config that cannot be read keeps the row
+  ([#881](https://github.com/cisco-ai-defense/defenseclaw/issues/881)).
+- **The OpenClaw gateway reads "off (OpenClaw is not installed)" instead of
+  reconnecting forever.** `claw.mode` defaults to `openclaw`, so an install
+  that never picked a connector (every sandbox-only install, for example)
+  dialed `127.0.0.1:18789` for the life of the gateway, showed the Gateway
+  subsystem `RECONNECTING`, logged a connect failure per attempt and asked
+  for `OPENCLAW_GATEWAY_TOKEN`. When only `claw.mode` names OpenClaw,
+  `gateway.host` is loopback, `gateway.fleet_mode` is unset or `auto`, and
+  there is no `openclaw.json` (at `claw.config_file` or in `claw.home_dir`)
+  and no `openclaw` binary, the gateway no longer dials: the Gateway
+  subsystem is `disabled` with `OpenClaw gateway off (OpenClaw is not
+  installed)` in `defenseclaw-gateway status`, the TUI and the Mac app,
+  doctor reports `OpenClaw gateway: off (OpenClaw is not installed)` and no
+  longer requires the OpenClaw plugin, `defenseclaw version` lists no plugin
+  row, the token is not required, the watchdog stops reporting the fleet down, and
+  the Secure Client service status reads ready instead of degraded. An installed or configured OpenClaw, an explicit
+  `openclaw` connector, a non-loopback host or `fleet_mode: enabled` keeps
+  the dial. The gateway decides when it starts; restart it after installing
+  OpenClaw
+  ([#958](https://github.com/cisco-ai-defense/defenseclaw/issues/958)).
 - **Disabling Devin no longer puts DefenseClaw's earlier hooks back.** A
   Devin backup captured while the config already held DefenseClaw's
   `devin-hook.sh` hooks restored them at teardown. Teardown now removes
@@ -703,6 +728,58 @@ deleted.
     CLI, Antigravity) were only partly parsed, so a matching CRITICAL command
     rule was reported but not enforced. Those calls are now judged in the
     directory they name.
+- A host name on `openshell.admin.egress_block` now blocks the host and every
+  subdomain (#946): `example.net` also blocks `www.example.net` in the egress
+  proxy, `sandbox unblock`, approvals and `sandbox policy allow`, and
+  `sandbox policy explain` lists it as `example.net, *.example.net`. `policy
+  show|explain` and `sandbox doctor` no longer warn that such an entry leaves
+  its subdomains open. `egress_allow_only`, `openshell.egress.block` and pack
+  lists still match a host name exactly; IP addresses and CIDR prefixes are
+  unchanged.
+- After `sandbox unblock webhook.site`, a sandboxed agent's `curl
+  https://webhook.site/...` no longer gets the `C2-WEBHOOK-SITE` notice
+  ("Allowed but flagged by DefenseClaw rule C2-WEBHOOK-SITE", or a block
+  under a stricter policy) while the egress proxy lets it through (#954).
+  A sandbox verdict decided only by DefenseClaw's destination rules
+  (`C2-WEBHOOK-SITE`, `C2-NGROK`, `C2-PIPEDREAM`, `C2-REQUESTBIN`,
+  `C2-HOOKBIN`, `C2-BURP`, `C2-INTERACTSH`, `C2-OAST`, `C2-CANARY`,
+  `C2-PASTEBIN`) is a plain allow, with no finding on the activity feed,
+  when every host those rules name in the call is one the sandbox's proxy
+  reaches because of an unblock: a sandbox unblock does this in that
+  sandbox, an `--always` unblock in every sandbox. Subdomains nobody
+  unblocked, names next to a shell expansion, calls another rule flags too,
+  calls Cisco AI Defense or the LLM judge flags or blocks (a custom-policy
+  block that names no rule included) and hosts the proxy allows for another
+  reason keep their verdict. The
+  audit row's reason names the rule that was not applied, and
+  `extra.sandbox_egress_unblocked` the unblocks. Both drivers.
+- A sandboxed agent is told why the egress proxy refused an HTTPS
+  destination (#954). The proxy answers a refused `CONNECT` with a 403 whose
+  body clients never show (`curl: (56) CONNECT tunnel failed, response
+  403`), so the agent saw only a connection error. Now the post-tool hook of
+  the sandbox's next shell or fetch tool call adds a short note to the
+  model's context. It names each destination the proxy refused in the last
+  two minutes and why, and gives the user's `sandbox unblock HOST --sandbox
+  NAME` command when an unblock lifts the refusal, or says who can allow
+  it. The note tells the agent not to try another way. An upload the
+  large-upload block cut on an HTTPS tunnel, which the tool sees only as a
+  broken connection (`curl: (56) Failure when receiving data from the
+  peer`), is told the same way, once and in the same window: `DefenseClaw's
+  egress policy cut this sandbox's upload to HOST after 996 KiB, because it
+  is a destination this sandbox had not contacted before (the large-upload
+  block); the upload did not complete, …`, with the unblock command when an
+  unblock lifts it (a live test's agent had answered "Uploaded the file.").
+  The harness hooks
+  that carry it are Claude Code `PostToolUse`/`PostToolUseFailure`, Codex
+  `PostToolUse`, Copilot CLI `postToolUse`/`postToolUseFailure`, Cursor
+  `postToolUse` and Devin `PostToolUse`. Each refusal is told once, and only
+  to the sandbox whose proxy credential made the request. A host unblocked
+  since is left out; so is the unblock command from the end-of-session
+  summary of a host unblocked later in that session (`✗ DefenseClaw
+  blocked webhook.site (webhook catcher); unblocked since`). The audit
+  row's `extra.sandbox_egress_refused` names what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
+  OmniGent have no post-tool context field, so there only the terminal's
+  live notice reports the block. Both drivers.
 
 ### OpenShell sandboxes on macOS (MicroVM driver)
 
@@ -739,17 +816,48 @@ deleted.
   offers `brew install e2fsprogs`, and writes `compute_driver = "vm"` and the
   sandbox identity (your uid and gid) in one plan with one restart;
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
-  checks. On a Mac still on the Docker driver, a run that fails OpenShell's
-  Landlock check names the switch.
+  checks. On a Mac still on the Docker driver, `sandbox run` on Docker
+  Desktop refuses before it builds an image or makes a sandbox (one `docker
+  info`), and a run on another Docker VM that fails OpenShell's Landlock
+  check names the switch too, on a line of its own (`→ …`) after
+  OpenShell's output. A failing `sandbox doctor` ends with `✗ not ready for
+  sandboxes: N checks failed`, as a passing one ends with `✓ ready for
+  sandboxes` (every driver; `--json` is unchanged). Without Landlock in the
+  Docker VM, the doctor skips Docker Desktop's host networking and file
+  sharing checks, saying why, instead of asking for a setting that cannot
+  help.
 - With OpenShell's release binaries outside Homebrew, a gateway that answers
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,
   saying how the gateway runs (a launchd label, or started by hand, which
-  does not start at login) and that DefenseClaw cannot restart it. Its fix
-  is the one setup, which refuses such an OpenShell, gives: stop that
-  gateway and remove that OpenShell, then `sandbox setup
-  --install-openshell` installs the formula; the TUI's machine check says
-  the same instead of "✓ OpenShell". A driver outside the formula's keg that lacks the Hypervisor entitlement
+  does not start at login) and that DefenseClaw cannot restart it. Setup
+  uses such a gateway too, as the doctor does, on a Mac and on Linux with
+  an OpenShell that came without the `openshell-gateway` user unit (whose
+  gateway-service check now warns the same way): its machine line marks
+  `⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula` (or
+  `has no openshell-gateway user service`), it warns that DefenseClaw
+  cannot start or restart that gateway, and it goes on. A gateway change
+  it needs (MicroVM sandbox user or resources, bind mounts, telemetry) is
+  asked about as `Write this change? DefenseClaw cannot restart this
+  gateway: …`, written without a restart, and ends with `restart the
+  OpenShell gateway yourself, the way you started it, so it runs on the
+  change above`, adding that the restart stops every sandbox on the
+  gateway and, on the MicroVM driver, to first stop the running ones it
+  names with `defenseclaw sandbox stop NAME`, which flushes their disks
+  (DefenseClaw cannot flush them before a restart it does not make);
+  teardown restores those files the same way. Until that
+  restart the doctor's bind-mounts, telemetry and vm-identity checks warn
+  that the gateway has not been restarted since the change (on Linux the
+  gateway's start comes from `pgrep` and `ps`, as no unit reports it), and
+  with no gateway process found they warn that DefenseClaw cannot tell
+  whether it was, instead of reporting the change loaded. Setup stops
+  only where it would have to start that gateway (none answers), with the
+  doctor's fix: start it yourself, or, for a gateway DefenseClaw starts
+  and restarts, remove that OpenShell and run `sandbox setup
+  --install-openshell`. Before, setup refused such an OpenShell up front
+  (`✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`,
+  exit 1) while the doctor said `✓ ready for sandboxes`. The TUI's
+  machine check says what setup says. A driver outside the formula's keg that lacks the Hypervisor entitlement
   gets a fix that names it; `doctor --fix` and setup re-sign only the
   formula's driver (`brew postinstall` signs no other).
   The doctor's disk line counts only the MicroVM disks prepared from images,
@@ -775,6 +883,16 @@ deleted.
   forgets its record, and the doctor's image check does not count it. That
   check also lists every harness image built for you, not only the
   configured harnesses'.
+- New `sandbox image rm <harness>...` (#960) removes every image recorded
+  for the named harnesses, current ones included: the harness image and, on
+  a Mac, its run images and aliases and the MicroVM disks (about 5 GB each)
+  OpenShell prepared from them, by prune's rules for disks. It forgets their
+  records, also of images already removed with `docker rmi`, shows what it
+  removes and asks first (`--yes`, `--dry-run`). It refuses, removing
+  nothing, while a sandbox uses one of the images, and names the sandbox to
+  delete first; it also refuses while the daemon does not answer and such
+  MicroVM disks exist, so no disk is left that nothing would remove later.
+  The TUI command palette offers it.
 - Fixes from the macOS connector certification (every driver unless noted):
   a copy names the secret files it holds back once; a Kiro tool block names
   DefenseClaw once (host hooks too); the egress counts are destinations
@@ -800,10 +918,57 @@ deleted.
   harness whose own suspend fails (Copilot CLI) is explained at once in the
   terminal's title, and the notice after it exits (and Hermes' at once) says
   there is nothing to bring back with `fg`.
-- Harness start-up fixes from the macOS certification, on both drivers: the
-  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
-  the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no
-  longer prints above the TUI at every start.
+- `sandbox delete` of a copy-mode sandbox says where its work last went and
+  when (`fix-tests's work was last applied to ~/code/myapp at 14:03; nothing
+  newer is left in it`, or the branch or patch file), and its warning about
+  unpulled work names that too (#964). `sandbox stop` of a copy-mode sandbox
+  that no detached run or other session is using looks at its copy first:
+  after a `pull --apply` (or `--branch`, `--patch-out`) of the running
+  sandbox, `delete` of the stopped one no longer warns that it "may hold work
+  … it was not checked". A later pull of a state that went to a branch or
+  patch file counts as brought back too. Every driver, Linux `--copy`
+  included. Its question no longer names an undo point a copy does not
+  have: `Delete sandbox fix-tests (its providers and credentials)?`, where
+  a mount-mode sandbox's still adds `unless --keep-snapshot, its undo
+  point`.
+- `sandbox pull --branch`, `--branch-name` and `--patch-out FILE` are checked
+  before the sandbox is started: a branch that holds other work, a patch
+  file that exists and a branch for a folder without git are refused before
+  "starting … to read its work", instead of after the download and review. A
+  branch that already holds the work is done (`nothing to do: branch dc/<name>
+  already has these changes`), with no question about its sensitive
+  changes, at a session's end too. A branch that holds only the last pull is
+  refused before the start too when the stopped sandbox has run since that
+  pull (`… it holds <name>'s pull at 14:03, and <name> has run since, so its
+  work may have changed`). A stopped sandbox whose copy has not changed since
+  its last pull read it is not started: `sandbox pull` and `review` use that
+  pull again (`…'s copy has not changed since its last pull at 14:03; using
+  that pull instead of starting it`), which on a Mac saves booting the
+  MicroVM (#965).
+  Every driver.
+- Node's `[UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental` no
+  longer prints in a sandbox
+  ([#951](https://github.com/cisco-ai-defense/defenseclaw/issues/951)). The
+  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as the
+  Codex one does, to Copilot's npm launcher, which printed it above the TUI
+  at every start (the native CLI that launcher starts does not print it). And
+  every open or balanced sandbox now sets `NODE_NO_WARNINGS=1` with its proxy
+  settings, so the `node`, `npm` and `npx` commands the agent runs no longer
+  print it into their output either. That hides Node's other warnings as
+  well, including the one that says `NODE_TLS_REJECT_UNAUTHORIZED=0` turned
+  TLS certificate checks off; create a sandbox with `--env
+  NODE_NO_WARNINGS=0` to keep them. Both
+  drivers; the images rebuild.
+- A new Antigravity sandbox starts at agy's prompt: the image completes
+  agy 1.2.12's onboarding, so it no longer asks for a colour scheme, the
+  terms and a data-sharing choice, and the launcher trusts the working
+  directory, so it no longer asks whether to trust the folder
+  ([#963](https://github.com/cisco-ai-defense/defenseclaw/issues/963)).
+  DefenseClaw accepts the Google Antigravity CLI Terms of Service for the
+  user with data sharing off: the "help improve Antigravity CLI" box, ticked
+  by default, is never ticked, and Enable Telemetry is off. Without
+  `GEMINI_API_KEY` agy still asks how to sign in. Both drivers; the
+  Antigravity image rebuilds.
 - The Kiro image unpacks the embedding model Kiro CLI downloads at its first
   start (`all-MiniLM-L6-v2`, 79 MiB, each file checked against the SHA-256
   the pinned `kiro-cli-chat` carries) into the image HOME, so a new Kiro
@@ -863,6 +1028,151 @@ deleted.
   (`sandbox start`, `sandbox exec <name> -- rm <file>`, `sandbox connect`),
   with the path quoted for the shell. Both drivers; the OpenCode image
   rebuilds.
+- Copilot CLI sandboxes get hook tamper detection: a tool call that ran
+  although DefenseClaw denied it, or whose `preToolUse` hook never reached
+  DefenseClaw, now raises the `hook_tamper` finding and `hooks.on_tamper`
+  applies (`stop` in `balanced` and `strict`). Until now only a silent hook
+  was noticed. Copilot's hooks carry no per-call ID, so its calls are paired
+  like Kiro CLI's, by session, tool name and tool arguments; measured on the
+  pinned 1.0.88, a call a hook denied or the user refused sends no
+  `postToolUse`. Both drivers.
+- Devin CLI sandboxes get hook tamper detection too: a tool call that ran
+  although DefenseClaw denied it, or whose `PreToolUse` hook never reached
+  DefenseClaw, raises the `hook_tamper` finding and `hooks.on_tamper`
+  applies. Devin documents no per-call ID, so its calls are paired like
+  Kiro CLI's and Copilot CLI's, by session, tool name and tool input;
+  measured on a logged-in Devin CLI 3000.11.3, a call a hook denied, the
+  user refused or that failed before it ran sends no `PostToolUse`. The
+  Devin CLI image is still unverified, so `sandbox run devin` still refuses
+  it. Both drivers.
+- The Kiro CLI sandbox image rebuilds: its agent hooks now set
+  `timeout_ms` 30000, so a slow verdict no longer lets the tool run (see
+  Kiro CLI tool hooks).
+- Claude Code's `Agent` (subagent) calls are recorded in full (#957), on the
+  host and in sandboxes. Claude Code 2.1.156 sends the call's `PostToolUse`
+  after the subagent's own hooks. It reached the gateway, but its
+  correlation failed as stale, so the audit had no decision and no end for
+  the call, and the `PostToolBatch` recorded as `ClaudeCodeTool` was its
+  only result. Main-agent hooks, which carry no `agent_id`, also lost their
+  agent while a subagent's cursor was active (an interrupted subagent's
+  stays active), and each later prompt gave the main agent a new ID. Now
+  every hook is recorded and the main agent keeps one ID. Each subagent's
+  calls carry the subagent's ID and type, with the main agent as parent at
+  depth 1, also for parallel `Agent` calls. The correlation ledger links
+  each subagent to the `Agent` call that ran it (`caused_by`,
+  `spawned-agent-tool-result`). A `PostToolBatch` is recorded as a
+  `tool_batch` listing its calls. Both drivers.
+
+### OpenShell sandbox lifecycle and configuration
+
+- `openshell.llm` (default `auto`) chooses the model credential a sandbox
+  run shares, as `sandbox run --llm` does (#955). The shell wrappers, the TUI
+  and the macOS app pass no `--llm`, so the runs they start now share the
+  credential it names; `--llm` still overrides it for one run. A provider the
+  harness has no profile for falls back to `auto` with a note, and one whose
+  key is not set refuses the run, naming the key. `--llm auto` now also picks
+  Amazon Bedrock (`AWS_BEARER_TOKEN_BEDROCK`) when that is the only
+  credential set, after every other one, so a host with only a Bedrock key
+  reaches its model without `--llm bedrock`. The key is in the Python config,
+  the v8 schema, and the TUI and macOS app config editors. Both drivers.
+- A headless `sandbox run` in the foreground (`--prompt`, or the harness's
+  print mode, such as the shell wrapper's `claude -p`) now deletes the
+  sandbox it created when it ends and nothing is left in it to bring back or
+  undo, by the rules of `--rm` (#948), so one-prompt runs no longer pile up
+  stopped sandboxes. Changes nobody kept in a mounted folder keep their undo
+  point (`sandbox undo NAME` still reverts them), and a copy whose work was
+  not brought back keeps its sandbox; the run's last line says it was
+  deleted and why, or why it was kept. `--keep` (a new `sandbox run` flag)
+  and `openshell.keep_headless: true` keep it. Interactive sessions,
+  `--detach` runs and a run that resumes the folder's sandbox are unchanged.
+  Both drivers.
+- `openshell.workdir.undo_ignored` (#944) lets `sandbox undo` restore the
+  dependency directories git ignores, which it only reported before
+  (`undo cannot restore node_modules/ …: delete it and reinstall`). Off by
+  default; with `enabled: true` each undo point of a mounted project keeps a
+  copy of `dirs` (`node_modules`, `.venv` and `venv` unless set), as file
+  clones where the filesystem supports them and byte copies otherwise, up to
+  `max_mb` (500 MiB). A directory whose copy would pass the cap keeps none and
+  is reported as before, naming the cap; review says which directories undo
+  restores. Undo that cannot restore a dependency directory names the key.
+  Linux mount mode only: copy mode, every sandbox on a Mac included, has no
+  undo point. In the Python config, the v8 schema, and the TUI and macOS app
+  config editors; the TUI's undo preview names what it restores.
+- `defenseclaw config validate` names the field and what it takes for a
+  value the v8 schema refuses, such as `openshell.workdir.undo_ignored.max_mb`
+  (`expected a number between 0 and 1048576`) or `openshell.llm` (`expected
+  one of [...]`), as the Go loader does: the canonical validator ran its
+  runtime loader before the schema pass, so it only said "configuration
+  could not be compiled safely" at `$`. A refusal only that loader makes
+  (`openshell.binary`, an `openshell.egress` pattern) is placed by the
+  Python mirror of those checks. Messages still never contain the rejected
+  value.
+- The daemon now does the detached-run and undo-point bookkeeping the CLI
+  did alone (#947), so the TUI, the macOS app, a tamper stop
+  (`hooks.on_tamper: stop`) and `undo` get it too. Every stop of a running
+  sandbox marks a detached run still going interrupted (its runner is found
+  by `latest.pid` and a command line naming `latest.exit`), says so on the
+  activity feed (`run_interrupted`), and keeps the last 1 MiB of the run's
+  log under `<data_dir>/sandboxes/<name>/runlog/` (reading only a regular
+  file, bounded, after it publishes `stopping`; a tamper stop neither
+  looks at the run nor keeps its log, so it waits on nothing the workload
+  controls); `sandbox logs` of a
+  stopped sandbox reads it from the new `GET
+  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows (as such) a log an earlier
+  CLI kept, until the sandbox starts again. Keeping the changes at the end of a session is recorded through
+  the new `POST /api/v1/sandbox/sandboxes/{name}/accept` instead of
+  `cli/accepted.json` (one an earlier CLI wrote is honoured once), so the
+  next start takes a new undo point whoever starts the sandbox, and the
+  sandbox's snapshot carries `accepted_at` (the TUI and the macOS app say
+  so). The accept names the snapshot and the sandbox's `session` (a count of
+  its starts) it reviewed, so a keep answered after another start, whose
+  changes nobody reviewed, is refused. A start with `--no-snapshot` now uses the acceptance up, so that
+  session's changes keep the undo point at the next start; a start that fails
+  before the sandbox runs keeps it. The CLI still
+  asks before `sandbox stop` ends a run, and reads the same from the user's
+  side. The Python client has `sandbox_run_log` and
+  `accept_sandbox_changes`. Both drivers.
+- `sandbox status NAME` counts the hook verdicts per hook event, under the
+  harness's own event names (#956): a `Hook events` row reads `PreToolUse
+  12 · PostToolUse 11 · UserPromptSubmit 3 · Stop 2`, most frequent first.
+  Until now it gave only the totals (requests, tool calls, blocks), so a
+  harness whose `PostToolUse` or `Stop` hooks never fired looked the same as
+  one whose did. The daemon keeps the counts with the sandbox's other hook
+  counters, in the API's `hooks.events` (the JSON output too), at most 48
+  names a sandbox, cut to 64 bytes, with the rest in `hooks.other_events`.
+  The details of the TUI Sandboxes panel and the macOS app show the same
+  row. Both drivers.
+- Large uploads to first-seen hosts can now be blocked, not only reported
+  (#967). The egress proxy already cut such uploads when asked, but nothing
+  asked. The pack key `egress.block_large_uploads`,
+  `openshell.egress.block_large_uploads: true` (every sandbox; `false`, the
+  default, follows the pack) and `openshell.admin.block_large_uploads: true`
+  (every sandbox; a pack's `large_upload_mb: 0` gets 25 MiB, and a higher
+  threshold is lowered to 25 MiB or the required pack's own) turn it on;
+  each sandbox's proxy credential carries its own, and a configuration change
+  reaches running sandboxes, whose feed says so. The upload is stopped before
+  the chunk that crosses the threshold, and later requests to that host, or to
+  other new hosts under its domain or at its address, get a 403 of category
+  `large_upload`, whose reason says why the destination is blocked rather
+  than repeat the upload (`This destination is blocked since this sandbox
+  tried to send more than 10 MiB to it, …`; a `GET` sends nothing), as the
+  run's live notice of it does (`✗ DefenseClaw blocked HOST (…)`). The feed shows a ✗ with the threshold and the unblock
+  command (`✗ files.example.net (large upload blocked: this sandbox tried to
+  send more than 10 MiB to a destination it had not contacted before)`) instead of
+  the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
+  egress audit records the cut as blocked (`SANDBOX_EGRESS_LARGE_UPLOAD`).
+  Unblocked hosts and those on an allow list the user or the administrator
+  wrote are only reported; an unblock lifts the block. With a threshold of 0
+  there is nothing to cut, so the block is off, and `sandbox policy explain`
+  says so. The ⚠ report without the block, made as the upload crosses the
+  threshold, now says `more than` it (`⚠ large upload to files.example.net
+  (more than 25 MiB)`, with `threshold` on the event) instead of the bytes
+  sent by then, which read `(1.0 MiB)` for a 1.9 MiB upload. `sandbox policy
+  explain` shows `egress.block_large_uploads` and where it came from, and
+  `policy show` the threshold. In the Python config, the v8 schema, and the
+  TUI and macOS app config editors, which show the key read-only under the
+  administrator's switch; the TUI and app feeds name the threshold. Both
+  drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 
@@ -968,6 +1278,18 @@ deleted.
   connector setup at every start, so the first start after an upgrade
   rewrites DefenseClaw's own entries in place; entries the operator added
   are left as they are. Measured against kiro-cli 2.24.1 on Linux.
+- Kiro CLI 2.x: a DefenseClaw verdict that took longer than about ten
+  seconds let the tool run, on the host and in a Kiro sandbox. DefenseClaw's
+  agent hooks set no `timeout_ms`, and Kiro ignores a hook past its default
+  timeout (measured on 2.24.1: a `preToolUse` hook that took 12 s to block
+  did not stop the tool). Every DefenseClaw agent hook now sets
+  `timeout_ms` 30000; the gateway rewrites a host agent at its next start,
+  and the Kiro sandbox image rebuilds.
+- Kiro CLI on the host: an agent that Kiro upgraded to its universal (V2 +
+  V3) format, which `kiro-cli --v3` offers at start and `/upgrade-agent`
+  does, lost the hooks you had added to it at DefenseClaw's next setup, and
+  teardown left DefenseClaw's entries in it. Setup, verification and
+  teardown now read that format and change only DefenseClaw's own entries.
 
 ### Renamed and removed connectors
 

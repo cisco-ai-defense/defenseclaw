@@ -76,8 +76,8 @@
     "/usr/local/lib/defenseclaw/kiro/defenseclaw.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 923,
-      "sha256": "2cbe2a98d245f82e08b155e3499f387bdfe8a568c3b7b48cfde9b76dd8d553ba"
+      "size": 1039,
+      "sha256": "14043ccd498a5f3ffb40ef2de629e0b1c521a03b06d0d869d9af9fee25ee4fac"
     }
   }
 }

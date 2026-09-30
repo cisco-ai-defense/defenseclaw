@@ -116,7 +116,7 @@ func TestSandboxCommandTreeCoversThePlan(t *testing.T) {
 		"setup", "doctor", "run", "list", "status", "connect", "exec", "stop", "start", "delete", "logs", "activity",
 		"undo", "review", "approvals", "approve", "reject", "unblock", "pull", "policy show", "policy explain",
 		"policy suggest", "policy allow", "policy block", "pack list", "pack show", "pack validate", "image build",
-		"image list", "image prune", "enable", "disable", "teardown",
+		"image list", "image prune", "image rm", "enable", "disable", "teardown",
 	} {
 		if !slices.Contains(paths, want) {
 			t.Errorf("sandbox %s is missing", want)
@@ -291,7 +291,7 @@ func TestSandboxHostRefusal(t *testing.T) {
 // no-terminal refusal points to; nothing points to --non-interactive, which
 // only setup takes (manual test L6).
 func TestSandboxCommandsThatAskTakeYes(t *testing.T) {
-	for _, path := range []string{"delete", "undo", "teardown", "doctor", "setup", "stop", "run", "connect"} {
+	for _, path := range []string{"delete", "undo", "teardown", "doctor", "setup", "stop", "run", "connect", "image rm"} {
 		cmd, _, err := sandboxCmd.Find(strings.Fields(path))
 		if err != nil {
 			t.Fatalf("sandbox %s: %v", path, err)

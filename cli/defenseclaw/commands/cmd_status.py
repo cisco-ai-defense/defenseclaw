@@ -31,6 +31,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.config import config_path, legacy_standalone_configured
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 from defenseclaw.scanner_binary import resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
@@ -559,6 +560,10 @@ def _print_agents(
                 )
             elif conn == "omnigent":
                 runtime_state, runtime_detail = _omnigent_effective_runtime_state(cfg, runtime_state)
+            elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
+                # The gateway does not dial an OpenClaw gateway that is only
+                # the claw.mode default and is not installed (#958).
+                runtime_state, runtime_detail = "off", "OpenClaw is not installed"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
@@ -579,6 +584,9 @@ def _print_agents(
                 )
                 suffix = _connector_state_verb(runtime_state)
                 suffix += ux.dim(f" ({runtime_detail})")
+                ux.echo(f"                {dim_text}{suffix}")
+            elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
+                suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
                 ux.echo(f"                {dim_text}{suffix}")
             else:
                 ux.echo(f"                {dim_text}")

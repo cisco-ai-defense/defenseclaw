@@ -671,6 +671,25 @@
             "null"
           ]
         },
+        "llm": {
+          "description": "The model credential a sandbox run shares: the default of `sandbox run --llm`, which the shell wrappers, the TUI and the macOS app take too.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "anthropic",
+            "claude-oauth",
+            "openai",
+            "bedrock",
+            "gemini"
+          ],
+          "default": "auto"
+        },
+        "keep_headless": {
+          "description": "Keep the sandbox a foreground one-prompt `sandbox run --prompt` (or a harness print mode) creates; by default it is deleted at the run's end when nothing is left in it to bring back or undo.",
+          "type": "boolean",
+          "default": false
+        },
         "workdir": {
           "$ref": "#/$defs/openShellWorkdir"
         },
@@ -879,6 +898,45 @@
             "undo"
           ],
           "default": "ask"
+        },
+        "undo_ignored": {
+          "$ref": "#/$defs/openShellUndoIgnored"
+        }
+      }
+    },
+    "openShellUndoIgnored": {
+      "description": "Keep, with a mounted project's undo point (Linux mount mode), a copy of the dependency directories git ignores, so `sandbox undo` restores them. Copy mode, every sandbox on a Mac, is unaffected.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_mb": {
+          "description": "The cap on one undo point's copies, in MiB; 0 means 500. A directory whose copy would pass it keeps none.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 500
+        },
+        "dirs": {
+          "description": "Directory names kept at any depth; empty means node_modules, .venv and venv.",
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$",
+            "not": {
+              "const": ".git"
+            }
+          },
+          "default": [
+            "node_modules",
+            ".venv",
+            "venv"
+          ]
         }
       }
     },
@@ -902,6 +960,11 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 1048576
+        },
+        "block_large_uploads": {
+          "description": "Also cut the upload that crosses large_upload_mb to a destination the sandbox had not contacted before, and refuse later requests there, for every sandbox; false follows the pack's egress.block_large_uploads. An unblock of the destination, or an allow entry naming it, lifts the block.",
+          "type": "boolean",
+          "default": false
         },
         "feed": {
           "type": "string",
@@ -1034,6 +1097,11 @@
         },
         "egress_allow_only": {
           "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "block_large_uploads": {
+          "description": "Block large uploads to first-seen destinations for every sandbox, whatever its pack and the user's openshell.egress.block_large_uploads say; a pack's large_upload_mb of 0 then takes the default threshold. false imposes nothing.",
+          "type": "boolean",
+          "default": false
         },
         "require_copy_for": {
           "$ref": "#/$defs/openShellGlobList"

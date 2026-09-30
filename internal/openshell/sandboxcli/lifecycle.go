@@ -232,6 +232,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		cov += a.style(" — NOT REACHING DefenseClaw since "+sb.Hooks.UnreachableSince.Local().Format("15:04:05"), ansiRed)
 	}
 	row("Hook traffic", cov)
+	row("Hook events", hookEventsText(sb.Hooks))
 	if n := sb.Hooks.Tampered; n > 0 {
 		// A post-tool hook whose tool DefenseClaw denied or never saw: the
 		// hooks were tampered with (hooks.on_tamper decides what follows).
@@ -279,6 +280,29 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	if sb.Orphaned {
 		a.warn("DefenseClaw holds no binding for this sandbox; its hooks cannot authenticate. Delete it.")
 	}
+}
+
+// hookEventsText is the verdicts per hook event, the most frequent first:
+// "PreToolUse 12 · PostToolUse 11 · Stop 2"; "" before the first verdict.
+func hookEventsText(h sandboxapi.HookCoverage) string {
+	names := make([]string, 0, len(h.Events))
+	for name := range h.Events {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if ni, nj := h.Events[names[i]], h.Events[names[j]]; ni != nj {
+			return ni > nj
+		}
+		return names[i] < names[j]
+	})
+	parts := make([]string, 0, len(names)+1)
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s %d", sandboxapi.DisplayText(name), h.Events[name]))
+	}
+	if h.OtherEvents > 0 {
+		parts = append(parts, fmt.Sprintf("other events %d", h.OtherEvents))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func shortDigest(d string) string {
@@ -383,7 +407,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	} else if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
-	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept})
+	// The policy the sandbox runs under, for the banner's Uploads line; a
+	// daemon that cannot say leaves the line out.
+	var policy []sandboxapi.Setting
+	if ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name}); err == nil {
+		policy = ex.Settings
+	}
+	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy})
 	var code int
 	if o.Shell {
 		// A shell in the project, reviewed at its end like a harness
@@ -477,6 +507,9 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	if err != nil {
 		return err
 	}
+	// The command can change a copy: what it held as the sandbox last
+	// stopped is no longer known.
+	a.forgetStoppedCopy(sb.Name)
 	// The command outlives a client that is ended (execreap.go): one told
 	// to end stops what the command left running before it exits.
 	runCtx, stop := untilTerminated(ctx, tty)
@@ -513,7 +546,12 @@ type StopOptions struct {
 }
 
 // Stop is `sandbox stop`. A detached run the stop would end is confirmed
-// on a terminal (said otherwise), and its log is kept for `sandbox logs`.
+// on a terminal (said otherwise); the daemon's stop marks it interrupted
+// and keeps its log for `sandbox logs`.
+// The copy of a copy-mode sandbox nothing runs in any more is looked at
+// first: what it holds as it stops is remembered (markStoppedCopy), so
+// `delete` need not warn about work that came back already, and the next
+// pull need not start it.
 func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	a.defaults()
 	api, err := a.api()
@@ -524,9 +562,11 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	var copyAt *workspace.CopyStatus
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
-			ok, err := a.beforeStop(ctx, a.cli(gateway), sb, o.Yes)
+			cli := a.cli(gateway)
+			ok, idle, err := a.beforeStop(ctx, cli, sb, o.Yes)
 			if err != nil {
 				return err
 			}
@@ -534,14 +574,35 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 				a.note(sb.Name + " keeps running")
 				return nil
 			}
+			// A detached run or a session still going can change the copy
+			// between the look and the stop.
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
+				copyAt = a.copyAtStop(ctx, cli, sb)
+			}
 		}
 	}
-	sb, err = api.Stop(ctx, o.Name)
+	stopped, err := api.Stop(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
 	}
-	a.ok(sb.Name + " is " + sb.Phase)
+	// A hook request since the look is something that ran in it after all.
+	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
+		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+	}
+	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// copyAtStop looks at the copy of sb, which is about to stop, within a
+// minute: nil when it could not be looked at.
+func (a *App) copyAtStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox) *workspace.CopyStatus {
+	look, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	st, err := a.Workspace.PendingWork(look, a.dataDir(), sb.Name, a.transport(cli))
+	if err != nil {
+		return nil
+	}
+	return &st
 }
 
 // StartOptions are the `sandbox start` flags.
@@ -598,11 +659,17 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	for _, name := range o.Names {
 		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo point)?"
 		if sb, err := api.Get(ctx, name); err == nil {
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy {
+				// A copy has no undo point: the folder was never mounted.
+				question = "Delete sandbox " + name + " (its providers and credentials)?"
+			}
 			if lost := a.unhandedWork(ctx, sb); lost != "" {
 				question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
 				if o.Yes {
 					a.warn("sandbox " + name + " " + lost + "; deleting it discards that work (--yes)")
 				}
+			} else if h := a.lastHandover(sb); h != nil {
+				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
 		yes, err := a.confirm(question, o.Yes)
@@ -627,9 +694,10 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 }
 
 // unhandedWork says what work a copy-mode sandbox holds that never came
-// back to the folder, which deleting the sandbox discards: "" when there
-// is none. A running sandbox's copy is looked at; a stopped one is judged
-// by its last pull.
+// back to the folder, which deleting the sandbox discards, and where its
+// work last went: "" when there is none. A running sandbox's copy is looked
+// at; a stopped one is judged by its last pull, and by what its copy held
+// as it stopped.
 func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	if sb == nil || sb.WorkdirMode != config.OpenShellWorkdirCopy {
 		return ""
@@ -640,24 +708,52 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 			ex = a.transport(a.cli(gateway))
 		}
 	}
-	work, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	st, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	work := st.Work
 	if ex == nil && (err != nil || work == workspace.CopyWorkUnknown) && a.cleanCopy(sb) {
-		// The session that stopped it found it changed nothing, and it has
-		// not run since.
+		// What stopped it found nothing left to bring back, and it has not
+		// run since.
 		return ""
 	}
 	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
+	last := ""
+	if h := a.lastHandover(sb); h != nil {
+		last = "its work was last " + a.handoverText(h)
+	}
+	why := func(reasons ...string) string {
+		var out []string
+		for _, r := range append(reasons, last) {
+			if r != "" {
+				out = append(out, r)
+			}
+		}
+		if len(out) == 0 {
+			return ""
+		}
+		return " (" + strings.Join(out, "; ") + ")"
+	}
 	switch {
 	case err != nil:
-		return "may hold work that was never pulled back (it could not be checked: " + truncate(err.Error(), 120) + "); " + pull + " brings it back"
+		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(err.Error(), 120)) + "; " + pull + " brings it back"
 	case work == workspace.CopyWorkUnpulled:
-		return "holds work that was never pulled back; " + pull + " brings it back"
+		return "holds work that was never pulled back" + why() + "; " + pull + " brings it back"
 	case work == workspace.CopyWorkUnapplied:
-		return "holds a pull that was never applied; " + pull + " applies it"
+		return "holds a pull that was never applied" + why() + "; " + pull + " applies it"
 	case work == workspace.CopyWorkUnknown:
-		return "may hold work that was never pulled back (it is not running, so it was not checked); " + pull + " looks"
+		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; " + pull + " looks"
 	}
 	return ""
+}
+
+// lastHandover is where a copy-mode sandbox's work last went, or nil.
+func (a *App) lastHandover(sb *sandboxapi.Sandbox) *handover {
+	if sb == nil || sb.WorkdirMode != config.OpenShellWorkdirCopy {
+		return nil
+	}
+	if rec := a.copyHandoverOf(sb); rec != nil {
+		return rec.Last
+	}
+	return nil
 }
 
 // LogsOptions are the `sandbox logs` flags.
@@ -684,7 +780,7 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	}
 	out, flush := a.runLogWriter(sb)
 	if sb.Phase != "ready" {
-		return a.keptLogs(sb, lines, out, flush)
+		return a.keptLogs(ctx, api, sb, lines, out, flush)
 	}
 	gateway, err := a.gatewayName(ctx)
 	if err != nil {
@@ -722,13 +818,13 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		return nil
 	}
 	switch run.State {
-	case runRunning:
+	case sandboxapi.RunRunning:
 		a.note("the run is still going (follow it with -f)")
 		if sb.Hooks.Unreachable {
 			a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 		}
 		return nil
-	case runInterrupted, runNone:
+	case sandboxapi.RunInterrupted, sandboxapi.RunNone:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
 		return nil
 	}
@@ -757,27 +853,63 @@ func (a *App) runLogWriter(sb *sandboxapi.Sandbox) (io.Writer, func() error) {
 }
 
 // keptLogs prints the run log DefenseClaw kept when it stopped the sandbox.
-func (a *App) keptLogs(sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
-	meta, log, err := a.savedRunLog(sb)
+func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
+	kept, legacy, err := a.keptRunLog(ctx, api, sb, lines)
 	if err != nil {
 		return err
 	}
-	if meta == nil {
+	if kept == nil {
 		return fmt.Errorf("%s is %s, and no log of a detached run was kept when it stopped; its log is inside it (`%s start %s`, then `%s logs %s`)",
 			sb.Name, sb.Phase, CommandName, sb.Name, CommandName, sb.Name)
 	}
-	if _, err := out.Write(lastLines(log, lines)); err != nil {
+	if _, err := io.WriteString(out, kept.Log); err != nil {
 		return err
 	}
 	_ = flush()
-	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(meta.SavedAt)))
-	switch meta.State {
-	case runExited:
-		a.note("the run exited with status " + meta.Exit)
-	case runInterrupted:
+	// Which run it is of: a stop that could not look at the run keeps the
+	// log an earlier stop kept.
+	what := "the log"
+	switch {
+	case legacy:
+		what = "the log an earlier DefenseClaw CLI"
+	case !kept.StartedAt.IsZero():
+		what = "the log of its detached run started " + a.clock(kept.StartedAt) + ","
+	}
+	a.note(fmt.Sprintf("%s is %s; this is %s kept when it stopped (%s)", sb.Name, sb.Phase, what, a.clock(kept.KeptAt)))
+	switch kept.State {
+	case sandboxapi.RunExited:
+		a.note("the run exited with status " + kept.Exit)
+	case sandboxapi.RunInterrupted:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
-	case runRunning:
+	case sandboxapi.RunRunning:
 		a.note("the run was still going when the log was kept")
 	}
 	return nil
+}
+
+// keptRunLog is the log of sb's latest detached run the daemon kept when it
+// stopped the sandbox, its last lines lines; failing that, one an earlier
+// CLI kept (legacyRunLog, legacy true) while it is still the log of the
+// latest stop. nil when neither kept one.
+func (a *App) keptRunLog(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int) (*sandboxapi.RunLog, bool, error) {
+	kept, err := api.RunLog(ctx, sb.Name, lines)
+	if err == nil {
+		return kept, false, nil
+	}
+	if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return nil, false, apiError(err)
+	}
+	if sb.Session > 0 {
+		// The daemon has seen the sandbox start since it began counting
+		// sessions, which is since it keeps run logs: every stop after that
+		// was its own, so a log an earlier CLI kept is older than the
+		// latest stop, which kept none.
+		return nil, false, nil
+	}
+	meta, log, err := a.legacyRunLog(sb)
+	if err != nil || meta == nil {
+		return nil, false, err
+	}
+	return &sandboxapi.RunLog{Name: sb.Name, State: meta.State, Exit: meta.Exit, KeptAt: meta.SavedAt,
+		Log: string(harness.LastLines(log, lines))}, true, nil
 }

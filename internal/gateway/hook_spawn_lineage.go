@@ -41,6 +41,13 @@ type hookSpawnIntent struct {
 	ambiguous      bool
 }
 
+// scoredHookSpawnIntent is one candidate intent of takeHookSpawnIntentAt.
+type scoredHookSpawnIntent struct {
+	key   string
+	score int
+	ready bool
+}
+
 var hookSpawnTaskPattern = regexp.MustCompile(`(?i)(?:task[_-]?name|agent[_-]?name|child[_-]?(?:name|role))\s*[:=]\s*["']?([A-Za-z0-9_./:-]{1,512})`)
 
 func hookSpawnIntentToolKey(meta llmEventMeta) string {
@@ -293,6 +300,28 @@ func (a *APIServer) rememberHookSpawnIntentAt(
 	})
 }
 
+// forgetHookSpawnIntent drops the spawn intent of meta's tool call, if one
+// is left.
+func (a *APIServer) forgetHookSpawnIntent(meta llmEventMeta) {
+	key := hookSpawnIntentToolKey(meta)
+	if a == nil || key == "" {
+		return
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	a.removeHookSpawnIntentLocked(key)
+}
+
+// hookAgentStateKnown reports whether the agent's lifecycle is retained: a
+// start (SubagentStart, or an inferred one) or another hook of it was seen.
+func (a *APIServer) hookAgentStateKnown(source, sessionID, agentID string) bool {
+	if strings.TrimSpace(agentID) == "" {
+		return false
+	}
+	_, ok := a.hookSessionStateSnapshot(source, sessionID, agentID)
+	return ok
+}
+
 func (a *APIServer) hookSpawnIntentCandidatesLocked(
 	scope, parentAgentID string,
 	aliases map[string]struct{},
@@ -388,12 +417,7 @@ func (a *APIServer) takeHookSpawnIntentAt(
 	defer a.llmPromptMu.Unlock()
 	a.evictHookSpawnIntentsLocked(now)
 
-	type scoredIntent struct {
-		key   string
-		score int
-		ready bool
-	}
-	candidates := make([]scoredIntent, 0, 4)
+	candidates := make([]scoredHookSpawnIntent, 0, 4)
 	for _, key := range a.hookSpawnIntentOrder {
 		intent, ok := a.hookSpawnIntents[key]
 		if !ok || intent.ambiguous || hookSpawnIntentScope(intent.source, intent.sessionID) != scope ||
@@ -404,7 +428,7 @@ func (a *APIServer) takeHookSpawnIntentAt(
 		if len(aliases) > 0 && score == 0 {
 			continue
 		}
-		candidates = append(candidates, scoredIntent{key: key, score: score, ready: intent.resultObserved})
+		candidates = append(candidates, scoredHookSpawnIntent{key: key, score: score, ready: intent.resultObserved})
 	}
 	if len(candidates) == 0 {
 		return hookSpawnIntent{}, false
@@ -435,12 +459,42 @@ func (a *APIServer) takeHookSpawnIntentAt(
 			tied = true
 		}
 	}
-	if tied {
+	if tied && !a.hookSpawnTieSharesParentLocked(meta.Source, candidates, best) {
 		return hookSpawnIntent{}, false
 	}
 	intent := a.hookSpawnIntents[best.key]
 	a.removeHookSpawnIntentLocked(best.key)
 	return intent, true
+}
+
+// hookSpawnTieSharesParentLocked reports whether a tie between the best
+// scored spawn intents may be broken by taking the oldest (best, the first
+// in intent order): only where every tied intent names the same parent, so
+// the child's lineage is the same whichever it takes, and only for a
+// connector whose children name nothing to tell the calls apart by. Claude
+// Code is one: its subagents cannot start subagents (a subagent's model
+// request offers no Agent tool; measured on 2.1.156 for #957), so every
+// Agent call of a session is the main agent's, and its SubagentStart
+// carries only agent_id and agent_type. Parallel Agent calls therefore
+// always tie. Which call ran which subagent follows exactly from the
+// call's PostToolUse (tool_response.agentId), not from this choice.
+func (a *APIServer) hookSpawnTieSharesParentLocked(source string, candidates []scoredHookSpawnIntent, best scoredHookSpawnIntent) bool {
+	if !strings.EqualFold(strings.TrimSpace(source), "claudecode") {
+		return false
+	}
+	want := a.hookSpawnIntents[best.key].parent
+	for _, candidate := range candidates {
+		if candidate.score != best.score {
+			continue
+		}
+		got := a.hookSpawnIntents[candidate.key].parent
+		if got.AgentID != want.AgentID || got.ExecutionID != want.ExecutionID ||
+			got.RootAgentID != want.RootAgentID || got.AgentDepth != want.AgentDepth ||
+			got.SessionID != want.SessionID || got.RootSessionID != want.RootSessionID {
+			return false
+		}
+	}
+	return true
 }
 
 // takeUniqueCompletedHookSpawnIntentForUnseenAgentAt owns the conservative

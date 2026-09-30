@@ -131,10 +131,11 @@ only for `UserPromptSubmit`, `SessionStart`, and `PostToolUse`. Exit `2`
 blocks, while every other hook error fails open. Restricted Mode disables
 hooks and agents entirely.
 
-Devin publishes `session_id` and per-turn `prompt_id`, but no stable per-tool
-invocation ID. Cross-event tool pairing is therefore detection-only. A
-`confirm` finding remains available in audit but cannot pause and resume in
-the DefenseClaw TUI.
+Devin documents `session_id` and per-turn `prompt_id`, but no per-tool
+invocation ID. Devin CLI 3000.11.3 also sends an undocumented `tool_use_id`,
+which DefenseClaw does not rely on. Cross-event tool pairing is therefore
+detection-only. A `confirm` finding remains available in audit but cannot
+pause and resume in the DefenseClaw TUI.
 
 ## Local customization surfaces
 
@@ -212,6 +213,14 @@ the Devin CLI image already holds:
   its `autonomous` mode needs Devin's own sandbox, which cannot run inside
   OpenShell. `--safe` drops `--permission-mode dangerous` and
   `--permission-mode autonomous` from the arguments you pass.
+- **Hook tamper detection.** DefenseClaw pairs each tool call's
+  `PostToolUse` with its `PreToolUse` by session, tool name and tool input,
+  so a tool that ran although DefenseClaw denied it, or whose `PreToolUse`
+  hook never reached DefenseClaw, raises a `hook_tamper` finding and the
+  pack's `hooks.on_tamper` applies (see
+  [Sandbox policy](/docs/setup/sandbox-policy)). Measured on a logged-in
+  Devin CLI 3000.11.3: `PostToolUse` fires only for a tool that ran, not for
+  a call a hook denied or you refused at Devin's permission prompt.
 - **Workspace trust is skipped.** A headless Devin run fails in an untrusted
   folder, and a declined trust prompt runs Devin without hooks, so the
   launcher always passes `--respect-workspace-trust false` and refuses that

@@ -48,8 +48,9 @@ type HookDecision struct {
 	// call's pre-tool event with its post-tool event.
 	ToolUseID string
 	// SessionID and ToolInput are the call's session and tool input. They
-	// name a call whose harness sends no per-call ID (Kiro CLI); ToolInput
-	// is empty when the event carries no tool input.
+	// name a call whose hooks send no per-call ID the gateway reads (Kiro
+	// CLI, Copilot CLI, Devin CLI); ToolInput is empty when the event
+	// carries no tool input.
 	SessionID string
 	ToolInput json.RawMessage
 	// ResultStatus is the status a post-tool event reports (Amp's
@@ -96,25 +97,30 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 	}
 }
 
-// ObserveHookDecision counts tool calls and blocked tool calls for the
-// session summary, puts blocks on the activity feed, and correlates each
-// tool call's pre-tool and post-tool events to detect hook tamper.
+// ObserveHookDecision counts every verdict under its hook event, counts
+// tool calls and blocked tool calls for the session summary, puts blocks on
+// the activity feed, and correlates each tool call's pre-tool and post-tool
+// events to detect hook tamper.
 func (m *Manager) ObserveHookDecision(d HookDecision) {
 	hooks := toolCallHooksFor(d.Connector)
 	pre, result := hooks.classify(d.Event, d.ResultStatus)
 	counted := isToolEvent(d.Event)
-	if !pre && result == toolResultNone && !counted {
-		return
-	}
+	toolEvent := pre || result != toolResultNone || counted
 	var call toolCallRef
 	if pre || result != toolResultNone {
 		call = hooks.ref(d)
 	}
 	blocked := isBlockAction(d.Action)
 	reason := displayReason(d.Reason)
+	event := hookLabel(d.Event, maxHookEventName)
 	m.mu.Lock()
 	b := m.boxes[d.SandboxName]
 	if b == nil || b.rec.BindingID != d.BindingID {
+		m.mu.Unlock()
+		return
+	}
+	b.hooks.countEvent(event)
+	if !toolEvent {
 		m.mu.Unlock()
 		return
 	}
@@ -163,6 +169,25 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	if alarm != nil {
 		m.raiseTamper(b, *alarm)
 	}
+}
+
+// maxHookEventName bounds a hook event name kept in the per-event counts, in
+// bytes; the harnesses' event names are far shorter.
+const maxHookEventName = 64
+
+// countEvent counts one verdict under its hook event name (hookLabel'd).
+// The names come from the workload, so at most sandboxapi.MaxHookEvents are
+// kept: a verdict for another one, or for an event with no printable name,
+// counts in otherEvents. Callers hold Manager.mu.
+func (h *hookStats) countEvent(name string) {
+	if _, known := h.events[name]; name == "" || !known && len(h.events) >= sandboxapi.MaxHookEvents {
+		h.otherEvents++
+		return
+	}
+	if h.events == nil {
+		h.events = make(map[string]int64)
+	}
+	h.events[name]++
 }
 
 // HookFailure is an authenticated hook post from a sandbox binding that the

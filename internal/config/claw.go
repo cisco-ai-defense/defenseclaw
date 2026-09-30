@@ -547,6 +547,42 @@ func (c *Config) ClawHomeDir() string {
 	return c.ConnectorHomeDir(c.activeConnector())
 }
 
+// OpenClawConfigCandidates returns the openclaw.json paths whose presence
+// marks OpenClaw as set up on this machine: claw.config_file and
+// <claw.home_dir>/openclaw.json, with "~/" expanded and duplicates removed.
+// With both keys empty it falls back to the loader default
+// ~/.openclaw/openclaw.json. OpenClaw writes this file when it is onboarded,
+// and its own gateway cannot start without it. Mirrors
+// openclaw_presence.openclaw_config_candidates in the Python CLI.
+func (c *Config) OpenClawConfigCandidates() []string {
+	configFile, homeDir := "", ""
+	if c != nil {
+		configFile = strings.TrimSpace(c.Claw.ConfigFile)
+		homeDir = strings.TrimSpace(c.Claw.HomeDir)
+	}
+	if configFile == "" && homeDir == "" {
+		configFile = "~/.openclaw/openclaw.json"
+	}
+	raw := []string{configFile}
+	if homeDir != "" {
+		raw = append(raw, filepath.Join(expandPath(homeDir), "openclaw.json"))
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, candidate := range raw {
+		if candidate == "" {
+			continue
+		}
+		candidate = filepath.Clean(expandPath(candidate))
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
+}
+
 func connectorEnvHome(variable, defaultDir string) string {
 	if configured := strings.TrimSpace(os.Getenv(variable)); configured != "" {
 		configured = expandPath(configured)

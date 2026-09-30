@@ -153,15 +153,36 @@ var toolCallHooksByConnector = map[string]toolCallHooks{
 	// never for one a preToolUse exit 2 blocked or Kiro's own permission
 	// check denied, and preToolUse fires before that check.
 	"kiro": {keying: keyByContent, pre: "preToolUse", ran: "postToolUse"},
-	// Copilot CLI and Devin CLI hooks carry no per-call ID either, and
-	// whether their post-tool events fire for a call a hook denied is not
-	// measured, so their calls are not paired: hook silence is their
-	// backstop.
-	"copilot": {pre: "preToolUse", ran: "postToolUse", failed: "postToolUseFailure"},
-	"devin":   {pre: "PreToolUse", ran: "PostToolUse"},
+	// Copilot CLI 1.0.88 sends no per-call ID either: preToolUse carries
+	// sessionId, toolName and toolArgs, and postToolUse the same three plus
+	// toolResult. Measured (the pinned release's macOS arm64 build through
+	// its bring-your-own-provider mode): toolArgs is the same object in
+	// both events, postToolUse fires only for a tool that ran, never for
+	// one a preToolUse deny blocked or the user refused at Copilot's
+	// permission prompt (neither sends postToolUseFailure), and parallel or
+	// identical calls each get their own pair.
+	"copilot": {keying: keyByContent, pre: "preToolUse", ran: "postToolUse", failed: "postToolUseFailure"},
+	// Devin CLI documents no per-call ID: PreToolUse carries session_id,
+	// prompt_id, tool_name and tool_input, and PostToolUse the same plus
+	// tool_response. Measured on 3000.11.3 (a logged-in CLI in its own
+	// TUI): tool_input is the same object in both events, PostToolUse fires
+	// only for a tool that ran, never for one a PreToolUse exit 2 or
+	// {"decision":"block"} denied, one the user refused at Devin's
+	// permission prompt, or one that failed before it ran (a read of a
+	// missing file), and there is no failure event. A PreToolUse hook that
+	// dies with another exit code lets the tool run, and its PostToolUse
+	// still arrives. Parallel or identical calls each get their own pair,
+	// and a command the user edits at the permission prompt gets a new
+	// PreToolUse with the edited input. 3000.11.3 also sends an
+	// undocumented tool_use_id, the same in both events; the gateway's
+	// Devin correlation does not read it as the call's ID, so the calls
+	// are keyed by content, like Kiro CLI's. The image's pinned 3000.4.25
+	// declares the same hook payload fields but was not run.
+	"devin": {keying: keyByContent, pre: "PreToolUse", ran: "PostToolUse"},
 	// Hermes, OpenHands, Antigravity and OmniGent: whether their hooks carry
 	// a per-call ID the gateway sees, and whether a post-tool event fires for
-	// a denied call, is not measured, so they are not paired either.
+	// a denied call, is not measured, so they are not paired: hook silence
+	// is their backstop.
 	"hermes":      {pre: "pre_tool_call", ran: "post_tool_call"},
 	"openhands":   {pre: "PreToolUse", ran: "PostToolUse"},
 	"antigravity": {pre: "PreToolUse", ran: "PostToolUse"},

@@ -504,6 +504,42 @@ func TestStartRotatesBinding(t *testing.T) {
 	}
 }
 
+// openshell.workdir.undo_ignored reaches the snapshots of a mounted project,
+// the one at create and the one each start takes, from the configuration
+// the daemon holds then: off, they keep no copy of ignored directories; on,
+// they keep the configured names (or node_modules, .venv and venv) up to
+// max_mb (500 MiB unless set) (#944).
+func TestSnapshotsKeepTheConfiguredIgnoredDirs(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "keepbox"})
+	if o := e.ws.lastSnapshot; o.KeepIgnored != nil || o.KeepIgnoredBytes != 0 {
+		t.Fatalf("off: snapshot keeps %v up to %d bytes", o.KeepIgnored, o.KeepIgnoredBytes)
+	}
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Workdir.UndoIgnored = config.OpenShellUndoIgnoredConfig{Enabled: true}
+	})
+	if _, err := e.m.Stop(t.Context(), sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Start(t.Context(), sb.Name, sandboxapi.StartRequest{NewSnapshot: true}); err != nil {
+		t.Fatal(err)
+	}
+	if o := e.ws.lastSnapshot; !slices.Equal(o.KeepIgnored, []string{"node_modules", ".venv", "venv"}) || o.KeepIgnoredBytes != 500<<20 {
+		t.Fatalf("defaults: snapshot keeps %v up to %d bytes", o.KeepIgnored, o.KeepIgnoredBytes)
+	}
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Workdir.UndoIgnored = config.OpenShellUndoIgnoredConfig{Enabled: true, MaxMB: 64, Dirs: []string{"vendor"}}
+	})
+	if _, err := e.m.Delete(t.Context(), sb.Name, sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "keepbox2"})
+	if o := e.ws.lastSnapshot; !slices.Equal(o.KeepIgnored, []string{"vendor"}) || o.KeepIgnoredBytes != 64<<20 {
+		t.Fatalf("configured: snapshot keeps %v up to %d bytes", o.KeepIgnored, o.KeepIgnoredBytes)
+	}
+}
+
 // An administrator change applies to a stopped sandbox: a harness, live mount
 // or learn mode the organization disallowed since refuses the start.
 func TestStartRechecksAdminPolicy(t *testing.T) {
@@ -868,7 +904,7 @@ func TestEndHarnessScriptMarksTheDetachedRun(t *testing.T) {
 	end := func(args ...string) {
 		t.Helper()
 		out, err := exec.Command("/bin/sh", append([]string{"-c", endHarnessScript, "defenseclaw-end-harness", root, "1"}, args...)...).Output()
-		if err != nil || strings.TrimSpace(string(out)) != "none" {
+		if err != nil || parseHarnessEnd(out).Harness != "none" {
 			t.Fatalf("script = %q, %v", out, err)
 		}
 	}

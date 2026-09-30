@@ -625,6 +625,10 @@ func TestEnv(t *testing.T) {
 					t.Errorf("env[%s] = %q, want %q", key, env[key], opts.EgressProxyURL)
 				}
 			}
+			// Node's experimental-proxy warning goes with the proxy (#951).
+			if want := map[bool]string{true: "1"}[opts.EgressProxyURL != ""]; env["NODE_NO_WARNINGS"] != want || env["NODE_USE_ENV_PROXY"] != want {
+				t.Errorf("NODE_NO_WARNINGS = %q, NODE_USE_ENV_PROXY = %q, want %q for both", env["NODE_NO_WARNINGS"], env["NODE_USE_ENV_PROXY"], want)
+			}
 			for key := range env {
 				if strings.Contains(key, "TOKEN") || strings.Contains(key, "API_KEY") {
 					t.Errorf("secret-bearing variable %s must come from a provider, not --env", key)

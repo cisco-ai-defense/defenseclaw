@@ -949,6 +949,8 @@ DEFAULT_SANDBOX_HOME = "/home/sandbox"
 # Sandbox profiles, loosest to strictest (mirrors OpenShellProfile* in
 # internal/config/openshell.go).
 OPENSHELL_PROFILES = ("open", "balanced", "strict")
+# openshell.llm and ``sandbox run --llm`` (mirrors OpenShellLLMChoices).
+OPENSHELL_LLM_CHOICES = ("auto", "none", "anthropic", "claude-oauth", "openai", "bedrock", "gemini")
 # openshell keys an administrator can lock against ``sandbox run`` flags
 # (mirrors OpenShellLockableKeys).
 OPENSHELL_LOCKABLE_KEYS = (
@@ -969,6 +971,24 @@ class OpenShellGatewayConfig:
     workspace: str = ""
 
 
+# openshell.workdir.undo_ignored defaults (mirror
+# DefaultOpenShellUndoIgnoredMaxMB and DefaultOpenShellUndoIgnoredDirs).
+OPENSHELL_UNDO_IGNORED_MAX_MB = 500
+OPENSHELL_UNDO_IGNORED_DIRS = ("node_modules", ".venv", "venv")
+
+
+@dataclass
+class OpenShellUndoIgnoredConfig:
+    """``openshell.workdir.undo_ignored``: keep, with a mounted project's undo
+    point, a copy of the dependency directories git ignores, so ``sandbox
+    undo`` restores them (Linux mount mode; copy mode is unaffected)."""
+
+    enabled: bool = False
+    # 0 means OPENSHELL_UNDO_IGNORED_MAX_MB; an empty list the default names.
+    max_mb: int = OPENSHELL_UNDO_IGNORED_MAX_MB
+    dirs: list[str] = field(default_factory=lambda: list(OPENSHELL_UNDO_IGNORED_DIRS))
+
+
 @dataclass
 class OpenShellWorkdirConfig:
     # Empty/zero values inherit the selected sandbox policy pack.
@@ -978,6 +998,7 @@ class OpenShellWorkdirConfig:
     max_upload_mb: int = 0
     git_depth: int = 200
     on_exit: str = "ask"
+    undo_ignored: OpenShellUndoIgnoredConfig = field(default_factory=OpenShellUndoIgnoredConfig)
 
 
 @dataclass
@@ -986,6 +1007,9 @@ class OpenShellEgressConfig:
     allow: list[str] = field(default_factory=list)
     ports: list[int] = field(default_factory=list)
     large_upload_mb: int = 0
+    # Also cut the upload that crosses large_upload_mb, for every sandbox;
+    # False follows the pack's egress.block_large_uploads.
+    block_large_uploads: bool = False
     feed: str = ""
     # "Always" unblock and approval decisions the daemon writes; they lift
     # blocklist and allowlist refusals but never the private-address guard.
@@ -1047,6 +1071,8 @@ class OpenShellAdminConfig:
     allowed_harnesses: list[str] = field(default_factory=list)
     egress_block: list[str] = field(default_factory=list)
     egress_allow_only: list[str] = field(default_factory=list)
+    # True blocks large uploads to first-seen hosts for every sandbox.
+    block_large_uploads: bool = False
     require_copy_for: list[str] = field(default_factory=list)
     max_resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
     locked: list[str] = field(default_factory=list)
@@ -1076,6 +1102,12 @@ class OpenShellConfig:
     pack_dir: str = ""
     profile: str = ""
     yolo: bool | None = None
+    # The model credential a run shares (``sandbox run --llm``'s default,
+    # which the shell wrappers, the TUI and the macOS app take too).
+    llm: str = "auto"
+    # Keep the sandbox of a foreground one-prompt run (``sandbox run --keep``);
+    # by default it goes when nothing is left in it to bring back or undo.
+    keep_headless: bool = False
     workdir: OpenShellWorkdirConfig = field(default_factory=OpenShellWorkdirConfig)
     egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
     image: OpenShellImageConfig = field(default_factory=OpenShellImageConfig)
@@ -5061,6 +5093,17 @@ def _merge_openshell_resources(raw: Any) -> OpenShellResourcesConfig:
     )
 
 
+def _merge_openshell_undo_ignored(raw: Any) -> OpenShellUndoIgnoredConfig:
+    """``openshell.workdir.undo_ignored`` with the Go loader defaults for absent keys."""
+    raw = _openshell_mapping(raw)
+    dirs = raw.get("dirs")
+    return OpenShellUndoIgnoredConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        max_mb=_openshell_int(raw.get("max_mb"), OPENSHELL_UNDO_IGNORED_MAX_MB),
+        dirs=_openshell_str_list(dirs) if dirs is not None else list(OPENSHELL_UNDO_IGNORED_DIRS),
+    )
+
+
 def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShellConfig:
     """Build :class:`OpenShellConfig` from the raw ``openshell:`` mapping.
 
@@ -5094,6 +5137,8 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         pack_dir=_openshell_str(raw.get("pack_dir"), pack_dir_default),
         profile=_openshell_str(raw.get("profile")),
         yolo=_openshell_optional_bool(raw.get("yolo")),
+        llm=_openshell_str(raw.get("llm")) or "auto",
+        keep_headless=_coerce_bool(raw.get("keep_headless", False)),
         workdir=OpenShellWorkdirConfig(
             mode=_openshell_str(workdir.get("mode")),
             masks=_openshell_str_list(workdir.get("masks")),
@@ -5101,12 +5146,14 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             max_upload_mb=_openshell_int(workdir.get("max_upload_mb")),
             git_depth=_openshell_int(workdir.get("git_depth"), 200),
             on_exit=_openshell_str(workdir.get("on_exit")) or "ask",
+            undo_ignored=_merge_openshell_undo_ignored(workdir.get("undo_ignored")),
         ),
         egress=OpenShellEgressConfig(
             block=_openshell_str_list(egress.get("block")),
             allow=_openshell_str_list(egress.get("allow")),
             ports=_openshell_int_list(egress.get("ports")),
             large_upload_mb=_openshell_int(egress.get("large_upload_mb")),
+            block_large_uploads=_coerce_bool(egress.get("block_large_uploads", False)),
             feed=_openshell_str(egress.get("feed")),
             unblocked=_openshell_str_list(egress.get("unblocked")),
         ),
@@ -5140,6 +5187,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
             egress_block=_openshell_str_list(admin.get("egress_block")),
             egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
+            block_large_uploads=_coerce_bool(admin.get("block_large_uploads", False)),
             require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
             max_resources=_merge_openshell_resources(admin.get("max_resources")),
             locked=_openshell_str_list(admin.get("locked")),

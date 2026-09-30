@@ -400,10 +400,6 @@ func (a *App) adminCheck() openshell.Check {
 	if s.Detail != "" {
 		c.Detail += ": " + s.Detail
 	}
-	if warnings := a.adminWarnings(); len(warnings) > 0 {
-		c.Status = openshell.StatusWarn
-		c.Detail += "; " + strings.Join(warnings, "; ")
-	}
 	return c
 }
 
@@ -438,11 +434,13 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			return err
 		}
 		if o.Output != OutputJSON {
+			// Named as the question named them (`Fix "Gateway": …?`), not
+			// by their ids.
 			for _, out := range outcomes {
 				if out.Applied {
-					a.ok("fixed " + out.ID)
+					a.ok(fmt.Sprintf("fixed %q", out.Title))
 				} else if out.Error != "" {
-					a.bad(out.ID + ": " + out.Error)
+					a.bad(fmt.Sprintf("could not fix %q: %s", out.Title, out.Error))
 				}
 			}
 		}
@@ -456,8 +454,11 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			OK bool `json:"ok"`
 			// Ready is OK with sandboxes turned on (sandboxesOff).
 			Ready bool `json:"ready"`
+			// OpenShellInstall is when setup offers the OpenShell install
+			// (DoctorReport.OpenShellInstallNeeded), which the TUI presets.
+			OpenShellInstall bool `json:"openshell_install"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off, rep})
+		}{rep.OK(), rep.OK() && !off, rep.OpenShellInstallNeeded(), rep})
 	}
 	a.printDoctor(rep)
 	if !rep.OK() {
@@ -491,14 +492,27 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 			a.line("  " + a.dim("→ "+fix))
 		}
 	}
-	if rep.OK() {
-		a.println()
-		if why, off := sandboxesOff(rep); off {
-			a.warn("not ready for sandboxes yet: " + why)
-		} else {
-			a.ok("ready for sandboxes")
+	// The last line is the verdict, a failing one too (it ended on the
+	// last check's line, with only the exit status to tell).
+	a.println()
+	if failed := failedChecks(rep); failed > 0 {
+		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
+	} else if why, off := sandboxesOff(rep); off {
+		a.warn("not ready for sandboxes yet: " + why)
+	} else {
+		a.ok("ready for sandboxes")
+	}
+}
+
+// failedChecks counts the checks of rep that failed.
+func failedChecks(rep *openshell.DoctorReport) int {
+	n := 0
+	for _, c := range rep.Checks {
+		if c.Status == openshell.StatusFail {
+			n++
 		}
 	}
+	return n
 }
 
 // sandboxesOff reports a report without failures whose sandboxes are still

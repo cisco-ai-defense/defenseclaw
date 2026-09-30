@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"slices"
 	"strconv"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -49,6 +51,14 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
+	// autoRm marks an rm the run did not ask for: a headless run's sandbox,
+	// which goes by the rules of --rm unless --keep or
+	// openshell.keep_headless keeps it (App.headlessRm). The end of the
+	// session says why it went, or why it stayed, without naming --rm.
+	autoRm bool
+	// keptWhy says why a sandbox the end of its session was to delete
+	// (autoRm) is kept instead.
+	keptWhy string
 	// started is set when the session created or started the sandbox; one
 	// that was already running (a detached run, another session) is left
 	// running when the session ends.
@@ -72,6 +82,11 @@ type session struct {
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
 	before *sandboxapi.Sandbox
+	// daemonStarted is when the daemon the session ends with started
+	// (sandboxapi.Status.StartedAt; zero when it does not say): after the
+	// session's start, the daemon restarted during it, and its counters
+	// cover only the time since.
+	daemonStarted time.Time
 
 	// shell marks a `connect --shell` session: no harness, so no hooks to
 	// expect.
@@ -90,6 +105,11 @@ type session struct {
 	// stopped a sandbox it had found running.
 	interrupted bool
 	undoStopped bool
+	// pulled is the result of the pull a copy-mode session's end took, and
+	// handedOver is set once nothing of it is left to bring back: finish
+	// records both for a sandbox it stops (markStoppedCopy).
+	pulled     string
+	handedOver bool
 
 	// hooksWarned is set once the live warning that the session's hooks do
 	// not reach DefenseClaw went out (hooks.go); noHooks once the session
@@ -100,6 +120,10 @@ type session struct {
 	hooksWarned bool
 	noHooks     bool
 	sawHooks    atomic.Bool
+	// hooksUnknown is set once the summary said a daemon restart during
+	// the session left it unable to tell whether a hook reached DefenseClaw
+	// (hookReachUnknown).
+	hooksUnknown bool
 	// hadTurn is set by the summary when the session made a tool call:
 	// the harness had a turn, so the resume line it prints as it exits is
 	// on the screen (Copilot CLI prints none without a prompt).
@@ -112,8 +136,10 @@ type session struct {
 	noticeKeys map[string]bool
 	titleSet   bool
 	// blockedHosts are the destinations the session announced blocked
-	// (blockNotice), which the summary counts.
-	blockedHosts map[string]bool
+	// (blockNotice), which the summary counts; unblockedHosts those of them
+	// unblocked since, whose summary line offers no unblock.
+	blockedHosts   map[string]bool
+	unblockedHosts map[string]bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -153,9 +179,11 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
-	// While the harness runs, other sessions' ends leave the sandbox alone.
+	// While the harness runs, other sessions' ends leave the sandbox alone,
+	// and what its copy held as it last stopped is no longer known.
 	release := s.app.holdSession(s.sb.Name)
 	defer release()
+	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
 	defer stop()
 	if headless || !s.app.IO.TTY {
@@ -198,9 +226,11 @@ var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then 
 // attachShell runs a login shell in the project folder with the terminal
 // (`connect --shell`).
 func (s *session) attachShell(ctx context.Context) (int, error) {
-	// While the shell runs, other sessions' ends leave the sandbox alone.
+	// While the shell runs, other sessions' ends leave the sandbox alone,
+	// and what its copy held as it last stopped is no longer known.
 	release := s.app.holdSession(s.sb.Name)
 	defer release()
+	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
 	defer stop()
 	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
@@ -232,10 +262,10 @@ var promptFirst = map[string]bool{
 
 // watchNotices follows the sandbox during the session and announces what
 // must not wait until the end: an ask waiting for the user, a blocked
-// destination, a finding (an alert, hook tamper), a quarantined nested
-// repository, a DefenseClaw daemon that does not answer, and hooks that
-// do not reach DefenseClaw (the daemon's verdict, or no hook by the end of
-// the hook window).
+// destination, a large upload, a finding (an alert, hook tamper), a
+// quarantined nested repository, a DefenseClaw daemon that does not
+// answer, and hooks that do not reach DefenseClaw (the daemon's verdict,
+// or no hook by the end of the hook window).
 func (s *session) watchNotices(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var since uint64
@@ -325,6 +355,10 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.askNotice(ctx, ev)
 	case sandboxapi.ActivityEgressBlocked:
 		s.blockNotice(ev)
+	case sandboxapi.ActivityEgressUnblocked:
+		s.onUnblock(ev.Host)
+	case sandboxapi.ActivityEgressLargeUpload:
+		s.largeUploadNotice(ev)
 	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityHookFailed:
 		// A hook of the session reached DefenseClaw.
 		s.sawHooks.Store(true)
@@ -353,9 +387,23 @@ func askDestination(ev sandboxapi.ActivityEvent) string {
 		return ""
 	}
 	if ev.Port != 0 {
-		return ev.Host + ":" + strconv.Itoa(ev.Port)
+		// An ask is for one host and port, 443 included; an IPv6 literal
+		// is bracketed, or its port reads as part of the address.
+		return net.JoinHostPort(strings.Trim(ev.Host, "[]"), strconv.Itoa(ev.Port))
 	}
 	return ev.Host
+}
+
+// portBlock reports a block of one port rather than of the host, named
+// with its port (443 too): a port the egress proxy or triage does not
+// carry, a port on this machine the sandbox may not reach
+// (host.openshell.internal, whose hook ingress and approved ports stay
+// open), and OpenShell's own direct denials (no category), which its rules
+// make per host and port. DefenseClaw's triage rejections of OpenShell's
+// proposals carry the proxy's host-wide category (blocklisted, ip_literal).
+func portBlock(ev sandboxapi.ActivityEvent) bool {
+	return ev.Category == string(egress.CategoryPortNotAllowed) || ev.Reason == sandboxapi.ReasonHostPortClosed ||
+		ev.Source == sandboxapi.SourceOpenShell && ev.Category == ""
 }
 
 // askText is an ask of sandbox name for the live notice: the destination
@@ -399,26 +447,86 @@ func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
 // blockNotice announces a destination DefenseClaw blocked, once per host,
 // with the command that lifts the block when one does. What the harness
 // fetches on its own and does without (a startup tip) is not announced.
+//
+// A block of the egress proxy holds the host on every port, so the notice
+// names the host alone: the port of whichever request came first
+// ("webhook.site:80") would say the block stops there, though HTTPS is
+// blocked too. The feed keeps the port, which tells its request lines
+// apart. Where the port is what is blocked (portBlock), it shows, once per
+// port.
 func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	if ev.Host == "" || ev.Reason == harnessFetchReason {
 		return
 	}
-	text := "✗ DefenseClaw blocked " + hostPort(ev)
-	if why := firstNonEmpty(ev.Category, ev.Reason); why != "" {
+	where, key := ev.Host, "block "+ev.Host
+	if portBlock(ev) {
+		where = askDestination(ev)
+		key = "block " + where
+	}
+	text := "✗ DefenseClaw blocked " + where
+	switch why := firstNonEmpty(ev.Category, ev.Reason); {
+	case ev.Category == sandboxapi.CategoryLargeUpload:
+		// The large-upload block (egress.block_large_uploads) cut an
+		// upload there (its event counts what went up), or refused a
+		// request after the cut, which its reason explains.
+		if ev.BytesUp > 0 {
+			text = "✗ DefenseClaw blocked a large upload to " + where
+		}
+		if clause := sandboxapi.LargeUploadReason(ev.Reason); clause != "" {
+			text += " (" + clause + ")"
+		}
+	case why != "":
 		text += " (" + reasonText(why) + ")"
 	}
+	host := strings.ToLower(ev.Host)
+	n := sessionNotice{summary: text}
 	if ev.Unblockable {
+		// Once the host is unblocked the summary gives the block without
+		// the command (onUnblock).
+		n.host, n.unblocked = host, text+"; unblocked since"
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
+		n.summary = text
 	}
 	s.noticeMu.Lock()
 	if s.blockedHosts == nil {
 		s.blockedHosts = map[string]bool{}
 	}
 	if len(s.blockedHosts) < maxSeenEvents {
-		s.blockedHosts[strings.ToLower(ev.Host)] = true
+		s.blockedHosts[host] = true
 	}
+	// Blocked again after an unblock: the command applies again.
+	delete(s.unblockedHosts, host)
 	s.noticeMu.Unlock()
-	s.notice("block "+ev.Host, text, text)
+	s.noticeWith(key, text, n)
+}
+
+// largeUploadNotice announces a large upload only the report saw (the
+// large-upload block was off, or the destination is exempt from it), once
+// per host, as the feed words it but for the port, which is the first
+// request's: "⚠ large upload to files.example.net (more than 25 MiB)".
+func (s *session) largeUploadNotice(ev sandboxapi.ActivityEvent) {
+	if ev.Host == "" {
+		return
+	}
+	text := "⚠ " + largeUploadText(ev.Host, ev)
+	s.notice("large upload "+strings.ToLower(ev.Host), text, text)
+}
+
+// onUnblock records that host was unblocked for this sandbox (or for every
+// sandbox) during the session.
+func (s *session) onUnblock(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return
+	}
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	if s.unblockedHosts == nil {
+		s.unblockedHosts = map[string]bool{}
+	}
+	if len(s.unblockedHosts) < maxSeenEvents {
+		s.unblockedHosts[host] = true
+	}
 }
 
 // harnessFetchReason is triage's reason for a denied request the harness
@@ -600,6 +708,9 @@ func (s *session) end(ctx context.Context) error {
 		return apiError(err)
 	}
 	a.println()
+	if st, err := s.api.Status(ctx); err == nil {
+		s.daemonStarted = st.StartedAt
+	}
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
@@ -609,7 +720,7 @@ func (s *session) end(ctx context.Context) error {
 	if !s.started && after.Phase == "ready" {
 		// The sandbox was running before the session: a detached run may
 		// still be going in it.
-		if run, err := a.detachedRun(ctx, s.cli, after); err == nil && run.State == runRunning {
+		if run, err := a.detachedRun(ctx, s.cli, after); err == nil && run.State == sandboxapi.RunRunning {
 			s.liveRun = true
 		}
 	}
@@ -715,9 +826,14 @@ func (s *session) end(ctx context.Context) error {
 	case !changed:
 	case accepted && reviewed && stopped:
 		// The next session starts from here: its undo point replaces this
-		// one. Changes nobody could review never become the base.
-		a.acceptUndoPoint(after)
-		a.ok("kept: the changes stay in the folder, and the next session takes a new undo point")
+		// one, whoever starts it. Changes nobody could review never become
+		// the base.
+		if a.acceptChanges(ctx, s.api, after) {
+			a.ok("kept: the changes stay in the folder, and the next session takes a new undo point")
+		} else {
+			// The warning said the undo point stays.
+			a.ok("kept: the changes stay in the folder")
+		}
 	case accepted && reviewed:
 		// The sandbox keeps running: what it changes after this review was
 		// not reviewed, so it must not become the base either.
@@ -806,23 +922,35 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	name := s.sb.Name
 	switch {
 	case s.rm && s.liveRun:
-		a.warn(name + " is not deleted (--rm): its detached run is still going; delete it once the run ends: `" + CommandName + " delete " + name + "`")
-		s.rm = false
+		s.notDeleted("its detached run is still going", "the run ends")
 	case s.rm && s.others > 0:
-		a.warn(name + " is not deleted (--rm): " + s.othersText() + "; delete it once they end: `" + CommandName + " delete " + name + "`")
-		s.rm = false
+		s.notDeleted(s.othersText(), "they end")
 	}
 	if s.rm {
 		if _, err := s.api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: s.keepSnapshot}); err != nil {
-			return fmt.Errorf("delete %s: %w", name, apiError(err))
+			if !s.autoRm {
+				return fmt.Errorf("delete %s: %w", name, apiError(err))
+			}
+			// Nobody asked for this delete: the run still succeeded, and
+			// the sandbox is kept as without it.
+			s.rm, s.keptWhy = false, "it could not be deleted ("+apiError(err).Error()+")"
 		}
+	}
+	if s.rm {
 		a.forgetCLIState(name)
+		why := " (--rm)"
+		if s.autoRm {
+			why = " (" + autoRmKeep + ")"
+		}
 		if s.keepSnapshot {
-			a.ok("sandbox " + name + " deleted (--rm); its undo point is kept because " + s.keepWhy + " → review: " +
+			a.ok("sandbox " + name + " deleted" + why + "; its undo point is kept because " + s.keepWhy + " → review: " +
 				CommandName + " review " + name + "   undo: " + CommandName + " undo " + name + "   drop it: " + CommandName + " delete " + name)
 			return nil
 		}
-		a.ok("sandbox " + name + " deleted (--rm)")
+		if s.autoRm {
+			why = ": nothing is left in it to bring back or undo (" + autoRmKeep + ")"
+		}
+		a.ok("sandbox " + name + " deleted" + why)
 		return nil
 	}
 	if !stopped {
@@ -843,6 +971,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			a.warn("could not stop " + name + ": " + apiError(err).Error())
 			return nil
 		}
+		s.markStopped()
 	}
 	next := "resume: " + CommandName + " connect " + name
 	if s.headless {
@@ -851,6 +980,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	kept := "Sandbox kept (stopped)"
 	if s.undoStopped {
 		kept = "Sandbox " + name + " is stopped now (undo stops it) and kept"
+	}
+	if s.keptWhy != "" {
+		kept += ": " + s.keptWhy
 	}
 	a.note(kept + " → " + next + "   delete: " + CommandName + " delete " + name)
 	s.continueHint()
@@ -901,10 +1033,11 @@ var ownResumeHint = map[string]string{
 // what the harness's own resume hint does: the one it printed above after
 // a session with a turn, else one it may print.
 func (s *session) continueHint() {
-	if s.headless || s.shell || s.spec == nil || !s.sawHooks.Load() {
+	if s.headless || s.shell || s.spec == nil || (!s.sawHooks.Load() && !s.hooksUnknown) {
 		// No conversation to continue: no hook of the session reached
 		// DefenseClaw (a harness that failed to start, one nobody
-		// prompted).
+		// prompted). After a daemon restart that cannot be told, and the
+		// conversation may be there.
 		return
 	}
 	args, ok := continueArgs[s.spec.Name]
@@ -973,28 +1106,40 @@ const (
 // session announced blocked (its ✗ lines, which the summary repeats), or
 // the daemon's count of newly blocked ones when that is higher (a late
 // denial, or a flood the feed paced). A daemon restart during the session
-// starts its counters from zero: the session's then count from zero too.
+// starts its counters from zero (nothing keeps them): the session's then
+// count from zero too, and the line says they cover only the time since
+// the restart.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
 		before = &sandboxapi.Sandbox{}
 	}
 	hooksBefore, egressBefore := before.Hooks, before.Egress
-	restarted := false
-	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
-		hooksBefore, restarted = sandboxapi.HookCoverage{}, true
-	}
-	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
-		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
-		egressBefore = sandboxapi.EgressStats{}
+	// since qualifies the counts a daemon restart started again; sitesReset
+	// marks the egress counts among them.
+	since, sitesReset := "", false
+	switch {
+	case s.restartedDuring():
+		hooksBefore, egressBefore = sandboxapi.HookCoverage{}, sandboxapi.EgressStats{}
+		since, sitesReset = "since the daemon restarted at "+s.app.clock(s.daemonStarted), true
+	default:
+		// A daemon that does not say when it started: counters below the
+		// session's start mean it restarted.
+		if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
+			hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted"
+		}
+		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+			after.Egress.BlockedRequests < egressBefore.BlockedRequests {
+			egressBefore, sitesReset = sandboxapi.EgressStats{}, since != ""
+		}
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
 	s.hadTurn = calls > 0
 	parts := []string{"Session ended"}
 	tools := plural(max(calls, 0), "tool call", "tool calls")
-	if restarted {
-		tools += " since the daemon restarted"
+	if since != "" {
+		tools += " " + since
 	}
 	if blocked > 0 {
 		tools += fmt.Sprintf(" (%d blocked", blocked)
@@ -1010,7 +1155,11 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		parts = append(parts, plural(failed, "hook call", "hook calls")+" failed (blocked)")
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
-	parts = append(parts, plural(int64(max(sites, 0)), "new site contacted", "new sites contacted"))
+	contacted := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
+	if sitesReset {
+		contacted += " since then"
+	}
+	parts = append(parts, contacted)
 	s.noticeMu.Lock()
 	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
 	s.noticeMu.Unlock()
@@ -1029,6 +1178,21 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// restartedDuring reports that the daemon the session ended with started
+// after the session did: it restarted during the session, and nothing kept
+// its counters, so they cover only the time since (PR 1022 live retest N1:
+// "0 tool calls · 0 new sites contacted" after 7 tool calls and two
+// restarts, which left no counter below the session's start).
+func (s *session) restartedDuring() bool {
+	return s.startedBefore(s.daemonStarted)
+}
+
+// startedBefore reports that the session started before a daemon that
+// started at daemonStarted (zero: it does not say).
+func (s *session) startedBefore(daemonStarted time.Time) bool {
+	return !daemonStarted.IsZero() && !s.startedAt.IsZero() && daemonStarted.After(s.startedAt)
 }
 
 // blockedReason is a blocked tool call's reason as the summary names it:
@@ -1146,6 +1310,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
+	s.pulled, s.handedOver = pull.Result, pull.HandedOver()
 	rev := &sandboxapi.ReviewResponse{Summary: pullSummary(pull), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after, endedElsewhere)
@@ -1163,7 +1328,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		} else {
 			a.note("the sandbox changed nothing")
 		}
-		s.markHandedOver(after)
+		s.handedOver = true
 		return s.finish(ctx, false)
 	}
 	mode := ""
@@ -1203,7 +1368,9 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 	case "patch":
 		opts.PatchOut = after.Name + ".patch"
 	}
-	if sensitive {
+	// A branch that holds this work already takes nothing new: nothing to
+	// confirm.
+	if sensitive && !a.branchHolds(ctx, after, opts) {
 		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {
 			return errors.Join(err, s.keepInSandbox(ctx, after, pull))
@@ -1213,24 +1380,27 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}
+	} else if sensitive {
+		opts.AcceptSensitive = true
 	}
 	if _, err := a.applyPull(ctx, s.api, after, pull, opts); err != nil {
 		a.warn(err.Error())
 		s.keepUnpulled()
 	} else {
-		s.markHandedOver(after)
+		s.handedOver = true
 	}
 	return s.finish(ctx, false)
 }
 
-// markHandedOver records, for a sandbox this session's end stops, that
-// nothing in its copy is left to bring back (the pull found nothing new,
-// or it was applied or handed over as a branch or a patch), so `delete`
-// of it stopped need not warn about work it cannot check. A sandbox that
-// keeps running can still change, so it is not marked.
-func (s *session) markHandedOver(after *sandboxapi.Sandbox) {
-	if s.started && !s.liveRun && s.others == 0 {
-		s.app.markCleanCopy(after)
+// markStopped records, for a copy-mode sandbox this session's end stopped
+// after its pull, what its copy held (markStoppedCopy): nothing left to
+// bring back when the pull found nothing new or went to the folder, a
+// branch or a patch, so `delete` of it stopped need not warn about work it
+// cannot check; and that pull, which the next pull is made from. A sandbox
+// that keeps running can still change, so it is not marked.
+func (s *session) markStopped() {
+	if s.pulled != "" || s.handedOver {
+		s.app.markStoppedCopy(s.sb, s.handedOver, s.pulled)
 	}
 }
 
@@ -1263,7 +1433,22 @@ func (s *session) keepInSandbox(ctx context.Context, after *sandboxapi.Sandbox, 
 // and said.
 func (s *session) keepUnpulled() {
 	if s.rm {
-		s.app.warn(s.sb.Name + " is not deleted (--rm): its work was not brought back; delete it once it is: `" + CommandName + " delete " + s.sb.Name + "`")
+		s.notDeleted("its work was not brought back", "it is")
+	}
+	s.rm = false
+}
+
+// autoRmKeep is what keeps the sandbox of a headless run (App.headlessRm).
+const autoRmKeep = "a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it"
+
+// notDeleted drops the session's rm, saying why the sandbox stays: a
+// warning for --rm, which asked for the delete; for a headless run's
+// sandbox (autoRm) the reason goes on the line that says it was kept.
+func (s *session) notDeleted(why, until string) {
+	if s.autoRm {
+		s.keptWhy = why
+	} else {
+		s.app.warn(s.sb.Name + " is not deleted (--rm): " + why + "; delete it once " + until + ": `" + CommandName + " delete " + s.sb.Name + "`")
 	}
 	s.rm = false
 }

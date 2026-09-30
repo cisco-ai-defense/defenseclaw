@@ -18,10 +18,12 @@ toasts for blocked destinations and new asks, and the actions (unblock,
 approve/reject, undo, review, pull, stop, delete). Connect and new runs hand
 the terminal to ``defenseclaw-gateway sandbox`` through ``App.suspend`` so the
 harness owns it, exactly as on the command line. So do stop, delete, pull and
-the undo of a running or copy-mode sandbox: the command line does work on this
-machine before it calls the daemon (a detached run's log, copy-mode work never
-pulled back, the git work of a pull and of its revert, its own state for a
-deleted sandbox) and asks about it.
+the undo of a running or copy-mode sandbox: the command line asks about what
+they end or discard (a detached run still going, copy-mode work never pulled
+back) and does work on this machine before it calls the daemon (what a copy
+held as it stopped, the git work of a pull and of its revert, its own state
+for a deleted sandbox). The daemon's stop, whoever asks for it, marks a
+detached run it ends interrupted and keeps its log for ``sandbox logs``.
 
 The pure state lives in :mod:`defenseclaw.tui.services.sandbox_state`.
 """
@@ -820,11 +822,13 @@ class SandboxPanelMixin:
     def _run_sandbox_cli(self, *argv: str) -> None:
         """Run ``defenseclaw sandbox ...`` in the terminal, where it asks what it needs to.
 
-        Stop, delete and the undo of a running sandbox do work on this
-        machine before they call the daemon: they check for a detached run
-        (and keep its log for ``sandbox logs``), for copy-mode work that was
-        never pulled back, and forget what the command line kept for a
-        deleted sandbox. The command line is the one place that does it.
+        Stop, delete and the undo of a running sandbox look at the sandbox
+        before they call the daemon: they ask while a detached run the stop
+        would end is still going, look for copy-mode work that was never
+        pulled back (and remember what a copy held as it stopped), and
+        forget what the command line kept for a deleted sandbox. The
+        daemon's stop marks the run interrupted and keeps its log for
+        ``sandbox logs``.
         """
         self._run_sandbox_terminal(SandboxLaunch(("sandbox", *argv), os.getcwd(), "sandbox " + " ".join(argv)))
 
@@ -866,7 +870,7 @@ class SandboxPanelMixin:
             self._set_status("Undo cancelled; nothing changed.")  # type: ignore[attr-defined]
             return
         # Not stop=True: a sandbox that started meanwhile is refused (stop it
-        # with s, which looks for a detached run first) rather than stopped here.
+        # with s, which asks about a detached run first) rather than stopped here.
         result = await self._sandbox_call("undo_sandbox", name, stop=False)
         message = undo_done_text(result, name)
         self._set_status(message)  # type: ignore[attr-defined]
@@ -943,8 +947,9 @@ class SandboxPanelMixin:
         confirmed = await self._confirm(
             f"Stop {name}?",
             "Ends the harness session running in it. A detached run (sandbox run --detach) still going ends "
-            "unfinished: `defenseclaw sandbox stop` runs in this terminal, asks first when one is, and keeps its "
-            "log for `defenseclaw sandbox logs`. The sandbox is kept: connect (c) resumes it.",
+            "unfinished: `defenseclaw sandbox stop` runs in this terminal and asks first when one is, and "
+            f"DefenseClaw keeps its log for `defenseclaw sandbox logs {name}`. The sandbox is kept: connect (c) "
+            "resumes it.",
             MenuAction("stop", "Stop", variant="warning"),
         )
         if not confirmed:

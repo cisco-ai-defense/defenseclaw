@@ -50,3 +50,40 @@ func TestDisplayTexts(t *testing.T) {
 		t.Fatalf("DisplayTexts = %q (input %q)", got, in)
 	}
 }
+
+// The proxy's sentence becomes a clause by its first character, which may
+// be more than one byte.
+func TestLargeUploadReason(t *testing.T) {
+	for in, want := range map[string]string{
+		"This sandbox tried to send more than 25 MiB to a destination it had not contacted before.": "this sandbox tried to send more than 25 MiB to a destination it had not contacted before",
+		"Ésta sandbox intentó enviar más de 25 MiB.":                                                "ésta sandbox intentó enviar más de 25 MiB",
+		"  ": "",
+	} {
+		if got := LargeUploadReason(in); got != want {
+			t.Errorf("LargeUploadReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A destination shows its port unless that is 443 or unknown, and an IPv6
+// literal with its port is bracketed: "fd00:ec2::254:80" is another
+// address (PR 1022 review of N3).
+func TestHostPort(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		port int
+		want string
+	}{
+		{"example.com", 443, "example.com"},
+		{"example.com", 0, "example.com"},
+		{"example.com", 80, "example.com:80"},
+		{"10.0.0.5", 8080, "10.0.0.5:8080"},
+		{"fd00:ec2::254", 80, "[fd00:ec2::254]:80"},
+		{"fd00:ec2::254", 443, "fd00:ec2::254"},
+		{"[::1]", 8080, "[::1]:8080"},
+	} {
+		if got := HostPort(tc.host, tc.port); got != tc.want {
+			t.Errorf("HostPort(%q, %d) = %q, want %q", tc.host, tc.port, got, tc.want)
+		}
+	}
+}

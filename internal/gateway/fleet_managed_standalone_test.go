@@ -92,11 +92,13 @@ func TestGatewayShouldConnect_ManagedStandaloneNeedsExplicitRemoteFleet(t *testi
 
 	// The same connectors-map shape outside a managed deployment keeps the
 	// historical claw.mode derivation, so unmanaged OpenClaw installs still
-	// dial their local daemon.
+	// dial their local daemon. OpenClaw is configured here (openclaw.json
+	// exists): without it the claw.mode default no longer dials (#958).
 	t.Run("unmanaged_control_keeps_claw_mode_derivation", func(t *testing.T) {
 		cfg := managedStandaloneFleetConfig("127.0.0.1", 18789, "")
 		cfg.DeploymentMode = ""
 		cfg.Enterprise = config.EnterpriseConfig{}
+		withConfiguredOpenClaw(t, cfg)
 		if !gatewayShouldConnectForConfiguredConnector(cfg) {
 			t.Errorf("unmanaged connectors map with claw.mode=openclaw: predicate = false, want true")
 		}
@@ -134,6 +136,7 @@ func TestRunGatewayLoop_ManagedStandaloneSendsNothingToLoopbackListener(t *testi
 		if !managedDeployment {
 			cfg.DeploymentMode = ""
 			cfg.Enterprise = config.EnterpriseConfig{}
+			withConfiguredOpenClaw(t, cfg)
 		}
 		dataDir := testenv.PrivateTempDir(t)
 		cfg.DataDir = dataDir

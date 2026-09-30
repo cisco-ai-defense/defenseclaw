@@ -156,6 +156,9 @@ type agentHookResponse struct {
 	// SourceReason is retained only for canonical v8 routing. Reason remains
 	// the connector-safe response projection and is never reused as source.
 	SourceReason string `json:"-"`
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// took part in the verdict. Never serialized.
+	laneVerdict bool
 }
 
 func hookSourceReason(resp agentHookResponse) string {
@@ -1623,6 +1626,20 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		}
 	}
 
+	if childAgentID == "" && spec.ProfileVersion == connector.CorrelationProfileClaudeCodeV1 &&
+		event == "PostToolUse" && toolName == claudeCodeAgentTool && firstString(payload, "mcp_server_name") == "" {
+		// Claude Code's PostToolUse for its own Agent tool names the subagent
+		// the call ran, as tool_response.agentId: the agent_id every hook of
+		// that subagent carries (measured on 2.1.156, #957). Any other tool's
+		// response is that tool's output, so no binding reads this path.
+		if childAgentID = firstHookIdentityString(objectAt(payload, "tool_response"), "agentId"); childAgentID != "" {
+			values[connector.CorrelationTargetChildAgent] = connector.CorrelationValue{
+				Target: connector.CorrelationTargetChildAgent, Value: childAgentID, Path: "tool_response.agentId",
+				Origin: connector.CorrelationOriginReported, Namespace: connectorName, IDKind: "subagent",
+			}
+		}
+	}
+
 	args := firstValue(payload, "tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments")
 	if args == nil {
 		args = firstValue(payload, "tool_info", "toolInfo")
@@ -2045,6 +2062,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.laneVerdict = verdict.laneVerdict
 	return resp
 }
 

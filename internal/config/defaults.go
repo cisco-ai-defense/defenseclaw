@@ -160,9 +160,14 @@ func DefaultConfig() *Config {
 			Workdir: OpenShellWorkdirConfig{
 				GitDepth: DefaultOpenShellGitDepth,
 				OnExit:   DefaultOpenShellOnExit,
+				UndoIgnored: OpenShellUndoIgnoredConfig{
+					MaxMB: DefaultOpenShellUndoIgnoredMaxMB,
+					Dirs:  append([]string(nil), DefaultOpenShellUndoIgnoredDirs...),
+				},
 			},
 			Approvals:     OpenShellApprovalsConfig{DebounceMs: DefaultOpenShellApprovalDebounceMs},
 			TokenDelivery: DefaultOpenShellTokenDelivery,
+			LLM:           DefaultOpenShellLLM,
 		},
 		Watch: WatchConfig{
 			DebounceMs:          500,

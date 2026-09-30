@@ -1129,6 +1129,13 @@ type liveProxy struct {
 
 func startLiveProxy(t *testing.T, e *harnessEnv) *liveProxy {
 	t.Helper()
+	return startLiveProxyWith(t, e, nil)
+}
+
+// startLiveProxyWith is startLiveProxy with the proxy's options edited, for
+// example to send its events to the manager's sink.
+func startLiveProxyWith(t *testing.T, e *harnessEnv, edit func(*egress.Options)) *liveProxy {
+	t.Helper()
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
 	t.Cleanup(func() { _ = upstream.Close() })
@@ -1144,12 +1151,16 @@ func startLiveProxy(t *testing.T, e *harnessEnv) *liveProxy {
 	d, err := e.m.Decider()
 	must(t, err)
 	var dialer net.Dialer
-	p, err := egress.New(egress.Options{
+	opts := egress.Options{
 		Auth: e.m.EgressAuthenticator(), Decider: d, Resolver: e.dns,
 		Dialer: dialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "tcp", upstream.Addr().String())
 		}),
-	})
+	}
+	if edit != nil {
+		edit(&opts)
+	}
+	p, err := egress.New(opts)
 	must(t, err)
 	e.m.AttachProxy(p)
 	ln, err := egress.Listen("127.0.0.1:0")

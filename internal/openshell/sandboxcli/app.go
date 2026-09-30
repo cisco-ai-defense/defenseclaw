@@ -65,6 +65,8 @@ type API interface {
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
+	Accept(ctx context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error)
+	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
 	ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
@@ -135,6 +137,11 @@ type App struct {
 	// (openshell.DiskFree): the MicroVM driver prepares a disk of about an
 	// image's size from each image a sandbox first boots.
 	DiskFree func(path string) (uint64, error)
+	// DockerEngine is the operating system of the Docker engine the docker
+	// CLI talks to (openshell.DockerEngineOS): on a Mac whose gateway runs
+	// the docker driver, Docker Desktop's refuses a run up front
+	// (dockerDesktopRefusal).
+	DockerEngine func(ctx context.Context) (string, error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// HookWindow is how long a harness session may run before its first
@@ -263,6 +270,11 @@ func (a *App) defaults() {
 		}
 		if a.DiskFree == nil {
 			a.DiskFree = openshell.DiskFree
+		}
+		if a.DockerEngine == nil {
+			a.DockerEngine = func(ctx context.Context) (string, error) {
+				return openshell.DockerEngineOS(ctx, openshell.ExecRunner{})
+			}
 		}
 		if a.ConfigPath == "" && a.Cfg != nil {
 			a.ConfigPath = strings.TrimSpace(a.Cfg.ConfigFilePath)

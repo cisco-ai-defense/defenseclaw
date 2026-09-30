@@ -195,6 +195,7 @@ func liveChunk(host string, port uint32) openshell.PolicyChunk {
 func TestClassify(t *testing.T) {
 	withAllow := effective(t, func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"api.internal-tools.example"} }, packs.Flags{Profile: "balanced"})
 	adminBlock := effective(t, func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"*.corp-blocked.example"} }, packs.Flags{})
+	adminDomain := effective(t, func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"corp-blocked.example"} }, packs.Flags{})
 	noHostPorts := effective(t, func(o *config.OpenShellConfig) { o.Admin.AllowHostPorts = boolPtr(false) }, packs.Flags{})
 	blocked := effective(t, func(o *config.OpenShellConfig) { o.Egress.Block = []string{"drop.example.org"} }, packs.Flags{})
 	nr, hp := KindNetworkRule, KindHostPort
@@ -212,6 +213,7 @@ func TestClassify(t *testing.T) {
 		{effOpen, Approve, ReasonAutoMode, nr, false, false, []string{"registry.example.org:443", "docs.example.org:80"}},
 		{effOpen, Reject, ReasonBlocklisted, nr, false, true, []string{"webhook.site:443", "x.pastebin.com:443"}},
 		{adminBlock, Reject, ReasonAdmin, nr, false, false, []string{"a.corp-blocked.example:443"}},
+		{adminDomain, Reject, ReasonAdmin, nr, false, false, []string{"corp-blocked.example:443", "www.corp-blocked.example:443"}},
 		{blocked, Reject, ReasonPolicy, nr, false, false, []string{"drop.example.org:443"}},
 		{effOpen, Reject, ReasonPolicy, nr, false, false, []string{"169.254.169.254:80", "169.254.169.254:443", "metadata.google.internal:80"}},
 		{effOpen, Reject, ReasonIPLiteral, nr, true, true, []string{"93.184.216.34:443"}},
@@ -280,6 +282,17 @@ func TestClassifyDenyPackWithoutPortsUnderOpenProfile(t *testing.T) {
 	}
 	if got := Classify(context.Background(), proposal("db.example.org", 5432), pol); got.Reason != ReasonPortNotAllowed {
 		t.Fatalf("Classify(db.example.org:5432) = %+v, want the port refused", got)
+	}
+}
+
+// A port the egress proxy does not carry is refused whatever the host: an
+// unblock of a host the balanced profile does not list would not lift it,
+// so the rejection is not unblockable (the TUI and the macOS app offered
+// "u to unblock" for git over ssh; PR 1022 final review).
+func TestARefusedPortIsNotUnblockable(t *testing.T) {
+	got := Classify(context.Background(), proposal("gitlab.example.net", 22), testPolicy(effBalanced))
+	if got.Verdict != Reject || got.Reason != ReasonPortNotAllowed || got.Unblockable {
+		t.Fatalf("Classify(gitlab.example.net:22) on balanced = %+v, want a rejection no unblock lifts", got)
 	}
 }
 
@@ -774,6 +787,22 @@ func TestCheckApprovalAndUnblock(t *testing.T) {
 	}
 	if err := CheckUnblock(effOpen, "webhook.site"); err != nil {
 		t.Fatalf("unblock refused: %v", err)
+	}
+	// #946: an administrator's domain covers its subdomains, for approvals
+	// and unblocks alike, and the refusal names the organization's list.
+	domain := effective(t, func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"example.net"} }, packs.Flags{})
+	for _, host := range []string{"example.net", "www.example.net", "a.b.example.net"} {
+		for _, always := range []bool{false, true} {
+			if err := CheckApproval(domain, host, 443, always); err == nil || !strings.Contains(err.Error(), "on your organization's blocklist") {
+				t.Errorf("CheckApproval(%s, always=%t) = %v, want the organization's blocklist", host, always, err)
+			}
+		}
+		if err := CheckUnblock(domain, host); err == nil || !strings.Contains(err.Error(), "on your organization's blocklist") {
+			t.Errorf("CheckUnblock(%s) = %v, want the organization's blocklist", host, err)
+		}
+	}
+	if err := CheckApproval(domain, "myexample.net", 443, false); err != nil {
+		t.Errorf("a name that only ends like the domain was refused: %v", err)
 	}
 	for host, want := range map[string]bool{
 		"host.openshell.internal": true, "HOST.OpenShell.Internal.": true, "localhost": true, "app.localhost": true,

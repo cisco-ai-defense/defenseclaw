@@ -142,6 +142,19 @@ type SandboxIngressConfig struct {
 	// OnListening is told once RunSandboxIngress holds its socket: until
 	// then another program may be the one listening on the ingress port.
 	OnListening func()
+	// EgressUnblock reports whether the sandbox's egress proxy reaches host
+	// because the user unblocked it, and the unblock's scope ("sandbox" or
+	// "always"). A sandbox verdict decided only by destination rules for
+	// hosts it reports is an allow (liftUnblockedDestinations). Nil lifts
+	// nothing. It runs on the request goroutine and must not block.
+	EgressUnblock func(binding sandboxauth.Binding, host string) (scope string, ok bool)
+	// EgressRefusals returns the destinations the sandbox's egress proxy
+	// refused a CONNECT to shortly before, that its agent has not been told
+	// of, and marks them told. The post-tool hook of a shell or fetch tool
+	// call adds them to its context (addSandboxEgressRefusals): the 403
+	// body of a refused CONNECT never reaches the agent. Nil tells nothing.
+	// It runs on the request goroutine and must not block.
+	EgressRefusals func(binding sandboxauth.Binding) []SandboxEgressRefusal
 	// OnHookFailure observes every authenticated hook or inspect post the
 	// ingress answered with a status outside 2xx. Sandbox hooks fail closed
 	// on such an answer, so the harness did not do what the hook was about.
@@ -165,8 +178,8 @@ type SandboxHookDecision struct {
 	// pre-tool event with its post-tool event.
 	ToolUseID string
 	// SessionID and ToolInput are the call's session and tool input (empty
-	// when the event carries none). They name a call whose harness sends no
-	// per-call ID (Kiro CLI).
+	// when the event carries none). They name a call whose hooks send no
+	// per-call ID the gateway reads (Kiro CLI, Copilot CLI, Devin CLI).
 	SessionID string
 	ToolInput json.RawMessage
 	// ResultStatus is the status field a post-tool event reports (Amp's
@@ -209,6 +222,12 @@ type sandboxIngressState struct {
 	onHookDecision func(SandboxHookDecision)
 	onListening    func()
 	onHookFailure  func(SandboxHookFailure)
+	// egressUnblock is the manager's unblock lookup
+	// (SandboxIngressConfig.EgressUnblock).
+	egressUnblock func(sandboxauth.Binding, string) (string, bool)
+	// egressRefusals is the manager's refusal lookup
+	// (SandboxIngressConfig.EgressRefusals).
+	egressRefusals func(sandboxauth.Binding) []SandboxEgressRefusal
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -256,6 +275,8 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		onHookDecision: cfg.OnHookDecision,
 		onListening:    cfg.OnListening,
 		onHookFailure:  cfg.OnHookFailure,
+		egressUnblock:  cfg.EgressUnblock,
+		egressRefusals: cfg.EgressRefusals,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())

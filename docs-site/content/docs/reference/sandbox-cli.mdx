@@ -54,7 +54,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
   Help and hints name Kiro and Antigravity by their connector names, as
   `image build` and `image list` do. Setup and the image commands default to `openshell.harnesses`, and then to
-  Claude Code and Codex. Amp, Cursor Agent, and Devin CLI are not verified
+  Claude Code and Codex; `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
   [capability matrix](/docs/capability-matrix) says why for each harness.
@@ -85,7 +85,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | --- | --- |
 | [`sandbox setup`](#sandbox-setup) | One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, and images. |
 | [`sandbox doctor`](#sandbox-doctor) | Check that this machine can run sandboxes. |
-| [`sandbox image`](#sandbox-image) | Build, list, and prune the harness images. |
+| [`sandbox image`](#sandbox-image) | Build, list, prune, and remove the harness images. |
 | [`sandbox enable`](#sandbox-enable), [`disable`](#sandbox-disable) | Add or remove the shell wrapper that runs a harness command in a sandbox. |
 | [`sandbox teardown`](#sandbox-teardown) | Remove everything DefenseClaw set up for sandboxes. |
 | [`sandbox run`](#sandbox-run) | Run a harness in a new sandbox on the current folder. |
@@ -191,6 +191,7 @@ defenseclaw sandbox image list
 | [`sandbox image build`](#sandbox-image-build) | Build and hook-verify harness images (default: the configured harnesses). |
 | [`sandbox image list`](#sandbox-image-list) | List the harness images. |
 | [`sandbox image prune`](#sandbox-image-prune) | Remove superseded harness images. |
+| [`sandbox image rm`](#sandbox-image-rm) | Remove the harnesses' images (on a Mac also their MicroVM disks). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox image build`
@@ -272,6 +273,35 @@ defenseclaw sandbox image prune --dry-run
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--dry-run` | switch |  | Only show what would be removed. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox image rm`
+
+Removes the images this data directory recorded for the named harnesses,
+current ones included, and forgets their records: the harness image and, on a
+MicroVM (vm) gateway, the run images and aliases made from it. For an image
+already removed from Docker (with `docker rmi`, say) only the record goes. On
+a Mac it also removes the MicroVM disks OpenShell prepared from these images
+(about 5 GB each), by the rules of `sandbox image prune`: only
+`sandbox-prepared-rootfs-*` directories of image IDs Docker no longer has, and
+only with the daemon's list of sandboxes. When the daemon does not answer and
+such disks exist, it refuses and removes nothing, so that no disk is left
+that no command would remove later. It also refuses, removing nothing, while a
+sandbox uses one of the images (running, stopped, or only recorded), and names
+it: delete that sandbox first. A sandbox deleted with `--keep-snapshot` uses
+none. It shows what it removes and asks first; `--yes` does not ask, and
+`--dry-run` only shows. The next run of the harness builds its image again.
+
+```bash
+defenseclaw sandbox image rm claude --dry-run
+defenseclaw sandbox image rm kiro opencode --yes
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags image rm */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--dry-run` | switch |  | Only show what would be removed. |
+| `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox enable`
@@ -373,8 +403,10 @@ port on your machine, a private address, a destination the profile does not
 list) with its destination and the `sandbox approve` command that answers it
 from another terminal (or `defenseclaw tui`, key `7`, then `t` for the Asks
 view); a destination DefenseClaw blocked, with the `sandbox unblock` command
-that lifts the block; a finding such as an alert on a tool call or hook
-tamper; a quarantined nested repository; and a DefenseClaw daemon that
+that lifts the block; a large upload the block did not cut (`⚠ large upload
+to files.example.net (more than 25 MiB)`, with the block off or for a
+destination exempt from it); a finding such as an alert on a tool call or
+hook tamper; a quarantined nested repository; and a DefenseClaw daemon that
 does not answer (the hooks fail closed until it is back). The harness draws
 its own screen, so these notices go to the terminal's title and, where the
 terminal has them, a desktop notification, and ring the bell, instead of
@@ -486,14 +518,29 @@ A few rules the flags follow:
   `-- exec "TEXT"` for Codex). It can't be combined with `--rm`. Follow the
   run with `sandbox logs -f`.
 - Without a terminal, `run` needs `--prompt`.
+- A headless run in the foreground (`--prompt`, or the harness's print flag
+  after `--`, as the shell wrapper's `claude -p` passes it) deletes the
+  sandbox it created when it ends, by the rules of `--rm`: a mounted
+  folder's undo point stays when nobody kept the changes, and a copy whose
+  work was not brought back keeps its sandbox. `--keep`, or
+  `openshell.keep_headless: true`, keeps it; `--keep` with `--rm` is
+  refused. Interactive sessions, `--detach` runs and a run that resumes this
+  folder's sandbox keep theirs.
 - `--llm auto` shares the first model credential it finds for the harness.
   For Claude Code that is `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`.
   For Codex it is `OPENAI_API_KEY` (or `CODEX_API_KEY`), then the API key
   that `codex login --with-api-key` saved in `~/.codex/auth.json`; a ChatGPT
-  login is not shared. `--llm bedrock` shares `AWS_BEARER_TOKEN_BEDROCK` for
-  Amazon Bedrock in `--bedrock-region`, and `auto` never picks it. OpenShell
+  login is not shared. An Amazon Bedrock key (`AWS_BEARER_TOKEN_BEDROCK`)
+  comes last, for the harnesses that have a Bedrock profile. `--llm bedrock`
+  shares only that key, for Amazon Bedrock in `--bedrock-region`. OpenShell
   gives the harness a placeholder that works only against the provider's
-  hosts. With `--llm none`, or when nothing is found, you log in inside the
+  hosts.
+- Without `--llm`, a run takes `openshell.llm` (`auto` unless set). The shell
+  wrappers, the TUI and the macOS app pass no `--llm`, so that key is how the
+  runs they start share a chosen credential. A provider in `openshell.llm`
+  that the harness has no profile for gives way to `auto`, and the run says
+  so (a harness that shares no model credential at all, such as Kiro CLI,
+  takes `auto` without a note); one whose key is not set refuses the run, naming the key. With `--llm none`, or when nothing is found, you log in inside the
   sandbox, which stores a real token there that the agent can read. A Claude
   subscription can instead run `claude setup-token` on this machine (with
   the shell wrapper on, `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`) and
@@ -511,6 +558,13 @@ A few rules the flags follow:
   in plain text, which the agent can read. A name that looks like a secret
   (`KIRO_API_KEY`, `*_TOKEN`, `*_PASSWORD`) gets a warning; bind a key with
   `--credential NAME=HOST` instead, so the sandbox sees only a placeholder.
+- A sandbox with the egress proxy sets `NODE_NO_WARNINGS=1`, so Node's
+  `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning, which the proxy
+  settings trigger, does not print above the harness or in the agent's
+  `node` and `npm` output. It hides Node's other warnings too, including
+  the one that says TLS certificate checks are off
+  (`NODE_TLS_REJECT_UNAUTHORIZED=0`); pass `--env NODE_NO_WARNINGS=0` to a
+  new sandbox to keep them.
 - Hermes Agent's managed `defenseclaw` provider reads an OpenAI-compatible
   endpoint from `HERMES_DEFENSECLAW_BASE_URL` and its key from
   `HERMES_DEFENSECLAW_API_KEY`: for your own endpoint, run
@@ -560,7 +614,8 @@ A few rules the flags follow:
 | `--env` | text, repeatable |  | KEY=VALUE non-secret variable for the sandbox (repeatable). |
 | `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered. |
 | `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
-| `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini. |
+| `--keep` | switch |  | Keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when nothing is left in it to bring back or undo. |
+| `--llm` | text |  | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini (default: openshell.llm, which is auto unless set). |
 | `--memory` | text |  | Memory limit, for example 4Gi. |
 | `--name` | text |  | Sandbox name, at most 19 lowercase letters, digits and '-' (default `<folder>-<random>`). |
 | `--new` | switch |  | Start a new sandbox even when one already holds this folder. |
@@ -644,8 +699,10 @@ server with `--no-tty` to get the prompt back at once.
 
 Shows the output of a detached run (`run --detach`) and whether the run is
 still going, finished (with its exit status) or was interrupted. `-f` follows
-the output until the run ends. Once the sandbox is stopped, it shows the log
-`stop` kept on this machine. The agent writes this log, so on a terminal
+the output until the run ends. Once the sandbox is stopped, it shows the last
+1 MiB of the log that DefenseClaw kept on this machine as it stopped the
+sandbox, whoever stopped it (`stop`, the TUI, the macOS app, `undo`, a tamper
+stop). The agent writes this log, so on a terminal
 its escape sequences (other than colors) and control characters print as
 `�` rather than acting on the terminal; piped or redirected to a file, the
 log is written as it is. A one-prompt `run --prompt` prints the harness's
@@ -687,8 +744,9 @@ Without a name, shows the sandbox subsystem: whether it is on and reachable,
 the OpenShell gateway, the listener addresses, the default pack and profile,
 the organization policy, and counts. With a name, shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
-policy, hook tamper tier, hook traffic and the last blocked tool call, the
-tool calls that ran without a DefenseClaw verdict (hook tamper), egress
+policy, hook tamper tier, hook traffic, the verdicts per hook event under
+the harness's own event names ("Hook events  PreToolUse 12 · PostToolUse 11
+· Stop 2"), the last blocked tool call, the tool calls that ran without a DefenseClaw verdict (hook tamper), egress
 totals (destinations contacted and blocked, each counted once, as the
 activity feed names them; the JSON also has `blocked_requests`), credential
 endpoints, the undo point, waiting asks, nested
@@ -710,8 +768,16 @@ defenseclaw sandbox status myapp-7f3a --output json
 
 Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
 detached run is still going, `stop` asks first on a terminal (`--yes` skips
-the question; without a terminal it warns), marks the run interrupted and
-keeps its log for `sandbox logs`.
+the question; without a terminal it warns). The stop marks the run
+interrupted and keeps its log for `sandbox logs`, as every stop does.
+
+For a copy-mode sandbox that no detached run and no other session is using,
+`stop` first looks at its copy. When nothing in it is left to bring back (it
+is as it was uploaded, or as its last pull took it and that pull went to your
+folder, a branch or a patch file), `delete` of the stopped sandbox does not
+warn about unpulled work, as after a session that brought everything back.
+When the copy is as its last pull took it, the next `pull` uses that pull
+instead of starting the sandbox.
 
 ```bash
 defenseclaw sandbox stop myapp-7f3a
@@ -731,7 +797,8 @@ one was undone, or the folder hasn't changed since it. If an earlier
 session's changes are still in the folder, the old snapshot is kept, so
 `undo` can still revert them, and the activity feed says so. Changes you
 kept at the end of a session ("Keep changes?", `--yes` or `on_exit: keep`)
-count as accepted: the next `start` or `connect` takes a fresh snapshot.
+count as accepted: DefenseClaw records it, and the next start takes a fresh
+snapshot, whether `start`, `connect`, the TUI or the macOS app starts it.
 `--new-snapshot` accepts the changes and takes a fresh snapshot;
 `--no-snapshot` always keeps the old one. `start` says which undo point
 applies, and when it kept the old one, that stopping the sandbox and
@@ -756,8 +823,14 @@ and their undo point (snapshot) unless you pass `--keep-snapshot`. Asks once per
 sandbox unless you pass `--yes`. A copy-mode sandbox holding work that was
 never pulled back (or a pull never applied) is named in the question, which
 then defaults to no; `teardown` lists such sandboxes before it asks. A
-stopped copy-mode sandbox whose last session found nothing to bring back is
-not warned about.
+stopped copy-mode sandbox is not warned about when what stopped it (a
+session's end, a `pull` that started it, or `stop`) found nothing left in it
+to bring back. For a copy-mode sandbox whose work came back, `delete` says
+where it last went and when, and so does its warning:
+
+```text
+  fix-tests's work was last applied to ~/code/myapp at 14:03; nothing newer is left in it
+```
 
 ```bash
 defenseclaw sandbox delete myapp-7f3a
@@ -779,8 +852,17 @@ Shows the activity feed of every sandbox, or one: destinations reached (✓)
 and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
 calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
 changes (a sandbox being created, becoming ready, stopping, or being deleted),
-and workspace events such as an undo or a copy-mode upload. A blocked
-destination that can be unblocked shows the `unblock` command to run. `-f`
+and workspace events such as an undo or a copy-mode upload. A destination
+shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
+`example.com:80`, so an HTTPS and an HTTP request refused at the same host
+are two different lines. An IPv6 address with its port is bracketed:
+`[fd00:ec2::254]:80`. A blocked destination that can be unblocked shows
+the `unblock` command to run. A large upload is a ⚠ report, made as it crosses the threshold, so it says `more than`
+it (`⚠ large upload to files.example.net (more than 25 MiB)`), or, with
+[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+on, a ✗ that names the threshold, such as `✗ files.example.net (large upload
+blocked: this sandbox tried to send more than 10 MiB to a destination it had
+not contacted before)`, with its `unblock` command. `-f`
 keeps following the feed. The daemon keeps a bounded buffer of recent events. Each event has a
 sequence number, and `--since` starts after one.
 
@@ -872,6 +954,21 @@ organization's lists can't be unblocked, and neither can anything under
 [decision order](/docs/setup/sandbox-policy#how-a-destination-is-decided)
 has the details.
 
+An unblock also stops DefenseClaw's destination rules (such as
+`C2-WEBHOOK-SITE` for `webhook.site`, or `C2-NGROK`) from flagging or
+blocking tool calls that name the unblocked host, in the sandboxes the
+unblock covers: the agent is no longer told a destination is blocked that
+the proxy lets it reach, and the activity feed shows no finding for it. A
+call that names a subdomain you did not unblock, that another rule flags
+too, or that Cisco AI Defense or the LLM judge flags or blocks (even without
+naming a rule), keeps its verdict.
+
+The agent learns the command from DefenseClaw too. When the proxy refuses an
+HTTPS destination, the hook of the next shell or web-fetch tool call tells
+the agent the destination, why it is blocked, and the `sandbox unblock`
+command for you to run (Claude Code, Codex, Copilot CLI, Cursor and Devin).
+Once you unblock the host, the agent is no longer told of that block.
+
 ```bash
 defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 defenseclaw sandbox unblock docs.example.com --always
@@ -924,7 +1021,12 @@ started from). It shows a preview first, then asks. The sandbox is stopped
 before the restore, and `--restart` starts it again afterwards. Branches and
 tags the session moved are put back too, unless you pass `--keep-refs`. The
 session's own state is kept in a commit, and the command `undo` prints
-(`git -C FOLDER checkout COMMIT -- .`) brings its files back.
+(`git -C FOLDER checkout COMMIT -- .`) brings its files back. Files git
+ignores have no copy in the undo point: undo deletes what the session wrote
+to Python bytecode caches and names the rest, unless
+`openshell.workdir.undo_ignored` has the undo point keep a copy of
+dependency directories such as `node_modules` and `.venv`, which undo then
+restores as the session found them.
 
 For a copy-mode sandbox, which changes your folder only through
 `pull --apply`, `undo` reverts the last `pull --apply` instead, after the
@@ -951,7 +1053,8 @@ defenseclaw sandbox undo myapp-7f3a --yes --restart
 ### `sandbox pull`
 
 Brings a copy-mode sandbox's work back, starting the sandbox first if it is
-stopped. Without a mode it shows the review: the changed files, the ones that
+stopped (unless its copy has not changed since its last pull, see below). Without a
+mode it shows the review: the changed files, the ones that
 can run code on your machine, and files held back from the sandbox. Choose
 one mode to bring the work back: `--apply` (a
 3-way merge into your working tree), `--branch` (branch `dc/<name>`) or
@@ -971,7 +1074,26 @@ With nothing new it says so and asks nothing, and `sandbox delete` of the
 stopped sandbox does not warn about work it holds. `sandbox undo` of the
 apply starts the next pull from the uploaded copy again, so the undone work
 is offered anew. A branch or a patch file does not move that point: your
-folder does not have those changes.
+folder does not have those changes. A later pull of the same state still
+counts as brought back, so `delete` does not warn about it.
+
+`--branch`, `--branch-name` and `--patch-out FILE` are checked before the
+sandbox is started or read: a branch that exists and does not hold the last
+pull's work, a patch file that exists (without `--force`) or whose folder
+does not, and a branch for a folder without git are refused at once. A branch
+that already holds the work is done: `nothing to do: branch dc/<name> already
+has these changes`, with nothing asked (`"up_to_date": true` with `-o json`).
+A branch that holds the last pull's work is refused at once too when the
+stopped sandbox has run since that pull, since only starting it tells whether
+its work changed (`branch dc/<name> already exists: it holds <name>'s pull at
+14:03, and <name> has run since, so its work may have changed`): pass
+`--branch-name NAME`, or `--force` to move the branch to the new work.
+A stopped sandbox whose copy has not changed since its last pull read it (the
+pull, the session's end or the `stop` that stopped it saw its copy in that
+state, and it has not run since) is not started: that pull is made again, its
+changes and review measured anew (`fix-tests's copy has not changed since its
+last pull at 14:03; using that pull instead of starting it`). On a Mac this
+saves booting the MicroVM.
 
 ```bash
 defenseclaw sandbox pull fix-tests
@@ -1092,7 +1214,8 @@ The daemon applies the change to running sandboxes within a few seconds.
 Under your organization's `openshell.admin` limits the command refuses an
 entry, names the limit, and changes nothing: every entry when
 `allow_unblock` is `false` (your own allow entries would be ignored), and a
-host on `egress_block` or outside `egress_allow_only`.
+host on `egress_block` (or a subdomain of a host name there) or outside
+`egress_allow_only`.
 
 ```bash
 defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"

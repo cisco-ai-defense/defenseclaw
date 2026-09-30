@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -117,6 +118,9 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 		ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
 		FlushSandboxes:  func(context.Context) error { f.flushes++; return f.flush },
 		Now:             func() time.Time { return time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC) },
+		// The tests' preflight answers to the bare name, whatever this
+		// machine's PATH holds.
+		LookPath: func(string) (string, error) { return "", exec.ErrNotFound },
 	}
 	return f
 }
@@ -567,9 +571,13 @@ func TestGatewayConfigFollowsTheService(t *testing.T) {
 	t.Run("unit not installed", func(t *testing.T) {
 		f := newGatewayFixture(t)
 		f.unit = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n"
-		if _, err := f.cfg.Plan(context.Background(), bindMounts); err == nil || !strings.Contains(err.Error(), "not installed") {
-			t.Fatalf("Plan = %v", err)
+		f.write(t, "gateway.toml", operatorTOML)
+		// Apply restarts through the unit: it refuses before it writes
+		// (TestGatewayConfigWritesForAGatewayRunAnotherWay writes).
+		if _, err := f.apply(f.plan(t, bindMounts)); !errors.Is(err, openshell.ErrNoGatewayService) {
+			t.Fatalf("Apply = %v, want ErrNoGatewayService", err)
 		}
+		f.untouched(t, operatorTOML)
 	})
 	t.Run("Homebrew has no gateway.env to check", func(t *testing.T) {
 		f := newGatewayFixture(t)
@@ -580,6 +588,162 @@ func TestGatewayConfigFollowsTheService(t *testing.T) {
 			t.Fatal("asked systemd about a Homebrew service")
 		}
 	})
+}
+
+// TestGatewayConfigWritesForAGatewayRunAnotherWay: on Linux with OpenShell
+// from the release binaries and its gateway started by hand, setup refused
+// that OpenShell, and before that failed planning the change ("the
+// openshell-gateway user service is not installed"), though sandboxes ran
+// on the gateway (RT U1). Plan plans the files DefenseClaw reads, checking
+// bind mounts against the gateway that answers; Write writes them without
+// a restart and without a pending-restart mark nothing would clear; and
+// Rollback restores them, saying the gateway is the user's to restart.
+func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.unit = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n"
+	f.write(t, "gateway.toml", operatorTOML)
+	plan := f.plan(t, bothChanges)
+	if f.probes != 1 || len(plan.Files) != 2 {
+		t.Fatalf("plan %+v, probes %d", plan.Files, f.probes)
+	}
+	plan.Manual = true
+	text := plan.String()
+	if !strings.Contains(text, "then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it); "+
+		"restarting it stops every sandbox on it\n") || strings.Contains(text, "systemctl") {
+		t.Fatalf("plan:\n%s", text)
+	}
+	// The restart of a MicroVM gateway it does not make, DefenseClaw
+	// cannot flush first: the plan says to stop its sandboxes, which
+	// flushes them (fu2 review 5). A switch from docker stops docker
+	// sandboxes, which keep what they wrote.
+	files := []*openshell.FileChange{{Path: "/cfg/gateway.toml", Summary: []string{"sandbox_uid = 501"}}}
+	for _, tc := range []struct {
+		from, to openshell.ComputeDriver
+		want     string
+	}{
+		{openshell.DriverVM, openshell.DriverVM, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: " +
+			"first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME`, which flushes their disks, or what they wrote since their last sync is lost\n"},
+		{openshell.DriverDocker, openshell.DriverVM, "on the vm compute driver (DefenseClaw cannot restart it), which stops every sandbox on it; " +
+			"sandboxes made on the docker driver cannot start again"},
+	} {
+		p := &openshell.GatewayPlan{Files: files, Manual: true, ComputeDriver: tc.to, FromDriver: tc.from}
+		if text := p.String(); !strings.Contains(text, tc.want) || tc.from == openshell.DriverDocker && strings.Contains(text, "flushes") {
+			t.Fatalf("%s to %s plan:\n%s", tc.from, tc.to, text)
+		}
+	}
+	res, err := f.cfg.Write(context.Background(), plan)
+	if err != nil || res.Restarted || len(res.Files) != 2 || f.restarts() != 0 || f.flushes != 0 || f.probes != 2 {
+		t.Fatalf("Write = %+v, %v; restarts %d, flushes %d, probes %d", res, err, f.restarts(), f.flushes, f.probes)
+	}
+	if !strings.Contains(f.read(t, "gateway.toml"), "enable_bind_mounts = true") || f.read(t, "gateway.env") != "OPENSHELL_TELEMETRY_ENABLED=false\n" {
+		t.Fatalf("gateway.toml:\n%s\ngateway.env:\n%s", f.read(t, "gateway.toml"), f.read(t, "gateway.env"))
+	}
+	if st, err := f.cfg.Read(); err != nil || !st.RestartPendingSince.IsZero() {
+		t.Fatalf("Write left a pending-restart mark: %+v, %v", st, err)
+	}
+	// Bind mounts on a gateway others can reach are refused before anything is written.
+	f.write(t, "gateway.toml", operatorTOML)
+	exposed := f.plan(t, bindMounts)
+	f.probe = func() error { return openshell.ErrGatewayExposed }
+	if _, err := f.cfg.Write(context.Background(), exposed); !errors.Is(err, openshell.ErrBindMountsRefused) || f.read(t, "gateway.toml") != operatorTOML {
+		t.Fatalf("Write on an exposed gateway = %v", err)
+	}
+	if err := f.cfg.Rollback(context.Background(), res); !errors.Is(err, openshell.ErrNoGatewayService) || f.restarts() != 0 || f.flushes != 0 {
+		t.Fatalf("Rollback = %v; restarts %d, flushes %d", err, f.restarts(), f.flushes)
+	}
+	if f.read(t, "gateway.toml") != operatorTOML {
+		t.Fatalf("gateway.toml not restored:\n%s", f.read(t, "gateway.toml"))
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "gateway.env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created gateway.env not removed: %v", err)
+	}
+}
+
+// TestGatewayConfigPreflightsWithTheGatewayNextToTheCLI: an OpenShell run by
+// hand from a prefix that is not on PATH has no openshell-gateway there, and
+// Write's preflight failed to run the bare name. The gateway next to the
+// OpenShell CLI preflights instead, and the one on PATH still comes first.
+func TestGatewayConfigPreflightsWithTheGatewayNextToTheCLI(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "prefix", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gateway := filepath.Join(bin, "openshell-gateway")
+	for _, name := range []string{"openshell", "openshell-gateway"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newGatewayFixture(t)
+	f.cfg.CLI = "openshell"
+	f.cfg.LookPath = func(name string) (string, error) {
+		if name == "openshell" {
+			return filepath.Join(bin, "openshell"), nil
+		}
+		return "", exec.ErrNotFound
+	}
+	f.runner.On(gateway+" config preflight", "", nil)
+	f.write(t, "gateway.toml", operatorTOML)
+	plan := f.plan(t, bindMounts)
+	if _, err := f.apply(plan); err != nil || !f.runner.Called(gateway+" config preflight") {
+		t.Fatalf("apply = %v; calls %v", err, f.runner.Calls())
+	}
+
+	onPath := newGatewayFixture(t)
+	onPath.cfg.LookPath = func(name string) (string, error) { return filepath.Join(bin, name), nil }
+	onPath.write(t, "gateway.toml", operatorTOML)
+	if _, err := onPath.apply(onPath.plan(t, bindMounts)); err != nil || onPath.runner.Called(gateway+" config preflight") {
+		t.Fatalf("with the gateway on PATH: %v; calls %v", err, onPath.runner.Calls())
+	}
+}
+
+// TestGatewayConfigTrustsTheProbeWithoutAServiceEnvironment (fu2 review
+// 3): on Linux, a private gateway started by hand with
+// OPENSHELL_SERVER_PORT=8080 and registered at :8080 was refused bind
+// mounts ("…but the openshell-gateway service listens on port 17670"): with
+// no unit, its port is in an environment DefenseClaw cannot read, and the
+// default was compared. Without a service environment the registration and
+// the client-auth probe of the gateway it reaches decide; a gateway.toml
+// that opens the gateway to others is still refused.
+func TestGatewayConfigTrustsTheProbeWithoutAServiceEnvironment(t *testing.T) {
+	setup := func(t *testing.T, toml string) *gatewayFixture {
+		f := newGatewayFixture(t)
+		f.unit = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n"
+		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "https://127.0.0.1:8080",
+			"is_remote": false, "gateway_port": 8080, "auth_mode": "mtls"}, nil)
+		f.write(t, "gateway.toml", toml)
+		return f
+	}
+	f := setup(t, operatorTOML)
+	plan := f.plan(t, bindMounts)
+	if f.probes != 1 || !plan.BindMounts {
+		t.Fatalf("plan %+v, probes %d", plan, f.probes)
+	}
+	plan.Manual = true
+	if _, err := f.cfg.Write(context.Background(), plan); err != nil || !strings.Contains(f.read(t, "gateway.toml"), "enable_bind_mounts = true") {
+		t.Fatalf("Write = %v\n%s", err, f.read(t, "gateway.toml"))
+	}
+	// Listening beyond this machine is refused, whatever the port.
+	exposed := strings.Replace(operatorTOML, "[openshell.drivers.docker]", "[openshell.gateway]\nbind_address = \"0.0.0.0:8080\"\n\n[openshell.drivers.docker]", 1)
+	f = setup(t, exposed)
+	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, openshell.ErrGatewayExposed) {
+		t.Fatalf("Plan on a gateway listening beyond loopback = %v", err)
+	}
+	// The probe still refuses a gateway that lets in a client without the certificate.
+	f = setup(t, operatorTOML)
+	f.probe = func() error { return openshell.ErrGatewayExposed }
+	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrBindMountsRefused) {
+		t.Fatalf("Plan on an exposed gateway = %v", err)
+	}
+	// Homebrew's service has an environment DefenseClaw cannot read either,
+	// but it is the gateway DefenseClaw edits: a registration on another
+	// port reaches another gateway, which the probe would judge instead.
+	f = setup(t, operatorTOML)
+	f.cfg.GOOS = "darwin"
+	f.cfg.BrewFormulaInstalled = func() bool { return true }
+	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrGatewayMismatch) || f.probes != 0 {
+		t.Fatalf("Plan on Homebrew's gateway with a registration on another port = %v (probes %d)", err, f.probes)
+	}
 }
 
 // TestGatewayConfigRecordsPendingRestart covers a restart that never

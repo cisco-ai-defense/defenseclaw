@@ -351,43 +351,263 @@ def test_the_install_hint_says_how_openshell_is_installed(os_name: str, says: st
         assert says in hint and never not in hint, hint
 
 
-@pytest.mark.parametrize("service_status", ["warn", "fail"])
-def test_an_openshell_outside_the_homebrew_formula_is_refused_as_setup_refuses_it(service_status: str) -> None:
-    # sandboxcli/setup.go refuses it before it reads --install-openshell.
-    service = {"id": "gateway-service", "status": service_status, "detail": "runs under launchd (com.example.gw)"}
-    report = {
+# The doctor's Gateway fix for the gateway of an OpenShell installed another
+# way that does not answer (openshell doctor.go unmanagedFix).
+UNMANAGED_DOWN_FIX = {
+    "summary": "start that OpenShell's gateway yourself, the way you started it before. DefenseClaw starts and restarts "
+    "the gateway only through Homebrew's nvidia/openshell/openshell service, and the OpenShell 0.1.1 at "
+    "/Users/dev/openshell-direct/prefix/bin/openshell was installed another way",
+    "command": "defenseclaw sandbox setup --install-openshell",
+}
+
+
+def _unmanaged(manager: str, cli: str, service_status: str, service_detail: str, gateway: str) -> dict:
+    """READY on an OpenShell whose gateway no gateway service runs; gateway is its Gateway check's status."""
+    version = {"id": "gateway-version", "status": gateway, "detail": "0.1.1 healthy at https://127.0.0.1:17670"}
+    if gateway == "fail":
+        version = {**version, "detail": "the gateway is not answering: connection refused", "fix": UNMANAGED_DOWN_FIX}
+    unit = "openshell-gateway" if manager == "systemd" else "nvidia/openshell/openshell"
+    return {
         **READY,
-        "checks": [*READY["checks"][:3], service],
-        "service": {"manager": "brew", "unit": "nvidia/openshell/openshell", "installed": False},
+        "cli_path": cli,
+        "checks": [
+            *READY["checks"][:2],
+            {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": f"0.1.1 at {cli}"},
+            {"id": "gateway-service", "status": service_status, "detail": service_detail},
+            version,
+        ],
+        "service": {"manager": manager, "unit": unit, "installed": False},
     }
-    check = sandbox_machine_check(report)
-    assert check.openshell_refused and not check.openshell_needed
-    assert "✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula" in check.summary.split("\n")
-    install = next(
-        f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "Install OpenShell"
+
+
+def test_an_openshell_outside_the_homebrew_formula_is_used_while_its_gateway_answers() -> None:
+    # RT U1: the doctor said "✓ ready for sandboxes" on a Mac whose gateway
+    # was started by hand, while setup refused that OpenShell up front
+    # ("✗ … is not from Homebrew's nvidia/openshell formula"). Setup uses the
+    # gateway that answers (sandboxcli/setup.go), and the wizard says what
+    # DefenseClaw will not do with it.
+    cli = "/Users/dev/openshell-direct/prefix/bin/openshell"
+    by_hand = (
+        "…/openshell-gateway (process 4666) was started by hand, not Homebrew's nvidia/openshell/openshell service"
     )
-    assert install.value == "no" and "stop its gateway and remove it" in install.hint, install.hint
-    # The formula's own service, stopped, is still an install.
-    formula = {**report, "service": {"manager": "brew", "installed": True}}
-    assert sandbox_machine_check(formula).openshell_refused is False
+    check = sandbox_machine_check(_unmanaged("brew", cli, "warn", by_hand, "pass"))
+    assert check.openshell_unmanaged and not check.openshell_needed and check.openshell_attention == ""
+    assert "⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula" in check.summary.split("\n")
+    install = _install_field(check, "darwin")
+    assert install.value == "no"
+    assert install.hint.startswith(
+        f"OpenShell 0.1.1 at {cli} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
+        "whose service DefenseClaw starts and restarts the gateway through: setup uses its gateway as it runs, but "
+        "DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, the way you started it; "
+        "nothing to install."
+    ), install.hint
+    # Setup goes on to e2fsprogs; the MicroVM switch is the user's restart.
+    assert "e2fsprogs" in install.hint
+    micro = next(f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "MicroVMs")
+    assert "you restart the gateway yourself" in micro.hint and "restarts it once" not in micro.hint
+
+    # With its gateway down setup stops where it would have to start it,
+    # with the doctor's fix, before e2fsprogs.
+    down = sandbox_machine_check(_unmanaged("brew", cli, "fail", "nvidia/openshell/openshell is not installed", "fail"))
+    assert down.openshell_unmanaged and not down.openshell_needed and down.openshell_attention == "gateway-version"
+    assert down.summary.split("\n")[-2:] == [
+        "⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula",
+        "✗ OpenShell gateway not running",
+    ]
+    install = _install_field(down, "darwin")
+    assert install.value == "no" and install.hint == (
+        f"the OpenShell gateway needs attention: {UNMANAGED_DOWN_FIX['summary']} "
+        f"(`{UNMANAGED_DOWN_FIX['command']}`); installing OpenShell would change nothing."
+    )
+    # The formula's own service, stopped, is started through it.
+    formula = {**_unmanaged("brew", cli, "fail", "stopped", "fail"), "service": {"manager": "brew", "installed": True}}
+    assert sandbox_machine_check(formula).openshell_unmanaged is False
+
+
+@pytest.mark.parametrize("gateway", ["pass", "fail"])
+def test_an_openshell_without_the_linux_user_unit_is_used_while_its_gateway_answers(gateway: str) -> None:
+    # A supported CLI from the release binaries, no openshell-gateway unit:
+    # the wizard preset "Install OpenShell" to yes, whose
+    # `setup --install-openshell` installed nothing; then setup refused it
+    # up front even with its gateway run by hand. Setup uses a gateway that
+    # answers and writes a gateway change for the user to restart it on;
+    # with none answering it stops on the doctor's fix.
+    cli = "/home/dev/.local/bin/openshell"
+    service = "openshell-gateway is not installed" + (
+        "; the gateway that answers runs another way" if gateway == "pass" else ""
+    )
+    report = _unmanaged("systemd", cli, "warn" if gateway == "pass" else "fail", service, gateway)
+    check = sandbox_machine_check(report)
+    assert check.openshell_unmanaged and not check.openshell_needed
+    lines = check.summary.split("\n")
+    assert "⚠ OpenShell 0.1.1 has no openshell-gateway user service" in lines
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.apply_sandbox_machine_check(check)
+    install = _row(model, "Install OpenShell")
+    assert install.value == "no", install
+    assert "--install-openshell" not in model.wizard_command_preview()
+    if gateway == "pass":
+        assert check.openshell_attention == "" and "✗ OpenShell gateway not running" not in lines
+        assert install.hint == (
+            f"OpenShell 0.1.1 at {cli} was installed another way, without the openshell-gateway user service "
+            "DefenseClaw starts and restarts the gateway through on Linux: setup uses its gateway as it runs, but "
+            "DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, the way you "
+            "started it; nothing to install."
+        )
+        # The mounts and telemetry changes are written, not restarted.
+        for label in ("Mount Project Folder", "Disable OpenShell Telemetry"):
+            hint = _row(model, label).hint
+            assert "you restart it yourself, the way you started it" in hint and "doctor --fix" not in hint, hint
+    else:
+        assert check.openshell_attention == "gateway-version" and "✗ OpenShell gateway not running" in lines
+        assert install.hint.startswith("the OpenShell gateway needs attention: start that OpenShell's gateway yourself")
+    # The unit installed and stopped is started through it; without a CLI
+    # NVIDIA's installer runs and sets the unit up.
+    unit = {**report, "service": {"manager": "systemd", "unit": "openshell-gateway", "installed": True}}
+    assert sandbox_machine_check(unit).openshell_unmanaged is False
+    assert sandbox_machine_check({**NO_OPENSHELL, "service": report["service"]}).openshell_needed
 
 
 def test_a_warning_gateway_service_is_shown() -> None:
     service = {"id": "gateway-service", "status": "warn", "detail": "runs but does not start at login"}
     check = sandbox_machine_check({**READY, "checks": [*READY["checks"][:3], service]})
     assert "⚠ OpenShell 0.1.1: runs but does not start at login" in check.summary.split("\n")
-    assert not check.openshell_needed and not check.openshell_refused
+    assert not check.openshell_needed and not check.openshell_unmanaged
 
 
-def test_a_stopped_gateway_or_a_failed_doctor() -> None:
-    service = {"id": "gateway-service", "status": "fail", "detail": "inactive"}
-    stopped = {**READY, "checks": [*READY["checks"][:3], service]}
-    check = sandbox_machine_check(stopped)
-    assert check.openshell_needed and "✗ OpenShell gateway not running" in check.summary
+START = "systemctl --user enable --now openshell-gateway"
+
+
+def _stopped(**report) -> dict:
+    """READY with its openshell-gateway unit installed but stopped."""
+    service = {
+        "id": "gateway-service",
+        "status": "fail",
+        "detail": "openshell-gateway is inactive",
+        "fix": {"summary": "start the gateway and enable it at login", "command": START, "automatic": True},
+    }
+    return {
+        **READY,
+        "service": {"manager": "systemd", "unit": "openshell-gateway", "installed": True},
+        "checks": [*READY["checks"][:3], service],
+        **report,
+    }
+
+
+@pytest.mark.parametrize("openshell_install", [False, None])
+def test_a_stopped_gateway_is_not_an_install(openshell_install) -> None:
+    # A supported CLI whose unit is stopped: the wizard preset "Install
+    # OpenShell" to yes, whose install found the CLI and installed nothing.
+    # Setup offers it only for a CLI missing or one it upgrades
+    # (sandboxcli/setup.go); the hint is the doctor's fix. An older doctor
+    # reports no openshell_install.
+    report = _stopped() if openshell_install is None else _stopped(openshell_install=openshell_install)
+    check = sandbox_machine_check(report)
+    assert not check.openshell_needed and not check.openshell_unmanaged
+    assert check.openshell_attention == "gateway-service"
+    assert "✗ OpenShell gateway not running" in check.summary.split("\n")
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.apply_sandbox_machine_check(check)
+    install = _row(model, "Install OpenShell")
+    assert install.value == "no"
+    assert install.hint == (
+        f"the OpenShell gateway needs attention: start the gateway and enable it at login (`{START}`); "
+        "installing OpenShell would change nothing."
+    )
+    assert "--install-openshell" not in model.wizard_command_preview()
+
+
+def test_a_stopped_service_while_a_gateway_answers() -> None:
+    # Something else runs the gateway that answers: it is the service that
+    # is stopped, not the gateway.
+    check = sandbox_machine_check(_stopped(openshell_install=False, gateway_version="0.1.1"))
+    assert "✗ OpenShell gateway service stopped" in check.summary.split("\n")
+    assert "✗ OpenShell gateway not running" not in check.summary.split("\n")
+
+
+def test_the_install_follows_the_doctors_openshell_install() -> None:
+    # The Go doctor says when setup's install step runs NVIDIA's installer
+    # (DoctorReport.OpenShellInstallNeeded): a CLI newer than supported is
+    # not one, whose install would refuse to downgrade it.
+    newer = {
+        "id": "openshell-cli",
+        "status": "fail",
+        "detail": "OpenShell 0.2.0 is not supported; DefenseClaw drives >=0.1.1 <0.2.0",
+        "fix": {
+            "summary": "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, "
+            "then install OpenShell 0.1.1",
+            "command": "defenseclaw sandbox setup --install-openshell",
+        },
+    }
+    report = {**READY, "cli_version": "0.2.0", "openshell_install": False, "checks": [READY["checks"][0], newer]}
+    check = sandbox_machine_check(report)
+    assert not check.openshell_needed and check.openshell_attention == "openshell-cli"
+    install = next(
+        f for f in sandbox_wizard_fields({}, machine=check, os_name="linux") if f.label == "Install OpenShell"
+    )
+    assert install.value == "no" and install.hint.startswith(
+        "OpenShell needs attention: DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0"
+    )
+    assert sandbox_machine_check({**NO_OPENSHELL, "openshell_install": True}).openshell_needed
+
+
+def test_a_failed_doctor() -> None:
     failed = sandbox_machine_check(None, "'defenseclaw-gateway sandbox doctor' did not finish within 90s")
     assert failed.summary.startswith("not checked: ") and failed.error
     install = next(f for f in sandbox_wizard_fields({}, machine=failed) if f.label == "Install OpenShell")
     assert install.value == "no" and install.hint.startswith("Could not check this machine")
+
+
+def test_a_gateway_of_another_release_than_the_cli_is_not_an_install() -> None:
+    # A supported CLI and a gateway answering 0.0.40: the wizard preset
+    # "Install OpenShell" to yes, whose install found the CLI and installed
+    # nothing. Setup no longer offers it (sandboxcli/setup.go); the hint is
+    # the doctor's fix.
+    restart = (
+        "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing "
+        "OpenShell would change nothing: restart the openshell-gateway user service so it runs the gateway "
+        "installed with the CLI"
+    )
+    version = {
+        "id": "gateway-version",
+        "status": "fail",
+        "detail": "OpenShell 0.0.40 is older than 0.1.1; upgrade it in place to 0.1.1",
+        "fix": {"summary": restart, "command": "systemctl --user restart openshell-gateway", "automatic": True},
+    }
+    check = sandbox_machine_check({**READY, "gateway_version": "0.0.40", "checks": [*READY["checks"], version]})
+    assert not check.openshell_needed and not check.openshell_unmanaged
+    assert "✗ OpenShell 0.1.1, but the gateway runs 0.0.40" in check.summary.split("\n")
+    install = next(
+        f for f in sandbox_wizard_fields({}, machine=check, os_name="linux") if f.label == "Install OpenShell"
+    )
+    assert install.value == "no"
+    hint = (
+        f"the OpenShell gateway needs attention: {restart} "
+        "(`systemctl --user restart openshell-gateway`); installing OpenShell would change nothing."
+    )
+    assert install.hint == hint
+
+    # On a Mac whose MicroVM driver also fails, the gateway's fix stays the
+    # hint, with the install off: setup stops on it before e2fsprogs. The
+    # driver's failure had turned the install on and hidden the fix.
+    mac = {
+        **MAC_MICROVM,
+        "gateway_version": "0.0.40",
+        "checks": [
+            *MAC_MICROVM["checks"],
+            {**version, "fix": {**version["fix"], "command": "brew services restart nvidia/openshell/openshell"}},
+        ],
+    }
+    check = sandbox_machine_check(mac)
+    assert not check.openshell_needed and check.openshell_attention == "gateway-version"
+    assert "✗ MicroVM driver: e2fsprogs is not installed" in check.summary.split("\n")
+    install = _install_field(check, "darwin")
+    assert install.value == "no"
+    assert install.hint == hint.replace(
+        "systemctl --user restart openshell-gateway", "brew services restart nvidia/openshell/openshell"
+    )
 
 
 def test_the_answers_are_the_consent() -> None:
@@ -517,11 +737,21 @@ def _lines(report) -> list[str]:
 def test_a_microvm_gateway_skips_bind_mounts_and_checks_its_driver() -> None:
     check = sandbox_machine_check(MAC_MICROVM)
     assert check.summary.split("\n") == MAC_MICROVM_LINES
-    # Setup installs e2fsprogs with the OpenShell install's consent.
-    assert check.openshell_needed is True
+    # With OpenShell installed the hint is the doctor's fix, and a yes is
+    # what has setup install e2fsprogs: the only way from the wizard.
+    assert check.openshell_needed is False and check.openshell_attention == "vm-driver"
     assert check.openshell_detail == "the MicroVM driver needs attention: e2fsprogs is not installed"
     install = _install_field(check, "darwin")
-    assert install.value == "yes" and "brew install e2fsprogs" in install.hint
+    assert install.value == "no"
+    assert install.hint == (
+        "the MicroVM driver needs attention: e2fsprogs is not installed; OpenShell is installed, and yes lets setup "
+        "install e2fsprogs (brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
+    )
+    fix = {"summary": "install what the MicroVM driver needs with Homebrew", "command": "brew install e2fsprogs"}
+    fixed = {**MAC_MICROVM, "checks": [*MAC_MICROVM["checks"][:5], {**MAC_MICROVM["checks"][5], "fix": fix}]}
+    assert sandbox_machine_check(fixed).openshell_detail == (
+        "the MicroVM driver needs attention: install what the MicroVM driver needs with Homebrew (`brew install e2fsprogs`)"
+    )
 
     # The driver the files configure counts before the gateway runs it.
     assert _lines({**MAC_MICROVM, "driver": "", "configured_driver": "vm"}) == MAC_MICROVM_LINES
@@ -536,8 +766,8 @@ def test_a_microvm_gateway_skips_bind_mounts_and_checks_its_driver() -> None:
 
 def test_a_docker_desktop_mac_is_checked_for_the_switch_to_microvms() -> None:
     # Setup switches such a Mac's gateway to MicroVMs by default: the wizard
-    # shows the MicroVM driver's needs, installs them with OpenShell's
-    # consent, and asks about no bind mounts (sandboxcli/setup.go).
+    # shows the MicroVM driver's needs, with the install off (OpenShell is
+    # installed), and asks about no bind mounts (sandboxcli/setup.go).
     check = sandbox_machine_check(MAC_DOCKER_DESKTOP)
     assert check.summary.split("\n") == [
         "✓ Docker 29.1.5",
@@ -545,9 +775,9 @@ def test_a_docker_desktop_mac_is_checked_for_the_switch_to_microvms() -> None:
         "✓ OpenShell 0.1.1",
         "✗ MicroVM driver: " + MAC_DOCKER_DESKTOP["checks"][3]["detail"],
     ]
-    assert check.openshell_needed is True
+    assert check.openshell_needed is False and check.openshell_attention == "vm-driver"
     assert check.openshell_detail.startswith("the MicroVM driver needs attention: e2fsprogs is not installed")
-    assert _install_field(check, "darwin").value == "yes"
+    assert _install_field(check, "darwin").value == "no"
     # A Docker VM with Landlock (Colima) keeps the docker driver and its
     # bind mounts; so does Linux.
     colima = {
@@ -667,10 +897,50 @@ def test_credential_summary_skips_a_symlinked_auth_json(tmp_path: Path) -> None:
     assert _codex_summary(tmp_path, None) == _NO_CODEX
 
 
-def test_credential_summary_does_not_count_a_bedrock_key(tmp_path: Path) -> None:
-    # `sandbox run` shares a Bedrock key only with --llm bedrock.
+def test_credential_summary_counts_a_bedrock_key_last(tmp_path: Path) -> None:
+    # `sandbox run --llm auto` shares a Bedrock key when no other is set (#955).
     summary = _sandbox_credential_summary({"AWS_BEARER_TOKEN_BEDROCK": "bedrock-secret"}, str(tmp_path))
-    assert summary.count("none found") == 2 and "AWS_BEARER_TOKEN_BEDROCK" not in summary
+    assert summary == "Claude Code: AWS_BEARER_TOKEN_BEDROCK found · Codex: AWS_BEARER_TOKEN_BEDROCK found"
+    assert "bedrock-secret" not in summary
+    both = _sandbox_credential_summary(
+        {"AWS_BEARER_TOKEN_BEDROCK": "b", "ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}, str(tmp_path)
+    )
+    assert both == "Claude Code: ANTHROPIC_API_KEY found · Codex: OPENAI_API_KEY found"
+
+
+def test_credential_summary_follows_openshell_llm(tmp_path: Path) -> None:
+    # Runs take openshell.llm (the wrappers, the TUI and the app pass no --llm),
+    # as sandboxcli.runLLM does, and so does Go `sandbox setup`.
+    keys = {"AWS_BEARER_TOKEN_BEDROCK": "b", "ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm="bedrock") == (
+        "Claude Code: AWS_BEARER_TOKEN_BEDROCK found · Codex: AWS_BEARER_TOKEN_BEDROCK found"
+    )
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm="none") == (
+        "Claude Code: none shared (openshell.llm none; log in inside the sandbox)"
+        " · Codex: none shared (openshell.llm none; log in inside the sandbox)"
+    )
+    # A provider without its key refuses the run; one the harness has no
+    # credential for takes auto.
+    missing = _sandbox_credential_summary({"ANTHROPIC_API_KEY": "a"}, str(tmp_path), llm="bedrock")
+    assert missing == (
+        "Claude Code: none found (openshell.llm bedrock: runs are refused until you set AWS_BEARER_TOKEN_BEDROCK)"
+        " · Codex: none found (openshell.llm bedrock: runs are refused until you set AWS_BEARER_TOKEN_BEDROCK)"
+    )
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm="claude-oauth") == (
+        "Claude Code: none found (openshell.llm claude-oauth: runs are refused until you set CLAUDE_CODE_OAUTH_TOKEN)"
+        " · Codex: OPENAI_API_KEY found"
+    )
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm=" AUTO ") == (
+        "Claude Code: ANTHROPIC_API_KEY found · Codex: OPENAI_API_KEY found"
+    )
+
+
+def test_wizard_credentials_row_reads_openshell_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    fields = sandbox_wizard_fields({"openshell": {"llm": "none"}})
+    row = next(f for f in fields if f.label == "Credentials")
+    assert "none shared (openshell.llm none" in row.hint
+    assert "ANTHROPIC_API_KEY" not in row.hint
 
 
 # --- the config editor ----------------------------------------------------------
@@ -686,11 +956,13 @@ def test_admin_constraints_make_their_keys_read_only_with_the_reason() -> None:
                 "allow_mount": False,
                 "allow_host_ports": False,
                 "allow_unblock": False,
+                "block_large_uploads": True,
                 "locked": ["resources", "mcp.import"],
             },
         }
     }
     locks = openshell_admin_locks(cfg)
+    assert locks["openshell.egress.block_large_uploads"] == "your organization blocks large uploads to first-seen hosts"
     assert locks["openshell.pack"] == "your organization requires the balanced pack"
     assert locks["openshell.yolo"] == "skip-permissions mode is not allowed"
     assert locks["openshell.workdir.mode"] == "your organization requires copy mode"
@@ -713,9 +985,11 @@ def test_admin_constraints_make_their_keys_read_only_with_the_reason() -> None:
     assert _field({**cfg, "openshell": {**cfg["openshell"], "yolo": False}}, "openshell.yolo").value == (
         "false (locked)"
     )
+    assert _field(cfg, "openshell.egress.block_large_uploads").value == "(unset) → on by policy"
     assert _field(cfg, "openshell.profile").interactive is True
     policy = _field(cfg, "openshell.admin")
     assert "required_pack=balanced" in policy.value and "allow_unblock=false" in policy.value
+    assert "block_large_uploads=true" in policy.value
 
 
 def test_a_locked_row_says_why_when_focused_or_edited() -> None:
@@ -808,6 +1082,12 @@ def test_edits_are_written_with_the_go_types() -> None:
         ("openshell.harnesses", "string", "not a name", False),
         ("openshell.harnesses", "string", "-leading", False),
         ("openshell.workdir.git_depth", "int", "-1", False),
+        ("openshell.workdir.undo_ignored.max_mb", "int", "500", True),
+        ("openshell.workdir.undo_ignored.max_mb", "int", "1048577", False),
+        ("openshell.workdir.undo_ignored.dirs", "string", "node_modules, .venv, vendor", True),
+        ("openshell.workdir.undo_ignored.dirs", "string", "web/node_modules", False),
+        ("openshell.workdir.undo_ignored.dirs", "string", ".git", False),
+        ("openshell.workdir.undo_ignored.dirs", "string", "..", False),
     ],
 )
 def test_openshell_validation(key: str, kind: str, value: str, ok: bool) -> None:
@@ -897,3 +1177,15 @@ async def test_long_hints_wrap_instead_of_running_off_the_screen(monkeypatch) ->
         assert all(len(line) < width for line in mount.split("\n"))
         table = app.query_one("#panel-table", DataTable)
         assert any(row.height > 1 for row in table.rows.values())
+
+
+def test_credential_summary_says_a_provider_that_does_not_apply_gives_way_to_auto(tmp_path: Path) -> None:
+    # openshell.llm gemini names no credential Claude Code or Codex has, so
+    # both run as auto, which here finds nothing: the summary says why.
+    summary = _sandbox_credential_summary({}, str(tmp_path / "nothing"), llm="gemini")
+    assert summary == (
+        "Claude Code: none found (openshell.llm gemini does not apply to Claude Code, so auto; log in inside the sandbox)"
+        " · Codex: none found (openshell.llm gemini does not apply to Codex, so auto; log in inside the sandbox)"
+    )
+    # auto itself keeps the plain wording.
+    assert _sandbox_credential_summary({}, str(tmp_path / "nothing")).count("(log in inside the sandbox)") == 2

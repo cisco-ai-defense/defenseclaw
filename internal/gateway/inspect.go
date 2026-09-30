@@ -128,6 +128,13 @@ type ToolInspectVerdict struct {
 	// a timed-out request that the connector fails closed cannot be counted as
 	// a fail-open allow decision. It is never serialized.
 	managedAIDFailOpenReason string
+	// laneVerdict reports that a scan lane (Cisco AI Defense, the LLM
+	// judge) returned a verdict of its own that is not a plain allow. A
+	// lane may block or raise the severity without naming a rule, so the
+	// rule IDs and findings alone cannot show that it took part; the
+	// sandbox unblock lift (liftUnblockedDestinations) must keep such a
+	// verdict. Never serialized.
+	laneVerdict bool
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -444,6 +451,9 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 	}
 	if local == nil {
 		local = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	}
+	if rank(aid.Action) > 0 || sevRank(aid.Severity) > 0 || len(aid.Findings) > 0 {
+		local.laneVerdict = true
 	}
 	// AID-only escalation path: escalate the action when AID is
 	// stricter, escalate the severity when AID is stricter, append

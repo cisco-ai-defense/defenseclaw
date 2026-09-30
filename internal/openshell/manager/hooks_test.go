@@ -22,12 +22,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
@@ -81,12 +83,13 @@ func TestToolCallHooksClassify(t *testing.T) {
 }
 
 // Every sandboxed harness is listed, and each pairs by the identity its
-// hooks carry: a per-call ID, the call's content (Kiro CLI sends none), or
-// nothing (harnesses whose post-tool events on a denied call are unmeasured).
+// hooks carry: a per-call ID, the call's content (Kiro CLI, Copilot CLI and
+// Devin CLI send none the gateway reads), or nothing (harnesses whose
+// post-tool events on a denied call are unmeasured).
 func TestToolCallHooksKeying(t *testing.T) {
 	want := map[string]toolCallKeying{
 		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID, "kiro": keyByContent,
-		"copilot": keyNone, "devin": keyNone, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
+		"copilot": keyByContent, "devin": keyByContent, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
 	}
 	if len(toolCallHooksByConnector) != len(want) {
 		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
@@ -312,7 +315,7 @@ func (e *harnessEnv) decider(sandbox, tool string) func(event, id, action string
 func TestHookTamperPerHarness(t *testing.T) {
 	for _, tc := range []struct {
 		connector, pre, post, status string
-		byContent                    bool // no per-call ID (Kiro CLI)
+		byContent                    bool // no per-call ID (Kiro CLI, Copilot CLI, Devin CLI)
 		paired                       bool
 	}{
 		{connector: "claudecode", pre: "PreToolUse", post: "PostToolUse", paired: true},
@@ -321,8 +324,8 @@ func TestHookTamperPerHarness(t *testing.T) {
 		{connector: "opencode", pre: "tool.execute.before", post: "tool.execute.after", paired: true},
 		{connector: "amp", pre: "tool.call", post: "tool.result", status: "done", paired: true},
 		{connector: "kiro", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
-		{connector: "copilot", pre: "preToolUse", post: "postToolUse"},
-		{connector: "devin", pre: "PreToolUse", post: "PostToolUse"},
+		{connector: "copilot", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
+		{connector: "devin", pre: "PreToolUse", post: "PostToolUse", byContent: true, paired: true},
 		{connector: "hermes", pre: "pre_tool_call", post: "post_tool_call"},
 		{connector: "openhands", pre: "PreToolUse", post: "PostToolUse"},
 		{connector: "antigravity", pre: "PreToolUse", post: "PostToolUse"},
@@ -392,6 +395,53 @@ func TestHookTamperPerHarness(t *testing.T) {
 				e.m.ObserveHookDecision(refused)
 				if len(hookTamperFindings(e)) != 2 {
 					t.Fatalf("a cancelled tool.result raised %+v", hookTamperFindings(e)[2:])
+				}
+			}
+			if tc.connector == "copilot" {
+				// A postToolUseFailure closes even a denied call without
+				// proving it ran, and identical calls pair one by one.
+				e.m.ObserveHookDecision(d(tc.pre, "block", "failed"))
+				e.m.ObserveHookDecision(d("postToolUseFailure", "allow", "failed"))
+				for _, dec := range []HookDecision{d(tc.pre, "allow", "twice"), d(tc.pre, "allow", "twice"),
+					d(tc.post, "allow", "twice"), d(tc.post, "allow", "twice")} {
+					e.m.ObserveHookDecision(dec)
+				}
+				if len(hookTamperFindings(e)) != 2 {
+					t.Fatalf("a postToolUseFailure or an identical call pair raised %+v", hookTamperFindings(e)[2:])
+				}
+			}
+			if tc.connector == "devin" {
+				// As measured on Devin CLI 3000.11.3: a tool that failed
+				// before it ran sends no PostToolUse, so its call stays
+				// open, and an identical call after it pairs; parallel
+				// identical calls pair one by one; a command the user
+				// edits at Devin's permission prompt gets a new PreToolUse
+				// with the edited input, and only that one's PostToolUse
+				// arrives.
+				edited := d(tc.pre, "allow", "edited")
+				edited.ToolInput = json.RawMessage(`{"command":"echo dctamper-edited-by-the-user"}`)
+				editedRan := edited
+				editedRan.Event = tc.post
+				for _, dec := range []HookDecision{d(tc.pre, "allow", "failed"),
+					d(tc.pre, "allow", "failed"), d(tc.post, "allow", "failed"),
+					d(tc.pre, "allow", "twice"), d(tc.pre, "allow", "twice"), d(tc.post, "allow", "twice"), d(tc.post, "allow", "twice"),
+					d(tc.pre, "allow", "edited"), edited, editedRan} {
+					e.m.ObserveHookDecision(dec)
+				}
+				if len(hookTamperFindings(e)) != 2 {
+					t.Fatalf("a failed, identical or edited Devin call raised %+v", hookTamperFindings(e)[2:])
+				}
+				// An edited command whose PreToolUse DefenseClaw denied,
+				// and that ran anyway, is still reported.
+				denied := d(tc.pre, "block", "edited-denied")
+				denied.ToolInput = json.RawMessage(`{"command":"echo dctamper-edited-and-denied"}`)
+				deniedRan := denied
+				deniedRan.Event, deniedRan.Action = tc.post, "allow"
+				for _, dec := range []HookDecision{d(tc.pre, "allow", "edited-denied"), denied, deniedRan} {
+					e.m.ObserveHookDecision(dec)
+				}
+				if got := hookTamperFindings(e); len(got) != 3 || !strings.Contains(got[2].Title, "denied ran anyway") {
+					t.Fatalf("an edited Devin call DefenseClaw denied that ran anyway raised %+v", got[2:])
 				}
 			}
 		})
@@ -533,6 +583,100 @@ func TestHookCoverage(t *testing.T) {
 	if len(findings) != 1 || findings[0].Severity != "HIGH" || findings[0].Tool != "Bash" ||
 		!strings.Contains(findings[0].Message, "Bash: Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT") {
 		t.Fatalf("finding events = %+v", findings)
+	}
+}
+
+// Every verdict counts under its hook event, the harness's name for it, tool
+// events or not (#956). The counts live as long as the sandbox's other hook
+// counters: a stop and start keep them, a new sandbox of the name and a
+// daemon restart start over.
+func TestHookEventCounts(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "eventbox"})
+	d := e.decider("eventbox", "Bash")
+	for _, dec := range []HookDecision{d("SessionStart", "", "allow"), d("UserPromptSubmit", "", "allow"),
+		d("PreToolUse", "toolu_1", "allow"), d("PostToolUse", "toolu_1", "allow"), d("PreToolUse", "toolu_2", "block"),
+		d("Stop", "", "allow"), {BindingID: "sb_other", SandboxName: "eventbox", Event: "PreToolUse"}} {
+		e.m.ObserveHookDecision(dec)
+	}
+	want := map[string]int64{"SessionStart": 1, "UserPromptSubmit": 1, "PreToolUse": 2, "PostToolUse": 1, "Stop": 1}
+	if h := e.get("eventbox").Hooks; !maps.Equal(h.Events, want) || h.OtherEvents != 0 || h.ToolCalls != 2 || h.ToolBlocked != 1 {
+		t.Fatalf("hooks = %+v, want events %v", h, want)
+	}
+	e.stopBox("eventbox")
+	e.startBox("eventbox", sandboxapi.StartRequest{})
+	e.m.ObserveHookDecision(e.decider("eventbox", "Bash")("SessionStart", "", "allow"))
+	want["SessionStart"]++
+	if h := e.get("eventbox").Hooks; !maps.Equal(h.Events, want) {
+		t.Fatalf("after a restart of the sandbox: events %v, want %v", h.Events, want)
+	}
+	e.restartDaemon()
+	if h := e.get("eventbox").Hooks; h.Events != nil || h.HookRequests != 0 {
+		t.Fatalf("after a daemon restart: hooks %+v, want no counts", h)
+	}
+	e.m.ObserveHookDecision(e.decider("eventbox", "Bash")("Stop", "", "allow"))
+	e.deleteBox("eventbox", sandboxapi.DeleteRequest{})
+	e.create(sandboxapi.CreateRequest{Name: "eventbox"})
+	if h := e.get("eventbox").Hooks; h.Events != nil {
+		t.Fatalf("a new sandbox of the name has events %v", h.Events)
+	}
+
+	// Another harness's names are its own (OpenCode's plugin events).
+	e.create(sandboxapi.CreateRequest{Name: "eventoc", Project: e.otherProject("eventoc")})
+	oc := e.decider("eventoc", "bash")
+	for _, event := range []string{"session.created", "tool.execute.before", "tool.execute.after", "session.idle"} {
+		dec := oc(event, "call_1", "allow")
+		dec.Connector = "opencode"
+		e.m.ObserveHookDecision(dec)
+	}
+	if h := e.get("eventoc").Hooks; !maps.Equal(h.Events, map[string]int64{
+		"session.created": 1, "tool.execute.before": 1, "tool.execute.after": 1, "session.idle": 1,
+	}) || h.ToolCalls != 1 {
+		t.Fatalf("opencode hooks = %+v", h)
+	}
+}
+
+// The event names come from the workload: they are cut and stripped, a
+// sandbox keeps at most MaxHookEvents of them and counts the rest, and an
+// event without a printable name, as "other events".
+func TestHookEventCountsAreBounded(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "floodbox"})
+	d := e.decider("floodbox", "")
+	e.m.ObserveHookDecision(d("PreToolUse", "", "allow"))
+	e.m.ObserveHookDecision(d(" Pre\x1b[31mTool\u202eUse\n", "", "allow")) // kept without its control characters
+	e.m.ObserveHookDecision(d("\x1b\u202e \t", "", "allow"))
+	e.m.ObserveHookDecision(d(strings.Repeat("e", 200), "", "allow"))
+	for i := range sandboxapi.MaxHookEvents {
+		e.m.ObserveHookDecision(d("junk"+strconv.Itoa(i), "", "allow"))
+	}
+	e.m.ObserveHookDecision(d("PreToolUse", "", "allow")) // a name it keeps still counts
+	h := e.get("floodbox").Hooks
+	if len(h.Events) != sandboxapi.MaxHookEvents || h.Events["Pre[31mToolUse"] != 1 || h.Events["PreToolUse"] != 2 ||
+		h.Events[strings.Repeat("e", maxHookEventName)] != 1 {
+		t.Fatalf("events = %v", h.Events)
+	}
+	// Kept: PreToolUse, the cleaned name, the cut one and all but 3 of the
+	// junk names; those 3 and the unprintable name count as other events.
+	if h.OtherEvents != 4 {
+		t.Fatalf("other events = %d, want 4", h.OtherEvents)
+	}
+	for name := range h.Events {
+		if name != hookLabel(name, maxHookEventName) || len(name) > maxHookEventName {
+			t.Fatalf("event name %q was kept as sent", name)
+		}
+	}
+}
+
+// Every harness's hook contract has fewer events than a sandbox keeps
+// counts for, so a harness's own events never fall into "other events".
+func TestHookEventCapCoversEveryContract(t *testing.T) {
+	for name := range toolCallHooksByConnector {
+		for _, c := range connector.KnownHookContracts(name) {
+			if len(c.Events) >= sandboxapi.MaxHookEvents {
+				t.Errorf("%s contract %s has %d events, MaxHookEvents is %d", name, c.ContractID, len(c.Events), sandboxapi.MaxHookEvents)
+			}
+		}
 	}
 }
 

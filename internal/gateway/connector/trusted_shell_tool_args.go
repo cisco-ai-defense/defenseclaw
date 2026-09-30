@@ -221,6 +221,12 @@ func ShellCommandArgs(connectorName, toolName string, args json.RawMessage) (jso
 	return shellCommandOnly(key, args)
 }
 
+// IsShellTool reports whether toolName is the connector's shell tool, as
+// the tool is named to hooks (the tools ShellCommandArgs reduces).
+func IsShellTool(connectorName, toolName string) bool {
+	return shellCommandKeys[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)] != ""
+}
+
 // CursorShellCommandArgs reduces a Cursor beforeShellExecution payload to
 // its command in the {"command": ...} shape, whatever else it carries (see
 // ShellCommandArgs); CursorTrustedShellArgs refuses one whose cwd is

@@ -92,8 +92,9 @@ type Driver struct {
 	// it boots, relative to the home of the user the gateway runs as; empty
 	// when it prepares nothing. The vm driver turns an image into a MicroVM
 	// root disk there on its first boot (about a minute and about 5 GB),
-	// one per image ID, and never removes it: `sandbox image prune` and
-	// teardown remove the disks of the image IDs they removed.
+	// one per image ID, and never removes it: `sandbox image prune`,
+	// `image rm` and teardown remove the disks of the image IDs they
+	// removed.
 	ImageCache string
 	// HostsFile says the workload's /etc/hosts names localhost: Docker
 	// writes one into every container. OpenShell 0.1.1's vm driver makes a

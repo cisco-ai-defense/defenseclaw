@@ -17,7 +17,11 @@
 package sandboxapi
 
 import (
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -63,6 +67,11 @@ type Status struct {
 	Running          int       `json:"running"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	// StartedAt is when the daemon's sandbox subsystem started. Nothing
+	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
+	// restart: they count from then, so a session that began earlier knows
+	// its counts cover only the time since.
+	StartedAt time.Time `json:"started_at,omitzero"`
 	// DaemonUID is the uid the daemon runs as (unset where there is none):
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.
@@ -214,9 +223,13 @@ type Sandbox struct {
 	TamperTier     string    `json:"tamper_tier,omitempty"`
 	CreatedAt      time.Time `json:"created_at,omitzero"`
 	// StartedAt is the last transition to ready seen by this daemon.
-	StartedAt     time.Time `json:"started_at,omitzero"`
-	UptimeSeconds int64     `json:"uptime_seconds,omitempty"`
-	ExitCode      *int32    `json:"exit_code,omitempty"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	// Session counts the sandbox's sessions: it goes up each time
+	// DefenseClaw sees the sandbox become ready. An accept names the session
+	// whose changes were reviewed (AcceptRequest.Session).
+	Session       int    `json:"session,omitempty"`
+	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
+	ExitCode      *int32 `json:"exit_code,omitempty"`
 	// Launch is what the CLI needs to start the harness in the sandbox.
 	Launch Launch `json:"launch"`
 	// Credentials are the sandbox's --credential bindings (--github-write's
@@ -281,6 +294,15 @@ type HookCoverage struct {
 	HookRequests int64 `json:"hook_requests"`
 	ToolCalls    int64 `json:"tool_calls"`
 	ToolBlocked  int64 `json:"tool_blocked"`
+	// Events counts the hook verdicts per hook event, under the name the
+	// harness sends (PreToolUse, preToolUse, tool.execute.before, ...).
+	// Their sum can be below HookRequests: a post refused before a verdict
+	// (malformed, outside the hook contract) or answered again from a
+	// retried post's first answer has no event. The names come from the
+	// workload, so a sandbox keeps at most MaxHookEvents of them; verdicts
+	// for further names count in OtherEvents.
+	Events      map[string]int64 `json:"events,omitempty"`
+	OtherEvents int64            `json:"other_events,omitempty"`
 	// LastBlocked is the plain reason of the most recent denied tool call
 	// (rule ID, title and what to do instead; never matched content).
 	LastBlocked string `json:"last_blocked,omitempty"`
@@ -318,6 +340,11 @@ type HookCoverage struct {
 	// rather than HooksUnreachableWarning.
 	NoHookYet bool `json:"no_hook_yet,omitempty"`
 }
+
+// MaxHookEvents bounds the hook event names HookCoverage.Events keeps for
+// one sandbox. Every harness's hook contract has fewer events (Claude
+// Code's, the largest, has 29).
+const MaxHookEvents = 48
 
 // Endpoint is an OpenShell EndpointStatus: the last network result of a
 // configured credentialed endpoint (a credential that never bound shows up
@@ -379,6 +406,11 @@ type SnapshotInfo struct {
 	Ref       string    `json:"ref,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	UndoneAt  time.Time `json:"undone_at,omitzero"`
+	// AcceptedAt is when the user kept the changes made on top of this
+	// snapshot (POST /sandboxes/{name}/accept): the next start takes a new
+	// snapshot, so an accepted session is the base of the next one. Zero
+	// while nobody accepted them.
+	AcceptedAt time.Time `json:"accepted_at,omitzero"`
 }
 
 // Violation is a requested setting or action the sandbox policy refused or
@@ -417,14 +449,73 @@ type DeleteResponse struct {
 type StartRequest struct {
 	// NoSnapshot keeps the previous snapshot instead of taking a fresh one
 	// for the new session. Without it a start takes a fresh one only when
-	// nothing would be lost: no snapshot yet, the last one was undone, or
-	// the folder did not change since it; otherwise the snapshot of the
-	// earlier session is kept, so undo still reverts its changes.
+	// nothing would be lost: no snapshot yet, the last one was undone, the
+	// folder did not change since it, or the user accepted the changes on
+	// top of it (POST /sandboxes/{name}/accept); otherwise the snapshot of
+	// the earlier session is kept, so undo still reverts its changes.
 	NoSnapshot bool `json:"no_snapshot,omitempty"`
 	// NewSnapshot takes a fresh snapshot even though the folder still holds
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+}
+
+// AcceptRequest is POST /sandboxes/{name}/accept: the user kept the changes
+// a session made on top of a stopped mounted sandbox's snapshot (the
+// end-of-session "Keep changes?" answered yes, --yes, or on_exit: keep), so
+// the next start takes a new snapshot instead of keeping this one for undo.
+type AcceptRequest struct {
+	// Snapshot is the created_at of the snapshot the changes were reviewed
+	// against: the daemon refuses with 409 conflict when the sandbox's
+	// snapshot is another one by now. Zero accepts the current one.
+	Snapshot time.Time `json:"snapshot_created_at,omitzero"`
+	// Session is the sandbox's Session when the changes were reviewed: the
+	// daemon refuses with 409 conflict when the sandbox was started again
+	// since, which keeps the snapshot with that session's unreviewed
+	// changes on top. Zero skips the check.
+	Session int `json:"session,omitempty"`
+}
+
+// RunState is how a sandbox's latest detached run (`sandbox run --detach`)
+// stands. A kept run log (RunLog.State) is RunExited or RunInterrupted.
+type RunState string
+
+const (
+	// RunNone: the sandbox has no detached run.
+	RunNone RunState = "none"
+	// RunRunning: the run is still going.
+	RunRunning RunState = "running"
+	// RunExited: the run had ended on its own before the stop; RunLog.Exit
+	// is its exit status.
+	RunExited RunState = "exited"
+	// RunInterrupted: the stop ended the run (or the sandbox had stopped
+	// under it before).
+	RunInterrupted RunState = "interrupted"
+)
+
+// MaxRunLogBytes bounds the log of a detached run the daemon keeps at a
+// stop: the end of the run's output.
+const MaxRunLogBytes = 1 << 20
+
+// RunLog is GET /sandboxes/{name}/logs: the log of the sandbox's latest
+// detached run (`sandbox run --detach`), which the daemon keeps on this
+// machine whenever it stops the sandbox (`sandbox stop`, the TUI, the macOS
+// app, undo, a tamper stop), so it can be read while the sandbox is
+// stopped. 404 not_found when no log was kept.
+type RunLog struct {
+	Name string `json:"name"`
+	// State is RunExited or RunInterrupted.
+	State RunState `json:"state"`
+	// Exit is the exit status of an exited run.
+	Exit string `json:"exit,omitempty"`
+	// StartedAt is when the run started (zero: unknown), KeptAt when the
+	// stop kept its log.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	KeptAt    time.Time `json:"kept_at"`
+	// Log is the end of the run's output: at most MaxRunLogBytes, or its
+	// last ?lines=N lines when asked. Bytes that are not UTF-8 are
+	// replaced.
+	Log string `json:"log"`
 }
 
 // UndoRequest is POST /sandboxes/{name}/undo. Undo needs the sandbox
@@ -677,6 +768,38 @@ const (
 	ActivityDropped = "dropped"
 )
 
+// CategoryLargeUpload is the Category of the egress.blocked events of the
+// large-upload block (egress.block_large_uploads): the upload that crossed
+// the threshold, which the block cut, and later requests to the destination,
+// which it refused. An unblock of the destination lifts the block.
+const CategoryLargeUpload = "large_upload"
+
+// LargeUploadBlockedText is how the feed words an egress.blocked event of
+// category large_upload, whose Reason is the egress proxy's sentence
+// ("This sandbox tried to send more than 25 MiB to a destination it had
+// not contacted before."): "large upload blocked: this sandbox tried to
+// send more than 25 MiB to …". The large-upload block
+// (egress.block_large_uploads) stopped the upload before it crossed the
+// threshold, or refused a later one to the destination.
+func LargeUploadBlockedText(reason string) string {
+	if why := LargeUploadReason(reason); why != "" {
+		return "large upload blocked: " + why
+	}
+	return "large upload blocked"
+}
+
+// LargeUploadReason is the proxy's large-upload sentence as a clause: "this
+// sandbox tried to send more than 25 MiB to a destination it had not
+// contacted before". Empty for an empty reason.
+func LargeUploadReason(reason string) string {
+	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
+	if reason == "" {
+		return ""
+	}
+	r, n := utf8.DecodeRuneInString(reason)
+	return string(unicode.ToLower(r)) + reason[n:]
+}
+
 // ReasonNestedRepo is the Reason of the finding events the nested-repository
 // guard publishes.
 const ReasonNestedRepo = "nested_repo"
@@ -750,6 +873,11 @@ type ActivityEvent struct {
 	Unblockable bool   `json:"unblockable,omitempty"`
 	BytesUp     int64  `json:"bytes_up,omitempty"`
 	BytesDown   int64  `json:"bytes_down,omitempty"`
+	// Threshold is the large-upload threshold an egress.large_upload
+	// report crossed. The proxy reports the upload as it crosses, before
+	// it ends: BytesUp is what had been sent then, and the upload sent
+	// more than Threshold.
+	Threshold int64 `json:"threshold,omitempty"`
 	// Approval and hook fields.
 	ApprovalID string `json:"approval_id,omitempty"`
 	Tool       string `json:"tool,omitempty"`
@@ -763,6 +891,23 @@ type ActivityEvent struct {
 	// which OpenShell's stream replays when DefenseClaw starts again: it
 	// arrives after newer events.
 	Replayed bool `json:"replayed,omitempty"`
+}
+
+// HostPort is a destination as the feed names it: the host, with its port
+// unless that is 443 (HTTPS, which nearly every request uses) or unknown.
+// A plain-HTTP request reads host:80, so an HTTPS and an HTTP request to
+// one host (the egress proxy refuses them one by one) do not read as one
+// line twice. An IPv6 literal with its port is bracketed, as
+// net.JoinHostPort does: "[fd00:ec2::254]:80", not "fd00:ec2::254:80",
+// which is another address.
+func HostPort(host string, port int) string {
+	if port == 0 || port == 443 {
+		return host
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	return host + ":" + strconv.Itoa(port)
 }
 
 // ActivityQuery selects the activity stream.

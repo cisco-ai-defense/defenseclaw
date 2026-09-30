@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
@@ -331,6 +332,53 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	has(t, ta.output(), "✗ install OpenShell: Homebrew could not install the nvidia/openshell formula\n",
 		"Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants",
 		"then run `defenseclaw sandbox setup` again", "docs/setup/sandbox/#troubleshooting")
+
+	// "Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please
+	// update to Xcode 27.0 (or delete it).", with the Command Line Tools
+	// 27.0 selected: the hint named "Xcode or the Command Line Tools", and
+	// a user could have updated the current ones. It names that Xcode.app.
+	tools := func(macOS, clt, xcode string) *openshell.DeveloperTools {
+		return &openshell.DeveloperTools{MacOS: macOS, Selected: "/Library/Developer/CommandLineTools", CLT: clt, XcodeApp: "/Applications/Xcode.app", Xcode: xcode}
+	}
+	generic := "→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
+		"Update them as it says, then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"
+	for _, tc := range []struct {
+		tools *openshell.DeveloperTools
+		hint  string
+	}{
+		{tools("27.0", "27.0.0.0.1.1788430756", "26.2"), "→ Homebrew says why above. The Command Line Tools 27.0, which xcode-select selects, are current for macOS 27.0, " +
+			"but Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so: update that Xcode (from the App Store) or delete it, as Homebrew says; " +
+			"updating the Command Line Tools does not help. Then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
+		{tools("27.0", "26.2.0.0.1.1764812424", "26.2"), generic},
+		// Homebrew wants the Command Line Tools 16.0.0 and Xcode 16.0 on
+		// macOS 15. With the tools 15.3 it refuses them too ("Your Command
+		// Line Tools are too outdated."): setup said they were current and
+		// that updating them did not help.
+		{tools("15.6", "15.3.0.0.1.1708646388", "14.3.1"), generic},
+		// With the tools 16.4 it refuses Xcode 15.4 alone: setup gave the
+		// generic hint.
+		{tools("15.6", "16.4.0.0.1.1747106510", "15.4"), "→ Homebrew says why above. The Command Line Tools 16.4, which xcode-select selects, are current for macOS 15.6, " +
+			"but Homebrew checks Xcode 15.4 at /Applications/Xcode.app even so: update that Xcode (from the App Store) or delete it, as Homebrew says; " +
+			"updating the Command Line Tools does not help. Then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
+	} {
+		ta := setupApp(t, "", "", false)
+		ta.GOOS = "darwin"
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+			r.CLIVersion = ""
+			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+		})
+		inst := &fakeInstaller{err: &openshell.HomebrewInstallError{Err: errors.New("/bin/sh: exit status 1"), Tools: tc.tools}}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+		var silent *Silent
+		if !errors.As(err, &silent) || !errors.Is(err, openshell.ErrHomebrewInstall) {
+			t.Fatalf("Setup = %v, want the Homebrew failure, already printed", err)
+		}
+		has(t, ta.output(), tc.hint)
+	}
 }
 
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo
@@ -351,49 +399,133 @@ func TestSetupInstallQuestionSaysHowItInstalls(t *testing.T) {
 	}
 }
 
-// TestSetupNamesTheHomebrewGatewayItNeeds: on a Mac with OpenShell
-// installed from the release binaries (gateway healthy and registered),
-// setup showed "✓ OpenShell 0.1.1", asked to install it again, and on "n"
-// said "OpenShell 0.1.1 is needed" (manual test M9). The installer would
-// find that CLI and change nothing; what is missing is the Homebrew
-// formula whose service DefenseClaw restarts the gateway through.
-func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
-	notBrew := hostReport(func(r *openshell.DoctorReport) {
-		c := r.Get(openshell.CheckIDGatewayService)
-		c.Status, c.Detail = openshell.StatusFail, openshell.GatewayFormula+" is not installed"
-		r.Service = &openshell.ServiceState{Manager: "brew", Unit: openshell.GatewayFormula}
-	})
-	ta := setupApp(t, "y\n", "", false)
-	ta.GOOS = "darwin"
-	ta.HostDoctor = notBrew
-	inst := &fakeInstaller{}
-	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
-		inst.consent = consent
-		return inst
+// TestSetupOnAGatewayOfAnotherRelease: with the supported OpenShell 0.1.1
+// CLI and a gateway answering 0.0.40, setup asked "Install OpenShell 0.1.1
+// with NVIDIA's installer?", said "✓ OpenShell 0.1.1 is already
+// installed" on yes and "OpenShell 0.1.1 is needed" on no, then stopped on
+// the doctor's Gateway fix, that same install; every run did the same.
+// Setup offers no install that installs nothing: it stops on the doctor's
+// fix, which restarts the gateway service.
+func TestSetupOnAGatewayOfAnotherRelease(t *testing.T) {
+	const fix = "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing OpenShell would change nothing: " +
+		"restart the openshell-gateway user service so it runs the gateway installed with the CLI"
+	for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
+		ta := setupApp(t, "", "", false)
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+			r.GatewayVersion = "0.0.40"
+			c := r.Get(openshell.CheckIDGatewayVersion)
+			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1; upgrade it in place to 0.1.1"
+			c.Fix = &openshell.Fix{Summary: fix, Command: "systemctl --user restart openshell-gateway", Automatic: true, RestartsGateway: true,
+				Apply: func(context.Context) error { return nil }}
+		})
+		inst := &fakeInstaller{}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		wantErr(t, ta.Setup(bg, o), "the OpenShell gateway is not usable yet (Gateway); see `defenseclaw sandbox doctor`")
+		has(t, ta.output(), "✓ OpenShell 0.1.1", "✗ Gateway: OpenShell 0.0.40 is older than 0.1.1",
+			"→ "+fix+" systemctl --user restart openshell-gateway\n")
+		lacks(t, ta.output(), "Install OpenShell", "already installed", "is needed", "--install-openshell")
+		if inst.ran {
+			t.Fatalf("%+v: the installer ran", o)
+		}
 	}
-	wantErr(t, ta.Setup(bg, SetupOptions{}), "on macOS OpenShell must come from the nvidia/openshell/openshell Homebrew formula")
-	// The machine line marks the OpenShell setup refuses on the next line,
-	// as the TUI's machine check does (RT-A-1: it showed "✓ OpenShell
-	// 0.1.1").
-	has(t, ta.output(), "  ✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula\n",
-		"✗ Gateway service: the nvidia/openshell/openshell Homebrew formula is not installed\n",
-		"→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell 0.1.1 found here "+
-			"was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway and remove that OpenShell, "+
-			"then run `defenseclaw sandbox setup --install-openshell`")
-	lacks(t, ta.output(), "Install OpenShell", "is needed", "✓ OpenShell")
-	if inst.ran {
-		t.Fatal("the installer ran")
-	}
-	// On Linux the systemd unit is what the package installs: setup offers it.
-	ta = setupApp(t, "n\n", "", false)
-	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+}
+
+// TestSetupOffersTheInstallOnlyForTheCLI: with the supported OpenShell
+// 0.1.1 CLI and its openshell-gateway unit (or Homebrew service) installed
+// but stopped, setup asked "Install OpenShell 0.1.1 with NVIDIA's
+// installer?", whose yes installed nothing ("✓ OpenShell 0.1.1 is already
+// installed") before it showed the doctor's fix, and -n said "OpenShell
+// 0.1.1 is needed" without it. A CLI newer than supported got the same
+// question, whose yes failed (the install step does not downgrade). Setup
+// offers the install only where it runs NVIDIA's installer, for a CLI
+// missing or one it upgrades; with any other CLI it stops on the doctor's
+// fix.
+func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
+	const start = "systemctl --user enable --now openshell-gateway"
+	stopped := func(r *openshell.DoctorReport) {
 		c := r.Get(openshell.CheckIDGatewayService)
-		c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is not installed"
-		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService}
-	})
+		c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is inactive"
+		c.Fix = &openshell.Fix{Summary: "start the gateway and enable it at login", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
+		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService, Installed: true}
+	}
+	for _, tc := range []struct {
+		name  string
+		edit  func(*openshell.DoctorReport)
+		check string
+		stop  string
+		fix   string
+	}{
+		{"service stopped", func(r *openshell.DoctorReport) {
+			stopped(r)
+			c := r.Get(openshell.CheckIDGatewayVersion)
+			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
+			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
+		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway " + start + "\n"},
+		// Something else answers: the service's own fix, which the doctor
+		// gives as the operator's (it does not start the unit over it).
+		{"service stopped, a gateway answers", func(r *openshell.DoctorReport) {
+			stopped(r)
+			r.Get(openshell.CheckIDGatewayService).Fix = &openshell.Fix{Summary: "the openshell-gateway user service is stopped, but a gateway answers at " +
+				"https://127.0.0.1:17670: something else runs it, and the service's gateway would not get its port. Stop that gateway, then start the service",
+				Command: start}
+		}, "Gateway service", "✗ Gateway service: openshell-gateway is inactive\n",
+			"→ the openshell-gateway user service is stopped, but a gateway answers at https://127.0.0.1:17670: something else runs it"},
+		{"CLI newer than supported", func(r *openshell.DoctorReport) {
+			r.CLIVersion = "0.2.0"
+			c := r.Get(openshell.CheckIDCLI)
+			c.Status, c.Detail = openshell.StatusFail, "OpenShell 0.2.0 is not supported; DefenseClaw drives >=0.1.1 <0.2.0"
+			c.Fix = &openshell.Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, then install OpenShell 0.1.1",
+				Command: "defenseclaw sandbox setup --install-openshell"}
+		}, "OpenShell CLI", "✗ OpenShell CLI: OpenShell 0.2.0 is not supported", "→ DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0"},
+	} {
+		for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
+			t.Run(fmt.Sprintf("%s %+v", tc.name, o), func(t *testing.T) {
+				ta := setupApp(t, "", "", false)
+				ta.HostDoctor = hostReport(tc.edit)
+				inst := &fakeInstaller{}
+				ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+					inst.consent = consent
+					return inst
+				}
+				wantErr(t, ta.Setup(bg, o), "is not usable yet ("+tc.check+"); see `defenseclaw sandbox doctor`")
+				has(t, ta.output(), tc.stop, tc.fix)
+				lacks(t, ta.output(), "Install OpenShell", "already installed", "is needed")
+				if inst.ran || len(ta.gateway.planned) != 0 {
+					t.Fatalf("installer ran %v, gateway plans %+v", inst.ran, ta.gateway.planned)
+				}
+			})
+		}
+	}
+
+	// A CLI the install upgrades is offered it.
+	older := func(r *openshell.DoctorReport) {
+		r.CLIVersion = "0.0.40"
+		c := r.Get(openshell.CheckIDCLI)
+		c.Status, c.Detail = openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1; upgrade it in place to 0.1.1"
+	}
+	ta := setupApp(t, "n\n", "", false)
+	ta.HostDoctor = hostReport(older)
 	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-	has(t, ta.output(), "✓ OpenShell 0.1.1\n", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
-	lacks(t, ta.output(), "not from Homebrew")
+	has(t, ta.output(), "✗ OpenShell 0.0.40 unsupported", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+
+	// The TUI presets its "Install OpenShell" from `sandbox doctor --json`.
+	for _, tc := range []struct {
+		edit func(*openshell.DoctorReport)
+		want bool
+	}{{nil, false}, {stopped, false}, {older, true}} {
+		ta := newTestApp(t, "")
+		ta.HostDoctor = hostReport(tc.edit)
+		ta.ok(t, ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+		var rep struct {
+			OpenShellInstall *bool `json:"openshell_install"`
+		}
+		if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OpenShellInstall == nil || *rep.OpenShellInstall != tc.want {
+			t.Fatalf("doctor json openshell_install = %v, %v; want %v", rep.OpenShellInstall, err, tc.want)
+		}
+	}
 }
 
 func TestSetupStopsOnHostFailure(t *testing.T) {
@@ -580,6 +712,39 @@ func macReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorReport
 			edit(r)
 		}
 	})
+}
+
+// TestSetupFoldsTheMicroVMDriverIntoOpenShell: on a Mac without OpenShell
+// the machine line said "✗ MicroVM driver  ✗ OpenShell not installed",
+// two marks for one cause, as the formula installs the driver. The driver
+// keeps a mark of its own when it is there, or OpenShell is.
+func TestSetupFoldsTheMicroVMDriverIntoOpenShell(t *testing.T) {
+	noOpenShell := func(driverThere bool) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+		return macReport(openshell.DriverVM, func(r *openshell.DoctorReport) {
+			r.CLIVersion = ""
+			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+			r.MicroVM.E2fsprogs = ""
+			if !driverThere {
+				r.MicroVM.DriverBinary = ""
+			}
+			c := r.Get(openshell.CheckIDVMDriver)
+			c.Status, c.Detail = openshell.StatusFail, strings.Join(r.MicroVM.Problems(), "; ")
+		})
+	}
+	for _, tc := range []struct {
+		driverThere bool
+		line        string
+	}{
+		{false, "Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed\n"},
+		{true, "Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ MicroVM driver  ✗ OpenShell not installed\n"},
+	} {
+		ta := setupApp(t, "", "", false)
+		ta.IO.TTY = false
+		ta.GOOS = "darwin"
+		ta.HostDoctor = noOpenShell(tc.driverThere)
+		wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true}), "--install-openshell")
+		has(t, ta.output(), tc.line)
+	}
 }
 
 // emptyPlans is a gateway whose configuration already holds every change
@@ -963,7 +1128,7 @@ func TestSetupHarnessLines(t *testing.T) {
 	has(t, ta.output(),
 		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
 			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
-			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY or log in with `codex login --with-api-key`; or log in inside the sandbox\n"+
+			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY or log in with `codex login --with-api-key`, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
 			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands\n",
 		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
 		"Build the Codex image now?",
@@ -985,6 +1150,47 @@ func TestSetupHarnessLines(t *testing.T) {
 	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
 	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
 		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
+	}
+}
+
+// TestSetupCredentialFollowsOpenShellLLM pins that setup's credential line
+// reports what the configured openshell.llm choice finds: a provider
+// without its key is a refused run (no sandbox to log in inside), none
+// shares nothing whatever keys are set, and a harness with no model
+// credentials only logs in inside.
+func TestSetupCredentialFollowsOpenShellLLM(t *testing.T) {
+	claude, kiro := harnessSpec(t, "claudecode"), harnessSpec(t, "kiro")
+	for _, c := range []struct {
+		name, llm string
+		env       map[string]string
+		spec      *harness.Spec
+		want      string
+		not       []string
+	}{
+		{"provider without its key", "bedrock", map[string]string{"ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential none found: runs are refused until you set AWS_BEARER_TOKEN_BEDROCK (openshell.llm bedrock; `--llm auto` overrides it for one run)",
+			[]string{"log in inside the sandbox", "ANTHROPIC_API_KEY"}},
+		{"claude-oauth without its token", "claude-oauth", map[string]string{"ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential none found: runs are refused until you set CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` (openshell.llm claude-oauth;",
+			[]string{"log in inside the sandbox", "ANTHROPIC_API_KEY"}},
+		{"none", "none", map[string]string{"ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential none shared (openshell.llm none): you log in inside the sandbox on the first run",
+			[]string{"ANTHROPIC_API_KEY", "found"}},
+		{"provider with its key", "bedrock", map[string]string{EnvBedrockToken: "b", "ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential AWS_BEARER_TOKEN_BEDROCK ✓", nil},
+		{"harness without model credentials", "bedrock", nil, kiro,
+			"model credential none found: you log in inside the sandbox on the first run", []string{"refused"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.Cfg.OpenShell.LLM = c.llm
+			for k, v := range c.env {
+				ta.env[k] = v
+			}
+			got := ta.credentialText(c.spec)
+			has(t, got, c.want)
+			lacks(t, got, c.not...)
+		})
 	}
 }
 
@@ -1146,6 +1352,28 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 }
 
+// TestDoctorFixNamesChecksAsItAsked: `doctor --fix` asked `Fix "Gateway":
+// start the gateway?` and then reported "✗ gateway-version: brew services
+// start …", naming the check by its id; the outcome lines name it by the
+// title the question used.
+func TestDoctorFixNamesChecksAsItAsked(t *testing.T) {
+	ta := newTestApp(t, "y\ny\n")
+	ta.IO.TTY = true
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayVersion)
+		c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering"
+		c.Fix = &openshell.Fix{Summary: "start the gateway", Automatic: true, Apply: func(context.Context) error {
+			return errors.New("brew services start nvidia/openshell/openshell: exit status 1")
+		}}
+		m := r.Get(openshell.CheckIDMTLS)
+		m.Status, m.Fix = openshell.StatusWarn, &openshell.Fix{Summary: "drop group write access", Automatic: true, Apply: func(context.Context) error { return nil }}
+	})
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true})
+	has(t, ta.output(), `Fix "Gateway": start the gateway? [Y/n]`, `✓ fixed "mTLS files"`,
+		`✗ could not fix "Gateway": brew services start nvidia/openshell/openshell: exit status 1`)
+	lacks(t, ta.output(), "gateway-version:", "fixed mtls-permissions")
+}
+
 // TestDoctorVerdict pins the doctor's last line: not "ready" while
 // sandboxes are turned off, and no image to build for a harness the
 // organization forbids.
@@ -1168,6 +1396,31 @@ func TestDoctorVerdict(t *testing.T) {
 	has(t, ta.output(), "hook-verified: claudecode 2.1.156; codex not allowed by your organization's policy (openshell.admin.allowed_harnesses)",
 		"ready for sandboxes")
 	lacks(t, ta.output(), "image build codex", "not built yet: codex")
+
+	// A failing doctor ends with its verdict too, which counts the failed
+	// checks (it ended on the last check's line, the #1019 retest), and
+	// its JSON is as before.
+	ta = newTestApp(t, "")
+	ta.HostDoctor, ta.images.recs = hostReport(func(r *openshell.DoctorReport) {
+		for _, id := range []string{openshell.CheckIDLandlock, openshell.CheckIDDocker} {
+			c := r.Get(id)
+			c.Status, c.Detail = openshell.StatusFail, "broken"
+		}
+	}), readyImages(ta)
+	err := ta.RunDoctor(bg, DoctorOptions{})
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("RunDoctor = %v", err)
+	}
+	if out := strings.TrimRight(ta.output(), "\n"); !strings.HasSuffix(out, "\n\n  ✗ not ready for sandboxes: 2 checks failed") {
+		t.Fatalf("a failing doctor ends:\n%s", out)
+	}
+	lacks(t, ta.output(), "✓ ready for sandboxes")
+	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OK || rep.Ready {
+		t.Fatalf("failing doctor json ok/ready = %+v, %v", rep, err)
+	}
+	lacks(t, ta.output(), "not ready for sandboxes")
 }
 
 // The doctor's image check counts the images for the driver the gateway
@@ -1372,9 +1625,10 @@ func TestTeardownDryRunListsEveryStep(t *testing.T) {
 	}
 }
 
-// The daemon's delete leaves the CLI's own state of a sandbox (the run log
-// kept at a stop, the accepted undo point) under its data directory, which
-// `sandbox delete` removes after it: teardown removes it too.
+// The daemon's delete leaves the CLI's own state of a sandbox (the run's
+// options, a copy's hand-over, and what an earlier CLI kept there: a run
+// log, the accepted undo point) under its data directory, which `sandbox
+// delete` removes after it: teardown removes it too.
 func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")

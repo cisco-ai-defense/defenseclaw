@@ -1288,7 +1288,7 @@
     {
       "name": "DEFENSECLAW_EGRESS_URL",
       "category": "hook_internal",
-      "purpose": "DefenseClaw egress proxy URL (`http://<per-sandbox credential>@host.openshell.internal:<egress_port>`) set inside every open or balanced sandbox. OpenShell 0.1.1 drops `*_PROXY` variables from the sandbox environment, so the in-image harness launchers, the login-shell profile /etc/profile.d/defenseclaw-sandbox.sh and the sandbox exec wrapper export HTTPS_PROXY, HTTP_PROXY and NODE_USE_ENV_PROXY from it, in place of any the caller's environment carries.",
+      "purpose": "DefenseClaw egress proxy URL (`http://<per-sandbox credential>@host.openshell.internal:<egress_port>`) set inside every open or balanced sandbox. OpenShell 0.1.1 drops `*_PROXY` variables from the sandbox environment, so the in-image harness launchers, the login-shell profile /etc/profile.d/defenseclaw-sandbox.sh and the sandbox exec wrapper export HTTPS_PROXY, HTTP_PROXY and NODE_USE_ENV_PROXY from it, in place of any the caller's environment carries, and NODE_NO_WARNINGS=1 (which silences Node's experimental-EnvHttpProxyAgent warning, and every other Node warning, the NODE_TLS_REJECT_UNAUTHORIZED=0 one included) unless the environment already sets it.",
       "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
         "http:// proxy URL",

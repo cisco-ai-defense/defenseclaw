@@ -91,6 +91,10 @@ const (
 	// gateway has not been restarted on yet. It lives in the config
 	// directory and survives a crash between the write and the restart.
 	restartPendingFile = ".defenseclaw-restart-pending"
+	// releaseRestartFile records a restart of the gateway service that
+	// left a gateway of another release than the CLI (the doctor's
+	// Gateway fix, releaseRestart), which the doctor does not offer again.
+	releaseRestartFile = ".defenseclaw-release-restart"
 
 	maxGatewayFileBytes = 1 << 20
 )
@@ -108,6 +112,12 @@ var (
 	// between this process and the systemd user manager, for instance), or
 	// the registration reaches another port than the service listens on.
 	ErrGatewayMismatch = errors.New("openshell: the gateway service does not match DefenseClaw's view of it")
+	// ErrNoGatewayService means the service manager has no gateway
+	// service to restart the gateway through: the gateway, where one
+	// runs, runs another way (by hand, say), and its operator restarts it
+	// on a change (Write). Rollback returns it once it has restored the
+	// files.
+	ErrNoGatewayService = errors.New("openshell: no gateway service runs the gateway")
 )
 
 // What the MicroVM (vm) driver gives every sandbox when
@@ -150,8 +160,15 @@ type GatewayConfigurator struct {
 	// GOOS selects the service manager (default runtime.GOOS).
 	GOOS   string
 	Runner Runner
-	// Gateway is the openshell-gateway binary (default GatewayBinary).
+	// Gateway is the openshell-gateway binary that preflights gateway.toml
+	// (default gatewayExecutable: the one on PATH, else the one next to the
+	// OpenShell CLI).
 	Gateway string
+	// CLI is the OpenShell CLI (default DefaultBinary), whose directory
+	// holds the gateway of an OpenShell whose prefix is not on PATH.
+	CLI string
+	// LookPath finds executables on PATH (default exec.LookPath).
+	LookPath func(string) (string, error)
 	// Discover selects the registration that must be usable before bind
 	// mounts are enabled and that VerifyGateway checks. Its ConfigDir
 	// defaults to Dir.
@@ -186,6 +203,23 @@ type GatewayConfigurator struct {
 	FlushSandboxes func(context.Context) error
 }
 
+// gatewayExecutable is the openshell-gateway that preflights gateway.toml:
+// the one on PATH (its bare name, as an install puts it there), else the
+// one next to the OpenShell CLI cli, the only one to find for an OpenShell
+// run by hand from a prefix that is not on PATH.
+func gatewayExecutable(lookPath func(string) (string, error), cli string) string {
+	if _, err := lookPath(GatewayBinary); err == nil {
+		return GatewayBinary
+	}
+	if path, err := lookPath(cli); err == nil {
+		next := filepath.Join(filepath.Dir(path), GatewayBinary)
+		if info, err := os.Stat(next); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return next
+		}
+	}
+	return GatewayBinary
+}
+
 func (g *GatewayConfigurator) defaults() error {
 	dir := g.Dir
 	if dir == "" {
@@ -208,8 +242,14 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.Runner == nil {
 		g.Runner = ExecRunner{}
 	}
+	if g.CLI == "" {
+		g.CLI = DefaultBinary
+	}
+	if g.LookPath == nil {
+		g.LookPath = exec.LookPath
+	}
 	if g.Gateway == "" {
-		g.Gateway = GatewayBinary
+		g.Gateway = gatewayExecutable(g.LookPath, g.CLI)
 	}
 	if g.RestartWait <= 0 {
 		g.RestartWait = 90 * time.Second
@@ -682,7 +722,18 @@ type GatewayPlan struct {
 	// configuration selected before (docker when it named none).
 	ComputeDriver ComputeDriver `json:"compute_driver,omitempty"`
 	FromDriver    ComputeDriver `json:"from_driver,omitempty"`
+	// Manual marks a plan for a gateway that no gateway service runs
+	// (DoctorReport.GatewayUnmanaged), which the caller sets: Write writes
+	// it, and the gateway loads it once its operator restarts it.
+	Manual bool `json:"manual,omitempty"`
 }
+
+// manualRestartFlushFirst is what to do before restarting by hand a
+// gateway on the MicroVM driver that no gateway service runs (a Manual
+// plan): the restart stops its sandboxes without the flush DefenseClaw's
+// restarts make first (FlushSandboxes), and `sandbox stop` flushes.
+const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME`, which flushes their disks, " +
+	"or what they wrote since their last sync is lost"
 
 // switchesDriver reports whether the plan moves the gateway to another
 // compute driver.
@@ -720,7 +771,20 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "      %s\n", strings.TrimRight(l, " "))
 		}
 	}
+	// The restart of a gateway no service runs is its user's: DefenseClaw
+	// cannot flush the MicroVM sandboxes first, which a stop without a
+	// flush empties of what they wrote since their last sync.
+	flushFirst := ""
+	if p.FromDriver == DriverVM {
+		flushFirst = ": " + manualRestartFlushFirst
+	}
 	switch {
+	case p.Manual && p.switchesDriver():
+		fmt.Fprintf(&b, "  then you restart the gateway, the way you started it, on the %s compute driver (DefenseClaw cannot restart it), which stops every sandbox on it%s; "+
+			"sandboxes made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.ComputeDriver, flushFirst, p.FromDriver)
+	case p.Manual:
+		b.WriteString("  then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it" +
+			flushFirst + "\n")
 	case p.switchesDriver():
 		fmt.Fprintf(&b, "  then restart the gateway (%s) on the %s compute driver; running sandboxes stop, and sandboxes "+
 			"made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.Restart, p.ComputeDriver, p.FromDriver)
@@ -731,7 +795,9 @@ func (p *GatewayPlan) String() string {
 }
 
 // Plan computes the changes without touching anything. On Linux it first
-// checks that the gateway service reads the files it would edit.
+// checks that the gateway service reads the files it would edit; without
+// the service (a gateway run another way, whose environment is not known)
+// it plans the files DefenseClaw reads.
 func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*GatewayPlan, error) {
 	if err := g.defaults(); err != nil {
 		return nil, err
@@ -745,7 +811,7 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 		return plan, nil
 	}
 	env, err := g.serviceEnvironment(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNoGatewayService) {
 		return nil, err
 	}
 	envSet := ch.Env
@@ -928,49 +994,14 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err != nil {
 		return nil, err
 	}
-	if plan.BindMounts {
-		if err := g.requirePrivateGateway(ctx, env); err != nil {
-			return nil, err
-		}
-	}
-	for _, f := range plan.Files {
-		current, info, err := readGatewayFile(f.Path)
-		if err != nil {
-			return nil, err
-		}
-		if (info == nil) != (f.Before == nil) || (info != nil && !bytes.Equal(current, f.Before)) {
-			return nil, fmt.Errorf("%w: %s", ErrConfigChanged, f.Path)
-		}
-		if f.SeededFrom != "" {
-			if seed, _, _, err := g.readConfigFile(f.SeededFrom); err != nil || !bytes.Equal(seed, f.SeedBefore) {
-				return nil, fmt.Errorf("%w: %s", ErrConfigChanged, f.SeededFrom)
-			}
-		}
-		if f.TOML {
-			if err := g.preflight(ctx, f); err != nil {
-				return nil, err
-			}
-		}
+	if err := g.checkPlan(ctx, plan, env); err != nil {
+		return nil, err
 	}
 	if err := g.markRestartPending(); err != nil {
 		return nil, err
 	}
-	for _, f := range plan.Files {
-		applied := AppliedFile{Path: f.Path}
-		if f.Before != nil {
-			backup, err := g.backup(f.Path, f.Before)
-			if err != nil {
-				return res, g.rollbackAfter(ctx, res, err, false)
-			}
-			applied.Backup = backup
-		}
-		if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
-			return res, g.rollbackAfter(ctx, res, fmt.Errorf("openshell: create %s: %w", filepath.Dir(f.Path), err), false)
-		}
-		if err := safefile.Write(f.Path, f.After); err != nil {
-			return res, g.rollbackAfter(ctx, res, fmt.Errorf("openshell: write %s: %w", f.Path, err), false)
-		}
-		res.Files = append(res.Files, applied)
+	if err := g.writeFiles(res, plan); err != nil {
+		return res, g.rollbackAfter(ctx, res, err, false)
 	}
 	// The restart stops every sandbox on the gateway: their disks are
 	// flushed first where its driver's stop would not keep what they
@@ -1000,6 +1031,90 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	}
 	res.Restarted = true
 	return res, nil
+}
+
+// Write writes the plan of a gateway that no gateway service runs
+// (GatewayPlan.Manual): its operator restarts it on the files, so Write
+// neither flushes nor restarts anything, and leaves no pending-restart
+// mark, which only a restart of DefenseClaw's would clear. It checks what
+// Apply checks before it writes, bind mounts against the gateway that
+// answers, and restores the previous files when a write fails.
+func (g *GatewayConfigurator) Write(ctx context.Context, plan *GatewayPlan) (*GatewayApplyResult, error) {
+	if err := g.defaults(); err != nil {
+		return nil, err
+	}
+	res := &GatewayApplyResult{}
+	if plan.Empty() {
+		return res, nil
+	}
+	env, err := g.serviceEnvironment(ctx)
+	if err != nil && !errors.Is(err, ErrNoGatewayService) {
+		return nil, err
+	}
+	if err := g.checkPlan(ctx, plan, env); err != nil {
+		return nil, err
+	}
+	if err := g.writeFiles(res, plan); err != nil {
+		if rerr := g.restore(res); rerr != nil {
+			return res, fmt.Errorf("%w; restoring the previous configuration also failed: %v", err, rerr)
+		}
+		return res, fmt.Errorf("%w (the previous configuration was restored)", err)
+	}
+	return res, nil
+}
+
+// checkPlan refuses a plan whose files changed since Plan, whose
+// gateway.toml fails preflight, or that enables bind mounts on a gateway
+// others can reach (env: the service's environment, nil when unknown).
+func (g *GatewayConfigurator) checkPlan(ctx context.Context, plan *GatewayPlan, env map[string]string) error {
+	if plan.BindMounts {
+		if err := g.requirePrivateGateway(ctx, env); err != nil {
+			return err
+		}
+	}
+	for _, f := range plan.Files {
+		current, info, err := readGatewayFile(f.Path)
+		if err != nil {
+			return err
+		}
+		if (info == nil) != (f.Before == nil) || (info != nil && !bytes.Equal(current, f.Before)) {
+			return fmt.Errorf("%w: %s", ErrConfigChanged, f.Path)
+		}
+		if f.SeededFrom != "" {
+			if seed, _, _, err := g.readConfigFile(f.SeededFrom); err != nil || !bytes.Equal(seed, f.SeedBefore) {
+				return fmt.Errorf("%w: %s", ErrConfigChanged, f.SeededFrom)
+			}
+		}
+		if f.TOML {
+			if err := g.preflight(ctx, f); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// writeFiles backs up and writes the plan's files, recording each in res
+// for a restore.
+func (g *GatewayConfigurator) writeFiles(res *GatewayApplyResult, plan *GatewayPlan) error {
+	for _, f := range plan.Files {
+		applied := AppliedFile{Path: f.Path}
+		if f.Before != nil {
+			backup, err := g.backup(f.Path, f.Before)
+			if err != nil {
+				return err
+			}
+			applied.Backup = backup
+		}
+		if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+			return fmt.Errorf("openshell: create %s: %w", filepath.Dir(f.Path), err)
+		}
+		if err := safefile.Write(f.Path, f.After); err != nil {
+			return fmt.Errorf("openshell: write %s: %w", f.Path, err)
+		}
+		res.Files = append(res.Files, applied)
+	}
+	return nil
 }
 
 // restartedDriver asks the restarted gateway which compute driver it runs
@@ -1047,7 +1162,7 @@ func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map
 	if err != nil {
 		return err
 	}
-	if err := gatewayExposure(reg, st, env); err != nil {
+	if err := gatewayExposure(reg, st, env, env == nil && g.NoService(ctx)); err != nil {
 		return refuse(err)
 	}
 	if err := g.ProbeClientAuth(ctx, reg); err != nil {
@@ -1061,8 +1176,11 @@ func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map
 // as it does for the gateway. It returns ErrGatewayExposed for settings
 // that let in clients without the registration's certificate or listen
 // beyond loopback, and ErrGatewayMismatch when the registration reaches
-// another port than the service listens on.
-func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]string) error {
+// another port than the service listens on (gateway.toml, or the
+// service's environment). With no gateway service (noService, env nil)
+// the ports are not compared: a gateway run by hand takes its port from an
+// environment of its own.
+func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]string, noService bool) error {
 	s := st.server
 	var issues []string
 	if v, ok := env[envDisableTLS]; ok && envFlag(v) || !ok && s.DisableTLS != nil && *s.DisableTLS {
@@ -1097,6 +1215,16 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	}
 	if len(issues) > 0 {
 		return fmt.Errorf("%w: %s", ErrGatewayExposed, strings.Join(issues, "; "))
+	}
+	if env == nil && noService {
+		// No gateway service, so no environment to say where the gateway
+		// listens (one run by hand takes OPENSHELL_SERVER_PORT from its
+		// own): the registration and the client-auth probe of the gateway
+		// it reaches decide. A service whose environment cannot be read
+		// (Homebrew's, through launchd) is still compared with the
+		// registration, or the probe would judge another gateway than the
+		// one DefenseClaw edits.
+		return nil
 	}
 	if _, regPort, err := net.SplitHostPort(reg.Target()); err != nil || regPort != port {
 		return fmt.Errorf("%w: registration %s reaches %s, but the %s service listens on port %s", ErrGatewayMismatch, reg.Name, reg.Endpoint, GatewayService, port)
@@ -1140,13 +1268,22 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 	return fmt.Errorf("%w (the previous configuration was restored)", cause)
 }
 
-// Rollback restores the files an Apply wrote and restarts the gateway.
+// Rollback restores the files an Apply (or a Write) wrote and restarts the
+// gateway. With no gateway service to restart it through, it restores the
+// files and returns ErrNoGatewayService: the gateway, run another way,
+// loads them once its operator restarts it.
 func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyResult) error {
 	if err := g.defaults(); err != nil {
 		return err
 	}
 	if res == nil || len(res.Files) == 0 {
 		return nil
+	}
+	if g.NoService(ctx) {
+		if err := g.restore(res); err != nil {
+			return err
+		}
+		return ErrNoGatewayService
 	}
 	// Before anything changes: a sandbox that cannot be flushed refuses
 	// the restart.
@@ -1160,6 +1297,22 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		return err
 	}
 	return g.restart(ctx)
+}
+
+// NoService reports that the service manager has no gateway service
+// (ErrNoGatewayService), so the gateway, where one runs, is its user's to
+// restart: on a Mac the formula is not installed (a file system check,
+// without the slow `brew services info`), on Linux systemd does not know
+// the user unit. An unknown state is not a missing service.
+func (g *GatewayConfigurator) NoService(ctx context.Context) bool {
+	if err := g.defaults(); err != nil {
+		return false
+	}
+	if g.GOOS == "darwin" {
+		return !g.BrewFormulaInstalled()
+	}
+	svc, err := g.ServiceState(ctx)
+	return err == nil && !svc.Installed
 }
 
 func (g *GatewayConfigurator) restartPendingPath() string {
@@ -1577,7 +1730,7 @@ func (g *GatewayConfigurator) serviceEnv(svc *ServiceState) (map[string]string, 
 		return nil, errors.New("openshell: the gateway service's state is unknown")
 	}
 	if !svc.Installed {
-		return nil, fmt.Errorf("openshell: the %s user service is not installed", GatewayService)
+		return nil, fmt.Errorf("%w: the %s user service is not installed", ErrNoGatewayService, GatewayService)
 	}
 	envPath, err := g.EnvPath()
 	if err != nil {

@@ -155,6 +155,9 @@ type EgressPolicy struct {
 	Ports []int `yaml:"ports" json:"ports"`
 	// LargeUploadMB alerts when a first-seen host receives more; 0 disables.
 	LargeUploadMB int `yaml:"large_upload_mb" json:"large_upload_mb"`
+	// BlockLargeUploads also cuts that upload and refuses later requests
+	// to the destination, unless an unblock or allow entry names it.
+	BlockLargeUploads bool `yaml:"block_large_uploads" json:"block_large_uploads"`
 }
 
 // WorkspacePolicy configures how the project reaches the sandbox.
@@ -309,11 +312,12 @@ type approvalsFile struct {
 }
 
 type egressFile struct {
-	Feeds         *[]string `yaml:"feeds"`
-	Block         []string  `yaml:"block"`
-	Allow         []string  `yaml:"allow"`
-	Ports         *[]int    `yaml:"ports"`
-	LargeUploadMB *int      `yaml:"large_upload_mb"`
+	Feeds             *[]string `yaml:"feeds"`
+	Block             []string  `yaml:"block"`
+	Allow             []string  `yaml:"allow"`
+	Ports             *[]int    `yaml:"ports"`
+	LargeUploadMB     *int      `yaml:"large_upload_mb"`
+	BlockLargeUploads *bool     `yaml:"block_large_uploads"`
 }
 
 type workspaceFile struct {
@@ -406,6 +410,9 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 	p.Egress.LargeUploadMB = defaultLargeUploadMB
 	if egress.LargeUploadMB != nil {
 		p.Egress.LargeUploadMB = v.boundedInt("egress.large_upload_mb", *egress.LargeUploadMB, 0, maxUploadMB)
+	}
+	if egress.BlockLargeUploads != nil {
+		p.Egress.BlockLargeUploads = *egress.BlockLargeUploads
 	}
 
 	workspace := f.Workspace

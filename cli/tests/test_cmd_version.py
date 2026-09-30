@@ -203,7 +203,96 @@ class VersionCommandTests(unittest.TestCase):
         cfg = Mock(active_connectors=lambda: ["openclaw"], _source_config_version=0)
         with patch("defenseclaw.config.load", return_value=cfg), \
              patch("defenseclaw.config.config_path", return_value=Mock(exists=lambda: False)):
-            self.assertFalse(cmd_version._openclaw_configured())
+            self.assertFalse(cmd_version._openclaw_connector_active())
+
+
+class OpenClawPluginRowTests(unittest.TestCase):
+    """#881: the plugin row exists only when OpenClaw is an active connector."""
+
+    def _cfg(self, **guardrail):
+        from defenseclaw.config import Config, PerConnectorGuardrailConfig
+
+        cfg = Config()
+        mode = guardrail.pop("claw_mode", None)
+        if mode is not None:
+            cfg.claw.mode = mode
+        cfg.guardrail.connector = guardrail.pop("connector", "")
+        cfg.guardrail.connectors = {
+            name: PerConnectorGuardrailConfig(enabled=enabled)
+            for name, enabled in guardrail.pop("connectors", {}).items()
+        }
+        return cfg
+
+    def test_hermes_only_install_is_not_openclaw(self):
+        cfg = self._cfg(connector="hermes", claw_mode="hermes")
+        self.assertFalse(cmd_version._openclaw_active_in(cfg))
+
+    def test_multi_connector_install_with_openclaw_is_openclaw(self):
+        cfg = self._cfg(connector="codex", claw_mode="codex", connectors={"codex": None, "openclaw": None})
+        self.assertTrue(cmd_version._openclaw_active_in(cfg))
+
+    def test_disabled_openclaw_connector_is_not_active(self):
+        cfg = self._cfg(connector="codex", claw_mode="codex", connectors={"codex": None, "openclaw": False})
+        self.assertFalse(cmd_version._openclaw_active_in(cfg))
+
+    def test_unconfigured_install_is_not_openclaw(self):
+        cfg = self._cfg(claw_mode="")
+        self.assertFalse(cmd_version._openclaw_active_in(cfg))
+
+    def test_single_openclaw_install_is_openclaw(self):
+        cfg = self._cfg(connector="openclaw", claw_mode="openclaw")
+        self.assertTrue(cmd_version._openclaw_active_in(cfg))
+
+    def test_unreadable_config_keeps_the_plugin_row(self):
+        with patch("defenseclaw.config.load", side_effect=RuntimeError("bad yaml")):
+            self.assertTrue(cmd_version._openclaw_connector_active())
+
+    def test_reads_the_install_config(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as fh:
+                fh.write("config_version: 8\nclaw:\n  mode: hermes\nguardrail:\n  connector: hermes\n")
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": home}):
+                os.environ.pop("DEFENSECLAW_CONFIG", None)
+                self.assertFalse(cmd_version._openclaw_connector_active())
+
+    def test_hermes_only_version_skips_the_plugin(self):
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_version._openclaw_connector_active", return_value=False), \
+             patch("defenseclaw.commands.cmd_version._gateway_component") as gw, \
+             patch("defenseclaw.commands.cmd_version._plugin_component") as pl:
+            gw.return_value = cmd_version.Component(name="gateway", version=__version__, origin="/usr/bin")
+            # A stale plugin left on disk must not count as drift either.
+            pl.return_value = cmd_version.Component(name="plugin", version="0.0.1", origin="~/.openclaw")
+            human = runner.invoke(cmd_version.version_cmd, [])
+            as_json = runner.invoke(cmd_version.version_cmd, ["--json"])
+
+        self.assertEqual(human.exit_code, 0, msg=human.output)
+        self.assertIn("(not used)", human.output)
+        self.assertIn("All components in sync", human.output)
+        payload = json.loads(as_json.output)
+        self.assertEqual(
+            [(c["name"], c["status"]) for c in payload["components"]],
+            [("cli", "ok"), ("gateway", "ok"), ("plugin", "skipped")],
+        )
+        self.assertTrue(payload["ok"])
+        pl.assert_not_called()
+
+    def test_openclaw_install_lists_the_plugin(self):
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_version._openclaw_connector_active", return_value=True), \
+             patch("defenseclaw.commands.cmd_version._gateway_component") as gw, \
+             patch("defenseclaw.commands.cmd_version._plugin_component") as pl:
+            gw.return_value = cmd_version.Component(name="gateway", version=__version__, origin="/usr/bin")
+            pl.return_value = cmd_version.Component(
+                name="plugin", version="(not installed)", origin="~/.openclaw", status="missing",
+            )
+            result = runner.invoke(cmd_version.version_cmd, ["--json"])
+
+        payload = json.loads(result.output)
+        plugin = next(c for c in payload["components"] if c["name"] == "plugin")
+        self.assertEqual(plugin["status"], "missing")
 
 
 if __name__ == "__main__":

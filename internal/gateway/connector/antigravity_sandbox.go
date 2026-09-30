@@ -42,6 +42,39 @@ const (
 // AntigravitySandboxCanonicalHooksPath is the root-owned reference copy.
 var AntigravitySandboxCanonicalHooksPath = path.Join(SandboxCanonicalDir("antigravity"), antigravitySandboxHooksName)
 
+// AntigravitySandboxOnboardingPath is agy's record of its first-run
+// onboarding (#963). Measured with the pinned 1.2.12 on Linux: the first
+// interactive start with a Gemini API key shows a colour-scheme picker, then
+// "Terms of Service & Data Use", whose "Yes, I agree to help improve
+// Antigravity CLI by allowing Google to collect and use my Interactions
+// data" box is ticked by default, then the folder-trust question (which the
+// launcher answers). Done writes this file, and a start that finds it shows
+// neither of the first two screens. The box's choice is kept nowhere on
+// disk: /settings shows Enable Telemetry on for the rest of a session that
+// left it ticked and off at the next start. So the image pre-seeds the file
+// as agy writes it, which accepts the terms for the user with data sharing
+// off (the box is never ticked, and Enable Telemetry is off, measured with
+// a Gemini API key; a Google sign-in inside a sandbox is untested).
+// Enterprise onboarding, a Business sign-in under a Google Cloud project's
+// terms, stays the organization's to accept, and a start without an API key
+// still asks how to sign in. The file is the workload's, like the rest of
+// HOME: deleting it brings the screens back.
+const AntigravitySandboxOnboardingPath = SandboxHomeDir + "/.gemini/antigravity-cli/cache/onboarding.json"
+
+// renderAntigravitySandboxOnboarding is the onboarding record agy 1.2.12
+// writes once a user signed in with a Gemini API key clicked Done.
+func renderAntigravitySandboxOnboarding() ([]byte, error) {
+	body, err := marshalSandboxJSON(map[string]bool{
+		"consumerOnboardingComplete":   true,
+		"enterpriseOnboardingComplete": false,
+		"onboardingComplete":           true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal Antigravity sandbox onboarding record: %w", err)
+	}
+	return body, nil
+}
+
 func init() {
 	registerHookOnlySandboxRenderer("antigravity", renderAntigravitySandboxArtifacts)
 }
@@ -58,7 +91,12 @@ func renderAntigravitySandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxT
 	if err := verifyAntigravitySandboxHooks(hooks, rt); err != nil {
 		return SandboxArtifacts{}, err
 	}
+	onboarding, err := renderAntigravitySandboxOnboarding()
+	if err != nil {
+		return SandboxArtifacts{}, err
+	}
 	files := append(hookFiles, userTierHookFiles(c.name, antigravitySandboxHooksName, AntigravitySandboxHooksPath, hooks)...)
+	files = append(files, SandboxFile{Path: AntigravitySandboxOnboardingPath, Mode: 0o600, Owner: SandboxOwnerUser, Data: onboarding})
 	return SandboxArtifacts{
 		Connector:    c.name,
 		HookContract: rt.contract.ContractID,

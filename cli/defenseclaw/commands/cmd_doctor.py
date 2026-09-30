@@ -132,6 +132,10 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.openclaw_presence import (
+    OPENCLAW_NOT_INSTALLED_DETAIL,
+    openclaw_implied_but_not_installed,
+)
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
@@ -1800,6 +1804,19 @@ def _health_remediation_text(choices: tuple[object, ...]) -> str:
     return str(getattr(choice, "summary", "") or "")
 
 
+def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
+    """Whether the OpenClaw plugin is a required component.
+
+    Only an enabled OpenClaw connector needs it. The ``claw.mode`` openclaw
+    default on a machine without OpenClaw (#958) is not one: the OpenClaw
+    gateway row reads "off (OpenClaw is not installed)", and ``defenseclaw
+    version`` lists the plugin as ``(not used)``.
+    """
+    if "openclaw" not in enabled_connectors:
+        return False
+    return not openclaw_implied_but_not_installed(cfg)
+
+
 def _check_component_connector_compatibility(
     cfg,
     connectors: list[str],
@@ -1840,7 +1857,7 @@ def _check_component_connector_compatibility(
         return
 
     component_required = {"cli", "gateway"}
-    if "openclaw" in enabled:
+    if _openclaw_plugin_required(cfg, enabled):
         component_required.add("plugin")
     for finding in report.components:
         label = f"Component compatibility: {finding.component}"
@@ -2039,7 +2056,13 @@ def _gateway_fleet_expected_enabled(cfg) -> bool:
             # non-empty hostname expresses an external fleet endpoint.
             loopback = False
     if connector == "openclaw":
-        return not (loopback and _discovery_found_no_openclaw(cfg))
+        # The gateway reports the fleet uplink off instead of dialing when
+        # claw.mode alone names OpenClaw and OpenClaw is not installed (#958),
+        # or when discovery found no OpenClaw behind a loopback host.
+        return not (
+            openclaw_implied_but_not_installed(cfg)
+            or (loopback and _discovery_found_no_openclaw(cfg))
+        )
     return not loopback
 
 
@@ -2403,6 +2426,11 @@ def _authenticated_runtime_matches(cfg, trusted_pid: int, body: str) -> tuple[bo
 
 
 def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
+    if openclaw_implied_but_not_installed(cfg):
+        # Only claw.mode's default names OpenClaw and nothing on this machine
+        # is OpenClaw, so there is no OpenClaw gateway to reach (#958).
+        _emit("skip", "OpenClaw gateway", OPENCLAW_NOT_INSTALLED_DETAIL, r=r)
+        return
     url = f"http://{cfg.gateway.host}:{cfg.gateway.port}/health"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
@@ -8745,7 +8773,7 @@ def _component_compatibility_problems_for_executable(
     enabled_connectors = {
         connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector)
     }
-    if "openclaw" in enabled_connectors:
+    if _openclaw_plugin_required(cfg, enabled_connectors):
         required.add("plugin")
     findings = assess_component_health(
         _doctor_component_evidence_for_executable(gateway_executable)

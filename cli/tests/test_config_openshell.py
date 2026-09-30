@@ -37,6 +37,7 @@ from defenseclaw.config import (
     OpenShellConfig,
     OpenShellMCPConfig,
     OpenShellResourcesConfig,
+    OpenShellUndoIgnoredConfig,
     _merge_openshell,
     load,
 )
@@ -64,6 +65,8 @@ _FULL_SECTION = {
     "pack_dir": "/etc/defenseclaw/packs",
     "profile": "strict",
     "yolo": False,
+    "llm": "bedrock",
+    "keep_headless": True,
     "workdir": {
         "mode": "copy",
         "masks": [".env*"],
@@ -71,12 +74,14 @@ _FULL_SECTION = {
         "max_upload_mb": 100,
         "git_depth": 50,
         "on_exit": "keep",
+        "undo_ignored": {"enabled": True, "max_mb": 64, "dirs": ["vendor"]},
     },
     "egress": {
         "block": ["paste.example"],
         "allow": ["*.npmjs.org"],
         "ports": [443, 8443],
         "large_upload_mb": 10,
+        "block_large_uploads": True,
         "feed": "none",
         "unblocked": ["webhook.site"],
     },
@@ -98,6 +103,7 @@ _FULL_SECTION = {
         "allowed_harnesses": ["codex"],
         "egress_block": ["*.ngrok.io"],
         "egress_allow_only": ["*.corp.example"],
+        "block_large_uploads": True,
         "require_copy_for": ["/src/customer-*"],
         "max_resources": {"cpu": "500m", "memory": "8Gi"},
         "locked": ["profile", "yolo"],
@@ -118,9 +124,15 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.pack_dir, os.path.join("/var/dc", "policies", "sandbox"))
         self.assertEqual(oc.workdir.git_depth, 200)
         self.assertEqual(oc.workdir.on_exit, "ask")
+        self.assertEqual(
+            oc.workdir.undo_ignored,
+            OpenShellUndoIgnoredConfig(enabled=False, max_mb=500, dirs=["node_modules", ".venv", "venv"]),
+        )
         self.assertEqual(oc.approvals.debounce_ms, 3000)
         self.assertTrue(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.token_delivery, "provider")
+        self.assertEqual(oc.llm, "auto")
+        self.assertFalse(oc.keep_headless)
         self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
         # Pack-governed keys stay unset so the selected pack supplies them.
         self.assertEqual(oc.pack, "")
@@ -130,6 +142,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.workdir.max_upload_mb, 0)
         self.assertEqual(oc.egress.ports, [])
         self.assertEqual(oc.egress.feed, "")
+        self.assertFalse(oc.egress.block_large_uploads)
         self.assertIsNone(oc.mcp.import_)
         self.assertEqual(oc.admin, OpenShellAdminConfig())
 
@@ -151,12 +164,17 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.pack_dir, "/etc/defenseclaw/packs")
         self.assertEqual(oc.profile, "strict")
         self.assertIs(oc.yolo, False)
+        self.assertEqual(oc.llm, "bedrock")
+        self.assertTrue(oc.keep_headless)
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")
+        self.assertEqual(oc.workdir.undo_ignored, OpenShellUndoIgnoredConfig(enabled=True, max_mb=64, dirs=["vendor"]))
         self.assertEqual(oc.egress.ports, [443, 8443])
         self.assertEqual(oc.egress.feed, "none")
         self.assertEqual(oc.egress.unblocked, ["webhook.site"])
+        self.assertTrue(oc.egress.block_large_uploads)
+        self.assertTrue(oc.admin.block_large_uploads)
         self.assertEqual(oc.image.harness_versions, {"codex": "0.146.0"})
         self.assertFalse(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.resources, OpenShellResourcesConfig(cpu="2", memory="4Gi"))
@@ -316,6 +334,24 @@ class TestOpenShellValidation(unittest.TestCase):
             "openshell.egress_port",
         )
         self.assertIsNone(openshell_error({"openshell": {"enabled": False, "ingress_port": 18972}}))
+
+    def test_schema_refusals_name_what_the_field_takes(self):
+        # The #1019 retest: max_mb 2000000 and llm "bogus" were refused
+        # without the range or the values, which Go's loader names. The
+        # message names the schema's own values, never the rejected one.
+        for source, path, want, value in (
+            ({"workdir": {"undo_ignored": {"enabled": True, "max_mb": 2000000}}},
+             "$.openshell.workdir.undo_ignored.max_mb", "use a number between 0 and 1048576", "2000000"),
+            ({"workdir": {"undo_ignored": {"max_mb": -5}}},
+             "$.openshell.workdir.undo_ignored.max_mb", "use a number between 0 and 1048576", "-5"),
+            ({"llm": "bogus"},
+             "$.openshell.llm", "use one of auto, none, anthropic, claude-oauth, openai, bedrock, gemini", "bogus"),
+        ):
+            with self.assertRaises(V8ConfigError) as caught:
+                load_validate_v8({"config_version": 8, "openshell": source})
+            self.assertEqual(caught.exception.path, path)
+            self.assertEqual(caught.exception.corrective_action, want)
+            self.assertNotIn(value, str(caught.exception))
 
 
 class TestPolicyConnectors(unittest.TestCase):

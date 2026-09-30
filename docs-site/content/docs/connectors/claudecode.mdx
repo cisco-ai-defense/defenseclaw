@@ -183,6 +183,37 @@ telemetry. Batch, failure, denial, and mixed outputs remain untrusted content;
 they are still advisory because they cannot be attributed to one executable
 request safely.
 
+### Subagents and the Agent tool
+
+Claude Code runs subagents through its `Agent` tool. Measured on 2.1.156, with
+the hooks outside a sandbox:
+
+- The `Agent` call gets its own `PreToolUse`, and a `PostToolUse` once the
+  subagent is done. That `PostToolUse` arrives after the subagent's own hooks
+  and its `SubagentStop`, and names the subagent it ran in
+  `tool_response.agentId`. A backgrounded call (`run_in_background`) gets its
+  `PostToolUse` at launch, with status `async_launched`. An `Agent` call of an
+  unknown subagent type gets a `PostToolUseFailure`.
+- Every hook the subagent fires (`SubagentStart`, its `PreToolUse`,
+  `PermissionRequest`, `PostToolUse`, `PostToolUseFailure` and `PostToolBatch`,
+  and `SubagentStop`) carries its `agent_id` and `agent_type`. The main agent's
+  hooks carry neither. No hook carries the ID of the `Agent` call that started
+  the subagent.
+- A subagent interrupted with Esc sends nothing more: no `PostToolUse` for the
+  `Agent` call, no `SubagentStop`, `PostToolBatch` or `Stop`. A call the user
+  refuses at Claude Code's permission prompt gets no `PostToolUse` either; only
+  the `PostToolBatch` of its turn lists it.
+
+DefenseClaw records a subagent's calls under the subagent's agent ID and type,
+with the main agent as parent at depth 1, also for parallel `Agent` calls
+(Claude Code subagents cannot start subagents). Hooks without an `agent_id` are
+the main agent's, and it keeps one agent identity while subagents run or after
+one was interrupted. The correlation ledger records each subagent as caused by
+the `Agent` call that ran it (relationship `caused_by`, rule
+`spawned-agent-tool-result`). A `PostToolBatch` names no tool of its own. It is
+recorded as a `tool_batch` tool record that lists its calls by `tool_name` and
+`tool_use_id`, rather than as a second result of one of them.
+
 Protection for active `AGENTS.md` and `MEMORY.md` files is similarly
 context-bound. DefenseClaw accepts an active file only from an authenticated
 `InstructionsLoaded` event that names the exact absolute, regular,
@@ -255,10 +286,12 @@ sandbox image; your own Claude Code configuration does not change.
 - **Model sign-in.** `--llm auto` (the default) shares `ANTHROPIC_API_KEY`,
   or else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), from your
   shell. OpenShell holds the secret, and the sandbox gets a placeholder that
-  works only at `api.anthropic.com`. `--llm bedrock` shares a short-term Amazon
-  Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle
-  Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then
-  `$AWS_DEFAULT_REGION`, then `us-east-1`). With
+  works only at `api.anthropic.com`. `--llm bedrock`, and `auto` when neither
+  is set, shares a short-term Amazon Bedrock API key from
+  `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint in
+  `--bedrock-region` (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then
+  `us-east-1`). `openshell.llm` sets the choice for runs without `--llm`,
+  such as the `claude` shell wrapper's. With
   `--llm none`, or when no key is found, log in inside the sandbox; that login
   stays in the sandbox home, where the agent can read it.
 - **Bedrock models.** Bedrock Mantle serves Claude models only under

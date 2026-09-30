@@ -360,9 +360,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			}
 		}
 		if !in.req.NoSnapshot {
+			keep, keepBytes := m.keepIgnored()
 			snap, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: in.project, Name: name, DataDir: m.opts.DataDir, Skip: plan.MaskedRels(), Replace: true,
-				Protected: eff.PolicySources(),
+				Protected: eff.PolicySources(), KeepIgnored: keep, KeepIgnoredBytes: keepBytes,
 			})
 			if err != nil {
 				return nil, workspaceError(err)
@@ -1062,11 +1063,11 @@ func (m *Manager) revokeBinding(id string) error {
 }
 
 // principal is the egress identity of a sandbox, carrying the sandbox's own
-// decider (egressDecider) and large-upload threshold, so the proxy decides
-// and counts it by its policy alone.
+// decider (egressDecider), large-upload threshold and block, so the proxy
+// decides and counts it by its policy alone.
 func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider, eff *packs.Effective) egress.Principal {
 	return egress.Principal{BindingID: bindingID, SandboxID: sandboxID, SandboxName: name, Decider: d,
-		LargeUploadBytes: largeUploadBytes(eff)}
+		LargeUploadBytes: largeUploadBytes(eff), BlockLargeUploads: eff != nil && eff.Egress.BlockLargeUploads}
 }
 
 // reserve claims name for a create.

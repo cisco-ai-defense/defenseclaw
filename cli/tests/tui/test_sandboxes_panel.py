@@ -39,7 +39,7 @@ from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunchValues,
     harness_choices,
 )
-from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS
+from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port
 
 STATUS = {
     "enabled": True,
@@ -194,6 +194,20 @@ def test_sandbox_rows_carry_what_the_panel_shows() -> None:
     assert decode_sandbox({"phase": "ready"}) is None
 
 
+def test_the_detail_says_kept_changes_get_a_new_undo_point() -> None:
+    """The daemon's accept (the user kept the last session's changes) is on the
+    snapshot: the next start takes a new undo point, whoever starts it."""
+    model = SandboxesPanelModel()
+    kept = {**STOPPED, "snapshot": {"kind": "git", "accepted_at": "2026-09-30T10:00:00Z"}}
+    model.set_snapshot(STATUS, [kept], [])
+    row = model.selected_sandbox()
+    assert row is not None and row.undo_available and row.undo_accepted
+    assert dict(model.detail_pairs()[1])["Undo"] == (
+        "available (U); the last session's changes were kept, so the next start takes a new undo point"
+    )
+    assert decode_sandbox(RUNNING).undo_accepted is False
+
+
 def test_snapshot_sorts_running_first_and_keeps_only_pending_asks() -> None:
     model = _model()
     assert [row.name for row in model.rows] == ["fix-tests", "myapp-claude-7f3a", "docs"]
@@ -237,6 +251,22 @@ def test_a_run_image_is_in_the_details() -> None:
     assert pairs["Run image"] == image
     assert pairs["Undo"] == "reverts the last pull --apply (U)" and pairs["Pull"].startswith("P brings the work back")
     assert "Run image" not in dict(_model().detail_pairs()[1])
+
+
+def test_hook_events_are_in_the_details() -> None:
+    hooks = {
+        "tool_calls": 12,
+        "events": {"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "bad": "x", "": 4},
+        "other_events": 1,
+    }
+    row = decode_sandbox({**RUNNING, "hooks": hooks})
+    assert row is not None
+    assert row.hook_events == (("PreToolUse", 12), ("PostToolUse", 11), ("SessionStart", 2), ("Stop", 2))
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**RUNNING, "hooks": hooks}], [])
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Hook events"] == "PreToolUse 12 · PostToolUse 11 · SessionStart 2 · Stop 2 · other events 1"
+    assert "Hook events" not in dict(_model().detail_pairs()[1])
 
 
 def test_a_failed_refresh_keeps_the_last_good_snapshot() -> None:
@@ -286,6 +316,17 @@ def test_admin_status_line() -> None:
 
 
 # --- the live feed -------------------------------------------------------------
+
+
+def test_a_block_toast_names_the_host_without_the_first_requests_port() -> None:
+    # An unblockable block holds the host on every port, and the toast is
+    # once per host: ":80" of a plain-HTTP request that came first said the
+    # block stopped there (PR 1022 review of fix 4).
+    model = _model()
+    notices = model.add_events([{**BLOCKED, "port": 80}], now=100.0)
+    assert [n.message for n in notices] == [
+        "✗ webhook.site blocked in myapp-claude-7f3a (exfil destination). Sandboxes panel (7): u to unblock"
+    ]
 
 
 def test_events_are_deduplicated_by_sequence_and_toast_once() -> None:
@@ -452,6 +493,72 @@ TOOL_BLOCK = {
     "Try another approach that does not need this action, or ask the user to review the DefenseClaw policy.",
     "message": "✗ Bash blocked by DefenseClaw: Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: ...",
 }
+
+
+def test_a_blocked_large_upload_names_its_threshold() -> None:
+    model = _model()
+    model.add_events(
+        [
+            {
+                "seq": 60,
+                "kind": "egress.blocked",
+                "sandbox": "myapp-claude-7f3a",
+                "host": "files.example.net",
+                "category": "large_upload",
+                "reason": "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.",
+                "unblockable": True,
+                "severity": "HIGH",
+            }
+        ]
+    )
+    model.view = "activity"
+    assert [row[3] for row in model.data_table_rows()] == [
+        "files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination "
+        "it had not contacted before)  (u unblocks)"
+    ]
+    model.cursor = 0
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Category"] == "large upload" and pairs["Reason"].startswith("This sandbox tried to send more than 10 MiB")
+
+
+def test_an_https_and_an_http_refusal_of_one_host_read_apart() -> None:
+    # PR 1022 live retest N3: after a cut, the two refusals read as one line
+    # twice. The port shows unless it is 443.
+    refusal = "This destination is blocked since this sandbox tried to send more than 1 MiB to it."
+    model = _model()
+    model.add_events(
+        [
+            {
+                "seq": 61,
+                "kind": "egress.blocked",
+                "sandbox": "s",
+                "host": "httpbin.org",
+                "port": 443,
+                "category": "large_upload",
+                "reason": refusal,
+            },
+            {
+                "seq": 62,
+                "kind": "egress.blocked",
+                "sandbox": "s",
+                "host": "httpbin.org",
+                "port": 80,
+                "category": "large_upload",
+                "reason": refusal,
+            },
+        ]
+    )
+    model.view = "activity"
+    why = "(large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)"
+    assert sorted(row[3] for row in model.data_table_rows()) == [f"httpbin.org {why}", f"httpbin.org:80 {why}"]
+
+
+def test_host_port_brackets_an_ipv6_literal_with_its_port() -> None:
+    # PR 1022 review of N3: "fd00:ec2::254:80" is another address.
+    assert host_port("fd00:ec2::254", 80) == "[fd00:ec2::254]:80"
+    assert host_port("fd00:ec2::254", 443) == "fd00:ec2::254"
+    assert host_port("[::1]", 8080) == "[::1]:8080"
+    assert host_port("example.com", 80) == "example.com:80"
 
 
 def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
@@ -1041,8 +1148,8 @@ async def test_undo_of_a_stopped_sandbox_previews_then_restores(fetch, monkeypat
 
 @pytest.mark.asyncio
 async def test_undo_of_a_running_sandbox_runs_the_command_line(fetch, monkeypatch) -> None:
-    """Undo stops the sandbox first; the command line checks for a detached
-    run (asks, keeps its log for `sandbox logs`) before it stops it."""
+    """Undo stops the sandbox first; the command line says what the stop ends
+    (a detached run too) and asks, and the daemon's stop keeps the run's log."""
     app = DefenseClawTUI(config=_config())
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)
@@ -1178,6 +1285,8 @@ def test_undo_is_empty_mirrors_go() -> None:
     # bytecode caches it deletes do.
     assert undo_is_empty({"result": {"ignored": [NODE_MODULES]}}) is True
     assert undo_is_empty({"result": {"ignored": [PYCACHE]}}) is False
+    # A directory the undo point keeps a copy of is restored (#944).
+    assert undo_is_empty({"result": {"ignored": [{**NODE_MODULES, "restored": True}]}}) is False
 
 
 # UndoResult.Ignored entries: a dependency folder with a host executable,
@@ -1215,6 +1324,22 @@ def test_undo_preview_says_what_undo_cannot_restore() -> None:
         "restored 1 file, except node_modules/ (undo cannot restore them)"
     )
     assert undo_done_text({}, "docs") == "docs: the project folder is back to its pre-session snapshot"
+
+
+def test_undo_preview_names_the_kept_directories_it_restores() -> None:
+    # openshell.workdir.undo_ignored: the undo point keeps a copy (#944).
+    from defenseclaw.tui.services.sandbox_state import undo_done_text, undo_unrestored_lines
+
+    kept = {**NODE_MODULES, "restored": True}
+    over = {**NODE_MODULES, "path": "web/node_modules/", "over_cap": True}
+    preview = {"result": {"ignored": [kept, over]}}
+    lines = undo_unrestored_lines(preview)
+    assert len(lines) == 1 and lines[0].startswith("undo cannot restore web/node_modules/")
+    assert lines[0].endswith("(its copy would pass openshell.workdir.undo_ignored.max_mb)")
+    assert "Restores node_modules/ from the copy the undo point keeps." in undo_preview_text(preview)
+    assert undo_done_text({"summary": "restored 1 file", "result": {"ignored": [kept]}}, "docs") == (
+        "restored 1 file (node_modules/ too, from the copy the undo point keeps)"
+    )
 
 
 @pytest.mark.asyncio
@@ -1805,8 +1930,8 @@ def test_review_puts_warnings_and_findings_before_the_files() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_asks_first_then_runs_the_command_line(fetch, monkeypatch) -> None:
-    """The command line checks for a detached run the stop would end (asks,
-    marks it interrupted, keeps its log for `sandbox logs`)."""
+    """The command line asks while a detached run the stop would end is going;
+    the daemon's stop marks it interrupted and keeps its log for `sandbox logs`."""
     app = DefenseClawTUI(config=_config())
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)

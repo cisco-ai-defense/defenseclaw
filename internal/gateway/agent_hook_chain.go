@@ -2322,6 +2322,7 @@ func mergeAgentHookFindings(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	next.laneVerdict = resp.laneVerdict
 	return next
 }
 
@@ -2345,6 +2346,7 @@ func committedAgentHookChainBlock(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	next.laneVerdict = resp.laneVerdict
 	return next
 }
 

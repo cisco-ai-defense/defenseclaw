@@ -270,12 +270,13 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 	}
 	segments := v8SchemaPointerSegments(location)
 	var current any = observabilityV8SchemaDoc
+	var parent map[string]any
 	for _, segment := range segments {
 		mapping, ok := current.(map[string]any)
 		if !ok {
 			return ""
 		}
-		current = mapping[segment]
+		parent, current = mapping, mapping[segment]
 	}
 	keyword := ""
 	if len(segments) > 0 {
@@ -294,16 +295,38 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 		}
 	case "pattern":
 		return "a value matching the schema-declared pattern"
-	case "minimum":
-		return "a number at or above the declared minimum"
-	case "maximum":
-		return "a number at or below the declared maximum"
+	case "minimum", "maximum":
+		return v8SchemaNumberRange(parent)
 	case "minLength", "minItems", "minProperties":
 		return "a nonempty value meeting the declared minimum"
 	case "maxLength", "maxItems", "maxProperties":
 		return "a value within the declared size limit"
 	}
 	return ""
+}
+
+// v8SchemaNumberRange names the bounds a schema number declares (its
+// minimum and maximum, the schema's own values, never the rejected one):
+// "a number between 0 and 1048576".
+func v8SchemaNumberRange(schema map[string]any) string {
+	bound := func(key string) (string, bool) {
+		value, ok := schema[key].(float64)
+		if !ok {
+			return "", false
+		}
+		return strconv.FormatFloat(value, 'f', -1, 64), true
+	}
+	low, hasLow := bound("minimum")
+	high, hasHigh := bound("maximum")
+	switch {
+	case hasLow && hasHigh:
+		return "a number between " + low + " and " + high
+	case hasLow:
+		return "a number at or above " + low
+	case hasHigh:
+		return "a number at or below " + high
+	}
+	return "a number within the declared bounds"
 }
 
 func v8SchemaSiblingProperties(keywordLocation string) []string {

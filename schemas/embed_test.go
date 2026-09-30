@@ -808,8 +808,10 @@ openshell:
   pack_dir: /etc/defenseclaw/sandbox-packs
   profile: balanced
   yolo: true
-  workdir: {mode: mount, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 500, git_depth: 200, on_exit: ask}
-  egress: {block: [webhook.site], allow: ['*.npmjs.org'], unblocked: [paste.example], ports: [80, 443], large_upload_mb: 25, feed: builtin}
+  llm: auto
+  keep_headless: false
+  workdir: {mode: mount, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 500, git_depth: 200, on_exit: ask, undo_ignored: {enabled: true, max_mb: 500, dirs: [node_modules, .venv]}}
+  egress: {block: [webhook.site], allow: ['*.npmjs.org'], unblocked: [paste.example], ports: [80, 443], large_upload_mb: 25, block_large_uploads: false, feed: builtin}
   image: {base: 'ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e', harness_versions: {codex: 0.146.0}}
   approvals: {debounce_ms: 3000, agent_proposals: true}
   resources: {cpu: '2', memory: 4Gi}
@@ -831,6 +833,7 @@ openshell:
     allowed_harnesses: [claudecode, codex]
     egress_block: ['*.ngrok.io']
     egress_allow_only: ['*.corp.example.com']
+    block_large_uploads: true
     require_copy_for: [/src/customer-*]
     max_resources: {cpu: 500m, memory: 8Gi}
     locked: [pack, profile, yolo]
@@ -1060,6 +1063,14 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		{"memory unit", openshell(map[string]any{"admin": map[string]any{"max_resources": map[string]any{"memory": "4GB"}}})},
 		{"unknown feed", openshell(map[string]any{"egress": map[string]any{"feed": "custom"}})},
 		{"unknown token delivery", openshell(map[string]any{"token_delivery": "file"})},
+		{"unknown llm", openshell(map[string]any{"llm": "vertex"})},
+		{"keep_headless not a boolean", openshell(map[string]any{"keep_headless": "yes"})},
+		{"block_large_uploads not a boolean", openshell(map[string]any{"egress": map[string]any{"block_large_uploads": "yes"}})},
+		{"admin block_large_uploads not a boolean", openshell(map[string]any{"admin": map[string]any{"block_large_uploads": 1}})},
+		{"undo_ignored dir with a slash", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"dirs": []any{"a/node_modules"}}}})},
+		{"undo_ignored .git", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"dirs": []any{".git"}}}})},
+		{"undo_ignored negative cap", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"max_mb": -1}}})},
+		{"undo_ignored unknown key", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"size": 1}}})},
 		{"unknown workdir mode", openshell(map[string]any{"workdir": map[string]any{"mode": "overlay"}})},
 		{"host glob with scheme", openshell(map[string]any{"egress": map[string]any{"block": []any{"https://paste.example"}}})},
 		{"host glob with port", openshell(map[string]any{"egress": map[string]any{"block": []any{"paste.example:443"}}})},

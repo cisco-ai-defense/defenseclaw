@@ -20,7 +20,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -29,11 +28,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // What `sandbox run` remembers of the sandbox it created, in the CLI's
-// state (cliStateDir) next to the kept run log and the accepted undo point.
+// state (cliStateDir).
 // The daemon keeps the sandbox's policy, mounts and credentials; the run's
 // harness options and the names behind its banner are the CLI's. A later
 // session (`connect`, or a shell wrapper's resume) passes the options
@@ -79,7 +79,7 @@ const runLaunchFile = "launch.json"
 func newRunLaunch(sb *sandboxapi.Sandbox, spec *harness.Spec, o RunOptions, llm llmChoice) runLaunch {
 	rec := runLaunch{
 		SandboxID: sb.ID, Args: launchOptions(spec, o.Args), Credentials: o.Credentials, GitHubWrite: o.GitHubWrite,
-		EnvNames: envNames(o.Env), EnvDigest: envDigest(o.Env), LLM: strings.ToLower(strings.TrimSpace(o.LLM)),
+		EnvNames: envNames(o.Env), EnvDigest: envDigest(o.Env), LLM: firstNonEmpty(strings.ToLower(strings.TrimSpace(o.LLM)), llm.Configured),
 		BedrockRegion: o.BedrockRegion, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: strings.TrimSpace(o.CPU), Memory: strings.TrimSpace(o.Memory), NoSnapshot: o.NoSnapshot,
 	}
@@ -127,51 +127,185 @@ func (a *App) runLaunchOf(sb *sandboxapi.Sandbox) *runLaunch {
 	return &rec
 }
 
-// cleanCopyFile marks a copy-mode sandbox whose session ended with nothing
-// to bring back: `delete` of it stopped need not warn about work it could
-// not check.
-const cleanCopyFile = "copy-clean.json"
+// copyHandoverFile is what the CLI knows of a copy-mode sandbox's work
+// between sessions, which stays in the sandbox until a pull brings it back:
+// where it last went, and what the copy held when the sandbox last stopped.
+// `delete` words its question from it, and a pull of the stopped sandbox
+// takes the last pull again instead of starting the sandbox to read the
+// same state.
+const copyHandoverFile = "copy-handover.json"
 
-type cleanCopyRecord struct {
-	SandboxID string    `json:"sandbox_id,omitempty"`
-	At        time.Time `json:"at"`
+type copyHandover struct {
+	// SandboxID ties the record to the sandbox: a later sandbox of the same
+	// name does not inherit it.
+	SandboxID string `json:"sandbox_id,omitempty"`
+	// Last is the last time the work was brought back; nil when it never
+	// was.
+	Last *handover `json:"last,omitempty"`
+	// Stopped is what the copy held when a pull, a session's end or `sandbox
+	// stop` looked at it and stopped the sandbox; nil once it starts again.
+	Stopped *stoppedCopy `json:"stopped,omitempty"`
 }
 
-// markCleanCopy records that the session that ends now found sb's copy
-// unchanged (best effort).
-func (a *App) markCleanCopy(sb *sandboxapi.Sandbox) {
-	dir, err := a.cliStateDir(sb.Name)
+// handover is one bringing back of a sandbox's work.
+type handover struct {
+	Mode workspace.ApplyMode `json:"mode"`
+	// Folder is where a 3-way apply put it; Branch and Patch are the branch
+	// and patch file of --branch, --patch-out or an apply that could not
+	// merge in place.
+	Folder string    `json:"folder,omitempty"`
+	Branch string    `json:"branch,omitempty"`
+	Patch  string    `json:"patch,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// stoppedCopy is what the copy held as the sandbox stopped.
+type stoppedCopy struct {
+	At time.Time `json:"at"`
+	// Clean: nothing in it was left to bring back.
+	Clean bool `json:"clean,omitempty"`
+	// Pulled is the result of the last pull when the copy was in the state
+	// that pull took; the next pull is made from it (PullOptions.Reuse).
+	Pulled string `json:"pulled,omitempty"`
+}
+
+func (a *App) readCopyHandover(name string) (copyHandover, string) {
+	dir, err := a.cliStateDir(name)
 	if err != nil {
+		return copyHandover{}, ""
+	}
+	path := filepath.Join(dir, copyHandoverFile)
+	var rec copyHandover
+	if data, err := safefile.ReadRegularFileBounded(path, 16<<10); err == nil && json.Unmarshal(data, &rec) != nil {
+		rec = copyHandover{}
+	}
+	return rec, path
+}
+
+// updateCopyHandover changes sb's record (best effort: without it `delete`
+// warns about work it cannot check, and a pull starts the sandbox).
+func (a *App) updateCopyHandover(sb *sandboxapi.Sandbox, change func(*copyHandover)) {
+	rec, path := a.readCopyHandover(sb.Name)
+	if path == "" {
 		return
 	}
-	if data, err := json.Marshal(cleanCopyRecord{SandboxID: sb.ID, At: a.Now().UTC()}); err == nil {
-		_ = safefile.WritePrivate(filepath.Join(dir, cleanCopyFile), data)
+	if rec.SandboxID != sb.ID {
+		rec = copyHandover{SandboxID: sb.ID}
+	}
+	change(&rec)
+	if data, err := json.Marshal(rec); err == nil {
+		_ = safefile.WritePrivate(path, data)
 	}
 }
 
-// cleanCopy reports whether sb's last session found its copy unchanged and
-// it has not run since.
+// copyHandoverOf is sb's record, or nil.
+func (a *App) copyHandoverOf(sb *sandboxapi.Sandbox) *copyHandover {
+	if sb == nil {
+		return nil
+	}
+	rec, _ := a.readCopyHandover(sb.Name)
+	if rec.SandboxID == "" || rec.SandboxID != sb.ID {
+		return nil
+	}
+	return &rec
+}
+
+// recordHandover records where an apply put sb's work.
+func (a *App) recordHandover(sb *sandboxapi.Sandbox, r *workspace.ApplyResult) {
+	if r == nil {
+		return
+	}
+	h := &handover{Mode: r.Mode, Branch: r.Branch, Patch: r.PatchPath, At: a.Now().UTC()}
+	switch {
+	case r.Mode == workspace.ApplyMerge && (r.Applied || r.UpToDate):
+		h.Folder, h.Branch, h.Patch = sb.Project, "", ""
+	case r.Branch != "":
+		h.Mode = workspace.ApplyBranch
+	case r.PatchPath != "":
+		h.Mode = workspace.ApplyPatch
+	default:
+		return
+	}
+	a.updateCopyHandover(sb, func(rec *copyHandover) {
+		if old := rec.Last; r.UpToDate && old != nil && old.Mode == h.Mode && old.Folder == h.Folder && old.Branch == h.Branch {
+			// It is where it went the last time, since then.
+			return
+		}
+		rec.Last = h
+	})
+}
+
+// markStoppedCopy records what sb's copy held as it stopped: nothing left
+// to bring back (clean), and the last pull when the copy was in its state.
+func (a *App) markStoppedCopy(sb *sandboxapi.Sandbox, clean bool, pulled string) {
+	a.updateCopyHandover(sb, func(rec *copyHandover) {
+		rec.Stopped = nil
+		if clean || pulled != "" {
+			rec.Stopped = &stoppedCopy{At: a.Now().UTC(), Clean: clean, Pulled: pulled}
+		}
+	})
+}
+
+// stoppedCopyOf is what sb's copy held as it last stopped, when sb has not
+// run since: it is not running, and nothing dropped the mark (every start
+// goes through this CLI, which drops it, and so do a session and a `sandbox
+// exec` in the running sandbox: forgetStoppedCopy).
+func (a *App) stoppedCopyOf(sb *sandboxapi.Sandbox) *stoppedCopy {
+	rec := a.copyHandoverOf(sb)
+	if rec == nil || rec.Stopped == nil || sb.Phase == "ready" || sb.StartedAt.After(rec.Stopped.At) {
+		return nil
+	}
+	return rec.Stopped
+}
+
+// cleanCopy reports whether nothing was left in sb's copy to bring back
+// when it last stopped, and it has not run since.
 func (a *App) cleanCopy(sb *sandboxapi.Sandbox) bool {
-	dir, err := a.cliStateDir(sb.Name)
-	if err != nil {
-		return false
-	}
-	data, err := safefile.ReadRegularFileBounded(filepath.Join(dir, cleanCopyFile), 4<<10)
-	if err != nil {
-		return false
-	}
-	var rec cleanCopyRecord
-	if json.Unmarshal(data, &rec) != nil || rec.SandboxID != sb.ID {
-		return false
-	}
-	return sb.StartedAt.IsZero() || !sb.StartedAt.After(rec.At)
+	st := a.stoppedCopyOf(sb)
+	return st != nil && st.Clean
 }
 
-// forgetCleanCopy drops the mark as the sandbox starts again.
-func (a *App) forgetCleanCopy(name string) {
-	if dir, err := a.cliStateDir(name); err == nil {
-		_ = os.Remove(filepath.Join(dir, cleanCopyFile))
+// forgetStoppedCopy drops what was known of the copy of sandbox name as it
+// stopped, as it starts again; where its work last went stays.
+func (a *App) forgetStoppedCopy(name string) {
+	rec, path := a.readCopyHandover(name)
+	if path == "" || rec.Stopped == nil {
+		return
 	}
+	rec.Stopped = nil
+	if data, err := json.Marshal(rec); err == nil {
+		_ = safefile.WritePrivate(path, data)
+	}
+}
+
+// forgetApply is an undone apply of sb's work: that work is in the sandbox
+// alone again, and the apply is no longer where it went.
+func (a *App) forgetApply(sb *sandboxapi.Sandbox) {
+	a.updateCopyHandover(sb, func(rec *copyHandover) {
+		if rec.Stopped != nil {
+			rec.Stopped.Clean = false
+		}
+		if rec.Last != nil && rec.Last.Mode == workspace.ApplyMerge {
+			rec.Last = nil
+		}
+	})
+}
+
+// handoverText is where a hand-over put the work: "applied to ~/code/app
+// at 14:03".
+func (a *App) handoverText(h *handover) string {
+	var where string
+	switch {
+	case h.Mode == workspace.ApplyMerge:
+		where = "applied to " + a.tildePath(h.Folder)
+	case h.Branch != "" && h.Patch != "":
+		where = "put on branch " + h.Branch + " and in " + a.tildePath(h.Patch)
+	case h.Branch != "":
+		where = "put on branch " + h.Branch
+	default:
+		where = "written to " + a.tildePath(h.Patch)
+	}
+	return where + " at " + a.clock(h.At)
 }
 
 // launchOptions are the harness options of args a later session passes

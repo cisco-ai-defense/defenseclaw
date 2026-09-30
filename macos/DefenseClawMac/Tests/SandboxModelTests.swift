@@ -38,6 +38,7 @@ struct SandboxModelTests {
         copyRowsPullAndUndoTheLastApply()
         unreachableHooksAreAnAlertAndANotification()
         failedHookCallsAreAnAlert()
+        hookEventsAreCountedPerEvent()
         unblockedDestinationsAreNoLongerOffered()
         askTextIsTheDaemonsSentence()
         anAskShowsEveryPortItOpens()
@@ -125,6 +126,14 @@ struct SandboxModelTests {
         expect(notes.map(\.kind) == [.blocked, .ask], "one block and one ask notification")
         expect(notes[0].host == "webhook.site" && notes[0].sandbox == "myapp-claude-7f3a", "block target")
         expect(notes[0].title == "Blocked webhook.site", "block title \(notes[0].title)")
+        // An unblockable block holds the host on every port, and the
+        // notification is once per host: the first request's ":80" would
+        // say the block stops there.
+        var plain = SandboxSnapshot()
+        var http = blocked
+        http["port"] = 80
+        let first = plain.merge(events: SandboxDecoding.activity(from: ["events": [http]]), notify: true, now: start)
+        expect(first.first?.title == "Blocked webhook.site", "block title without the port \(first.first?.title ?? "")")
         expect(notes[1].approvalID == "a1", "ask id")
         expect(snapshot.lastSeq == 7, "last seq")
         expect(snapshot.merge(events: events, notify: true, now: start).isEmpty, "a replay adds nothing")
@@ -215,6 +224,22 @@ struct SandboxModelTests {
         expect(private22.summary == "10.0.0.5:22 (private network)", "private summary")
         let lifecycle = SandboxDecoding.event(["seq": 1, "kind": "sandbox.lifecycle", "phase": "Stopped"])!
         expect(lifecycle.summary == "now stopped", "lifecycle summary")
+        // The large-upload block names the threshold the upload crossed.
+        let upload = SandboxActivity(kind: "egress.blocked", host: "files.example.net", category: "large_upload",
+                                     reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.")
+        expect(upload.summary == "files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB "
+               + "to a destination it had not contacted before)", "large upload summary \(upload.summary)")
+        // An HTTPS and a plain-HTTP refusal of one host read apart (PR 1022
+        // live retest N3): the port shows unless it is 443.
+        let https = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 443, category: "large_upload", reason: "Blocked.")
+        let http = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 80, category: "large_upload", reason: "Blocked.")
+        expect(https.summary == "httpbin.org (large upload blocked: blocked)", "https summary \(https.summary)")
+        expect(http.summary == "httpbin.org:80 (large upload blocked: blocked)", "http summary \(http.summary)")
+        // An IPv6 literal with its port is bracketed: "fd00:ec2::254:80" is
+        // another address (PR 1022 review of N3).
+        expect(SandboxFormat.hostPort("fd00:ec2::254", 80) == "[fd00:ec2::254]:80", "ipv6 host port")
+        expect(SandboxFormat.hostPort("fd00:ec2::254", 443) == "fd00:ec2::254", "ipv6 on 443")
+        expect(SandboxFormat.hostPort("[::1]", 8080) == "[::1]:8080", "bracketed ipv6 host port")
     }
 
     private static func decodesSandboxAPIErrorBodies() {
@@ -237,10 +262,10 @@ struct SandboxModelTests {
 
     private static func adminLocksMirrorThePythonEditor() {
         let keys = ["openshell.pack", "openshell.yolo", "openshell.profile", "openshell.egress.unblocked",
-                    "openshell.resources.cpu"]
+                    "openshell.resources.cpu", "openshell.egress.block_large_uploads"]
         let locks = SandboxAdminLocks.locks(
             admin: ["required_pack": "balanced", "allow_yolo": "false", "allow_unblock": false,
-                    "locked": ["resources"]],
+                    "block_large_uploads": "true", "locked": ["resources"]],
             managed: false,
             keys: keys
         )
@@ -249,6 +274,8 @@ struct SandboxModelTests {
         expect(locks["openshell.egress.unblocked"] == "unblocking and allow entries are not allowed", "unblock")
         expect(locks["openshell.resources.cpu"]?.contains("openshell.admin.locked: resources") == true, "locked")
         expect(locks["openshell.profile"] == nil, "profile stays editable")
+        expect(locks["openshell.egress.block_large_uploads"] == "your organization blocks large uploads to first-seen hosts",
+               "upload block")
         let managed = SandboxAdminLocks.locks(admin: [:], managed: true, keys: keys)
         expect(managed.count == keys.count, "managed_enterprise locks every key")
     }
@@ -287,6 +314,19 @@ struct SandboxModelTests {
         expect(SandboxDecoding.sandbox(running)?.hookFailed == 0, "no failures by default")
         let event = SandboxDecoding.event(["seq": 1, "kind": "hook.failed", "message": "✗ a hook call failed (HTTP 429)"])
         expect(event?.glyph == "✗" && event?.summary == "a hook call failed (HTTP 429)", "hook.failed event line")
+    }
+
+    private static func hookEventsAreCountedPerEvent() {
+        var raw = running
+        raw["hooks"] = ["tool_calls": 12, "other_events": 1, "events": [
+            "Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "bad": "x", "": 4,
+        ]]
+        let row = SandboxDecoding.sandbox(raw)
+        expect(row?.hookEvents == ["PreToolUse 12", "PostToolUse 11", "SessionStart 2", "Stop 2"],
+               "most frequent first, then by name: \(row?.hookEvents ?? [])")
+        expect(row?.hookEventsText == "PreToolUse 12 · PostToolUse 11 · SessionStart 2 · Stop 2 · other events 1",
+               "the status line (the TUI's wording): \(row?.hookEventsText ?? "")")
+        expect(SandboxDecoding.sandbox(stopped)?.hookEventsLabel == "—", "no events before the first verdict")
     }
 
     private static func unblockedDestinationsAreNoLongerOffered() {
@@ -453,6 +493,14 @@ struct SandboxModelTests {
         expect(copy.pullCommand == "defenseclaw sandbox pull docs", "pull command: \(copy.pullCommand)")
         expect(copy.pullToBranchArguments == ["sandbox", "pull", "docs", "--branch"], "pull to branch argv")
         let mounted = SandboxDecoding.sandbox(running)!
-        expect(!mounted.copyMode && mounted.undoOffered && mounted.undoLabel == "available", "a mounted row")
+        expect(!mounted.copyMode && mounted.undoOffered && mounted.undoLabel == "available" && !mounted.undoAccepted, "a mounted row")
+        // The user kept the last session's changes (the daemon's accept).
+        var keptRaw = running
+        var snapshot = keptRaw["snapshot"] as? [String: Any] ?? [:]
+        snapshot["accepted_at"] = "2026-09-30T10:00:00Z"
+        keptRaw["snapshot"] = snapshot
+        let kept = SandboxDecoding.sandbox(keptRaw)!
+        expect(kept.undoAccepted && kept.undoLabel.hasPrefix("available; the last session's changes were kept"),
+               "a row whose changes were kept: \(kept.undoLabel)")
     }
 }

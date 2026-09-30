@@ -88,6 +88,11 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var pendingApprovals = 0
     var toolCalls = 0
     var toolBlocked = 0
+    /// The hook verdicts per hook event, as the harness names it, the most
+    /// frequent first ("PreToolUse 12"); otherHookEvents counts those past
+    /// the daemon's cap.
+    var hookEvents: [String] = []
+    var otherHookEvents = 0
     var lastBlocked = ""
     var tampered = 0
     var hooksSilent = false
@@ -102,6 +107,9 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var lastHookFailure = ""
     var orphaned = false
     var undoAvailable = false
+    /// The user kept the last session's changes (the daemon's accept): the
+    /// next start takes a new undo point, whoever starts the sandbox.
+    var undoAccepted = false
     var nestedRepos: [String] = []
     /// The image the sandbox runs when it is not the harness image: on the
     /// MicroVM (vm) driver, the image its per-run harness files are baked into.
@@ -113,7 +121,11 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     /// reverts its last `pull --apply` (it needs no snapshot).
     var copyMode: Bool { workdirMode == "copy" }
     var undoOffered: Bool { copyMode || undoAvailable }
-    var undoLabel: String { copyMode ? "reverts the last pull --apply" : (undoAvailable ? "available" : "no snapshot") }
+    var undoLabel: String {
+        if copyMode { return "reverts the last pull --apply" }
+        if !undoAvailable { return "no snapshot" }
+        return undoAccepted ? "available; the last session's changes were kept, so the next start takes a new undo point" : "available"
+    }
     /// Pull shows the work first; --apply, --branch or --patch-out FILE brings it back.
     var pullCommand: String { "defenseclaw sandbox pull \(name)" }
     /// The work on branch dc/<name>; the working tree stays as it is.
@@ -126,6 +138,13 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     }
 
     var uptimeText: String { running ? SandboxFormat.duration(uptimeSeconds) : "—" }
+
+    /// "PreToolUse 12 · PostToolUse 11 · Stop 2", as `sandbox status` shows
+    /// it (the TUI's SandboxRow.hook_events_text).
+    var hookEventsText: String {
+        (hookEvents + (otherHookEvents > 0 ? ["other events \(otherHookEvents)"] : [])).joined(separator: " · ")
+    }
+    var hookEventsLabel: String { hookEventsText.isEmpty ? "—" : hookEventsText }
 
     /// The failed hook calls, as the daemon's hook.failed event words them
     /// (the TUI's SandboxRow.hook_failure_alert).
@@ -241,7 +260,7 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
             return host.isEmpty ? text : SandboxFormat.hostPort(host, port)
         case "egress.blocked":
             guard !host.isEmpty else { return text.isEmpty ? "a destination was blocked" : text }
-            let why = category.isEmpty ? reason : category
+            let why = category == "large_upload" ? Self.largeUploadBlockedText(reason) : (category.isEmpty ? reason : category)
             return SandboxFormat.hostPort(host, port) + (why.isEmpty ? "" : " (\(why))")
         case "approval.requested":
             // The daemon's message is a whole sentence ("the sandbox asks to
@@ -252,6 +271,16 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
         default:
             return text.isEmpty ? (reason.isEmpty ? kind : reason) : text
         }
+    }
+
+    /// sandboxapi.LargeUploadBlockedText: the words for a block of the
+    /// large-upload block (egress.block_large_uploads), from the proxy's
+    /// sentence, which names the threshold.
+    static func largeUploadBlockedText(_ reason: String) -> String {
+        var clause = reason.trimmingCharacters(in: .whitespaces)
+        if clause.hasSuffix(".") { clause.removeLast() }
+        guard let first = clause.first else { return "large upload blocked" }
+        return "large upload blocked: " + first.lowercased() + clause.dropFirst()
     }
 }
 
@@ -432,7 +461,9 @@ struct SandboxSnapshot: Sendable {
             return SandboxNotification(
                 kind: .blocked,
                 id: "sandbox-block-\(event.seq)",
-                title: "Blocked \(SandboxFormat.hostPort(event.host, event.port))",
+                // An unblockable block holds the host on every port: the
+                // port of the first request would say it stops there.
+                title: "Blocked \(event.host)",
                 body: (event.sandbox.isEmpty ? "A sandbox" : event.sandbox)
                     + " tried to reach it" + (why.isEmpty ? "." : " (\(why)).") + " Unblock it if the agent needs it.",
                 sandbox: event.sandbox,
@@ -477,8 +508,17 @@ struct SandboxSnapshot: Sendable {
 }
 
 enum SandboxFormat {
+    /// sandboxapi.HostPort: the host, with its port unless that is 443
+    /// (HTTPS) or unknown. Plain HTTP reads host:80, so an HTTPS and an HTTP
+    /// refusal of one host are told apart. An IPv6 literal with its port is
+    /// bracketed ("[fd00:ec2::254]:80"; "fd00:ec2::254:80" is another
+    /// address).
     static func hostPort(_ host: String, _ port: Int) -> String {
-        (port == 0 || port == 80 || port == 443) ? host : "\(host):\(port)"
+        if port == 0 || port == 443 {
+            return host
+        }
+        let shown = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return "\(shown):\(port)"
     }
 
     /// triage.NormalizeHost: lower case, no brackets, no trailing dot.
@@ -577,6 +617,12 @@ enum SandboxDecoding {
         row.pendingApprovals = int(d["pending_approvals"])
         row.toolCalls = int(hooks["tool_calls"])
         row.toolBlocked = int(hooks["tool_blocked"])
+        row.hookEvents = dict(hooks["events"])
+            .map { (name: $0.key, count: int($0.value)) }
+            .filter { !$0.name.isEmpty && $0.count > 0 }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+            .map { "\($0.name) \($0.count)" }
+        row.otherHookEvents = int(hooks["other_events"])
         row.lastBlocked = str(hooks["last_blocked"])
         row.tampered = int(hooks["tampered"])
         row.hooksSilent = (hooks["silent"] as? Bool) ?? false
@@ -589,6 +635,8 @@ enum SandboxDecoding {
         row.runImage = str(d["run_image"])
         // undone_at is omitted until undo ran (Go omitzero).
         row.undoAvailable = !snapshot.isEmpty && DCDates.parse(snapshot["undone_at"]) == nil
+        // accepted_at is omitted until the user keeps a session's changes.
+        row.undoAccepted = !snapshot.isEmpty && DCDates.parse(snapshot["accepted_at"]) != nil
         row.nestedRepos = list(d["nested_repos"]).compactMap { item in
             let repo = dict(item)
             let path = str(repo["path"])
@@ -693,6 +741,10 @@ enum SandboxAdminLocks {
             if let b = admin[key] as? Bool { return !b }
             return (admin[key] as? String)?.lowercased() == "false"
         }
+        func isTrue(_ key: String) -> Bool {
+            if let b = admin[key] as? Bool { return b }
+            return (admin[key] as? String)?.lowercased() == "true"
+        }
         if let required = admin["required_pack"] as? String, !required.isEmpty {
             lock(["openshell.pack", "openshell.pack_dir"], "your organization requires the \(required) pack")
         }
@@ -702,6 +754,9 @@ enum SandboxAdminLocks {
         if isFalse("allow_unblock") {
             lock(["openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"],
                  "unblocking and allow entries are not allowed")
+        }
+        if isTrue("block_large_uploads") {
+            lock(["openshell.egress.block_large_uploads"], "your organization blocks large uploads to first-seen hosts")
         }
         for entry in (admin["locked"] as? [String]) ?? [] {
             if let targets = lockedConfigKeys[entry] {

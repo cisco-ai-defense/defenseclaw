@@ -327,6 +327,19 @@ exist only in the image; nothing on your host changes.
   sign-in. Signing in with a Google account inside a sandbox is untested.
   `defenseclaw sandbox run antigravity` shares `GEMINI_API_KEY` when it is
   set.
+- **First-run screens.** A sandbox starts at agy's prompt. The image
+  completes agy's onboarding for you, which means DefenseClaw accepts the
+  Google Antigravity CLI Terms of Service (https://antigravity.google/terms)
+  on your behalf with data sharing off: the onboarding's "help improve
+  Antigravity CLI by allowing Google to collect and use my Interactions
+  data" box, ticked by default, is never ticked, `/settings` shows Enable
+  Telemetry off, and the colour scheme is agy's default (`terminal`; change
+  it in `/settings`). The launcher also trusts the working directory, so
+  agy does not ask whether to trust the folder. A start without
+  `GEMINI_API_KEY` still asks how to sign in, and a Business sign-in with a
+  Google Cloud project keeps its own terms. Delete
+  `~/.gemini/antigravity-cli/cache/onboarding.json` in the sandbox to see
+  the onboarding screens again.
 - **Launch flags.** Skip-permissions mode adds
   `--dangerously-skip-permissions`. A run with `--safe` drops it in every
   form agy accepts (one or two dashes, `=true`). A headless run is
@@ -334,9 +347,11 @@ exist only in the image; nothing on your host changes.
 - **Other traffic.** Apart from the model, a mock-model run reached only
   `antigravity-unleash.goog` (feature flags) and `play.googleapis.com` (usage
   logging). In a two-prompt daemon run, the proxy counted about 600 KB sent,
-  nearly all of it to those two hosts. That traffic goes through the
-  DefenseClaw egress proxy, which logs it and applies the blocklist. Block
-  either host with `openshell.egress.block` if your organization requires it.
+  nearly all of it to those two hosts, and Enable Telemetry off does not
+  stop either (measured at an interactive start). That traffic goes through
+  the DefenseClaw egress proxy, which logs it and applies the blocklist.
+  Block either host with `openshell.egress.block` if your organization
+  requires it.
 - **Command directory.** DefenseClaw judges a `run_command` call in the
   directory its `Cwd` names, which is where agy runs it, rather than in the
   session's workspace.

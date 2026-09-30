@@ -271,14 +271,16 @@ your own Codex configuration does not change.
   `CODEX_API_KEY`) from your shell, or else the API key that
   `codex login --with-api-key` stored in `~/.codex/auth.json`. A ChatGPT
   sign-in is not shared. OpenShell holds the secret, and the sandbox gets a
-  placeholder that works only at `api.openai.com`. `--llm bedrock` shares a
-  short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for a Codex
-  custom provider on the Bedrock Mantle endpoint in `--bedrock-region`
+  placeholder that works only at `api.openai.com`. `--llm bedrock`, and `auto`
+  when neither is set, shares a short-term Amazon Bedrock API key from
+  `AWS_BEARER_TOKEN_BEDROCK` for a Codex custom provider on the Bedrock Mantle endpoint in `--bedrock-region`
   (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`), with
   Codex's multi-agent and web search tools off. Mantle does not serve Codex's
   own default model, so a Bedrock run uses `openai.gpt-oss-20b` unless you
   pick another with `-- -m MODEL` (a `-c model=` override does not change
-  it); the banner's Model line names the model either way.
+  it); the banner's Model line names the model either way. `openshell.llm`
+  sets the choice for runs without `--llm`, such as the `codex` shell
+  wrapper's.
 - **Bedrock follow-up turns.** Bedrock Mantle rejects every turn after the
   first of a Codex conversation, which Codex shows as `stream disconnected
   before completion`; no provider setting avoids it. Start each task with

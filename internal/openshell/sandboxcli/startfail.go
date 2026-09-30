@@ -69,7 +69,7 @@ func (t *outputTail) String() string {
 // seeing nothing wrong with its hooks: the harness itself failed.
 func (s *session) failedAtStart(after *sandboxapi.Sandbox, endedElsewhere bool) bool {
 	code := s.harnessCode
-	if s.shell || endedElsewhere || code == 0 || code == exitInterrupted || after.Hooks.Unreachable {
+	if s.shell || endedElsewhere || code == 0 || code == exitInterrupted || after.Hooks.Unreachable || s.hookReachUnknown(after) {
 		return false
 	}
 	return !s.hooksReached(after) && !s.telemetryReached(after)

@@ -196,7 +196,10 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
             "you get a summary, a review of changed files that can run code on your machine, and "
             "the choice to keep or undo the changes (from a copy: to bring them back, or leave them "
-            "in the sandbox for pull). Arguments after -- go to the harness."
+            "in the sandbox for pull). Arguments after -- go to the harness. A headless run in the "
+            "foreground (--prompt, or the harness's own print flag after --) deletes its sandbox when "
+            "it ends and nothing is left in it to bring back or undo, as --rm does; --keep (or "
+            "openshell.keep_headless) keeps it. Interactive sessions and --detach runs keep their sandbox."
         ),
         args=(_Arg("harness"), _Arg("harness_args", required=False, many=True)),
         flags=(
@@ -259,6 +262,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 short="d",
             ),
             _Flag("rm", "bool", "delete the sandbox when the session ends"),
+            _Flag(
+                "keep",
+                "bool",
+                "keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when "
+                "nothing is left in it to bring back or undo",
+            ),
             _Flag("prompt", "string", "run the harness headless with this prompt", short="p", metavar="TEXT"),
             _Flag(
                 "env",
@@ -269,8 +278,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "llm",
                 "string",
-                "model credential to share: auto, none, anthropic, claude-oauth, openai or bedrock",
-                default="auto",
+                "model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini "
+                "(default: openshell.llm, which is auto unless set)",
                 metavar="SOURCE",
             ),
             _Flag(
@@ -459,7 +468,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         flags=(_OUTPUT,),
     ),
     _Cmd(("pack", "validate"), "Validate a pack file strictly", args=(_Arg("path"),)),
-    _Cmd(("image",), "Build, list and prune the harness images"),
+    _Cmd(("image",), "Build, list, prune and remove the harness images"),
     _Cmd(
         ("image", "build"),
         "Build and hook-verify harness images (default: the configured harnesses)",
@@ -474,6 +483,23 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ("image", "prune"),
         "Remove superseded harness images",
         flags=(_Flag("dry-run", "bool", "only show what would be removed"),),
+    ),
+    _Cmd(
+        ("image", "rm"),
+        "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+        long=(
+            "Removes the images DefenseClaw built for the named harnesses under this data directory: the "
+            "harness images and, on the MicroVM driver, the run images and aliases made from them, and "
+            "forgets their records. On a Mac it also removes the MicroVM disks OpenShell prepared from them "
+            "(about 5 GB each), once Docker no longer has their images; that needs the DefenseClaw daemon's "
+            "list of sandboxes. It refuses, removing nothing, while a sandbox is recorded with one of the "
+            "images: delete that sandbox first. The next run of the harness builds its image again."
+        ),
+        args=(_Arg("harnesses", many=True),),
+        flags=(
+            _Flag("yes", "bool", "do not ask", short="y"),
+            _Flag("dry-run", "bool", "only show what would be removed"),
+        ),
     ),
     _Cmd(
         ("enable",),

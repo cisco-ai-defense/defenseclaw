@@ -320,6 +320,7 @@ func looserPackKey(candidate, baseline *Pack, mode string) string {
 			check{"egress.ports", !containsAllInts(b.Egress.Ports, c.Egress.Ports)},
 			check{"egress.large_upload_mb", b.Egress.LargeUploadMB > 0 &&
 				(c.Egress.LargeUploadMB == 0 || c.Egress.LargeUploadMB > b.Egress.LargeUploadMB)},
+			check{"egress.block_large_uploads", b.Egress.BlockLargeUploads && !c.Egress.BlockLargeUploads},
 		)
 	}
 	for _, ch := range checks {

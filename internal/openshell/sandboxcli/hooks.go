@@ -70,6 +70,10 @@ func errNoHooks() error {
 // end-of-session summary.
 type sessionNotice struct {
 	summary string
+	// host is the destination of a block the user can lift, and
+	// unblocked its line once the session saw host unblocked
+	// (session.unblockedHosts): the block, without the unblock command.
+	host, unblocked string
 }
 
 // notice announces msg while the harness owns the terminal, once per key
@@ -81,6 +85,12 @@ type sessionNotice struct {
 // bell (a harness may take the title back at once), and the summary
 // repeats it; a headless session prints a line on stderr.
 func (s *session) notice(key, msg, summary string) {
+	s.noticeWith(key, msg, sessionNotice{summary: summary})
+}
+
+// noticeWith is notice with the summary line n.
+func (s *session) noticeWith(key, msg string, n sessionNotice) {
+	summary := n.summary
 	msg = sandboxapi.DisplayText(msg)
 	tui := s.app.IO.TTY && !s.headless
 	s.noticeMu.Lock()
@@ -95,7 +105,7 @@ func (s *session) notice(key, msg, summary string) {
 		s.noticeKeys[key] = true
 	}
 	if summary != "" {
-		s.notices = append(s.notices, sessionNotice{summary: summary})
+		s.notices = append(s.notices, n)
 	}
 	push := tui && !s.titleSet
 	s.titleSet = s.titleSet || tui
@@ -156,19 +166,27 @@ const maxSummaryNotices = 6
 // while the harness owned the terminal.
 func (s *session) printNotices() {
 	s.noticeMu.Lock()
-	list := append([]sessionNotice(nil), s.notices...)
+	list := make([]string, 0, len(s.notices))
+	for _, n := range s.notices {
+		line := n.summary
+		if n.host != "" && s.unblockedHosts[n.host] {
+			// Unblocked since: no command to offer (RT U6).
+			line = n.unblocked
+		}
+		list = append(list, line)
+	}
 	s.noticeMu.Unlock()
 	a := s.app
-	for i, n := range list {
+	for i, line := range list {
 		if i == maxSummaryNotices {
 			a.note(fmt.Sprintf("… %d more: %s activity --sandbox %s", len(list)-i, CommandName, s.sb.Name))
 			break
 		}
 		style := ansiYellow
-		if strings.HasPrefix(n.summary, "✗") {
+		if strings.HasPrefix(line, "✗") {
 			style = ansiRed
 		}
-		a.line(a.style(n.summary, style))
+		a.line(a.style(line, style))
 	}
 }
 
@@ -200,6 +218,14 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 		// watch.
 		return
 	}
+	if !sb.Hooks.Unreachable {
+		// A daemon that restarted during the window counts from zero: no
+		// hook since then says nothing of the hooks before (the summary
+		// says it cannot tell).
+		if st, err := s.api.Status(ctx); err == nil && s.startedBefore(st.StartedAt) {
+			return
+		}
+	}
 	s.warnHooksOnce("⚠ " + hooksWarningText(firstNonEmpty(sb.Hooks.UnreachableReason,
 		"not one hook request reached DefenseClaw in the session's first "+window.Round(time.Second).String())))
 }
@@ -223,6 +249,25 @@ func (s *session) hooksReached(after *sandboxapi.Sandbox) bool {
 	return reached
 }
 
+// hookReachUnknown reports that the daemon restarted during the session,
+// which started its hook counters again, and has no verdict of its own on
+// the session's hooks: a hook that reached the daemon before the restart
+// left no trace, so DefenseClaw cannot tell whether one did (PR 1022: a
+// Copilot CLI session of 7 allowed tool calls and a restart ended with "no
+// hook of this session reached DefenseClaw"). A daemon that does not say
+// when it started gives its restart away by hook counters below the
+// session's start.
+func (s *session) hookReachUnknown(after *sandboxapi.Sandbox) bool {
+	if after.Hooks.Unreachable {
+		return false
+	}
+	before := s.before
+	if before == nil {
+		before = s.sb
+	}
+	return s.restartedDuring() || after.Hooks.HookRequests < before.Hooks.HookRequests
+}
+
 // telemetryReached reports whether an authenticated OTLP request of the
 // session reached DefenseClaw by the time after was read: the ingress
 // answers and the sandbox token arrives, so a harness that fires its first
@@ -244,11 +289,26 @@ func (s *session) telemetryReached(after *sandboxapi.Sandbox) bool {
 // shell fires none. A session whose authenticated telemetry got through
 // proved the path, as the live check counts it, unless the daemon says
 // otherwise.
+//
+// After a daemon restart during the session, with no verdict of the new
+// daemon's, whether a hook reached DefenseClaw is unknown (hookReachUnknown):
+// the session says so, and neither says its hooks did not reach it nor
+// ends with ExitHooksUnreachable.
 func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool) {
 	if s.shell || s.hooksReached(after) || (s.telemetryReached(after) && !after.Hooks.Unreachable) {
 		return
 	}
 	a := s.app
+	if s.hookReachUnknown(after) {
+		s.hooksUnknown = true
+		at := ""
+		if s.restartedDuring() {
+			at = " (at " + a.clock(s.daemonStarted) + ")"
+		}
+		a.note("the DefenseClaw daemon restarted during the session" + at + " and keeps no hook counts across a restart, " +
+			"so DefenseClaw cannot tell whether this session's hooks reached it")
+		return
+	}
 	if code := s.harnessCode; code != 0 && !after.Hooks.Unreachable {
 		if !endedElsewhere && code != exitInterrupted {
 			why := "the harness itself failed (its output is above)"

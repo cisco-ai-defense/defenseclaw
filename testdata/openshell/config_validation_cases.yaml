@@ -21,14 +21,17 @@ cases:
         egress_port: 19002
         pack: balanced
         profile: strict
-        workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep}
-        egress: {block: [Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2', 198.51.100.0/24, '2001:db8:1::/48', '::ffff:192.0.2.0/120'], allow: ['*.npmjs.org', pypi.org, _dmarc.example], ports: [443]}
+        llm: bedrock
+        keep_headless: true
+        workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep, undo_ignored: {enabled: true, max_mb: 200, dirs: [node_modules, .venv, vendor]}}
+        egress: {block: [Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2', 198.51.100.0/24, '2001:db8:1::/48', '::ffff:192.0.2.0/120'], allow: ['*.npmjs.org', pypi.org, _dmarc.example], ports: [443], large_upload_mb: 5, block_large_uploads: true}
         resources: {cpu: '1.5', memory: 512Mi}
         admin:
           required_pack: strict
           required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
           egress_block: [10.0.0.0/8, '::ffff:203.0.113.7']
           egress_allow_only: ['*.corp.example']
+          block_large_uploads: true
           require_copy_for: [/src/customer-*, '~/clients/*', '~', '**/customer-*', '**', 'C:/src/[a-c]*', '/srv/\*literal']
           max_resources: {cpu: 500m, memory: 8Gi}
 
@@ -578,6 +581,20 @@ cases:
         yolo: False
         admin: {allow_unblock: TRUE, allow_mount: null}
 
+  - name: block-large-uploads-yaml11-yes
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block_large_uploads: yes}
+
+  - name: admin-block-large-uploads-not-a-boolean
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {block_large_uploads: "true"}
+
   - name: harness-name-with-trailing-newline
     valid: false
     source: |
@@ -598,3 +615,45 @@ cases:
       config_version: 8
       openshell:
         resources: {cpu: "2\n"}
+
+  - name: llm-unknown-provider
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        llm: vertex
+
+  - name: llm-upper-case
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        llm: Bedrock
+
+  - name: undo-ignored-dir-with-a-slash
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {enabled: true, dirs: [web/node_modules]}}
+
+  - name: undo-ignored-dot-dot
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {dirs: [..]}}
+
+  - name: undo-ignored-git-dir
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {dirs: [.git]}}
+
+  - name: undo-ignored-cap-too-large
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {max_mb: 1048577}}

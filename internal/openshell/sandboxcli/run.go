@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -58,6 +59,10 @@ type RunOptions struct {
 	Detach      bool
 	// Rm deletes the sandbox when the session ends.
 	Rm bool
+	// Keep keeps the sandbox of a headless run, which is otherwise deleted
+	// at its end when nothing is left in it to bring back or undo
+	// (headlessRm).
+	Keep bool
 	// Prompt runs the harness headless with one prompt.
 	Prompt string
 	// Env adds non-secret KEY=VALUE variables to the sandbox.
@@ -117,6 +122,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}()
 	if o.Detach && o.Rm {
 		return errors.New("--rm cannot be combined with --detach: nothing is left to delete the sandbox when the run ends")
+	}
+	if o.Keep && o.Rm {
+		return errors.New("--keep keeps the sandbox and --rm deletes it; pass one of them")
 	}
 	o.Name = strings.TrimSpace(o.Name)
 	if err := checkNewName(o.Name); err != nil {
@@ -179,6 +187,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	// The organization's refusals come first; then what this gateway
 	// cannot do, and what the run needs from this terminal.
+	if err := a.dockerDesktopRefusal(ctx, drv); err != nil {
+		return err
+	}
 	if len(o.Context) > 0 && !drv.HostMounts {
 		return fmt.Errorf("--context mounts a folder into the sandbox read-only, and %s; run without --context (the agent works on a copy of this folder only)",
 			mountRefusal(drv))
@@ -330,7 +341,8 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		return a.landlockHint(apiError(err), func() openshell.Driver { return drv })
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
+	autoRm := a.headlessRm(o, headless)
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from
 	// attach means the harness never started (its exit status, a signal's
@@ -353,7 +365,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return fail(err)
 		}
 	}
-	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown})
+	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown, policy: ex.Settings})
 	if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
@@ -376,6 +388,22 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		return err
 	}
 	return s.exit(code)
+}
+
+// headlessRm reports whether a run's sandbox goes at the end of its session
+// though it has no --rm: a headless run in the foreground (--prompt, or the
+// harness's print mode, as the shell wrapper's `claude -p` passes it) that
+// created its sandbox, without --keep or openshell.keep_headless. It goes
+// by the rules of --rm: a copy whose work was not brought back is kept, and
+// a mounted folder's undo point stays when its changes could not be
+// reviewed or nobody kept them. A detached run keeps its sandbox, and a run
+// that resumes this folder's sandbox (offerResume) is a connect, which
+// keeps it too.
+func (a *App) headlessRm(o RunOptions, headless bool) bool {
+	if !headless || o.Detach || o.Rm || o.Keep {
+		return false
+	}
+	return a.Cfg == nil || !a.Cfg.OpenShell.KeepHeadless
 }
 
 func printMode(spec *harness.Spec, args []string) bool {
@@ -614,13 +642,42 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 	return apiError(err)
 }
 
+// dockerDesktopRefusal refuses a run, before its image is built or its
+// sandbox is made, on a Mac whose gateway runs the docker driver on Docker
+// Desktop: its sandboxes run on the kernel of Docker Desktop's Linux VM,
+// which has no Landlock, so OpenShell's supervisor fails every one of them
+// (the doctor's Landlock and compute driver checks say the same). It asks
+// Docker only in that case, one `docker info` and no Landlock probe. A
+// Docker VM that may have Landlock (Colima, OrbStack), and a Docker that
+// does not answer, are left to try, as on Linux.
+func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver) error {
+	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
+		return nil
+	}
+	if engine, err := a.DockerEngine(ctx); err != nil || !openshell.IsDockerDesktop(engine) {
+		return nil
+	}
+	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and Docker Desktop's Linux VM "+
+		"has no Landlock, which OpenShell sandboxes need; nothing was built or created"),
+		"run sandboxes in OpenShell MicroVMs, which have their own kernel: `"+CommandName+" setup` switches the gateway to them (or `"+
+			CommandName+" doctor --fix`; details: "+setupTroubleshootingURL+")")
+}
+
+// withNextStep puts DefenseClaw's way on after err on a line of its own
+// ("  → …"), where it is not lost at the end of what OpenShell said.
+func withNextStep(err error, step string) error {
+	return fmt.Errorf("%w\n  → %s", err, step)
+}
+
 // landlockHint completes, on macOS, a sandbox that ended in the error
 // phase for a reason naming Landlock (OpenShell's supervisor probes it
 // before the harness runs) on a gateway that runs the docker driver: there
 // sandboxes run on the kernel of Docker Desktop's Linux VM, which has none
 // today, and OpenShell's MicroVM driver, which boots each sandbox with a
-// kernel of its own, is the way on. driver is the gateway's compute
-// driver, asked for only when the failure is one of those.
+// kernel of its own, is the way on. The hint follows OpenShell's own
+// output (its Landlock probe error, box drawing and all) on a line of its
+// own. driver is the gateway's compute driver, asked for only when the
+// failure is one of those.
 func (a *App) landlockHint(err error, driver func() openshell.Driver) error {
 	if err == nil || a.GOOS != "darwin" {
 		return err
@@ -631,8 +688,8 @@ func (a *App) landlockHint(err error, driver func() openshell.Driver) error {
 	if driver().Name != openshell.DriverDocker {
 		return err
 	}
-	return fmt.Errorf("%w; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: "+
-		"switch the gateway to MicroVMs with `%s setup` (or `%s doctor --fix`; see %s)", err, CommandName, CommandName, setupTroubleshootingURL)
+	return withNextStep(err, "this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: "+
+		"switch the gateway to MicroVMs with `"+CommandName+" setup` (or `"+CommandName+" doctor --fix`; see "+setupTroubleshootingURL+")")
 }
 
 // gatewayDriver is the compute driver of the daemon's gateway, from its
@@ -1199,12 +1256,18 @@ func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []strin
 }
 
 func settingValue(settings []sandboxapi.Setting, key string) string {
+	s, _ := settingOf(settings, key)
+	return s.Value
+}
+
+// settingOf is the setting key of an explain, and whether it has one.
+func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, bool) {
 	for _, s := range settings {
 		if s.Key == key {
-			return s.Value
+			return s, true
 		}
 	}
-	return ""
+	return sandboxapi.Setting{}, false
 }
 
 // createRequest turns the flags into the daemon's create request.
@@ -1237,9 +1300,16 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 			}
 		}
 	}
-	llm, err := a.detectLLM(spec, o.LLM, o.BedrockRegion, reserved)
+	choice, from, note := a.runLLM(spec, o.LLM)
+	if note != "" {
+		a.note(note)
+	}
+	llm, err := a.detectLLM(spec, choice, from, o.BedrockRegion, reserved)
 	if err != nil {
 		return req, llmChoice{}, err
+	}
+	if from == llmFromConfig {
+		llm.Configured = choice
 	}
 	req.LLM = llm.Credential
 	return req, llm, nil
@@ -1357,6 +1427,9 @@ type bannerInfo struct {
 	// shown are the violations the preflight printed already (violationKey),
 	// and the warnings (warningKey).
 	shown map[string]bool
+	// policy is the effective policy the sandbox runs under (the daemon's
+	// explain): the banner names the large-upload block from it.
+	policy []sandboxapi.Setting
 }
 
 // launchModel is the banner's model: the one a launch of sb with the
@@ -1450,6 +1523,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
 		}
 		row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
+	}
+	if text := uploadBlockText(b.policy); text != "" {
+		row("Uploads", text)
 	}
 	// Asks (a host port, a private address, a destination the profile
 	// does not list) wait for the user while the harness owns the terminal;
@@ -1677,6 +1753,46 @@ func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
 		}
 	}
 	return out
+}
+
+// uploadBlockText is the banner's Uploads line: what the large-upload block
+// (egress.block_large_uploads) cuts, when it is on in the effective policy,
+// else "". The network label ("open + blocklist") says nothing of it. The
+// proxy only reports an upload to a host that is exempt from the block
+// (egress.exemptFromUploadBlock): one the user unblocked, one on an allow
+// list (openshell.egress.allow, a custom or required pack's egress.allow),
+// or one on the organization's allowed list (egress.allow_only). With that
+// list set, every host the sandbox may reach is on it, so the block cuts
+// nothing and the line says uploads are only reported. Otherwise it names
+// the exemptions as the user's own (the curated entries a built-in pack
+// allows come from a feed, which the block does not exempt), where the
+// organization lets them (openshell.admin.allow_unblock: false drops the
+// user's allow entries and refuses unblocks, and explain does not say so).
+func uploadBlockText(policy []sandboxapi.Setting) string {
+	block, ok := settingOf(policy, "egress.block_large_uploads")
+	if !ok || block.Value != "true" {
+		return ""
+	}
+	size := "a large upload"
+	if mb, err := strconv.Atoi(settingValue(policy, "egress.large_upload_mb")); err == nil && mb > 0 {
+		size = "an upload of more than " + egress.FormatThreshold(int64(mb)<<20)
+	}
+	whose := "the large-upload block"
+	if block.Source == string(packs.SourceAdmin) {
+		whose = "your organization's large-upload block"
+	}
+	if listed(settingValue(policy, "egress.allow_only")) {
+		return size + " is reported, not cut: every host this sandbox may reach is on your organization's allowed list, which " +
+			whose + " exempts"
+	}
+	return size + " to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your " +
+		"organization lets you (" + whose + ")"
+}
+
+// listed reports a list setting of explain that names something.
+func listed(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && v != "(none)"
 }
 
 func networkLabel(sb *sandboxapi.Sandbox) string {

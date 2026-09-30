@@ -32,6 +32,7 @@ from defenseclaw import credential_provenance
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
+    ClawConfig,
     Config,
     GatewayConfig,
     GuardrailConfig,
@@ -41,8 +42,23 @@ from defenseclaw.context import AppContext
 from defenseclaw.main import cli
 
 
+def _configured_openclaw(data_dir: str) -> ClawConfig:
+    """claw.mode's openclaw default with an openclaw.json, i.e. OpenClaw set up.
+
+    Without one the OpenClaw gateway token is not required (#958), which
+    these tests would otherwise inherit from the host.
+    """
+    home = os.path.join(data_dir, "openclaw-home")
+    os.makedirs(home, exist_ok=True)
+    config_file = os.path.join(home, "openclaw.json")
+    with open(config_file, "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    return ClawConfig(mode="openclaw", home_dir=home, config_file=config_file)
+
+
 def _make_app_context(data_dir: str, **overrides) -> AppContext:
     cfg = Config(
+        claw=overrides.get("claw") or _configured_openclaw(data_dir),
         data_dir=data_dir,
         audit_db=os.path.join(data_dir, "audit.db"),
         quarantine_dir=os.path.join(data_dir, "quarantine"),

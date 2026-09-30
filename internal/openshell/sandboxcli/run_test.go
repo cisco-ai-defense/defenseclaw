@@ -386,13 +386,15 @@ func TestRunRefusals(t *testing.T) {
 // supervisor's Landlock probe) only in the gateway log (manual test M13).
 // The daemon now passes the reason on, and on macOS a run or a start that
 // failed on Landlock on the docker driver (Docker Desktop's VM kernel) says
-// what that means there and how to switch to MicroVMs; on the MicroVM
-// driver, whose sandboxes boot kernels of their own, it says nothing more.
+// what that means there and how to switch to MicroVMs, on a line of its own
+// after OpenShell's output (it ended one long line, the #1019 retest); on
+// the MicroVM driver, whose sandboxes boot kernels of their own, it says
+// nothing more.
 func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 	const detail = `openshell: wait for sandbox "myapp-d395": Internal: sandbox "myapp-d395" is in error state; ` +
 		`OpenShell says: SupervisorFailed: Landlock allow/deny probe failed`
 	failure := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox myapp-d395 failed", Detail: detail}
-	hint := "; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: " +
+	hint := "\n  → this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: " +
 		"switch the gateway to MicroVMs with `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`; see " + setupTroubleshootingURL + ")"
 	for _, c := range []struct{ goos, driver, want string }{
 		{"linux", "", failure.Error()},
@@ -426,6 +428,50 @@ func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = rejected
 	if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != rejected.Error() {
 		t.Fatalf("Run = %v", err)
+	}
+}
+
+// On a Mac whose gateway ran the docker driver on Docker Desktop, `sandbox
+// run` built the harness image and made a sandbox before OpenShell's
+// supervisor failed it on the Landlock the VM does not have, a certain
+// failure (the Docker driver check of the #1019 retest). It is refused up
+// front now, with the doctor's way on, on a line of its own; another Docker
+// VM, one that does not answer, and Linux are left to try as before.
+func TestRunRefusesDockerDesktopUpFront(t *testing.T) {
+	const refusal = "no sandbox can start on this gateway: it runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, " +
+		"which OpenShell sandboxes need; nothing was built or created\n" +
+		"  → run sandboxes in OpenShell MicroVMs, which have their own kernel: `defenseclaw sandbox setup` switches the gateway to them " +
+		"(or `defenseclaw sandbox doctor --fix`; details: " + setupTroubleshootingURL + ")"
+	for _, c := range []struct {
+		goos, driver, engine string
+		refused              bool
+		asked                int
+	}{
+		{"darwin", "docker", "Docker Desktop", true, 1},
+		{"darwin", "", "Docker Desktop", true, 1}, // a daemon too old to name its driver drove docker
+		{"darwin", "docker", "Ubuntu 24.04.2 LTS", false, 1},
+		{"darwin", "docker", "", false, 1},
+		{"darwin", "vm", "Docker Desktop", false, 0},
+		{"linux", "docker", "Docker Desktop", false, 0},
+	} {
+		ta := newTestApp(t, "")
+		ta.GOOS, ta.dockerEngine = c.goos, c.engine
+		ta.daemon.status.Gateway.Driver = c.driver
+		// A run let through ends at the create.
+		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "create reached"}
+		err := ta.Run(bg, RunOptions{Harness: "claude"})
+		creates := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)
+		switch {
+		case c.refused && (err == nil || err.Error() != refusal):
+			t.Fatalf("%+v: Run = %v\nwant %s", c, err, refusal)
+		case c.refused && (len(creates) != 0 || len(ta.copy.steps) != 0 || strings.Contains(ta.output(), "Starting")):
+			t.Fatalf("%+v: a refused run created %d sandboxes and staged %v:\n%s", c, len(creates), ta.copy.steps, ta.output())
+		case !c.refused && (err == nil || !strings.HasPrefix(err.Error(), "create reached") || len(creates) != 1):
+			t.Fatalf("%+v: Run = %v (%d creates), want it to reach the create", c, err, len(creates))
+		}
+		if ta.dockerAsked != c.asked {
+			t.Fatalf("%+v: docker asked %d times, want %d", c, ta.dockerAsked, c.asked)
+		}
 	}
 }
 
@@ -504,6 +550,90 @@ func TestRunBanner(t *testing.T) {
 			}
 		}},
 	})
+}
+
+// openshell.llm is the default of --llm, so a run the shell wrapper, the
+// TUI or the macOS app starts (none passes --llm) shares the model
+// credential it names; --llm overrides it for one run, a provider the
+// harness has no credential for gives way to auto, which the run says, and
+// a configured provider without its key refuses the run, naming the key
+// (#955).
+func TestRunLLMFromConfig(t *testing.T) {
+	profileOf := func(t *testing.T, ta *testApp) string {
+		t.Helper()
+		if req := createRequest(t, ta.daemon); req.LLM != nil {
+			return req.LLM.Profile
+		}
+		return ""
+	}
+	configured := func(llm string, env map[string]string) func(*testApp) {
+		return func(ta *testApp) {
+			ta.Cfg.OpenShell.LLM = llm
+			for k, v := range env {
+				ta.env[k] = v
+			}
+			noChanges(ta)
+		}
+	}
+	both := map[string]string{EnvBedrockToken: "bedrock-test-not-a-secret", "ANTHROPIC_API_KEY": "anthropic-test-not-a-secret"}
+	profile := func(want string) func(*testing.T, *testApp) {
+		return func(t *testing.T, ta *testApp) {
+			if got := profileOf(t, ta); got != want {
+				t.Fatalf("credential profile = %q, want %q", got, want)
+			}
+		}
+	}
+	fallback := "openshell.llm is gemini, which Claude Code cannot use, so this run shares the credential --llm auto finds"
+	runCases(t, []runCase{
+		{name: "bedrock from the config", setup: configured("bedrock", both), opts: RunOptions{Harness: "claude"},
+			check: profile(profiles.ClaudeBedrockMantleID), not: []string{"bedrock-test-not-a-secret", fallback}},
+		{name: "--llm overrides it", setup: configured("bedrock", both), opts: RunOptions{Harness: "claude", LLM: LLMAuto},
+			check: profile(profiles.AnthropicID)},
+		{name: "auto from the config", setup: configured("auto", both), opts: RunOptions{Harness: "claude"},
+			check: profile(profiles.AnthropicID)},
+		{name: "none from the config", setup: configured("none", both), opts: RunOptions{Harness: "claude"},
+			check: profile(""), want: []string{"no model credential is shared (openshell.llm none)"}},
+		{name: "a provider the harness cannot use", setup: configured("gemini", both), opts: RunOptions{Harness: "claude"},
+			check: profile(profiles.AnthropicID), want: []string{fallback}},
+	})
+	// The run's record keeps the configured choice: a resume with the same
+	// --llm does not call it ignored.
+	ta := newTestApp(t, "")
+	configured("bedrock", both)(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	sb := ta.mustGet(t, sbName)
+	if got := resumeIgnores(RunOptions{LLM: LLMBedrock}, sb, ta.runLaunchOf(sb)); len(got) != 0 {
+		t.Fatalf("a resume with the configured --llm ignores %v", got)
+	}
+	ta = newTestApp(t, "")
+	configured("bedrock", map[string]string{"ANTHROPIC_API_KEY": "k"})(ta)
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "codex"}),
+		"openshell.llm bedrock: no credential found (set AWS_BEARER_TOKEN_BEDROCK; `--llm auto` overrides openshell.llm for one run)")
+	if n := ta.creates(); n != 0 {
+		t.Fatalf("create calls = %d, want none", n)
+	}
+}
+
+// openshell.llm is one key for every harness: a harness that shares no
+// model credential (Kiro, Cursor Agent, Amp, Devin) takes auto without a
+// note on every run; one that shares others but not this one is told.
+func TestRunLLMNotesOnlyAHarnessWithOtherCredentials(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.LLM = LLMBedrock
+	for _, h := range []string{"kiro", "cursor", "amp", "devin"} {
+		spec := harnessSpec(t, h)
+		if choice, from, note := ta.runLLM(spec, ""); choice != LLMAuto || from != llmFromFlag || note != "" {
+			t.Fatalf("runLLM(%s) = %q, %q, %q; want auto without a note", h, choice, from, note)
+		}
+	}
+	claude := harnessSpec(t, "claudecode")
+	if _, _, note := ta.runLLM(claude, ""); note != "" {
+		t.Fatalf("runLLM(claude) notes %q for a provider it can use", note)
+	}
+	ta.Cfg.OpenShell.LLM = LLMGemini
+	if _, _, note := ta.runLLM(claude, ""); !strings.Contains(note, "which Claude Code cannot use") {
+		t.Fatalf("runLLM(claude) with gemini: note = %q", note)
+	}
 }
 
 // A --credential binding of the model's key wins over the detected

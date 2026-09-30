@@ -144,6 +144,9 @@ type codexHookResponse struct {
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled *bool  `json:"-"`
 	SourceReason     string `json:"-"`
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// took part in the verdict. Never serialized.
+	laneVerdict bool
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -368,6 +371,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.laneVerdict = verdict.laneVerdict
 	return resp
 }
 
@@ -963,6 +967,7 @@ func mergeCodexToolResultVerdicts(
 		merged.RawAction = untrusted.RawAction
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
+	merged.laneVerdict = source.laneVerdict || untrusted.laneVerdict
 	if source.RedactionEnabled != nil || untrusted.RedactionEnabled != nil {
 		enabled := source.RedactionEnabled != nil && *source.RedactionEnabled ||
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled

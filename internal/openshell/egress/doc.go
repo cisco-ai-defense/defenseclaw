@@ -77,5 +77,8 @@
 // Blocked requests get a JSON 403 body that explains the reason and how to
 // ask for an unblock. Every decision, tunnel close and large upload to a
 // first-seen host is reported to an EventSink, and the Counter keeps byte
-// totals per tunnel and per destination.
+// totals per tunnel and per destination. A sandbox whose policy blocks large
+// uploads (Principal.BlockLargeUploads) has the upload that crosses its
+// threshold cut and later ones to that destination refused, until an
+// unblock or an operator allow entry names the destination.
 package egress

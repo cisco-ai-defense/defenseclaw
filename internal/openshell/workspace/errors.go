@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -67,6 +68,10 @@ var (
 	// ErrNothingApplied: no 3-way apply of a copy-mode sandbox's work is
 	// recorded that UndoApply could revert.
 	ErrNothingApplied = errors.New("workspace: no apply to undo")
+	// ErrNoReusablePull: the pull PullOptions.Reuse names is not the last
+	// pull of the copy (another pull replaced it, or an undo dropped it),
+	// so the sandbox has to be read again.
+	ErrNoReusablePull = errors.New("workspace: the last pull cannot be reused")
 	// ErrScanIncomplete: the secret scan could not look at the whole
 	// folder, so a live mount is refused rather than showing files nobody
 	// checked.
@@ -100,6 +105,20 @@ func (e *UploadNotArrivedError) Error() string {
 }
 
 func (e *UploadNotArrivedError) Unwrap() error { return ErrUploadNotArrived }
+
+// EarlierPullError is CheckApply's refusal of a branch that holds only the
+// last pull's result, before a pull that starts the stopped sandbox, which
+// has run since that pull, to read its work again (ApplyOptions.Starts).
+type EarlierPullError struct {
+	Branch string
+	// PulledAt is when that last pull read the sandbox's copy.
+	PulledAt time.Time
+}
+
+func (e *EarlierPullError) Error() string {
+	return fmt.Sprintf("workspace: branch %s already exists and holds only the sandbox's pull of %s, and the sandbox has run since",
+		e.Branch, e.PulledAt.UTC().Format(time.RFC3339))
+}
 
 // UnreadableError lists the folders a session made unreadable (see
 // ErrUnreadableFolders). Undo refuses until they can be read again: what

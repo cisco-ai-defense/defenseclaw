@@ -2382,8 +2382,11 @@ type GatewayConfig struct {
 	// gatewayShouldConnectForConfiguredConnector. Three values:
 	//
 	//   "" / "auto"   — derive from connector + host. openclaw/zeptoclaw
-	//                   always dial; codex/claudecode dial only if
-	//                   gateway.host is non-loopback.
+	//                   dial; codex/claudecode dial only if
+	//                   gateway.host is non-loopback. An openclaw
+	//                   connector implied only by claw.mode, on a
+	//                   loopback host, does not dial when OpenClaw is
+	//                   not installed (no openclaw.json, no binary).
 	//   "enabled"     — always dial regardless of connector/host. Use
 	//                   when running a local OpenClaw daemon on
 	//                   127.0.0.1 alongside a codex/claudecode connector
@@ -4056,8 +4059,11 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("openshell.pack_dir", filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName))
 	viper.SetDefault("openshell.workdir.git_depth", DefaultOpenShellGitDepth)
 	viper.SetDefault("openshell.workdir.on_exit", DefaultOpenShellOnExit)
+	viper.SetDefault("openshell.workdir.undo_ignored.max_mb", DefaultOpenShellUndoIgnoredMaxMB)
+	viper.SetDefault("openshell.workdir.undo_ignored.dirs", DefaultOpenShellUndoIgnoredDirs)
 	viper.SetDefault("openshell.approvals.debounce_ms", DefaultOpenShellApprovalDebounceMs)
 	viper.SetDefault("openshell.token_delivery", DefaultOpenShellTokenDelivery)
+	viper.SetDefault("openshell.llm", DefaultOpenShellLLM)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

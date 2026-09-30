@@ -355,16 +355,22 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 		resolvedDataDir = config.DefaultDataPath()
 	}
 	loadDotEnvIntoOS(filepath.Join(resolvedDataDir, ".env"))
-	managedOptions, err := config.ResolveObservabilityV8ManagedAIDOptionsForInspection(absPath, raw)
-	if err != nil {
-		return nil, err
-	}
 
+	// The schema pass comes first: its errors name the field and what it
+	// takes. The managed-destination decode below runs the runtime loader,
+	// whose errors reach the wire only as "configuration could not be
+	// compiled safely" at "$" (an openshell.llm or
+	// openshell.workdir.undo_ignored.max_mb the schema refuses was reported
+	// that way).
 	compiled, err := config.ParseCompileObservabilityV8(
 		absPath,
 		raw,
 		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir, CredentialsDir: credentialsDir},
 	)
+	if err != nil {
+		return nil, err
+	}
+	managedOptions, err := config.ResolveObservabilityV8ManagedAIDOptionsForInspection(absPath, raw)
 	if err != nil {
 		return nil, err
 	}

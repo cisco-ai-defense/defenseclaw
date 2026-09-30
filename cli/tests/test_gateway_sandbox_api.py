@@ -183,7 +183,7 @@ def test_the_gateways_driver_and_a_run_image_reach_the_panel(daemon: FakeDaemon)
 def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaemon) -> None:
     name = "my app/1"
     escaped = "/api/v1/sandbox/sandboxes/my%20app%2F1"
-    for verb in ("stop", "start", "undo", "review"):
+    for verb in ("stop", "start", "undo", "review", "accept"):
         daemon.routes[("POST", f"{escaped}/{verb}")] = (200, {"name": name})
     daemon.routes[("DELETE", escaped)] = (200, {"name": name, "deleted": True})
     daemon.routes[("POST", "/api/v1/sandbox/approvals/ask%2F1")] = (
@@ -198,6 +198,8 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
     client.start_sandbox(name, new_snapshot=True)
     client.undo_sandbox(name, preview=True, stop=True)
     client.review_sandbox(name, diff=True)
+    client.accept_sandbox_changes(name, snapshot_created_at="2026-09-30T10:00:00Z", session=2)
+    client.accept_sandbox_changes(name)
     assert client.delete_sandbox(name, keep_snapshot=True)["deleted"] is True
     assert client.decide_sandbox_approval("ask/1", approve=True, always=True, reason="ok")["message"] == "queued"
     client.decide_sandbox_approval("ask/1", approve=False)
@@ -211,6 +213,8 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
         ("POST", f"{escaped}/start", {"new_snapshot": True}),
         ("POST", f"{escaped}/undo", {"preview": True, "stop": True}),
         ("POST", f"{escaped}/review", {"diff": True}),
+        ("POST", f"{escaped}/accept", {"snapshot_created_at": "2026-09-30T10:00:00Z", "session": 2}),
+        ("POST", f"{escaped}/accept", {}),
         ("DELETE", escaped, {"keep_snapshot": True}),
         ("POST", "/api/v1/sandbox/approvals/ask%2F1", {"decision": "approve", "always": True, "reason": "ok"}),
         ("POST", "/api/v1/sandbox/approvals/ask%2F1", {"decision": "reject"}),
@@ -221,6 +225,28 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
         # The CSRF gate needs the client header and a JSON content type.
         assert request["headers"]["content-type"] == "application/json"
         assert request["headers"]["x-defenseclaw-client"]
+
+
+def test_the_kept_run_log_of_a_stopped_sandbox(daemon: FakeDaemon) -> None:
+    path = "/api/v1/sandbox/sandboxes/myapp-claude-7f3a/logs"
+    kept = {
+        "name": "myapp-claude-7f3a",
+        "state": "interrupted",
+        "kept_at": "2026-09-30T10:00:00Z",
+        "log": "still working\n",
+    }
+    daemon.routes[("GET", path)] = (200, kept)
+    client = daemon.client()
+    assert client.sandbox_run_log("myapp-claude-7f3a", lines=1)["log"] == "still working\n"
+    assert client.sandbox_run_log("myapp-claude-7f3a")["state"] == "interrupted"
+    assert [r["query"] for r in daemon.requests] == [{"lines": ["1"]}, {}]
+    daemon.routes[("GET", path)] = (
+        404,
+        {"code": "not_found", "error": "no log of a detached run of sandbox x was kept"},
+    )
+    with pytest.raises(SandboxAPIError) as exc:
+        client.sandbox_run_log("myapp-claude-7f3a")
+    assert exc.value.code == "not_found"
 
 
 def test_policy_explain_encodes_the_query_like_the_go_client(daemon: FakeDaemon) -> None:

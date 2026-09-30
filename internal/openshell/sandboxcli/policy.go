@@ -92,6 +92,11 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 			rows = append(rows, [2]string{key, withNote(listSummary(shown, 8), note)})
 		}
 	}
+	if settingValue(ex.Settings, "egress.block_large_uploads") == "true" {
+		rows = append(rows, [2]string{"egress.block_large_uploads", "true (an upload of more than " +
+			firstNonEmpty(settingValue(ex.Settings, "egress.large_upload_mb"), "?") +
+			" MiB to a host the sandbox had not contacted is cut)"})
+	}
 	// The key column fits the longest key: values never run into labels.
 	width := 0
 	for _, r := range rows {
@@ -102,9 +107,6 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 	}
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
-	}
-	for _, w := range a.adminWarnings() {
-		a.warn(w)
 	}
 	a.note("where each value comes from: " + CommandName + " policy explain")
 	return nil
@@ -211,29 +213,6 @@ func coveredBy(globs []string, entry string) bool {
 	return false
 }
 
-// adminWarnings are the organization-policy entries that do less than
-// they look like: a bare domain on openshell.admin.egress_block blocks
-// that host only, not its subdomains.
-func (a *App) adminWarnings() []string {
-	if a.Cfg == nil {
-		return nil
-	}
-	block := a.Cfg.OpenShell.Admin.EgressBlock
-	var out []string
-	for _, entry := range block {
-		p, err := config.ParseOpenShellEgressPattern(entry)
-		if err != nil || p.Wildcard || p.Prefix.IsValid() || p.Host == "" || !strings.Contains(p.Host, ".") {
-			continue
-		}
-		if coveredBy(block, "*."+p.Host) {
-			continue
-		}
-		out = append(out, fmt.Sprintf("openshell.admin.egress_block %s blocks %s itself, not its subdomains (www.%s stays reachable); "+
-			"add *.%s to block those too", entry, p.Host, p.Host, p.Host))
-	}
-	return out
-}
-
 func adminText(s sandboxapi.AdminStatus) string {
 	if !s.Configured {
 		return "no openshell.admin constraints"
@@ -311,9 +290,6 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 	}
-	for _, w := range a.adminWarnings() {
-		a.warn(w)
-	}
 	return nil
 }
 
@@ -366,6 +342,9 @@ func (a *App) adminConstraints() []string {
 	list("allowed_harnesses", ad.AllowedHarnesses)
 	list("egress_block", ad.EgressBlock)
 	list("egress_allow_only", ad.EgressAllowOnly)
+	if ad.BlockLargeUploads {
+		add("block_large_uploads", "true")
+	}
 	list("require_copy_for", ad.RequireCopyFor)
 	if r := ad.MaxResources; r.CPU != "" || r.Memory != "" {
 		add("max_resources", strings.TrimSpace(firstNonEmpty(r.CPU, "-")+" CPU, "+firstNonEmpty(r.Memory, "-")+" memory"))
@@ -527,7 +506,8 @@ func (a *App) adminAllows(entry string) error {
 		return refuse("openshell.admin.allow_unblock", "your own allow entries are ignored; ask your administrator to add destinations")
 	}
 	for _, b := range ad.EgressBlock {
-		if coveredBy([]string{b}, entry) {
+		// A host name there blocks its subdomains too.
+		if coveredBy(config.OpenShellAdminBlockPatterns([]string{b}), entry) {
 			return refuse("openshell.admin.egress_block", entry+" is on your organization's blocklist ("+b+")")
 		}
 	}

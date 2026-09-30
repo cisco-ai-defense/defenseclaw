@@ -385,7 +385,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, "e2fsprogs in "+f.e2fsprogs+"; "+driver+" signed for Apple's Hypervisor")
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
-		wantOutsideFormulaFix(t, c)
+		wantUnmanagedFix(t, c, restartYourself)
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
@@ -400,7 +400,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" runs under launchd (com.example.openshell-gateway), not Homebrew's nvidia/openshell/openshell service, so DefenseClaw cannot restart it")
-		wantOutsideFormulaFix(t, c)
+		wantUnmanagedFix(t, c, restartYourself)
 		if !r.OK() || !r.OpenShellOutsideFormula() {
 			t.Fatalf("outside the formula %v\n%s", r.OpenShellOutsideFormula(), r)
 		}
@@ -453,7 +453,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		}
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, filepath.Join(prefix, "libexec", "openshell-driver-vm")+" signed for Apple's Hypervisor")
-		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"))
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"), restartYourself)
 	})
 	// ps lists nothing: the answering gateway still runs the driver.
 	t.Run("driver not found", func(t *testing.T) {
@@ -512,6 +512,21 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			})
 		}
 	})
+	// Setup writes a change for a gateway run by hand without a
+	// pending-restart mark: with no start to compare gateway.toml with,
+	// the doctor cannot say the gateway loaded it (fu2 review 1).
+	t.Run("no start known and no mark", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.runner.On("ps -o etime= -p 7976", "", errors.New("exit status 1"))
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "gateway.toml, but DefenseClaw cannot tell whether the gateway was restarted on it: "+
+			"it found no start time for that gateway, which runs another way")
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.RestartsGateway || c.Fix.Summary != "restart the gateway the way you started it, if you have not since it changed; "+
+			"DefenseClaw restarts it only through the nvidia/openshell/openshell service, which is not installed" {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+	})
 	// The start ps reports is only good to the second: a gateway.toml
 	// written just before the gateway started, in its second, is loaded
 	// (it warned on this Mac, gateway.toml at 04:37:34.4 under a gateway
@@ -549,18 +564,117 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, fail, "openshell-driver-vm is not installed")
-		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"))
+		// The user starts it: setup stops here, where it would have to.
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"), startYourself)
+		// Not `brew services start` of the formula that is not installed.
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"), startYourself)
+		if r.OK() {
+			t.Fatalf("a Mac whose gateway does not answer is ready:\n%s", r)
+		}
 	})
 }
 
-// wantOutsideFormulaFix wants the gateway service fix setup gives for an
-// OpenShell installed another way than the Homebrew formula (setup refuses
-// it before it reads --install-openshell).
-func wantOutsideFormulaFix(t *testing.T, c *openshell.Check) {
+// unmanagedFix's first steps (doctor.go).
+const (
+	restartYourself = "after a gateway change, restart this gateway yourself, the way you started it"
+	startYourself   = "start that OpenShell's gateway yourself, the way you started it before"
+)
+
+// wantUnmanagedFix wants the fix of an OpenShell installed another way than
+// the Homebrew formula, which setup uses while its gateway answers: first,
+// the user's step with that gateway, then the way to a gateway DefenseClaw
+// starts and restarts. doctor --fix takes neither.
+func wantUnmanagedFix(t *testing.T, c *openshell.Check, first string) {
 	t.Helper()
-	if c.Fix == nil || c.Fix.Automatic || c.Fix.Summary != openshell.OpenShellOutsideFormulaFix || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
-		t.Fatalf("service fix = %+v", c.Fix)
+	if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" ||
+		!strings.HasPrefix(c.Fix.Summary, first+". DefenseClaw starts and restarts the gateway only through Homebrew's nvidia/openshell/openshell service, and the OpenShell 0.1.1") ||
+		!strings.HasSuffix(c.Fix.Summary, "was installed another way. For a gateway DefenseClaw starts and restarts, stop that one and remove that OpenShell "+
+			"(DefenseClaw's install step would find it and install nothing), then install the formula") {
+		t.Fatalf("%s fix = %+v", c.ID, c.Fix)
 	}
+}
+
+// TestDoctorOffersNoRestartWithoutAGatewayService: on a Mac without the
+// nvidia/openshell formula, "MicroVM sandbox user" (a pending-restart mark)
+// and "MicroVM resources" (below what builds need) offered `doctor --fix`
+// restarts of the gateway ("this restarts the OpenShell gateway, which
+// stops every sandbox running on it"), which `brew services restart` of a
+// formula that is not installed fails. With no gateway there is nothing
+// to restart, and a setting takes effect once the gateway is installed and
+// started; a gateway run another way is restarted the way it was started.
+func TestDoctorOffersNoRestartWithoutAGatewayService(t *testing.T) {
+	const pass, warn = openshell.StatusPass, openshell.StatusWarn
+	setup := func(t *testing.T) *doctorFixture {
+		f := newDoctorFixture(t)
+		f.onMicroVMs()
+		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+		f.writeTOML(strings.Replace(microVMTOML, "mem_mib = 4096\noverlay_disk_mib = 16384\n", "mem_mib = 2048\noverlay_disk_mib = 4096\n", 1),
+			f.started.Add(-time.Minute))
+		writeFile(t, filepath.Join(f.dir, ".defenseclaw-restart-pending"), time.Now().UTC().Format(time.RFC3339Nano)+"\n", 0o600)
+		f.runner.OnFunc("brew services", func(_ context.Context, c openshell.Command) ([]byte, error) {
+			t.Errorf("ran brew %v without the formula", c.Args)
+			return []byte("Error: Formula `openshell` is not installed."), errors.New("brew: exit status 1")
+		})
+		return f
+	}
+	// noRestarts wants no fix of r to restart the gateway, and doctor
+	// --fix to run no brew services command.
+	noRestarts := func(t *testing.T, r *openshell.DoctorReport) {
+		t.Helper()
+		for _, c := range r.Checks {
+			if c.Fix != nil && (c.Fix.RestartsGateway || strings.Contains(c.Fix.Command, "brew services")) {
+				t.Errorf("%s offers a gateway restart: %+v", c.ID, c.Fix)
+			}
+		}
+		if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resources := "raise them under [openshell.drivers.vm] in "
+
+	t.Run("no OpenShell", func(t *testing.T) {
+		f := setup(t)
+		f.found["openshell"] = false
+		_ = os.Remove(f.vmDriverPath())
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		r := f.run()
+		toml, _ := f.doctor.Gateway.TOMLPath()
+		if c := expectCheck(t, r, openshell.CheckIDVMIdentity, pass, "sandboxes run as 501:20, your user, once the gateway is installed and started (set in "+toml+")"); c.Fix != nil {
+			t.Fatalf("vm-identity fix = %+v", c.Fix)
+		}
+		c := expectCheck(t, r, openshell.CheckIDVMResources, warn, "every MicroVM gets 4 vCPUs, 2048 MiB of memory and a 4096 MiB disk")
+		if want := resources + toml + " (the disk is sparse on the host: it costs nothing until used); it takes effect once the gateway is installed and started"; c.Fix == nil || c.Fix.Summary != want || c.Fix.Automatic || c.Fix.Apply != nil {
+			t.Fatalf("vm-resources fix = %+v\nwant summary %q", c.Fix, want)
+		}
+		noRestarts(t, r)
+	})
+	t.Run("gateway run another way", func(t *testing.T) {
+		f := setup(t)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "restart the gateway if you have not since it changed")
+		const how = "; DefenseClaw restarts it only through the nvidia/openshell/openshell service, which is not installed"
+		if want := "restart the gateway the way you started it, to load its changed configuration" + how; c.Fix == nil || c.Fix.Summary != want || c.Fix.Apply != nil {
+			t.Fatalf("vm-identity fix = %+v\nwant summary %q", c.Fix, want)
+		}
+		c = expectCheck(t, r, openshell.CheckIDVMResources, warn, "an agent that builds code may need more")
+		toml, _ := f.doctor.Gateway.TOMLPath()
+		if want := resources + toml + ", then restart the gateway the way you started it (the disk is sparse on the host: it costs nothing until used)" + how; c.Fix == nil || c.Fix.Summary != want || c.Fix.Apply != nil {
+			t.Fatalf("vm-resources fix = %+v\nwant summary %q", c.Fix, want)
+		}
+		noRestarts(t, r)
+	})
+	// With the formula's service, the same checks restart the gateway.
+	t.Run("formula installed", func(t *testing.T) {
+		f := setup(t)
+		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		r := f.run()
+		for _, id := range []string{openshell.CheckIDVMIdentity, openshell.CheckIDVMResources} {
+			if c := r.Get(id); c.Fix == nil || !c.Fix.Automatic || !c.Fix.RestartsGateway {
+				t.Fatalf("%s fix = %+v", id, c.Fix)
+			}
+		}
+	})
 }
 
 // TestDoctorFollowsTheDriverTheGatewayRuns: a gateway can run vm through
@@ -584,6 +698,24 @@ func TestDoctorFollowsTheDriverTheGatewayRuns(t *testing.T) {
 	r = f.run()
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusFail, "has no Landlock")
 	expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusSkip, "")
+}
+
+// DockerEngineOS is the one `docker info` a run on a docker-driver Mac
+// makes to tell Docker Desktop (refused up front) from another Docker VM.
+func TestDockerEngineOS(t *testing.T) {
+	r := &openshelltest.Runner{}
+	r.On("docker info --format {{.OperatingSystem}}", "Docker Desktop\n", nil)
+	got, err := openshell.DockerEngineOS(context.Background(), r)
+	if err != nil || got != "Docker Desktop" || !openshell.IsDockerDesktop(got) {
+		t.Fatalf("DockerEngineOS = %q, %v", got, err)
+	}
+	r.On("docker info", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n", errors.New("exit status 1"))
+	if got, err := openshell.DockerEngineOS(context.Background(), r); err == nil || got != "" || !strings.Contains(err.Error(), "Cannot connect") {
+		t.Fatalf("DockerEngineOS of a Docker that does not answer = %q, %v", got, err)
+	}
+	if openshell.IsDockerDesktop("Ubuntu 24.04.2 LTS") {
+		t.Fatal("Colima's engine taken for Docker Desktop")
+	}
 }
 
 // TestDoctorOnADockerMac: on a Mac whose gateway runs the docker driver,
@@ -611,6 +743,19 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		}
 		expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, "signed for Apple's Hypervisor")
 		expectCheck(t, r, openshell.CheckIDVMIdentity, openshell.StatusSkip, "the gateway runs the docker driver")
+		// No Docker Desktop setting can help without Landlock: its host
+		// networking and file sharing warnings asked for one (the #1019
+		// retest), and are skipped, saying why.
+		for id, why := range map[string]string{
+			openshell.CheckIDDockerHostNetwork: "OpenShell MicroVMs, the way on, do not use Docker's network",
+			openshell.CheckIDDockerFileSharing: "OpenShell MicroVMs, the way on, mount no project folder",
+		} {
+			c := expectCheck(t, r, id, openshell.StatusSkip, "not needed: without a usable Landlock in the Linux VM Docker runs in, "+
+				"no sandbox starts there whatever this setting is, and "+why)
+			if c.Fix != nil {
+				t.Fatalf("%s fix = %+v", id, c.Fix)
+			}
+		}
 		if r.Driver != openshell.DriverDocker {
 			t.Fatalf("driver = %q", r.Driver)
 		}
@@ -666,10 +811,13 @@ func TestDoctorOnADockerMac(t *testing.T) {
 	t.Run("Landlock not checked", func(t *testing.T) {
 		f := docker(t)
 		f.vmErr = openshell.ErrNoProbeImage
-		c := expectCheck(t, f.run(), openshell.CheckIDGatewayDriver, openshell.StatusWarn, "whether the Linux VM Docker runs in has Landlock is not known")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusWarn, "whether the Linux VM Docker runs in has Landlock is not known")
 		if c.Fix == nil || !c.Fix.Automatic {
 			t.Fatalf("fix = %+v", c.Fix)
 		}
+		// Landlock may be there: the Docker Desktop settings still count.
+		expectCheck(t, r, openshell.CheckIDDockerHostNetwork, openshell.StatusWarn, "Docker Desktop does not report the host networking setting")
 	})
 
 	t.Run("a Docker VM with Landlock", func(t *testing.T) {
@@ -680,6 +828,8 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		expectCheck(t, r, openshell.CheckIDVMResources, openshell.StatusSkip, "the gateway runs the docker driver")
 		expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled")
 		expectCheck(t, r, openshell.CheckIDDisk, openshell.StatusSkip, "images live in the Docker Desktop VM disk")
+		expectCheck(t, r, openshell.CheckIDDockerHostNetwork, openshell.StatusWarn, "Docker Desktop does not report the host networking setting")
+		expectCheck(t, r, openshell.CheckIDDockerFileSharing, openshell.StatusWarn, "Docker Desktop does not report its shared directories")
 	})
 
 	t.Run("configured for MicroVMs, not restarted", func(t *testing.T) {

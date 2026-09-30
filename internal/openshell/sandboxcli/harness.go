@@ -65,16 +65,51 @@ func harnessList() string {
 	return strings.Join(parts, ", ")
 }
 
-// LLM credential selections for --llm.
+// LLM credential selections for --llm and openshell.llm.
 const (
-	LLMAuto        = "auto"
-	LLMNone        = "none"
-	LLMAnthropic   = "anthropic"
-	LLMClaudeOAuth = "claude-oauth"
-	LLMOpenAI      = "openai"
-	LLMBedrock     = "bedrock"
-	LLMGemini      = "gemini"
+	LLMAuto        = config.OpenShellLLMAuto
+	LLMNone        = config.OpenShellLLMNone
+	LLMAnthropic   = config.OpenShellLLMAnthropic
+	LLMClaudeOAuth = config.OpenShellLLMClaudeOAuth
+	LLMOpenAI      = config.OpenShellLLMOpenAI
+	LLMBedrock     = config.OpenShellLLMBedrock
+	LLMGemini      = config.OpenShellLLMGemini
 )
+
+// Where a run's model credential choice comes from, for its messages.
+const (
+	llmFromFlag   = "--llm"
+	llmFromConfig = "openshell.llm"
+)
+
+// runLLM is the model credential choice of a run: --llm, else
+// openshell.llm, else auto; where it came from; and, when a configured
+// provider is one the harness has no credential for (openshell.llm is one
+// key for every harness), the note that the run takes auto instead. A
+// harness that shares no model credential at all (it logs in inside) takes
+// auto without the note, which every one of its runs would repeat. The flag
+// names this harness's own choice, so an unknown one there is an error
+// (detectLLM).
+func (a *App) runLLM(spec *harness.Spec, flag string) (choice, from, note string) {
+	if c := strings.ToLower(strings.TrimSpace(flag)); c != "" {
+		return c, llmFromFlag, ""
+	}
+	c := ""
+	if a.Cfg != nil {
+		c = strings.ToLower(strings.TrimSpace(a.Cfg.OpenShell.LLM))
+	}
+	if c == "" || c == LLMAuto {
+		return LLMAuto, llmFromFlag, ""
+	}
+	if cands := a.llmCandidates(spec); c != LLMNone && !slices.ContainsFunc(cands, func(cand llmCandidate) bool { return cand.llm == c }) {
+		if len(cands) == 0 {
+			return LLMAuto, llmFromFlag, ""
+		}
+		return LLMAuto, llmFromFlag, llmFromConfig + " is " + c + ", which " + spec.DisplayName +
+			" cannot use, so this run shares the credential --llm auto finds"
+	}
+	return c, llmFromConfig, ""
+}
 
 // EnvBedrockToken holds a short-term Amazon Bedrock API key.
 const EnvBedrockToken = "AWS_BEARER_TOKEN_BEDROCK"
@@ -89,6 +124,10 @@ type llmChoice struct {
 	Hosts []string
 	// Note explains a run without a credential.
 	Note string
+	// Configured is the openshell.llm choice the run took, when it came
+	// from there rather than --llm (the run's record keeps it, so a resume
+	// with the same --llm is not told it is ignored).
+	Configured string
 }
 
 // llmCandidate is one model credential a harness can share: the --llm
@@ -172,12 +211,17 @@ var modelKeyVariables = map[string][]string{
 }
 
 // detectLLM picks the harness's model credential from the user's
-// environment (and, for Codex, ~/.codex/auth.json). reserved are variable
-// names --credential already binds; they win.
-func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[string]bool) (llmChoice, error) {
+// environment (and, for Codex, ~/.codex/auth.json): auto takes the first of
+// llmCandidates that is set, an Amazon Bedrock key last. reserved are
+// variable names --credential already binds; they win. from names where the
+// choice came from (--llm or openshell.llm), for the messages.
+func (a *App) detectLLM(spec *harness.Spec, choice, from, region string, reserved map[string]bool) (llmChoice, error) {
 	choice = strings.ToLower(strings.TrimSpace(choice))
 	if choice == "" {
 		choice = LLMAuto
+	}
+	if from == "" {
+		from = llmFromFlag
 	}
 	if region == "" {
 		region = firstNonEmpty(a.Getenv("AWS_REGION"), a.Getenv("AWS_DEFAULT_REGION"))
@@ -195,7 +239,7 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 		}
 	}
 	if choice == LLMNone {
-		return llmChoice{Note: "no model credential is shared (--llm none); " + insideLoginCaveat}, nil
+		return llmChoice{Note: "no model credential is shared (" + from + " none); " + insideLoginCaveat}, nil
 	}
 	known := choice == LLMAuto
 	for _, c := range cands {
@@ -204,12 +248,9 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 		}
 	}
 	if !known {
-		return llmChoice{}, fmt.Errorf("--llm %s is not available for %s (choose auto, none or one of its providers)", choice, spec.DisplayName)
+		return llmChoice{}, fmt.Errorf("%s %s is not available for %s (choose auto, none or one of its providers)", from, choice, spec.DisplayName)
 	}
 	for _, c := range cands {
-		if choice == LLMAuto && c.llm == LLMBedrock {
-			continue // Bedrock is chosen explicitly
-		}
 		if choice != LLMAuto && c.llm != choice {
 			continue
 		}
@@ -231,7 +272,11 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 		return llmChoice{Credential: cred, Source: c.source, Hosts: cp.Hosts}, nil
 	}
 	if choice != LLMAuto {
-		return llmChoice{}, fmt.Errorf("--llm %s: no credential found (%s)", choice, a.llmHint(spec, choice))
+		hint := a.llmHint(spec, choice)
+		if from == llmFromConfig {
+			hint += "; `--llm auto` overrides openshell.llm for one run"
+		}
+		return llmChoice{}, fmt.Errorf("%s %s: no credential found (%s)", from, choice, hint)
 	}
 	return llmChoice{Note: "no model credential found (" + a.llmHint(spec, choice) + "); " + insideLoginCaveat}, nil
 }
@@ -272,11 +317,34 @@ func (a *App) sandboxLLM(spec *harness.Spec, sb *sandboxapi.Sandbox, run *runLau
 	return llmChoice{Credential: &sandboxapi.LLMCredential{Profile: id}, Source: source, Hosts: cp.Hosts}
 }
 
-// llmHint says how to give a run spec's model credential.
+// llmHint says how to give a run spec's model credential; under auto, an
+// Amazon Bedrock key comes last, as detectLLM tries it.
 func (a *App) llmHint(spec *harness.Spec, choice string) string {
+	hint := a.providerHint(spec, choice)
+	if choice == LLMAuto && slices.ContainsFunc(a.llmCandidates(spec), func(c llmCandidate) bool { return c.llm == LLMBedrock }) {
+		hint += ", or set " + EnvBedrockToken + " for Amazon Bedrock"
+	}
+	return hint
+}
+
+// providerHint is llmHint without the Bedrock alternative of auto. A
+// named provider's hint names only that provider's key: with it chosen, no
+// other key is shared, and a run without it is refused, so there is no
+// sandbox to log in inside.
+func (a *App) providerHint(spec *harness.Spec, choice string) string {
 	switch harnessName := spec.Name; {
 	case choice == LLMBedrock:
 		return "set " + EnvBedrockToken
+	case choice == LLMAnthropic:
+		return "set ANTHROPIC_API_KEY"
+	case choice == LLMClaudeOAuth:
+		return "set CLAUDE_CODE_OAUTH_TOKEN from " + a.claudeSetupToken(spec)
+	case harnessName == "codex" && (choice == LLMOpenAI || choice == LLMAuto):
+		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
+	case choice == LLMOpenAI:
+		return "set OPENAI_API_KEY"
+	case choice == LLMGemini:
+		return "set GEMINI_API_KEY"
 	case harnessName == "claudecode":
 		// A Claude subscription logs in on this machine: setup-token prints
 		// a token the sandbox then sees only as a placeholder. The command
@@ -284,13 +352,7 @@ func (a *App) llmHint(spec *harness.Spec, choice string) string {
 		if _, err := a.LookPath(spec.Command); err != nil {
 			return "set ANTHROPIC_API_KEY, or use /login in the sandbox"
 		}
-		setup := "`claude setup-token`"
-		if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, spec.Name) {
-			setup = "`" + wrapper.EnvBypass + "=1 claude setup-token`"
-		}
-		return "set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from " + setup
-	case harnessName == "codex":
-		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
+		return "set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from " + a.claudeSetupToken(spec)
 	case harnessName == "opencode":
 		return "set ANTHROPIC_API_KEY or OPENAI_API_KEY"
 	case harnessName == "copilot":
@@ -301,6 +363,16 @@ func (a *App) llmHint(spec *harness.Spec, choice string) string {
 		return "set GEMINI_API_KEY"
 	}
 	return "set the provider's API key"
+}
+
+// claudeSetupToken is the command that prints a Claude subscription's
+// CLAUDE_CODE_OAUTH_TOKEN on this machine, past the shell wrapper when it
+// is on.
+func (a *App) claudeSetupToken(spec *harness.Spec) string {
+	if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, spec.Name) {
+		return "`" + wrapper.EnvBypass + "=1 claude setup-token`"
+	}
+	return "`claude setup-token`"
 }
 
 // codexAuthKey reads the API key a `codex login --with-api-key` stored.
