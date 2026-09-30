@@ -66,6 +66,14 @@ from defenseclaw.commands import windows_native_uninstall
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
 _RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
+# The installers (scripts/install.sh, scripts/install.ps1) write this record
+# beside the launchers when they install uv because it was missing: one
+# "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
+# that still match it, and keeps a uv that was updated or replaced since.
+_UV_RECORD = "defenseclaw-uv.sha256"
+_UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
+_UV_NAMES_POSIX = ("uv", "uvx")
+_UV_RECORD_MAX_BYTES = 4096
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
@@ -143,6 +151,11 @@ class UninstallPlan:
     managed_venv: str = ""
     gateway_path: str = ""
     binary_targets: tuple[str, ...] = ()
+    # data_bound_launchers are the launchers in install_root that run the
+    # CLI's virtual environment in data_dir (links on Linux and macOS, .cmd
+    # shims on Windows). `--all` removes them with data_dir even without
+    # --binaries: they stop working once it is gone.
+    data_bound_launchers: tuple[str, ...] = ()
     # sandbox_teardown runs ``defenseclaw-gateway sandbox teardown --yes``
     # before the sidecar stops: DefenseClaw's OpenShell sandboxes,
     # providers, profiles and images go, the gateway config setup changed is
@@ -406,6 +419,10 @@ def _build_plan(
     platform_name = platform_name or sys.platform
     data_dir = str(config_module.default_data_path())
     install_root, binary_targets = _owned_binary_targets(platform_name)
+    binary_targets += _installer_uv_targets(install_root, platform_name)
+    data_bound_launchers = (
+        _data_bound_launchers(binary_targets, data_dir, platform_name) if wipe_data and not binaries else ()
+    )
 
     # Config identifies active connectors. If it is missing or unreadable,
     # only durable rollback markers may authorize connector teardown.
@@ -477,7 +494,96 @@ def _build_plan(
             else (shutil.which("defenseclaw-gateway") or os.path.join(install_root, "defenseclaw-gateway"))
         ),
         binary_targets=binary_targets,
+        data_bound_launchers=data_bound_launchers,
     )
+
+
+def _launcher_link_target(path: str) -> str:
+    """Return the absolute target of a launcher link, or "" for anything else."""
+    try:
+        if not os.path.islink(path):
+            return ""
+        target = os.readlink(path)
+    except OSError:
+        return ""
+    return os.path.normpath(os.path.join(os.path.dirname(path), target))
+
+
+def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> bool:
+    """Report whether the launcher at path runs the CLI's venv in data_dir.
+
+    Linux and macOS installs link ``~/.local/bin/defenseclaw`` (and the
+    scanner launchers) into ``<data_dir>/.venv``; Windows installs write
+    ``.cmd`` shims that call the venv's ``Scripts`` folder. Removing data_dir
+    leaves them dangling. A launcher that points anywhere else (a source
+    checkout's ``make install`` links into the repository) keeps working.
+    """
+    venv = _normalized(os.path.join(data_dir, ".venv"))
+    if platform_name != "win32":
+        link = _launcher_link_target(path)
+        return bool(link) and os.path.commonpath((_normalized(link), venv)) == venv
+    name = os.path.basename(path)
+    if not name.lower().endswith(".cmd") or not os.path.isfile(path) or _is_reparse_path(path):
+        return False
+    expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as stream:
+            contents = stream.read(16_385)
+    except OSError:
+        return False
+    return len(contents) <= 16_384 and expected in contents.lower()
+
+
+def _data_bound_launchers(binary_targets: tuple[str, ...], data_dir: str, platform_name: str) -> tuple[str, ...]:
+    """Name the launchers that stop working once data_dir is removed."""
+    bound = tuple(path for path in binary_targets if _is_data_bound_launcher(path, data_dir, platform_name))
+    # On Windows the deferred helper removes shims only beside the CLI shim
+    # it verifies, so the others go only when defenseclaw.cmd does.
+    if platform_name == "win32" and not any(os.path.basename(path).lower() == "defenseclaw.cmd" for path in bound):
+        return ()
+    return bound
+
+
+def _installer_uv_targets(install_root: str, platform_name: str) -> tuple[str, ...]:
+    """Return the uv files the installer put in install_root, and its record.
+
+    Only files that still match the digest the installer recorded are
+    listed; a uv updated or replaced since then belongs to the user.
+    """
+    record = os.path.join(install_root, _UV_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _UV_RECORD_MAX_BYTES:
+            return ()
+        with open(record, encoding="utf-8", errors="strict") as stream:
+            lines = stream.read(_UV_RECORD_MAX_BYTES).splitlines()
+    except (OSError, UnicodeError):
+        return ()
+    names = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)
+    targets: list[str] = []
+    for line in lines:
+        digest, _, name = line.strip().partition("  ")
+        if name not in names:
+            continue
+        path = os.path.join(install_root, name)
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode) or _sha256_file(path) != digest.lower():
+                continue
+        except OSError:
+            continue
+        targets.append(path)
+    targets.append(record)
+    return tuple(targets)
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
@@ -704,6 +810,23 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         for target in plan.binary_targets:
             if os.path.lexists(target):
                 click.echo(f"      {ux.dim('·')} {target}")
+    elif plan.remove_data_dir:
+        # The launchers into the data dir stop working with it, so they go
+        # too; the rest keep working and stay until --binaries.
+        for target in plan.data_bound_launchers:
+            click.echo(f"      {ux.dim('·')} {target} (runs {plan.data_dir}, so it goes with it)")
+        kept = [
+            target
+            for target in plan.binary_targets
+            if os.path.lexists(target)
+            and target not in plan.data_bound_launchers
+            and os.path.basename(target) != _UV_RECORD
+        ]
+        if kept:
+            click.echo(
+                f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
+                f"in {plan.install_root} (add --binaries to remove them too)"
+            )
     if _requires_deferred_cleanup(plan):
         click.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
     click.echo()
@@ -755,7 +878,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         phases[-1] = ExecutionPhaseResult(
             "deferred cleanup",
             "scheduled",
-            f"result: {status[0]}",
+            # The result file stays for the operator to read; the next
+            # uninstall's helper removes it.
+            f"result: {status[0]}, kept for you to read",
         )
     elif plan.remove_data_dir:
         run_phase(
@@ -765,12 +890,54 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
                 preserve_entries=plan.preserve_data_entries,
             ),
         )
+        if plan.data_bound_launchers and not plan.remove_binaries:
+            run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
+    if plan.remove_data_dir and not plan.preserve_data_entries:
+        _remove_empty_plugin_cache()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
     return result
+
+
+def _remove_data_bound_launchers(plan: UninstallPlan) -> None:
+    """Remove the launchers into the removed data dir (see _data_bound_launchers).
+
+    Each one is checked again first: still an owned launcher name in the
+    install root that runs the data dir's virtual environment.
+    """
+    owned = set(plan.binary_targets)
+    failures: list[str] = []
+    for path in plan.data_bound_launchers:
+        if path not in owned or not _is_data_bound_launcher(path, plan.data_dir, plan.platform_name):
+            continue
+        try:
+            os.unlink(path)
+            ux.ok(f"removed {path}")
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise OSError("; ".join(failures))
+
+
+def _remove_empty_plugin_cache() -> None:
+    """Remove the gateway's plugin cache folder in TempDir while it is empty.
+
+    Current gateways create it only for a plugin they load; earlier ones
+    created it at every start. A folder with content, or anything that is
+    not a folder, stays.
+    """
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    path = os.path.join(tempfile.gettempdir(), f"defenseclaw-plugin-cache-{uid}")
+    try:
+        if stat.S_ISDIR(os.lstat(path).st_mode) and not _is_reparse_path(path):
+            os.rmdir(path)
+    except OSError:
+        pass
 
 
 def _render_execution_result(result: ExecutionResult) -> None:
@@ -892,6 +1059,8 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",
+                _UV_RECORD,
+                *_UV_NAMES["win32"],
             }
             if plan.platform_name == "win32"
             else {
@@ -904,6 +1073,8 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "mcp-scanner",
                 "mcp-scanner-api",
                 "litellm",
+                _UV_RECORD,
+                *_UV_NAMES_POSIX,
             }
         )
         for target in plan.binary_targets:
@@ -979,7 +1150,7 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
                 os.path.realpath(os.path.expanduser("~")),
                 str(Path(os.path.abspath(plan.data_dir)).anchor),
             ],
-            "binary_targets": list(plan.binary_targets) if plan.remove_binaries else [],
+            "binary_targets": list(plan.binary_targets if plan.remove_binaries else plan.data_bound_launchers),
             "remove_data_dir": plan.remove_data_dir,
             "ready_path": ready_path,
             "status_path": status_path,
@@ -1664,7 +1835,8 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
         targets.sort(key=lambda path: os.path.basename(path).lower() == "defenseclaw.cmd")
     for path in targets:
         if not os.path.lexists(path):
-            click.echo(f"  {ux.dim('·')} {path} not installed")
+            # The plan lists only the launchers that exist; the owned-name
+            # list also names optional ones most installs never had.
             continue
         last_error: OSError | None = None
         attempts = 40 if plan.platform_name == "win32" else 1

@@ -317,10 +317,17 @@ function Install-Uv {
         if ((Get-Sha256 $zip) -ne $UvZipSha256) { Write-Err "The uv download does not match its pinned checksum"; return "" }
         Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "uv") -Force
         New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+        $record = @()
         foreach ($name in @("uv.exe", "uvx.exe", "uvw.exe")) {
             $file = Join-Path $tmp "uv\$name"
-            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force }
+            if (Test-Path -LiteralPath $file) {
+                Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force
+                $record += "$(Get-Sha256 (Join-Path $BinDir $name))  $name"
+            }
         }
+        # `defenseclaw uninstall --binaries` removes the uv this installed
+        # while it still matches this record.
+        Invoke-Quietly { [IO.File]::WriteAllText((Join-Path $BinDir "defenseclaw-uv.sha256"), (($record -join "`n") + "`n")) }
         $uv = Join-Path $BinDir "uv.exe"
         if (Test-Path -LiteralPath $uv) { return $uv }
         return ""

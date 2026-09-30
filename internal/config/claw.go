@@ -804,9 +804,12 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".devin", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
-	case "opencode", "omnigent":
-		// These connectors have no documented local skills surface. Keep
-		// them isolated from OpenClaw's skill directories.
+	case "opencode", "omnigent", "kiro":
+		// These connectors have no documented local skills surface (Kiro's
+		// reusable context is steering docs and specs). Keep them isolated
+		// from OpenClaw's skill directories: the install watcher creates the
+		// folders it watches, so falling through would leave an empty
+		// ~/.openclaw tree behind.
 		return nil
 	case "amp":
 		return ampSkillDirs(home, cwd)
@@ -887,7 +890,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".config", "amp", "plugins"),
 			workspaceJoin(cwd, ".amp", "plugins"),
 		})
-	case "cursor", "devin", "copilot", "openhands", "opencode", "omnigent":
+	case "cursor", "devin", "copilot", "openhands", "opencode", "omnigent", "kiro":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()

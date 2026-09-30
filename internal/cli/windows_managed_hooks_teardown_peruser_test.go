@@ -152,7 +152,7 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testing.T) {
 	original := windowsManagedHooksStandaloneUserRegistrationRemover
 	t.Cleanup(func() { windowsManagedHooksStandaloneUserRegistrationRemover = original })
-	calls := 0
+	calls, pendingSID := 0, userCleanupSIDB
 	windowsManagedHooksStandaloneUserRegistrationRemover = func(
 		_ context.Context,
 		runtimeDir string,
@@ -164,7 +164,7 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		}
 		return enterpriseHookUserCleanupResult{
 			Removed: []string{"devin/" + userCleanupSIDA, "amp/" + userCleanupSIDA},
-			Pending: []string{"hermes/" + userCleanupSIDB},
+			Pending: []string{"hermes/" + pendingSID},
 		}
 	}
 	manifest := perUserTeardownManifest("devin")
@@ -222,6 +222,14 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	if purged != 1 || len(report.UserStateRemaining) != 0 {
 		t.Fatalf("purge ran %d time(s), remaining %v", purged, report.UserStateRemaining)
 	}
+	// An account whose registrations stayed keeps the folder with its
+	// connector_backups.
+	pendingSID = userCleanupSIDA
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if purged != 1 || len(report.UserStateRemaining) != 1 || !strings.Contains(report.UserStateRemaining[0], "connector_backups") {
+		t.Fatalf("purge with registrations left ran %d time(s), remaining %v", purged, report.UserStateRemaining)
+	}
+	pendingSID = userCleanupSIDB
 	windowsManagedHooksStandaloneUserStatePurger = func(string, string, string) error {
 		return errors.New("remove foreign-hook-sessions: access denied")
 	}

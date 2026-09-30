@@ -133,7 +133,7 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
-	report.UserStateRemaining = windowsManagedHooksStandaloneUserState(manifest, purge)
+	report.UserStateRemaining = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
@@ -151,13 +151,38 @@ const windowsManagedHooksPurgeUserStateEnv = "DEFENSECLAW_WINDOWS_UNINSTALL_PURG
 // windowsManagedHooksStandaloneUserStatePurger is replaceable in tests.
 var windowsManagedHooksStandaloneUserStatePurger = enterprisehooks.PurgeWindowsUserState
 
+// windowsManagedHooksAccountsKeepingRegistrations reports whether an
+// account's registrations may have stayed after cleanup: it is named in a
+// pending or failed entry ("connector/SID"), or a failure names no account.
+// Such an account's folder holds the connector_backups that restore its
+// agent configurations, so a purge keeps it.
+func windowsManagedHooksAccountsKeepingRegistrations(cleanup enterpriseHookUserCleanupResult) func(sid string) bool {
+	accounts := map[string]bool{}
+	unknown := false
+	for _, entry := range append(append([]string(nil), cleanup.Pending...), cleanup.Failed...) {
+		label, _, _ := strings.Cut(entry, ": ")
+		_, account, found := strings.Cut(label, "/")
+		if account = strings.TrimSpace(account); !found || account == "" {
+			unknown = true
+			continue
+		}
+		accounts[strings.ToLower(account)] = true
+	}
+	return func(sid string) bool { return unknown || accounts[strings.ToLower(strings.TrimSpace(sid))] }
+}
+
 // windowsManagedHooksStandaloneUserState handles the DefenseClaw per-user
 // folder of each enrolled account once the uninstall has removed the
 // registrations it could. With purge it removes each folder as LocalSystem,
 // signed-out accounts included, and lists each one it could not remove
-// ("user (SID): path: reason"). Without purge it lists each folder that
-// exists ("user (SID): path").
-func windowsManagedHooksStandaloneUserState(manifest enterprisehooks.Manifest, purge bool) []string {
+// ("user (SID): path: reason"). An account that keeps registrations
+// (keepsRegistrations) keeps its folder. Without purge it lists each folder
+// that exists ("user (SID): path").
+func windowsManagedHooksStandaloneUserState(
+	manifest enterprisehooks.Manifest,
+	purge bool,
+	keepsRegistrations func(sid string) bool,
+) []string {
 	var identityErr error
 	if purge {
 		identityErr = enterpriseHookWindowsUserCleanupIdentity()
@@ -197,6 +222,8 @@ func windowsManagedHooksStandaloneUserState(manifest enterprisehooks.Manifest, p
 			reason = "the account's profile folder is not on this computer while it is signed out"
 		case identityErr != nil:
 			reason = "the uninstall did not run as LocalSystem"
+		case keepsRegistrations(sid):
+			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
 			if err == nil {
