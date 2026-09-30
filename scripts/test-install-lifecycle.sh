@@ -372,7 +372,9 @@ lane_drills() {
     assert_versions "${TARGET}"
     assert_healthy
     assert_data_kept
-    grep -q "exit 1 ;;" "${HOME}/.local/bin/defenseclaw-gateway" && fail "the broken gateway was left installed"
+    # By content: the real gateway embeds shell snippets, so grepping it for
+    # the stub's text matches the working binary too.
+    cmp -s "${stage}/defenseclaw-gateway" "${HOME}/.local/bin/defenseclaw-gateway" && fail "the broken gateway was left installed"
 
     log "drills: a release whose migration fails halfway rolls back, data included"
     rm -rf "${broken}"

@@ -28,7 +28,9 @@ import (
 // credential file, closed fail mode, and the listener proof on.
 func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []byte {
 	t.Helper()
-	body, err := os.ReadFile(filepath.Join("connector", "hooks", asset))
+	// The bridge host template: the source template with its OpenShell
+	// sandbox branches resolved to the host ones (TestBridgeHostTemplatesGolden).
+	body, err := os.ReadFile(filepath.Join("connector", "testdata", "bridge_host", asset))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -75,7 +75,6 @@ def _invoke_status(*args: str, unicode_output: bool):
     client.is_running.return_value = False
     with (
         _render_mode(unicode_output),
-        mock.patch.object(cmd_status.shutil, "which", return_value=None),
         mock.patch.object(cmd_status, "resolve_scanner_binary", return_value=None),
         mock.patch.object(
             cmd_status,

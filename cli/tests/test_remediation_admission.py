@@ -29,8 +29,6 @@ pre-remediation behaviour and passes after the fix.
   F-0423  prior scans match by full resolved path, not basename
   F-0424  skill marker files are not read through symlinks
   F-0742  user-sourced inventory rows are not first-party-allowed
-  F-0544  openshell hostless allowed_ips requires host membership
-  F-0546  openshell messaging egress is not granted to every binary
   F-0641  Codex TOML parsing falls back to tomli when tomllib is absent
 """
 
@@ -69,7 +67,7 @@ from defenseclaw.inventory.claw_inventory import (
     enrich_with_policy,
 )
 from defenseclaw.models import ScanResult
-from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
+from defenseclaw.paths import bundled_rego_dir
 
 from tests.helpers import cleanup_app, make_app_context, make_temp_store
 
@@ -642,41 +640,6 @@ class TestF0421OwnerWritableTrustedBinary(unittest.TestCase):
             ):
                 # Explicit operator opt-in keeps the looser checks.
                 self.assertTrue(ad._is_trusted_binary_path(binary))
-
-
-# ---------------------------------------------------------------------------
-# F-0544 / F-0546 — openshell sandbox policy hardening
-# ---------------------------------------------------------------------------
-
-
-class TestOpenShellPolicyHardening(unittest.TestCase):
-    def _openshell_dir(self):
-        return os.fspath(bundled_policies_dir() / "openshell")
-
-    def test_f0544_hostless_allowed_ips_requires_host_membership(self):
-        rego = os.path.join(self._openshell_dir(), "default.rego")
-        with open(rego, encoding="utf-8") as f:
-            text = f.read()
-        # The fixed hostless branch must consult the connection host against
-        # allowed_ips rather than matching on the port alone.
-        self.assertIn("_host_in_allowed_ips", text)
-        self.assertIn("_host_in_allowed_ips(allowed, network.host)", text)
-
-    def test_f0546_messaging_egress_not_wildcard(self):
-        import yaml
-
-        data_path = os.path.join(self._openshell_dir(), "default-data.yaml")
-        with open(data_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        channels = data["network_policies"]["allow_channels"]
-        bin_paths = [b["path"] for b in channels["binaries"]]
-        # The universal `/**` grant is the vulnerability and must be gone.
-        self.assertNotIn("/**", bin_paths)
-        self.assertTrue(bin_paths, "allow_channels must still scope some binaries")
-        # All remaining grants must be specific runtime binaries, not a
-        # bare match-everything wildcard.
-        for path in bin_paths:
-            self.assertTrue(path.endswith(("/node", "/openclaw", "/claude", "/codex")))
 
 
 # ---------------------------------------------------------------------------

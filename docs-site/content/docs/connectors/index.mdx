@@ -89,6 +89,37 @@ See the [HITL reference](/docs/hitl) for the canonical per-event matrix and
 [Connector Compatibility](/docs/connectors/compatibility) for exact version
 ranges and script generations.
 
+## OpenShell sandbox
+
+`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell
+sandbox that sees only your project folder, on Linux, or on a Mac with Apple
+silicon in a MicroVM of its own that works on a copy of the folder
+([macOS](/docs/setup/sandbox#macos)); the [sandbox guide](/docs/setup/sandbox)
+covers setup and every command.
+DefenseClaw builds sandbox images for these harnesses:
+
+- **Run today:** [Claude Code](/docs/connectors/claudecode#in-an-openshell-sandbox),
+  [Codex](/docs/connectors/codex#in-an-openshell-sandbox),
+  [OpenCode](/docs/connectors/opencode#in-an-openshell-sandbox),
+  [GitHub Copilot CLI](/docs/connectors/copilot#in-an-openshell-sandbox),
+  [Kiro CLI](/docs/connectors/kiro#in-an-openshell-sandbox),
+  [Hermes Agent](/docs/connectors/hermes#openshell-sandbox),
+  [OpenHands](/docs/connectors/openhands#openshell-sandbox),
+  [OmniGent](/docs/connectors/omnigent#openshell-sandbox) and
+  [Antigravity](/docs/connectors/antigravity#openshell-sandbox).
+- **Cannot run yet:** [Amp](/docs/connectors/amp#in-an-openshell-sandbox),
+  [Cursor Agent](/docs/connectors/cursor#in-an-openshell-sandbox) and
+  [Devin CLI](/docs/connectors/devin#in-an-openshell-sandbox) need a vendor
+  account before any agent turn, so their images have not passed
+  DefenseClaw's hook check.
+
+Claude Code, Codex, Copilot CLI, Cursor Agent and OmniGent register their
+hooks in a root-owned managed policy or configuration, so user and project
+settings cannot switch them off. The others are in the user tier: the agent
+can edit their hook file, or code the agent or a repository adds runs beside
+the hooks. Every other connector is pending. The [capability matrix](/docs/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
+shows each harness's image pin, tier and verification.
+
 ## How a connector is structured
 
 <Flow

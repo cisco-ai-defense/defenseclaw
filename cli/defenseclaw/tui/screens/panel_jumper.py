@@ -34,6 +34,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,8 @@ class PanelJumperScreen(ModalScreen[str | None]):
                 f"  [#475569]({choice.name})[/]"
             )
             lines.append(row)
-        target.update("\n".join(lines))
+        size = rows_that_fit(self.app.size.height, 14, cap=14)
+        target.update("\n".join(window_lines(lines, self.selected_index, size)))
 
 
 __all__ = [

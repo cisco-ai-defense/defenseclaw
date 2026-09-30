@@ -105,14 +105,13 @@ def _list_skills_via_openclaw_cli() -> list[dict[str, Any]] | None:
     non-JSON.
     """
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
     except Exception:
         return None
 
     try:
         result = subprocess.run(
-            [*prefix, openclaw_bin(), "skills", "list", "--json"],
+            [openclaw_bin(), "skills", "list", "--json"],
             capture_output=True,
             text=True,
             timeout=30,

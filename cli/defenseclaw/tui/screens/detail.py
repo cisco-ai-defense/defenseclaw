@@ -70,6 +70,8 @@ class DetailScreen(ModalScreen[None]):
 
     #detail-dialog {{
         width: 92;
+        max-width: 96%;
+        height: auto;
         max-height: 85%;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
@@ -110,7 +112,7 @@ class DetailScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="detail-dialog"):
-            yield Static(self.model.title, id="detail-title")
+            yield Static(self.model.title, id="detail-title", markup=False)
             yield Static(self.model.table(), id="detail-body")
             yield Button("Close", id="detail-close", variant="default")
 

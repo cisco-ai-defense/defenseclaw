@@ -10,11 +10,20 @@
 // DefenseClaw may allow, reject, or ask through Amp's native confirmation UI.
 // Amp does not define ordering across sibling plugin handlers.
 //
-// The file is rendered at setup time with a stable scoped-token sidecar path.
+{{if .Sandbox}}// OpenShell sandbox variant: DefenseClaw's overlay image installs this file in
+// the sandbox user's ~/.config/amp/plugins (Amp has no system plugin
+// location, so this is the user tamper tier). The hook ingress address and
+// the fail mode are baked at image build and the plugin always fails closed.
+// The only runtime input is the per-sandbox binding token, an OpenShell
+// provider placeholder read from the process environment for every request;
+// the supervisor swaps in the real credential only on the ingress endpoint.
+// Each request carries a fresh idempotency key and is retried once on a
+// transport failure or relay 502/503/504.
+{{else}}// The file is rendered at setup time with a stable scoped-token sidecar path.
 // It loads and validates the credential for every request, so rotation never
 // leaves a replacement credential in this longer-lived plugin. It deliberately
 // does not read secrets or policy from process environment variables.
-
+{{end}}
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -23,7 +32,18 @@ import { userInfo } from 'node:os'
 import { dirname } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
-const DC_TOKEN_FILE = "{{.TokenFileJS}}"
+{{if .Sandbox}}const DC_FAIL_MODE: string = "closed" // sandbox hooks always fail closed
+const DC_TIMEOUT_MS = {{.SandboxMaxTime}}000
+const DC_RETRY_TIMEOUT_MS = {{.SandboxRetryMaxTime}}000
+// OpenShell placeholders (openshell:resolve:env:v<revision>_<KEY>) and the
+// host token alphabet; anything else is never sent.
+const DC_TOKEN_PATTERN = /^[A-Za-z0-9:._-]{1,512}$/
+// The standalone managed-install hook socket, foreign-hook guard and install
+// marker never apply in a sandbox: the plugin always posts to the ingress.
+const DC_HOOK_SOCKET: string = ""
+const DC_FOREIGN_GUARD: string = ""
+const DC_INSTALL_MARKER: string = ""
+{{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
 const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
@@ -59,7 +79,7 @@ const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
-// Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
+{{end}}// Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
 // differences and future envelope fields.
 const DC_MAX_BODY_BYTES = 900 * 1024
 
@@ -116,10 +136,10 @@ type AgentFacts = {
 	model?: string
 }
 
-type BunFileRuntime = {
+{{if not .Sandbox}}type BunFileRuntime = {
 	file(path: string): { slice(start?: number, end?: number): { text(): Promise<string> } }
 }
-
+{{end}}
 function stringID(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value)
 }
@@ -133,7 +153,44 @@ function safeError(error: unknown): string {
 	return String(error)
 }
 
-function trustedSocketOwner(uid: number): boolean {
+{{if .Sandbox}}async function scopedHookToken(): Promise<string> {
+	const token = String(process.env.DEFENSECLAW_SANDBOX_TOKEN || "")
+	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("missing or malformed sandbox binding token")
+	return token
+}
+
+// sandboxFetch POSTs to the baked ingress: one attempt, then exactly one
+// retry with the same idempotency key after a transport failure (no
+// connection, reset, timeout) or a relay 502/503/504. The ingress answers a
+// retried key from its dedupe window instead of evaluating the event twice.
+async function sandboxFetch(headers: Record<string, string>, body: string | Uint8Array): Promise<Response> {
+	const key = crypto.randomUUID()
+	let last: Response | Error | undefined
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const controller = new AbortController()
+		const timer = setTimeout(() => controller.abort(), attempt === 0 ? DC_TIMEOUT_MS : DC_RETRY_TIMEOUT_MS)
+		try {
+			const response = await fetch(`http://${DC_API_ADDR}/api/v1/amp/hook`, {
+				method: "POST",
+				headers: { ...headers, "X-DefenseClaw-Hook-Idempotency-Key": key },
+				body,
+				signal: controller.signal,
+			})
+			if (attempt === 0 && [502, 503, 504].includes(response.status)) {
+				last = response
+				continue
+			}
+			return response
+		} catch (error) {
+			last = error instanceof Error ? error : new Error(safeError(error))
+		} finally {
+			clearTimeout(timer)
+		}
+	}
+	if (last instanceof Error || last === undefined) throw last ?? new Error("sandbox ingress unreachable")
+	return last
+}
+{{else}}function trustedSocketOwner(uid: number): boolean {
 	return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID)
 }
 
@@ -211,7 +268,7 @@ async function scopedHookToken(): Promise<string> {
 	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("invalid scoped hook credential")
 	return token
 }
-
+{{end}}
 // agent.end includes the user prompt plus the turn transcript. Project only
 // assistant text blocks onto the response-inspection rail: thinking, tool-use,
 // user, and info blocks are intentionally excluded.
@@ -476,12 +533,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
-			const response = await gatewayFetch("/api/v1/amp/hook", {
+			const response = await {{if .Sandbox}}sandboxFetch(headers, body){{else}}gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-			}, token)
+			}, token){{end}}
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 
 			const data = await response.json() as GatewayResponse

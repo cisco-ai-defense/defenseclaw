@@ -47,8 +47,8 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
 		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, true, true, true},
-		// OpenHands uses Decode to map the SDK stdin event_type (PascalCase) to
-		// the contract event names and to project the terminal tool command.
+		// OpenHands uses Decode only to map the CLI's PascalCase SDK
+		// event_type onto the contract's snake_case event names.
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, true, true, true},
 		// Antigravity uses Decode because agy v1 ships a nested
 		// `toolCall` wire shape that the generic normalizer cannot read.

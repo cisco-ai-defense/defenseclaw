@@ -13,6 +13,7 @@ package audit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -63,6 +64,114 @@ func TestCompatibilityAuditV8OwnsGenericActionCorrelationAndMetric(t *testing.T)
 		attributes["defenseclaw.connector.source"] != "codex" ||
 		attributes["defenseclaw.security.severity"] != "INFO" {
 		t.Fatalf("generated audit metric attributes = %#v", attributes)
+	}
+}
+
+// TestCompatibilityAuditV8CarriesSandboxIdentity pins the sandbox
+// attribution of generic audit rows (codex notify, inspect, ...): the
+// envelope's sandbox id and name reach the event and its v8 record body,
+// and host traffic carries neither.
+func TestCompatibilityAuditV8CarriesSandboxIdentity(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	sandbox := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
+		Connector: "codex", SandboxID: "0f5c7a3e-1111-2222-3333-444455556666", SandboxName: "dc-codex-app",
+	})
+	if err := logger.LogEventCtx(sandbox, Event{
+		Action: string(ActionCodexNotify), Target: "codex.session", Actor: "codex", Severity: "INFO",
+	}); err != nil {
+		t.Fatalf("LogEventCtx: %v", err)
+	}
+	if err := logger.LogActionCtx(sandbox, string(ActionInspectToolAllow), "shell", "allowed"); err != nil {
+		t.Fatalf("LogActionCtx: %v", err)
+	}
+	host := ContextWithEnvelope(context.Background(), CorrelationEnvelope{Connector: "codex"})
+	if err := logger.LogActionCtx(host, string(ActionInspectToolAllow), "shell", "allowed"); err != nil {
+		t.Fatalf("host LogActionCtx: %v", err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != 3 {
+		t.Fatalf("records = %d, want 3", len(records))
+	}
+	for i, record := range records {
+		body, ok := record.Body()
+		if !ok {
+			t.Fatalf("record %d has no body", i)
+		}
+		object, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 2 {
+			if _, present := object["sandbox_id"]; present {
+				t.Fatalf("host record carries sandbox identity: %v", object)
+			}
+			if _, present := object["sandbox_name"]; present {
+				t.Fatalf("host record carries sandbox identity: %v", object)
+			}
+			continue
+		}
+		if object["sandbox_id"] != "0f5c7a3e-1111-2222-3333-444455556666" || object["sandbox_name"] != "dc-codex-app" {
+			t.Fatalf("record %d (%s) body = %v", i, record.Action(), object)
+		}
+		if record.FieldClasses()["/sandbox_id"] != observability.FieldClassIdentifier ||
+			record.FieldClasses()["/sandbox_name"] != observability.FieldClassIdentifier {
+			t.Fatalf("record %d field classes = %v", i, record.FieldClasses())
+		}
+	}
+
+	// A caller that already knows the sandbox keeps it.
+	pinned := Event{SandboxID: "sbx-pinned"}
+	ApplyEnvelope(&pinned, CorrelationEnvelope{SandboxID: "sbx-ctx", SandboxName: "dc-ctx"})
+	if pinned.SandboxID != "sbx-pinned" || pinned.SandboxName != "dc-ctx" {
+		t.Fatalf("ApplyEnvelope = %+v", pinned)
+	}
+}
+
+// TestCompatibilityAuditV8OmitsMalformedSandboxIdentity pins the shape
+// check on the body's sandbox attribution: a value that is not a bounded
+// sandbox identifier is omitted and the other one is kept.
+func TestCompatibilityAuditV8OmitsMalformedSandboxIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name, id, sandboxName string
+		wantID, wantName      bool
+	}{
+		{name: "both valid", id: "sbx-1", sandboxName: "dc-codex-app", wantID: true, wantName: true},
+		{name: "id with spaces", id: "sbx 1", sandboxName: "dc-codex-app", wantName: true},
+		{name: "name with markup", id: "sbx-1", sandboxName: "<dc-codex-app>", wantID: true},
+		{name: "leading dash", id: "-sbx", sandboxName: "-dc"},
+		{name: "oversized", id: strings.Repeat("i", maxSandboxIDBytes+1), sandboxName: strings.Repeat("n", maxSandboxNameBytes+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logger := newTestLogger(t)
+			runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+			logger.SetRuntimeV8Emitter(runtime)
+			if err := logger.LogEvent(Event{
+				Action: string(ActionCodexNotify), Target: "codex.session", Actor: "codex", Severity: "INFO",
+				SandboxID: test.id, SandboxName: test.sandboxName,
+			}); err != nil {
+				t.Fatalf("LogEvent: %v", err)
+			}
+			_, records := runtime.snapshot()
+			if len(records) != 1 {
+				t.Fatalf("records = %d, want 1", len(records))
+			}
+			body, ok := records[0].Body()
+			if !ok {
+				t.Fatal("record has no body")
+			}
+			object, err := body.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, present := object["sandbox_id"]; present != test.wantID || (present && got != test.id) {
+				t.Fatalf("sandbox_id = %#v present=%v, want present=%v", got, present, test.wantID)
+			}
+			if got, present := object["sandbox_name"]; present != test.wantName || (present && got != test.sandboxName) {
+				t.Fatalf("sandbox_name = %#v present=%v, want present=%v", got, present, test.wantName)
+			}
+		})
 	}
 }
 

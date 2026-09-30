@@ -1988,7 +1988,7 @@ func asciiLowerPreservingBytes(value string) string {
 
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {
 	current := boundToolJudgeArguments(args)
-	sessionID := SessionIDFromContext(ctx)
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
 	if j == nil || sessionID == "" {
 		return current
 	}
@@ -2061,7 +2061,7 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if j == nil {
 		return
 	}
-	sessionID := SessionIDFromContext(ctx)
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
 	content = strings.TrimSpace(content)
 	if sessionID == "" || content == "" {
 		return
@@ -2083,6 +2083,7 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 
 // ResetToolJudgeSession drops bounded in-memory context when a connector
 // announces a new or ended session. No tool arguments are persisted.
+// sessionID is the state key (sandboxSessionStateKey), not the raw ID.
 func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {
 		return

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pytest
 from defenseclaw.tui.app import DefenseClawTUI
 
 
@@ -100,51 +99,3 @@ def test_plugins_hidden_under_all_without_openclaw(monkeypatch) -> None:
     app.connector_filter = ""  # All
     assert app._panel_hidden("plugins") is True
     assert "plugins" not in app._visible_panels()
-
-
-@pytest.mark.asyncio
-async def test_digit_five_is_noop_when_plugins_hidden() -> None:
-    app = DefenseClawTUI(config=_config_for("claudecode"))
-    async with app.run_test(size=(150, 44)) as pilot:
-        await pilot.pause()
-        await pilot.press("5")
-        await pilot.pause()
-        assert app.active_panel != "plugins"
-
-
-@pytest.mark.asyncio
-async def test_digit_five_switches_when_plugins_visible() -> None:
-    app = DefenseClawTUI(config=_config_for("openclaw"))
-    async with app.run_test(size=(150, 44)) as pilot:
-        await pilot.pause()
-        await pilot.press("5")
-        await pilot.pause()
-        assert app.active_panel == "plugins"
-
-
-@pytest.mark.asyncio
-async def test_tab_cycling_skips_hidden_plugins() -> None:
-    """Tab and Shift+Tab must skip Plugins on non-OpenClaw connectors."""
-
-    app = DefenseClawTUI(config=_config_for("claudecode"))
-    async with app.run_test(size=(150, 44)) as pilot:
-        await pilot.pause()
-        # MCPs (4th tab) -> Tab should go straight to Inventory (6th)
-        app.action_switch_panel("mcps")
-        await pilot.pause()
-        app.action_next_panel()
-        assert app.active_panel == "inventory"
-
-        # Inventory -> Shift+Tab back to MCPs (skip plugins)
-        app.action_previous_panel()
-        assert app.active_panel == "mcps"
-
-
-@pytest.mark.asyncio
-async def test_tab_cycling_visits_plugins_on_openclaw() -> None:
-    app = DefenseClawTUI(config=_config_for("openclaw"))
-    async with app.run_test(size=(150, 44)) as pilot:
-        await pilot.pause()
-        app.action_switch_panel("mcps")
-        app.action_next_panel()
-        assert app.active_panel == "plugins"

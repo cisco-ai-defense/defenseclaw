@@ -1,0 +1,19 @@
+id: defenseclaw-gemini
+display_name: Google Gemini API (DefenseClaw)
+description: Binds GEMINI_API_KEY to the Gemini API (generativelanguage.googleapis.com) as x-goog-api-key; only the pinned harness binaries may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Gemini API key from Google AI Studio
+    env_vars: [GEMINI_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-goog-api-key
+endpoints:
+  - host: generativelanguage.googleapis.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: [{{range $i, $b := .Binaries}}{{if $i}}, {{end}}{{quote $b}}{{end}}]

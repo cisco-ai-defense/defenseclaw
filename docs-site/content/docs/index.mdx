@@ -30,7 +30,7 @@ The same synthetic Claude Code `PreToolUse` event produces three deliberately di
 
 | Govern | Inspect | Prove |
 | --- | --- | --- |
-| Skills, MCP servers, plugins, and generated code before they run | Prompts, completions, tool calls, and sandbox activity at runtime | SQLite audit history, JSONL, OTLP, Splunk, webhooks, and TUI views |
+| Skills, MCP servers, plugins, and generated code before they run | Prompts, completions, and tool calls at runtime | SQLite audit history, JSONL, OTLP, Splunk, webhooks, and TUI views |
 
 DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an **OpenClaw TypeScript plugin**. The CLI configures and inspects; the gateway runs the data path; the plugin wires the loop closed inside OpenClaw.
 
@@ -67,7 +67,7 @@ DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an
 
 ## Scope and limitations
 
-DefenseClaw improves safety by combining scanner results, runtime inspection, policy decisions, sandbox controls, and audit trails. It does **not** prove that an agent, skill, plugin, or model interaction is risk-free.
+DefenseClaw improves safety by combining scanner results, runtime inspection, policy decisions, and audit trails. It does **not** prove that an agent, skill, plugin, or model interaction is risk-free.
 
 <Callout type="warn">
 High-risk deployments should pair DefenseClaw with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring. In observe mode, findings are logged without blocking. In action mode, configured HIGH and CRITICAL findings can block prompts, tool calls, or component admission.

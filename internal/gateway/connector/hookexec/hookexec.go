@@ -782,7 +782,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 		if output != "" {
 			if d := decodeDecision(output); d == "deny" || d == "block" {
 				if reason := decodeReason(output); reason != "" {
-					fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", reason)
+					fmt.Fprintln(opts.Stderr, attributedReason(reason))
 				}
 				return blockExit
 			}
@@ -1817,6 +1817,16 @@ func decodeReason(output string) string {
 		return ""
 	}
 	return rawStringOr(m, "reason", "")
+}
+
+// attributedReason is a block reason as the harness shows it: DefenseClaw's
+// own reasons name it already ("Blocked by DefenseClaw rule ..."), any other
+// one gets the "defenseclaw: " prefix (kiro-hook.sh kiro_block_reason).
+func attributedReason(reason string) string {
+	if strings.Contains(strings.ToLower(reason), "defenseclaw") {
+		return reason
+	}
+	return "defenseclaw: " + reason
 }
 
 // mustJSONString returns s as a JSON string literal (quoted + escaped).

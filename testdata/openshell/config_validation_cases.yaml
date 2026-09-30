@@ -1,0 +1,600 @@
+# Shared openshell config validation corpus. The Go daemon loader
+# (LoadRuntimeV8File: schema + Config.ValidateOpenShell,
+# internal/config/openshell_parity_test.go) and the Python writer (schema +
+# defenseclaw.openshell_validation, cli/tests/test_config_openshell.py) must
+# agree on every case, so Python can never save a section the gateway refuses
+# to load. Keep cases independent of the host OS: both suites run on Windows.
+schema_version: 1
+cases:
+  - name: absent-section
+    valid: true
+    source: |
+      config_version: 8
+
+  - name: full-valid-section
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        enabled: true
+        ingress_port: 19001
+        egress_port: 19002
+        pack: balanced
+        profile: strict
+        workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep}
+        egress: {block: [Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2', 198.51.100.0/24, '2001:db8:1::/48', '::ffff:192.0.2.0/120'], allow: ['*.npmjs.org', pypi.org, _dmarc.example], ports: [443]}
+        resources: {cpu: '1.5', memory: 512Mi}
+        admin:
+          required_pack: strict
+          required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
+          egress_block: [10.0.0.0/8, '::ffff:203.0.113.7']
+          egress_allow_only: ['*.corp.example']
+          require_copy_for: [/src/customer-*, '~/clients/*', '~', '**/customer-*', '**', 'C:/src/[a-c]*', '/srv/\*literal']
+          max_resources: {cpu: 500m, memory: 8Gi}
+
+  - name: numeric-inner-labels-are-host-names
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [1.2.example, '*.0x7f.example', 0.example]}
+
+  - name: numeric-last-label-with-leading-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [01.2.3.4]}
+
+  - name: numeric-last-label-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [999.1.1.1]}
+
+  - name: numeric-last-label-shorthand
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['127.1']}
+
+  - name: hex-last-label
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {allow: [0x7f000001]}
+
+  - name: ip-with-trailing-dot
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [203.0.113.9.]}
+
+  - name: wildcard-over-an-ip
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['*.203.0.113.9']}
+
+  - name: bare-star-block
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['*']}
+
+  - name: bare-star-allow
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {allow: ['*']}
+
+  - name: bare-star-admin-block
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['*']}
+
+  - name: bare-star-admin-allow-only
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_allow_only: ['*']}
+
+  - name: unblocked-patterns
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        egress: {unblocked: [webhook.site, '*.pastebin.example', 203.0.113.9, '2001:db8::/48', _dmarc.example]}
+
+  - name: unblocked-numeric-last-label-shorthand
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {unblocked: [webhook.site, '127.1']}
+
+  - name: bare-star-unblocked
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {unblocked: ['*']}
+
+  - name: cidr-bits-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [10.0.0.0/33]}
+
+  - name: cidr-bits-with-leading-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: [10.0.0.0/08]}
+
+  - name: cidr-mapped-prefix-too-short
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['::ffff:10.0.0.0/80']}
+
+  - name: cidr-without-bits
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [10.0.0.0/]}
+
+  - name: cidr-over-a-name
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [example.com/24]}
+
+  - name: cidr-ipv6-bits-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['2001:db8::/129']}
+
+  - name: host-glob-with-port
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['paste.example:443']}
+
+  - name: host-glob-inner-wildcard
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {allow: ['a.*.example']}
+
+  - name: host-glob-double-wildcard
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['**.example']}
+
+  - name: host-glob-with-scheme
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_allow_only: ['https://corp.example']}
+
+  - name: host-glob-two-trailing-dots
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['example.com..']}
+
+  - name: host-glob-label-too-long
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example]}
+
+  - name: host-glob-label-with-leading-dash
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [-bad.example]}
+
+  - name: host-glob-malformed-ipv6
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [':::1']}
+
+  - name: host-glob-scoped-ipv6
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['fe80::1%eth0']}
+
+  - name: cpu-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: '0'}
+
+  - name: cpu-zero-millicores
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: 0m}
+
+  - name: cpu-zero-fraction
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: '0.000'}
+
+  - name: cpu-fraction
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: '0.001'}
+
+  - name: memory-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {max_resources: {memory: 0Mi}}
+
+  - name: memory-overflow
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {memory: 999999999999999Ti}
+
+  - name: admin-cpu-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {max_resources: {cpu: '0'}}
+
+  - name: explicit-equal-ports
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        ingress_port: 19001
+        egress_port: 19001
+
+  - name: explicit-equal-ports-disabled
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        enabled: false
+        ingress_port: 19001
+        egress_port: 19001
+
+  - name: ingress-on-derived-egress-port
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        enabled: true
+        ingress_port: 18972
+
+  - name: ingress-on-derived-egress-port-disabled
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        ingress_port: 18972
+
+  - name: egress-on-api-port
+    valid: false
+    source: |
+      config_version: 8
+      gateway: {api_port: 19000}
+      openshell:
+        enabled: true
+        egress_port: 19000
+
+  - name: ingress-on-guardrail-port
+    valid: false
+    source: |
+      config_version: 8
+      guardrail: {port: 4100}
+      openshell:
+        enabled: true
+        ingress_port: 4100
+
+  - name: derived-port-on-default-guardrail-port
+    valid: false
+    source: |
+      config_version: 8
+      gateway: {api_port: 3998}
+      openshell:
+        enabled: true
+
+  - name: derived-port-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      gateway: {api_port: 65535}
+      openshell:
+        enabled: true
+
+  - name: explicit-ports-at-the-top
+    valid: true
+    source: |
+      config_version: 8
+      gateway: {api_port: 65535}
+      openshell:
+        enabled: true
+        ingress_port: 65533
+        egress_port: 65534
+
+  - name: blank-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['  ']}
+
+  - name: relative-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: [customer-*]}
+
+  - name: relative-require-copy-for-with-a-wildcard-parent
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['*/customer-acme']}
+
+  - name: home-without-a-slash-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['~clients']}
+
+  - name: drive-letter-without-a-separator-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['C:src']}
+
+  - name: unclosed-class-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/customer-[ab']}
+
+  - name: empty-class-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/[]x]']}
+
+  - name: open-range-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/[a-]']}
+
+  - name: trailing-escape-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/customer\']}
+
+  - name: pack-digest-format
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {required_pack: strict, required_pack_digest: 'sha256:ABC'}
+
+  - name: pack-digest-without-pack
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f}
+
+  - name: workdir-project-globs
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {masks: ['.env.*', 'secrets/**', '**/*.pem', 'a..b'], unmask: [.env.example, ./certs/dev.pem]}
+
+  - name: workdir-mask-absolute
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {masks: [/srv/app/.env]}
+
+  - name: workdir-mask-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {masks: ['~/notes.txt']}
+
+  - name: workdir-unmask-escapes-the-project
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: [.env.example, ../../secrets/app.key]}
+
+  - name: workdir-unmask-drive-letter
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: ['C:/work/.env']}
+
+  - name: workdir-unmask-backslash
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: ['certs\dev.pem']}
+
+  - name: workdir-unmask-blank
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: ['  ']}
+
+  - name: binary-command-name
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        binary: openshell
+
+  - name: binary-relative-path
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        binary: bin/openshell
+
+  - name: binary-in-the-working-directory
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        binary: ./openshell
+
+  - name: binary-under-an-unexpanded-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        binary: '~/bin/openshell'
+
+  - name: pack-dir-under-home
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: '~/packs'
+
+  - name: pack-dir-explicitly-empty
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: ''
+
+  - name: pack-dir-relative
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: packs
+
+  - name: pack-dir-under-another-users-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: '~alice/packs'
+
+  - name: harness-version-dotted-key
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        image: {harness_versions: {claude.code: 1.0.0}}
+
+  - name: harness-version-keys
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        image: {harness_versions: {codex: 0.146.0, claude_code-2: '1'}}
+
+  - name: tri-state-yaml11-no
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        yolo: no
+
+  - name: tri-state-yaml11-off
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {allow_unblock: off}
+
+  - name: tri-state-core-booleans
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        yolo: False
+        admin: {allow_unblock: TRUE, allow_mount: null}
+
+  - name: harness-name-with-trailing-newline
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        harnesses: ["codex\n"]
+
+  - name: egress-pattern-with-trailing-newline
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ["paste.example\n"]}
+
+  - name: cpu-with-trailing-newline
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: "2\n"}

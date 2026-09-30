@@ -277,6 +277,9 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 (PATENTS)": (
             "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
         ),
+        "github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad (LICENSE)": (
+            "c4be3acebe12527d7de689933d98329b4065f8c50cd929d0365584eafe6c20dd"
+        ),
     }
     for title, digest in section_digests.items():
         assert digest in heading
@@ -290,17 +293,19 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "054e65f0b394d1bf387a254295588fb7e5bd0516/LICENSE",
         "https://github.com/golang/exp/blob/"
         "054e65f0b394d1bf387a254295588fb7e5bd0516/PATENTS",
+        "https://github.com/NVIDIA/OpenShell/blob/v0.1.1/LICENSE",
     )
     for provenance_url in provenance_urls:
         assert provenance_url in heading
-    assert "cel.dev/expr v0.25.1 is Apache-2.0-only" in heading
+    assert "cel.dev/expr v0.25.2 is Apache-2.0-only" in heading
 
     go_mod = (ROOT / "go.mod").read_text(encoding="utf-8")
     go_sum = (ROOT / "go.sum").read_text(encoding="utf-8")
     go_mod_requirements = (
         "\tgithub.com/google/cel-go v0.30.0\n",
         "\tmvdan.cc/sh/v3 v3.13.1\n",
-        "\tcel.dev/expr v0.25.1 // indirect\n",
+        "\tcel.dev/expr v0.25.2 // indirect\n",
+        "\tgithub.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad\n",
         "\tgithub.com/antlr4-go/antlr/v4 v4.13.1 // indirect\n",
         "\tgolang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect\n",
     )
@@ -308,7 +313,7 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         assert requirement in go_mod
 
     go_module_sums = (
-        "cel.dev/expr v0.25.1 h1:1KrZg61W6TWSxuNZ37Xy49ps13NUovb66QLprthtwi4=",
+        "cel.dev/expr v0.25.2 h1:K6j46C81hXtZQfuX60cVWQFBJahKSE2gfRbNuvr5bFs=",
         "github.com/antlr4-go/antlr/v4 v4.13.1 "
         "h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=",
         "github.com/google/cel-go v0.30.0 "

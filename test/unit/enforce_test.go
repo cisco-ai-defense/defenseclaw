@@ -23,7 +23,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 )
 
 func newTestStore(t *testing.T) *audit.Store {
@@ -203,46 +202,5 @@ func TestSkillEnforcerQuarantineAndRestore(t *testing.T) {
 	}
 	if string(data) != "print('hello')" {
 		t.Fatalf("restored content mismatch: %q", string(data))
-	}
-}
-
-func TestSandboxPolicyDenyAndAllow(t *testing.T) {
-	tmpDir := t.TempDir()
-	policyPath := filepath.Join(tmpDir, "policy.yaml")
-
-	p := sandbox.DefaultPolicy()
-	p.DenyEndpoint("https://bad.example.com")
-	p.DenySkill("malicious-skill")
-
-	if err := p.Save(policyPath); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	loaded, err := sandbox.LoadPolicy(policyPath)
-	if err != nil {
-		t.Fatalf("LoadPolicy: %v", err)
-	}
-
-	if len(loaded.DeniedEndpoints) != 1 || loaded.DeniedEndpoints[0] != "https://bad.example.com" {
-		t.Fatalf("expected denied endpoint, got %v", loaded.DeniedEndpoints)
-	}
-	if len(loaded.DeniedSkills) != 1 || loaded.DeniedSkills[0] != "malicious-skill" {
-		t.Fatalf("expected denied skill, got %v", loaded.DeniedSkills)
-	}
-
-	loaded.AllowEndpoint("https://bad.example.com")
-	loaded.AllowSkill("malicious-skill")
-
-	if len(loaded.DeniedEndpoints) != 0 {
-		t.Fatalf("expected no denied endpoints after allow, got %v", loaded.DeniedEndpoints)
-	}
-	if len(loaded.DeniedSkills) != 0 {
-		t.Fatalf("expected no denied skills after allow, got %v", loaded.DeniedSkills)
-	}
-	if len(loaded.AllowedEndpoints) != 1 {
-		t.Fatalf("expected 1 allowed endpoint, got %v", loaded.AllowedEndpoints)
-	}
-	if len(loaded.AllowedSkills) != 1 {
-		t.Fatalf("expected 1 allowed skill, got %v", loaded.AllowedSkills)
 	}
 }

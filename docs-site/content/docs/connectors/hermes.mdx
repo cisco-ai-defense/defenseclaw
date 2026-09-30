@@ -281,6 +281,128 @@ reports the staged state as unhealthy/pending reload.
 The official-source record and full cross-surface matrix are in
 [`docs/research/HERMES-NATIVE-WINDOWS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-NATIVE-WINDOWS.md).
 
+## OpenShell sandbox
+
+DefenseClaw can build a Hermes OpenShell overlay image. The files below exist
+only in the image; nothing on your host changes.
+
+- **Hooks in the managed layer, user tier.** Hermes 0.19 reads an
+  administrator layer from `/etc/hermes/config.yaml` and merges it over
+  `~/.hermes/config.yaml` key by key, with the managed value winning. The
+  image registers the DefenseClaw hook for all 23 Hermes events in that
+  root-owned file. It also pins `hooks_auto_accept: true` (the hooks register
+  without the first-use prompt), `plugins.enabled: []`, `terminal.backend:
+  local` (approved commands run inside the sandbox), `agent.disabled_toolsets:
+  [code_execution]`, `security.tirith_enabled: false`,
+  `security.allow_lazy_installs: false` and `model_catalog.enabled: false`.
+  A user setting can add hooks for
+  other events but cannot drop or replace DefenseClaw's.
+
+  Hermes still reads settings and imports code from its home directory,
+  which the agent can write. It loads `~/.hermes/.env` over the process
+  environment, where `HERMES_SAFE_MODE` switches every hook off and
+  `HERMES_MANAGED_DIR` moves the managed layer. It also imports model-provider
+  plugins from `~/.hermes/plugins/model-providers` whatever `plugins.enabled`
+  says. The hooks therefore depend on the launcher's checks, not only on file
+  ownership, so the tier is **user**.
+- **Launcher checks.** The root-owned launcher runs before every Hermes start.
+  It refuses to start while any of these is true:
+  - an argument is `--safe-mode` or a prefix of it that Hermes accepts
+    (`--sa` and longer). DefenseClaw's own `--safe`, which keeps the harness's
+    prompts, goes before the harness name.
+  - a `.env` or `.op.env` in the Hermes home or one of its profiles names a
+    variable that switches the hooks off, moves the managed layer or the
+    Hermes home, or loads other code (`HERMES_SAFE_MODE`,
+    `HERMES_MANAGED_DIR`, `HERMES_HOME`, `HERMES_ENABLE_PROJECT_PLUGINS`,
+    `HERMES_PYTHON*`, `PYTHON*`, `LD_*` and a few more).
+  - the home or a profile holds Python code under `plugins/`.
+  - a user `config.yaml` has a `secrets` section. Its secret sources set
+    environment variables before the managed settings apply.
+
+  The launcher also pins `HOME` and `HERMES_HOME`, and drops every `PYTHON*`
+  variable and the variables that move Hermes' code before the harness
+  starts. `/etc/hermes/.env`, which Hermes applies last, pins safe mode and
+  project plugins off. The refusal names the file; remove it and start Hermes
+  again.
+- **Fail closed.** Hermes ignores a hook's exit status and treats a timeout as
+  no opinion, so the sandbox hook prints a Hermes block directive on every
+  failure: missing token, ingress down, or a bad reply. It does so well inside
+  the 30-second hook timeout.
+- **Blocks on screen.** Hermes 0.19 shows nothing for a tool call a hook
+  blocked: the reason goes to the model as the tool's error, and the terminal
+  shows only `preparing terminal…`. A root-owned module in the image prints
+  the reason under that line, the way Hermes prints its own tool lines, for
+  example `┊ ✗ terminal blocked by DefenseClaw rule <ID>: <title>. …`. It
+  prints only to a terminal, and what the model gets is unchanged.
+- **Known gaps.** An agent can still start a second Hermes from a tool call,
+  for example by running the pinned binary directly. That start skips the
+  launcher's checks. DefenseClaw judges that tool call first, and
+  hook-silence detection is the backstop. Command rules judge the terminal
+  tool's commands, and the text the process tool sends to a background
+  process (judged as shell input). The image turns off `execute_code`, which
+  runs model-written Python that command rules cannot read. A command that a
+  script runs, when the agent writes the script to a file and runs it, is
+  judged by the command that starts the script.
+- **Install pin.** The image installs Hermes Agent 0.19.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13, with dependency
+  resolution cut off at the review date. The build refuses a Hermes version
+  outside the reviewed hook contracts (`>=0.19.0,<0.22.0`).
+- **Model access.** Use one of these provider profiles. Each key is an
+  OpenShell placeholder that resolves only at the provider endpoint, and only
+  for the harness's own interpreter. `defenseclaw sandbox run hermes` picks
+  one from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or, with `--llm bedrock`,
+  `AWS_BEARER_TOKEN_BEDROCK`:
+  - `defenseclaw-openai` or the regional
+    `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
+    `defenseclaw` provider (`--provider defenseclaw -m <model>`)
+  - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Launch flags.** Skip-permissions mode adds `--yolo`. A run with `--safe`
+  drops `--yolo` and every prefix Hermes accepts for it. A headless run is
+  `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`
+  for a detached run.
+- **Ctrl-Z.** Hermes suspends itself by signalling its process group, which
+  the OpenShell sandbox refuses. Hermes prints its own "has been suspended.
+  Run `fg` to bring Hermes Agent back." line first, which DefenseClaw cannot
+  keep off the screen; the image then answers the call with `defenseclaw:
+  Ctrl-Z cannot suspend a harness in an OpenShell sandbox (the sandbox
+  refuses the signal): Hermes Agent keeps running, and there is nothing to
+  bring back with fg.`, and Hermes keeps running.
+- **Ctrl-C.** One Ctrl-C at an empty Hermes prompt ends Hermes at once
+  (`Shutting down… (finalizing session)`), and DefenseClaw goes on to the end
+  of the session. That is Hermes' own binding: with a draft, Ctrl-C clears
+  it, and while the agent runs it interrupts the agent. The sandbox is
+  kept; `defenseclaw sandbox connect <name>` starts Hermes in it again.
+- **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
+  at start (its model metadata, which has no setting to turn off). The
+  image marks the install the way Hermes' own image does (an
+  `.install_method` of `docker` next to the code), so Hermes neither checks
+  `pypi.org` for updates nor prints its "pip installs are no longer an
+  officially supported platform" notice; `hermes update` then says it does
+  not apply in a container (rebuild the image instead). The managed layer
+  pins `model_catalog.enabled: false`, which stops the fetch of Hermes'
+  curated OpenRouter and Nous Portal model lists
+  (`hermes-agent.nousresearch.com`, redirected to `nousresearch.github.io`).
+  It also turns off the Tirith scanner download and runtime installs, which
+  reached `github.com` and fetched about 20 MB from
+  `release-assets.githubusercontent.com` and `files.pythonhosted.org`
+  before. Remaining traffic goes through the DefenseClaw egress proxy, which
+  logs it and applies the blocklist.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, on a mock model behind a credential binding, showed:
+  - hooks reaching the sandbox ingress, with OpenShell substituting the model
+    key;
+  - a command that a DefenseClaw rule blocks refused by the hook, with the
+    rule's reason passed back to the model;
+  - egress through the proxy, including a blocklisted host that a
+    sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe. In that probe a hostile user
+  `config.yaml` and a launch environment with a planted `sitecustomize`
+  module change nothing, and the launcher refuses to start with a planted
+  `.env`, model-provider plugin or profile `secrets` section. The curated
+  provider profiles have not carried a real model inside a sandbox; see the
+  harness's verification note for what was run.
+
 ## Enterprise deployments
 
 In an [enterprise deployment](/docs/enterprise) the guardian writes the

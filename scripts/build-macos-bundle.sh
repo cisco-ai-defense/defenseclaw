@@ -188,7 +188,7 @@ cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist \
 # them into ${DataDir}/policies/guardrail/ so the sidecar's cold-start
 # LoadRulePack finds them; without this the gateway fails init with
 # "rule-pack directory does not exist". Only guardrail/ from the repo's
-# policies/ is shipped — the openshell/, scanners/, rego/ trees and the
+# policies/ is shipped — the scanners/ and rego/ trees and the
 # {default,strict,permissive}.yaml profile files are not consumed by
 # the managed gateway.
 mkdir -p "${BUNDLE_DIR}/policies"

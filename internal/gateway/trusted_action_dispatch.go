@@ -2162,7 +2162,7 @@ func trustedReadOnlyInspectionAction(
 
 	commandText := trustedActionInputText(input, "")
 	if powerShellFacts, candidate := codexStaticPowerShellReaderFacts(
-		commandText, facts, input.CWD, input.Tool,
+		commandText, facts, input.CWD, input.Tool, input.ActiveHome,
 	); candidate {
 		return trustedReadOnlyPowerShellInspection(powerShellFacts)
 	}

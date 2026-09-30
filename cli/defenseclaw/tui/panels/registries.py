@@ -243,6 +243,12 @@ class RegistriesPanelModel:
         return rows
 
     def handle_key(self, key: str) -> RegistryPanelAction:
+        if key in {"j", "down"}:
+            self.cursor_down()
+            return RegistryPanelAction(True)
+        if key in {"k", "up"}:
+            self.cursor_up()
+            return RegistryPanelAction(True)
         if key == "1":
             self.set_tab(RegistriesTab.SOURCES)
             return RegistryPanelAction(True)

@@ -75,6 +75,9 @@ const (
 	StateStopped      SubsystemState = "stopped"
 	StateError        SubsystemState = "error"
 	StateDisabled     SubsystemState = "disabled"
+	// StateDegraded marks a subsystem that is up but needs operator action;
+	// today only the legacy standalone sandbox shim reports it.
+	StateDegraded SubsystemState = "degraded"
 )
 
 type SubsystemHealth struct {

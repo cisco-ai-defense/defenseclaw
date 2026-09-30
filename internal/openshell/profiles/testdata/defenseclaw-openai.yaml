@@ -1,0 +1,19 @@
+id: defenseclaw-openai
+display_name: OpenAI API (DefenseClaw)
+description: Binds OPENAI_API_KEY to the OpenAI API as a bearer; only the pinned harness binaries may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: OpenAI API key
+    env_vars: [OPENAI_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: api.openai.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"]

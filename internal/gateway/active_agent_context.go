@@ -20,11 +20,14 @@ import (
 	"context"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 const (
@@ -56,7 +59,12 @@ func authenticatedHookConnector(ctx context.Context) string {
 	return canonicalConnectorRulePackKey(connectorName)
 }
 
+// activeAgentContextKey scopes authority to one session of one connector.
+// scope is the sandbox binding ID for sandbox traffic and empty for the
+// host, so a sandbox that names a host session ID (or another sandbox's)
+// can neither read nor reset that session's instruction-file authority.
 type activeAgentContextKey struct {
+	scope     string
 	connector string
 	sessionID string
 }
@@ -240,22 +248,37 @@ func activeAgentASCIIEqualFold(left, right string) bool {
 }
 
 func validActiveAgentContextKey(connectorName, sessionID string) (activeAgentContextKey, bool) {
+	return validScopedActiveAgentContextKey("", connectorName, sessionID)
+}
+
+func validScopedActiveAgentContextKey(scope, connectorName, sessionID string) (activeAgentContextKey, bool) {
 	connectorName = canonicalConnectorRulePackKey(connectorName)
 	if connectorName == "" || sessionID == "" ||
 		len(sessionID) > maxActiveAgentSessionIDSize || strings.TrimSpace(sessionID) != sessionID {
 		return activeAgentContextKey{}, false
 	}
-	return activeAgentContextKey{connector: connectorName, sessionID: sessionID}, true
+	return activeAgentContextKey{scope: scope, connector: connectorName, sessionID: sessionID}, true
 }
 
-func (cache *activeAgentContextCache) makeRoomLocked() {
+// makeRoomLocked evicts the oldest session when the cache is full. To prevent
+// sandbox sessions from evicting host sessions, it only evicts sessions from
+// the same scope as the key that needs room: sandbox keys evict sandbox
+// sessions, host keys evict host sessions.
+func (cache *activeAgentContextCache) makeRoomLocked(needsRoom activeAgentContextKey) {
 	if len(cache.sessions) < maxActiveAgentContextSessions {
 		return
 	}
+	// Only evict from the same scope: sandbox evicts sandbox, host evicts host.
+	isSandbox := needsRoom.scope != ""
 	var oldestKey activeAgentContextKey
 	var oldestTime time.Time
 	found := false
 	for key, session := range cache.sessions {
+		// Only consider sessions from the same scope category.
+		candidateIsSandbox := key.scope != ""
+		if candidateIsSandbox != isSandbox {
+			continue
+		}
 		if !found || session.updatedAt.Before(oldestTime) ||
 			session.updatedAt.Equal(oldestTime) && activeAgentContextKeyLess(key, oldestKey) {
 			oldestKey = key
@@ -267,7 +290,7 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 		evicted := cache.sessions[oldestKey]
 		delete(cache.sessions, oldestKey)
 		if evicted.uncertain || len(evicted.files) != 0 {
-			cache.rememberEvictionLocked(oldestKey, evicted)
+			cache.rememberEvictionLocked(oldestKey, evicted, isSandbox)
 		}
 	}
 }
@@ -275,6 +298,7 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 func (cache *activeAgentContextCache) rememberEvictionLocked(
 	key activeAgentContextKey,
 	session activeAgentContextSession,
+	isSandbox bool,
 ) {
 	caseInsensitive := session.caseInsensitiveUncertain ||
 		len(session.caseInsensitiveFiles) != 0
@@ -298,9 +322,13 @@ func (cache *activeAgentContextCache) rememberEvictionLocked(
 	// Never drop authority loss when both bounded indexes saturate. This rare
 	// fallback retains the previous fail-closed behavior without making the
 	// ordinary single-cache-eviction path process-wide.
-	cache.uncertain = true
-	cache.caseInsensitiveUncertain =
-		cache.caseInsensitiveUncertain || caseInsensitive
+	// However, sandbox eviction overflow should not set a process-wide flag
+	// that would affect host sessions. Sandbox evictions stay scoped.
+	if !isSandbox {
+		cache.uncertain = true
+		cache.caseInsensitiveUncertain =
+			cache.caseInsensitiveUncertain || caseInsensitive
+	}
 }
 
 func (cache *activeAgentContextCache) consumeEvictionLocked(
@@ -314,6 +342,9 @@ func (cache *activeAgentContextCache) consumeEvictionLocked(
 }
 
 func activeAgentContextKeyLess(left, right activeAgentContextKey) bool {
+	if left.scope != right.scope {
+		return left.scope < right.scope
+	}
 	if left.connector != right.connector {
 		return left.connector < right.connector
 	}
@@ -325,6 +356,10 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	if !ok {
 		return
 	}
+	cache.seedKey(key, filePath)
+}
+
+func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePath string) {
 	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
 		if syntacticActiveAgentFileCandidate(filePath) {
@@ -340,6 +375,39 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	)
 }
 
+// seedSandboxKey records an instruction file a sandboxed Claude Code loaded.
+// Its identity is proved on the host file the sandbox path is mounted from;
+// both the sandbox spelling (absolute paths the agent types) and the mapped
+// host spelling (paths resolved against the mapped working directory) are
+// recorded, because tool-call analysis sees both. Without a host view
+// (copy mode, or a path outside the mount) the file cannot be proved and
+// the session is marked uncertain, which fails closed.
+func (cache *activeAgentContextCache) seedSandboxKey(
+	key activeAgentContextKey,
+	view *sandboxauth.FSView,
+	filePath string,
+) {
+	canonicalName, ok := syntacticActiveAgentFile(filePath)
+	if !ok {
+		return
+	}
+	hostPath, err := view.HostPath(filePath)
+	if err != nil {
+		if syntacticActiveAgentFileCandidate(filePath) {
+			cache.markUncertain(key, cache.currentTime())
+		}
+		return
+	}
+	hostCanonical, caseInsensitive, valid := exactActiveAgentFile(hostPath)
+	if !valid {
+		cache.markUncertain(key, cache.currentTime())
+		return
+	}
+	now := cache.currentTime()
+	cache.seedLoadedFile(key, path.Join(path.Dir(filePath), canonicalName), caseInsensitive, now)
+	cache.seedLoadedFile(key, hostCanonical, caseInsensitive, now)
+}
+
 func (cache *activeAgentContextCache) markUncertain(
 	key activeAgentContextKey,
 	now time.Time,
@@ -353,7 +421,7 @@ func (cache *activeAgentContextCache) markUncertain(
 	if !exists {
 		uncertain, caseInsensitiveUncertain :=
 			cache.consumeEvictionLocked(key)
-		cache.makeRoomLocked()
+		cache.makeRoomLocked(key)
 		session = activeAgentContextSession{
 			caseInsensitiveUncertain: caseInsensitiveUncertain,
 			uncertain:                uncertain,
@@ -382,7 +450,7 @@ func (cache *activeAgentContextCache) seedLoadedFile(
 	if !exists {
 		uncertain, caseInsensitiveUncertain :=
 			cache.consumeEvictionLocked(key)
-		cache.makeRoomLocked()
+		cache.makeRoomLocked(key)
 		session = activeAgentContextSession{
 			caseInsensitiveUncertain: caseInsensitiveUncertain,
 			uncertain:                uncertain,
@@ -436,6 +504,10 @@ func (cache *activeAgentContextCache) begin(connectorName, sessionID string) {
 	if !ok {
 		return
 	}
+	cache.beginKey(key)
+}
+
+func (cache *activeAgentContextCache) beginKey(key activeAgentContextKey) {
 	now := cache.currentTime()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -444,7 +516,7 @@ func (cache *activeAgentContextCache) begin(connectorName, sessionID string) {
 	}
 	delete(cache.evictions, key)
 	if _, exists := cache.sessions[key]; !exists {
-		cache.makeRoomLocked()
+		cache.makeRoomLocked(key)
 	}
 	// SessionStart and CwdChanged are authenticated lifecycle proof that no
 	// previously loaded instruction file remains active for this session.
@@ -456,6 +528,10 @@ func (cache *activeAgentContextCache) end(connectorName, sessionID string) {
 	if !ok {
 		return
 	}
+	cache.endKey(key)
+}
+
+func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 	cache.mu.Lock()
 	delete(cache.sessions, key)
 	delete(cache.evictions, key)
@@ -467,6 +543,10 @@ func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) 
 	if !ok {
 		return activeAgentContextSnapshot{}
 	}
+	return cache.snapshotKey(key)
+}
+
+func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) activeAgentContextSnapshot {
 	now := cache.currentTime()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -505,15 +585,28 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	if a == nil || authenticatedHookConnector(ctx) != connectorName {
 		return activeAgentContextSnapshot{}
 	}
+	scope := ""
+	view, sandboxed := sandboxHookView(ctx)
+	if binding, ok := sandboxauth.FromContext(ctx); ok {
+		scope = binding.ID
+	}
+	key, ok := validScopedActiveAgentContextKey(scope, connectorName, req.SessionID)
+	if !ok {
+		return activeAgentContextSnapshot{}
+	}
 	switch req.HookEventName {
 	case "SessionStart", "CwdChanged":
-		a.activeAgentContext.begin(connectorName, req.SessionID)
+		a.activeAgentContext.beginKey(key)
 	case "SessionEnd":
-		a.activeAgentContext.end(connectorName, req.SessionID)
+		a.activeAgentContext.endKey(key)
 	case "InstructionsLoaded":
-		a.activeAgentContext.seed(connectorName, req.SessionID, req.FilePath)
+		if sandboxed {
+			a.activeAgentContext.seedSandboxKey(key, view, req.FilePath)
+		} else {
+			a.activeAgentContext.seedKey(key, req.FilePath)
+		}
 	case "PreToolUse", "PermissionRequest":
-		return a.activeAgentContext.snapshot(connectorName, req.SessionID)
+		return a.activeAgentContext.snapshotKey(key)
 	}
 	return activeAgentContextSnapshot{}
 }

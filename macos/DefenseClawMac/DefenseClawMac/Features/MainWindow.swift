@@ -25,7 +25,7 @@ struct MainWindow: View {
 
     private let groups: [(String, [PanelID])] = [
         ("Monitor", [.overview, .alerts, .logs, .audit, .activity]),
-        ("Govern", [.skills, .mcps, .plugins, .tools]),
+        ("Govern", [.skills, .mcps, .plugins, .tools, .sandboxes]),
         ("Discover", [.inventory, .aiDiscovery, .aiRuntime, .registries]),
         ("Configure", [.setup]),
     ]
@@ -148,6 +148,14 @@ struct MainWindow: View {
                     .font(.caption2)
                     .foregroundStyle(Cisco.orange)
             }
+        // Asks are the only sandbox events that wait for a person.
+        case .sandboxes where !appState.sandbox.asks.isEmpty:
+            Text("\(appState.sandbox.asks.count)")
+                .font(.caption2.weight(.bold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Cisco.orange, in: Capsule())
+                .foregroundStyle(.white)
         default:
             EmptyView()
         }
@@ -170,6 +178,7 @@ struct MainWindow: View {
         case .aiRuntime: AIRuntimeView()
         case .registries: RegistriesView()
         case .setup: SetupView()
+        case .sandboxes: SandboxesView()
         }
     }
 

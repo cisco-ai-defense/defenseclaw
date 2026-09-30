@@ -113,11 +113,22 @@ func (e EnvVar) IsActive() bool {
 	return e.isActiveWithGetter(os.Getenv)
 }
 
+// activeWhenNonEmpty lists the variables that carry a value rather than a
+// switch: any non-empty value is active. Mirrors _ACTIVE_WHEN_NONEMPTY in
+// cli/defenseclaw/envvars.py.
+var activeWhenNonEmpty = map[string]struct{}{
+	"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": {},
+	"DEFENSECLAW_SANDBOX_ID":              {},
+}
+
 // isActiveWithGetter is the testable seam used by IsActive.
 func (e EnvVar) isActiveWithGetter(get func(string) string) bool {
 	v := strings.ToLower(strings.TrimSpace(get(e.Name)))
 	if v == "" {
 		return false
+	}
+	if _, ok := activeWhenNonEmpty[e.Name]; ok {
+		return true
 	}
 	_, truthy := truthyValues[v]
 	return truthy

@@ -107,6 +107,15 @@ class StepResult:
         }
 
 
+# ``init --sandbox`` is accepted so existing automation keeps working; the
+# legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
+SANDBOX_FLAG_DEPRECATION = (
+    "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
+    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
+    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
+)
+
+
 @dataclass
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
@@ -657,8 +666,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 StepResult(
                     "Sandbox",
                     "warn",
-                    "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
-                    "defenseclaw sandbox setup",
+                    SANDBOX_FLAG_DEPRECATION,
+                    "defenseclaw sandbox legacy-cleanup --dry-run",
                 )
             )
 

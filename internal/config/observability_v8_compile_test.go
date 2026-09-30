@@ -419,6 +419,67 @@ func TestCompileObservabilityV8BatchBoundariesAndKinds(t *testing.T) {
 	}
 }
 
+// A route written for a release that still had the legacy openshell-sandbox
+// integration must keep compiling after its producers were removed.
+func TestCompileObservabilityV8AcceptsRetiredSelectorValues(t *testing.T) {
+	logs := []observability.Signal{observability.SignalLogs}
+	metrics := []observability.Signal{observability.SignalMetrics}
+	console := ObservabilityV8DestinationSource{
+		Name: "console", Kind: ObservabilityV8DestinationConsole,
+		Routes: []ObservabilityV8RouteSource{{
+			Name: "sandbox-audit", Signals: logs, Action: ObservabilityV8RouteDrop,
+			Selector: &ObservabilityV8SelectorSource{Actions: []observability.ProducerKey{"init-sandbox"}},
+		}},
+	}
+	otlp := ObservabilityV8DestinationSource{
+		Name: "otlp", Kind: ObservabilityV8DestinationOTLP, Protocol: "http/protobuf", Endpoint: "https://otel.example.test",
+		Routes: []ObservabilityV8RouteSource{{
+			Name: "sandbox-exit", Signals: metrics,
+			Selector: &ObservabilityV8SelectorSource{EventNames: []observability.EventName{"defenseclaw.openshell.exit"}},
+		}},
+	}
+	plan, err := CompileObservabilityV8(&ObservabilityV8Source{Destinations: []ObservabilityV8DestinationSource{console, otlp}})
+	if err != nil {
+		t.Fatalf("a retired selector value was rejected: %v", err)
+	}
+	// The retired value stays, so the drop route matches nothing instead of
+	// widening to every action.
+	compiled, ok := plan.Destination("console")
+	if !ok || len(compiled.Routes) != 1 {
+		t.Fatalf("console destination = %+v, %v", compiled, ok)
+	}
+	if got := compiled.Routes[0].Selector.Actions; len(got) != 1 || got[0] != "init-sandbox" {
+		t.Fatalf("sandbox-audit actions = %v, want [init-sandbox]", got)
+	}
+	compiled, ok = plan.Destination("otlp")
+	if !ok || len(compiled.Routes) != 1 {
+		t.Fatalf("otlp destination = %+v, %v", compiled, ok)
+	}
+	if got := compiled.Routes[0].Selector.EventNames; len(got) != 1 || got[0] != "defenseclaw.openshell.exit" {
+		t.Fatalf("sandbox-exit event names = %v, want [defenseclaw.openshell.exit]", got)
+	}
+	var paths []string
+	for _, warning := range plan.Snapshot().Warnings {
+		if warning.Code == "retired_selector_value" {
+			paths = append(paths, warning.Path)
+		}
+	}
+	want := []string{
+		"observability.destinations[console].routes[sandbox-audit].selector.actions",
+		"observability.destinations[otlp].routes[sandbox-exit].selector.event_names",
+	}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("retired_selector_value warnings at %v, want %v", paths, want)
+	}
+
+	// A value that was never registered is still rejected.
+	console.Routes[0].Selector.Actions = []observability.ProducerKey{"init-sandboxx"}
+	if _, err := CompileObservabilityV8(&ObservabilityV8Source{Destinations: []ObservabilityV8DestinationSource{console}}); err == nil ||
+		!strings.Contains(err.Error(), "unregistered action") {
+		t.Fatalf("error = %v, want unregistered action", err)
+	}
+}
+
 func TestCompileObservabilityV8TransportValidation(t *testing.T) {
 	logs := []observability.Signal{observability.SignalLogs}
 	traces := []observability.Signal{observability.SignalTraces}

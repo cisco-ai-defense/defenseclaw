@@ -516,6 +516,57 @@ func TestConnectorCustodyHotPathIsMonotonicAndExplicitUpdatesRemainPossible(t *t
 	}
 }
 
+func TestScopedConnectorInstancesStayApartFromTheDefault(t *testing.T) {
+	_, repo := newCorrelationTestStore(t)
+	def := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal)
+	scopedID, err := NewConnectorInstanceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v1", ConnectorCustodyExternal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoped.ConnectorInstanceID != scopedID || scoped.Default || scoped.ExportCustody != ConnectorCustodyExternal {
+		t.Fatalf("scoped=%+v", scoped)
+	}
+	// The default resolver is not made ambiguous by the scoped instance.
+	if again := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal); again.ConnectorInstanceID != def.ConnectorInstanceID {
+		t.Fatalf("default moved to %s", again.ConnectorInstanceID)
+	}
+	promoted, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v2", ConnectorCustodyDefenseClaw)
+	if err != nil || promoted.ExportCustody != ConnectorCustodyDefenseClaw || promoted.ProfileVersion != "codex-profile-v2" {
+		t.Fatalf("promoted=%+v err=%v", promoted, err)
+	}
+	for _, attempted := range []ConnectorExportCustody{ConnectorCustodyExternal, ConnectorCustodyHookOnly} {
+		resolved, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v2", attempted)
+		if err != nil || resolved.ExportCustody != ConnectorCustodyDefenseClaw || resolved.ConnectorInstanceID != scopedID {
+			t.Fatalf("hot-path custody downgraded: %+v err=%v", resolved, err)
+		}
+	}
+	if def, err := repo.GetConnectorInstance(t.Context(), def.ConnectorInstanceID); err != nil ||
+		def.ExportCustody != ConnectorCustodyExternal {
+		t.Fatalf("scoped promotion touched the default: %+v err=%v", def, err)
+	}
+	// A scope can never resolve to a default or to another connector.
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), def.ConnectorInstanceID, "codex", "codex-profile-v1",
+		ConnectorCustodyExternal); !errors.Is(err, ErrCorrelationConflict) {
+		t.Fatalf("scoped resolution of the default instance: %v", err)
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "claudecode", "claudecode-profile-v1",
+		ConnectorCustodyExternal); !errors.Is(err, ErrCorrelationConflict) {
+		t.Fatalf("scoped resolution for another connector: %v", err)
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), "not-a-uuid", "codex", "codex-profile-v1",
+		ConnectorCustodyExternal); err == nil {
+		t.Fatal("malformed scoped id accepted")
+	}
+	instances, err := repo.ListConnectorInstances(t.Context())
+	if err != nil || len(instances) != 2 {
+		t.Fatalf("instances=%+v err=%v", instances, err)
+	}
+}
+
 func TestCorrelationStateQueriesSurviveRestartAndRejectAmbiguity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	store, err := NewStore(path)

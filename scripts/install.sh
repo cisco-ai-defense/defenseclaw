@@ -166,7 +166,7 @@ Options:
   --no-openclaw            First install only: do not install OpenClaw
   --quickstart             First install only: run 'defenseclaw quickstart' afterwards
   --quickstart-mode MODE   observe or action (implies --quickstart)
-  --sandbox                First install only: also install openshell-sandbox (Linux)
+  --sandbox                Deprecated no-op (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
 
 Environment:
@@ -198,12 +198,18 @@ while [[ $# -gt 0 ]]; do
             QUICKSTART_MODE="$2"; shift
             case "${QUICKSTART_MODE}" in observe|action) ;; *) die "invalid --quickstart-mode: ${QUICKSTART_MODE}" ;; esac
             RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart-mode "${QUICKSTART_MODE}") ;;
-        --sandbox) INSTALL_SANDBOX=true; PASSTHROUGH+=(--sandbox) ;;
+        --sandbox) INSTALL_SANDBOX=true ;;
         --help|-h) usage; exit 0 ;;
         *) warn "Ignoring unknown option: $1" ;;
     esac
     shift
 done
+if [[ "${INSTALL_SANDBOX}" == true ]]; then
+    # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
+    # accepted so existing automation keeps working, and does nothing. It is
+    # not forwarded to another release's installer either.
+    warn "--sandbox is deprecated and ignored: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
+fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"
@@ -629,7 +635,6 @@ fi
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
 fi
-# Kept until now: the sandbox extra is checked against the staged checksums.txt.
 rm -rf "${STAGING}"
 ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
@@ -1115,16 +1120,6 @@ first_install_extras() {
     fi
     if [[ "${CONNECTOR}" == openclaw ]]; then
         ensure_openclaw
-    fi
-    if [[ "${INSTALL_SANDBOX}" == true ]]; then
-        if [[ "${OS}" != linux || "${CONNECTOR}" != openclaw ]]; then
-            warn "--sandbox applies to the OpenClaw connector on Linux only; skipped"
-        else
-            fetch install-openshell-sandbox.sh "${STAGING}.sandbox.sh" || die "This release has no install-openshell-sandbox.sh"
-            verify "${STAGING}.sandbox.sh" install-openshell-sandbox.sh
-            bash "${STAGING}.sandbox.sh" || warn "openshell-sandbox installation failed"
-            rm -f "${STAGING}.sandbox.sh"
-        fi
     fi
     if [[ "${RUN_QUICKSTART}" == true ]]; then
         if [[ -z "${CONNECTOR}" || "${CONNECTOR}" == none ]]; then

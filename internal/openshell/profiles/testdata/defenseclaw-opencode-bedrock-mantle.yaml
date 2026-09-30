@@ -1,0 +1,19 @@
+id: defenseclaw-opencode-bedrock-mantle-us-east-1
+display_name: Amazon Bedrock Mantle (Anthropic route) for OpenCode (DefenseClaw)
+description: Binds a Bedrock API key to the Mantle Anthropic Messages route (https://bedrock-mantle.us-east-1.api.aws/anthropic/v1) as x-api-key for an OpenCode custom provider; only the OpenCode binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Amazon Bedrock API key (short-term or long-term)
+    env_vars: [BEDROCK_MANTLE_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+endpoints:
+  - host: "bedrock-mantle.us-east-1.api.aws"
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/opencode/lib/node_modules/opencode-ai/bin/opencode.exe"]

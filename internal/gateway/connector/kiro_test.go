@@ -352,6 +352,118 @@ func assertKiroV2AgentHooks(t *testing.T, path, script string) {
 		if entry["command"] != script {
 			t.Fatalf("agent %s command = %#v", spec.event, entry["command"])
 		}
+		// kiro-cli 2.x matches tool names as globs: "*" is every tool,
+		// ".*" is none.
+		if entry["matcher"] != "*" {
+			t.Fatalf("agent %s matcher = %#v, want the glob \"*\"", spec.event, entry["matcher"])
+		}
+	}
+}
+
+// Earlier releases registered the CLI 2.x hooks with the regular expression
+// ".*". kiro-cli 2.24.1 reads matchers as globs, so the tool hooks of those
+// agent files never ran. Setup (which the gateway runs at every start, so
+// also after an upgrade) must rewrite DefenseClaw's entries in place and
+// leave the operator's own entries alone.
+func TestKiroSetupRewritesRegexToolMatcherFromEarlierReleases(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	opts := SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "open"}
+	conn := NewKiroConnector()
+	command := conn.hookCommand(opts)
+
+	oldEntry := func(description string) map[string]interface{} {
+		return map[string]interface{}{"command": command, "description": description, "matcher": ".*"}
+	}
+	foreign := map[string]interface{}{"command": "echo operator", "matcher": ".*"}
+	earlier := map[string]interface{}{
+		"name":           kiroManagedAgentName,
+		"description":    "DefenseClaw-guarded Kiro agent",
+		"tools":          []interface{}{"*"},
+		"includeMcpJson": true,
+		"hooks": map[string]interface{}{
+			"userPromptSubmit": []interface{}{oldEntry("DefenseClaw prompt inspection")},
+			"preToolUse":       []interface{}{foreign, oldEntry("DefenseClaw tool-use inspection")},
+			"postToolUse":      []interface{}{oldEntry("DefenseClaw tool-use audit")},
+			"stop":             []interface{}{oldEntry("DefenseClaw session stop")},
+		},
+	}
+	// The operator's own default agent, patched by an earlier release too.
+	custom := map[string]interface{}{
+		"name":  "mine",
+		"model": "keep-me",
+		"hooks": map[string]interface{}{"preToolUse": []interface{}{oldEntry("DefenseClaw tool-use inspection")}},
+	}
+	writeJSON := func(path string, v interface{}) {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentPath := filepath.Join(home, "agents", kiroManagedAgentName+".json")
+	customPath := filepath.Join(home, "agents", "mine.json")
+	writeJSON(agentPath, earlier)
+	writeJSON(customPath, custom)
+	writeJSON(filepath.Join(home, "settings", "cli.json"), map[string]interface{}{kiroDefaultAgentSettingKey: "mine"})
+
+	for run := 1; run <= 2; run++ {
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			t.Fatalf("Setup run %d: %v", run, err)
+		}
+	}
+
+	readHooks := func(path string) map[string]interface{} {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		hooks, _ := cfg["hooks"].(map[string]interface{})
+		return hooks
+	}
+	agentHooks := readHooks(agentPath)
+	for _, spec := range kiroV2HookSpecs {
+		var ours []map[string]interface{}
+		list, _ := agentHooks[spec.event].([]interface{})
+		for _, item := range list {
+			entry, _ := item.(map[string]interface{})
+			if entry["command"] == command {
+				ours = append(ours, entry)
+			}
+		}
+		if len(ours) != 1 || ours[0]["matcher"] != "*" {
+			t.Fatalf("%s DefenseClaw entries after upgrade = %#v, want one with matcher \"*\"", spec.event, ours)
+		}
+	}
+	pre, _ := agentHooks["preToolUse"].([]interface{})
+	if len(pre) != 2 {
+		t.Fatalf("preToolUse = %#v, want the operator entry and DefenseClaw's", pre)
+	}
+	if first, _ := pre[0].(map[string]interface{}); first["command"] != "echo operator" || first["matcher"] != ".*" {
+		t.Fatalf("operator entry changed: %#v", pre[0])
+	}
+
+	customHooks := readHooks(customPath)
+	for _, spec := range kiroV2HookSpecs {
+		list, _ := customHooks[spec.event].([]interface{})
+		if len(list) != 1 {
+			t.Fatalf("custom agent %s = %#v", spec.event, customHooks[spec.event])
+		}
+		if entry, _ := list[0].(map[string]interface{}); entry["command"] != command || entry["matcher"] != "*" {
+			t.Fatalf("custom agent %s entry = %#v", spec.event, entry)
+		}
 	}
 }
 

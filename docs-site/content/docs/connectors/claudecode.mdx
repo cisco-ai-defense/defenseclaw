@@ -226,6 +226,66 @@ block, ask, or decision authority.
   <Edge from="otel" to="gateway" />
 </Flow>
 
+## In an OpenShell sandbox
+
+`defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell
+sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its own that
+works on a copy of your folder ([macOS](/docs/setup/sandbox#macos)): the
+agent sees only your project folder, and DefenseClaw hooks gate every tool
+call. The [sandbox guide](/docs/setup/sandbox)
+covers setup, the session and every flag. The files below exist only in the
+sandbox image; your own Claude Code configuration does not change.
+
+- **Managed tier.** The hooks are in the root-owned managed policy drop-in
+  `/etc/claude-code/managed-settings.d/50-defenseclaw.json`, with
+  `allowManagedHooksOnly` set, so user and project settings cannot add hooks
+  or switch DefenseClaw's off. The same drop-in turns off Claude Code's own
+  sandbox (it cannot run inside OpenShell), the auto-updater, the installation
+  checks (the image pins its own Claude Code, so there is nothing to install or
+  update) and non-essential traffic, and sends Claude Code's OTel to
+  DefenseClaw. The hooks fail closed
+  and authenticate with a per-sandbox token, never the host gateway token.
+- **Skip-permissions.** On by default (the `open` and `balanced` packs):
+  Claude Code starts with `--dangerously-skip-permissions`. `--safe`, or the
+  `strict` pack, keeps its permission prompts. The sandbox's managed settings
+  then refuse `bypassPermissions` from a flag or any settings file, and
+  `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` and
+  `--permission-mode bypassPermissions` are dropped from the arguments you
+  pass.
+- **Model sign-in.** `--llm auto` (the default) shares `ANTHROPIC_API_KEY`,
+  or else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), from your
+  shell. OpenShell holds the secret, and the sandbox gets a placeholder that
+  works only at `api.anthropic.com`. `--llm bedrock` shares a short-term Amazon
+  Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle
+  Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then
+  `$AWS_DEFAULT_REGION`, then `us-east-1`). With
+  `--llm none`, or when no key is found, log in inside the sandbox; that login
+  stays in the sandbox home, where the agent can read it.
+- **Bedrock models.** Bedrock Mantle serves Claude models only under
+  `anthropic.*` ids, not Claude Code's own model names, so a Bedrock run starts
+  on `anthropic.claude-sonnet-5` and maps the `/model` choices to Mantle ids:
+  Opus to `anthropic.claude-opus-4-8`, Sonnet to `anthropic.claude-sonnet-5`
+  and Haiku (also used for background tasks) to `anthropic.claude-haiku-4-5`.
+  Pick another model with `-- --model MODEL`, for example
+  `defenseclaw sandbox run claude --llm bedrock -- --model anthropic.claude-opus-5`,
+  or type `/model anthropic.claude-opus-5` in the session. The banner's
+  `Model` line names the model either way.
+- **Per-sandbox settings.** Each sandbox also gets a read-only drop-in,
+  `60-defenseclaw-run.json`, that wins over the image's. It pins the model
+  provider the run chose (and on Bedrock its models), so a repository's
+  `.claude/settings.json` cannot send the conversation to another endpoint. It admits only the MCP servers
+  DefenseClaw brought along from your Claude Code setup; a read-only
+  `/etc/claude-code/managed-mcp.json` lists them, so a repository's
+  `.mcp.json` servers never start unless the sandbox pack sets
+  [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox).
+  `--no-mcp` leaves your servers behind.
+- **Image and verification.** The image installs Claude Code 2.1.156 by
+  default and refuses a version without a reviewed Linux hook contract.
+  Verified end to end: against a mock model every required hook fired and a
+  blocked tool call did not run, also with hostile user and project settings
+  such as `disableAllHooks`, and a live sandbox run showed a
+  DefenseClaw-blocked command denied and the egress block list holding.
+
 ## Disable
 
 ```bash

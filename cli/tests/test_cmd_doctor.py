@@ -46,6 +46,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_openclaw_transport_advisory,
     _check_openhands_hooks,
     _check_proxy_interception,
+    _check_scanners,
     _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
@@ -2785,6 +2786,175 @@ class DoctorFixHelpTextTests(unittest.TestCase):
             warn["detail"],
         )
         self.assertNotIn("doctor --fix", warn["detail"])
+
+
+class TestLegacySandboxDoctor(unittest.TestCase):
+    """The removed openshell-sandbox mode is reported with its cleanup command."""
+
+    def _cfg(self, data_dir: str, *, legacy: bool) -> Config:
+        cfg = Config(
+            data_dir=data_dir,
+            audit_db=os.path.join(data_dir, "audit.db"),
+            gateway=GatewayConfig(host="127.0.0.1"),
+            openshell=OpenShellConfig(mode="standalone" if legacy else ""),
+        )
+        cfg._source_config_version = 8
+        return cfg
+
+    def test_legacy_install_warns_with_cleanup_remediation(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=True), result)
+        self.assertEqual(result.warned, 1, result.checks)
+        row = result.checks[0]
+        self.assertEqual(row["check_id"], "doctor.sandbox.legacy-install")
+        self.assertIn("openshell.mode=standalone", row["detail"])
+        self.assertIn("defenseclaw sandbox legacy-cleanup", row["remediation"])
+
+    def test_leftover_data_dir_artifacts_are_evidence_too(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "openclaw-ownership-backup.json"), "w") as fh:
+                fh.write("{}")
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("openclaw-ownership-backup.json", result.checks[0]["detail"])
+
+    def test_host_mode_install_emits_nothing(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
+        self.assertEqual(result.checks, [])
+
+    def test_degraded_legacy_sandbox_health_warns_instead_of_failing(self):
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {
+                "state": "degraded",
+                "last_error": "legacy standalone install detected — run `defenseclaw sandbox legacy-cleanup`",
+            },
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=True)
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(cfg, result)
+        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
+        self.assertEqual(sandbox["status"], "warn")
+        self.assertIn("legacy-cleanup", sandbox["detail"])
+
+    def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
+        # openshell.enabled makes the gateway run the sandbox subsystem; its
+        # "running" must not read as a stale sidecar or drive restarts.
+        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
+
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {"state": "running", "details": {"ingress": "127.0.0.1:18971", "egress": "127.0.0.1:18972"}},
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.openshell.enabled = True
+            result = _DoctorResult()
+            with (
+                patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._http_probe",
+                    return_value=(200, json.dumps(health)),
+                ),
+            ):
+                _check_sidecar(cfg, result)
+                _status, detail = _gateway_service_health_assessment(cfg, health)
+        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
+        self.assertEqual(sandbox["status"], "pass", sandbox)
+        # Other subsystems of this fixture may drift; the sandbox does not.
+        self.assertNotIn("sandbox", detail)
+
+        # Sandboxes enabled but reported disabled is a stale sidecar, except
+        # where the gateway turns them off on purpose.
+        stale = dict(health, sandbox={"state": "disabled"})
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.openshell.enabled = True
+            with patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"):
+                status, detail = _gateway_service_health_assessment(cfg, stale)
+            self.assertEqual(status, "repairable", detail)
+            self.assertIn("sandbox is enabled in config but reports disabled", detail)
+            with patch("defenseclaw.commands.cmd_doctor.sys.platform", "win32"):
+                status, detail = _gateway_service_health_assessment(cfg, stale)
+            self.assertNotIn("sandbox", detail)
+
+    def test_degraded_legacy_sandbox_does_not_block_gateway_repairs(self):
+        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=True)
+            health = {
+                "api": {"state": "running"},
+                "gateway": {"state": "disabled"},
+                "watcher": {"state": "disabled"},
+                "telemetry": {"state": "running"},
+                "guardrail": {"state": "disabled"},
+                "sandbox": {"state": "degraded"},
+            }
+            status, detail = _gateway_service_health_assessment(cfg, health)
+        self.assertNotEqual(status, "operational", detail)
+        self.assertNotIn("sandbox", detail)
+
+
+@unittest.skipIf(os.name == "nt", "the POSIX repair command")
+class DoctorScannerRepairHintTests(unittest.TestCase):
+    """A failed skill-scanner check names the command that repairs it (manual test R2-44)."""
+
+    _CFG = SimpleNamespace(
+        scanners=SimpleNamespace(
+            skill_scanner=SimpleNamespace(binary="/opt/dc/.venv/bin/skill-scanner"),
+            mcp_scanner=SimpleNamespace(binary="mcp-scanner"),
+        )
+    )
+
+    def _run(self, side_effect):
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=lambda b: b),
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", side_effect=side_effect),
+        ):
+            _check_scanners(self._CFG, result)
+        return result.checks[0]
+
+    def test_timeout_says_to_retry_then_names_the_resolver(self):
+        import subprocess as sp
+
+        check = self._run(sp.TimeoutExpired(cmd="skill-scanner", timeout=10))
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("did not answer --version within 10s", check["detail"])
+        self.assertIn("run `defenseclaw doctor` again", check["detail"])
+        self.assertIn("`bash defenseclaw-upgrade.sh --yes`", check["detail"])
+        self.assertIn("/docs/get-started/upgrade/", check["detail"])
+        self.assertNotIn("repair path", check["detail"])
+
+    def test_unstartable_launcher_names_the_resolver(self):
+        check = self._run(OSError("exec format error"))
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("could not start: exec format error; repair the launcher with the release upgrade resolver",
+                      check["detail"])
 
 
 if __name__ == "__main__":

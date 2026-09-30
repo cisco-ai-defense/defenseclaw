@@ -17,10 +17,12 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 // handleUnifiedConnectorHook is the single entry point that every
@@ -80,15 +82,7 @@ func sharedDefaultRegistry() *connector.Registry {
 // profile fields (Capabilities, NativeOTLP, MapVerdict, etc.) without
 // a nil-check ladder.
 func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
-	reg := a.connectorRegistry
-	if reg == nil {
-		reg = sharedDefaultRegistry()
-	}
-	conn, ok := reg.Get(name)
-	if !ok {
-		return connector.HookProfile{Name: name}
-	}
-	provider, ok := conn.(connector.HookProfileProvider)
+	provider, ok := a.hookProfileProvider(name)
 	if !ok {
 		return connector.HookProfile{Name: name}
 	}
@@ -105,4 +99,54 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 		AgentVersion:   agentVersion,
 		HookContractID: contractID,
 	})
+}
+
+// hookProfileForRequest is hookProfileForConnector for one request. A
+// sandbox request resolves the profile from its binding: the harness runs
+// from the sandbox image, whose agent version and reviewed hook contract
+// were recorded when the binding was minted, so the host's contract lock
+// and agent-version cache (which describe the host's own install) are never
+// consulted. A request for any connector other than the binding's gets an
+// empty profile, which supports no events and matches no contract.
+func (a *APIServer) hookProfileForRequest(ctx context.Context, name string) connector.HookProfile {
+	binding, ok := sandboxauth.FromContext(ctx)
+	if !ok {
+		return a.hookProfileForConnector(name)
+	}
+	if sandboxauth.CanonicalConnector(name) != binding.Connector {
+		return connector.HookProfile{Name: name}
+	}
+	provider, ok := a.hookProfileProvider(name)
+	if !ok {
+		return connector.HookProfile{Name: name}
+	}
+	return provider.HookProfile(sandboxSetupOpts(a, binding))
+}
+
+func (a *APIServer) hookProfileProvider(name string) (connector.HookProfileProvider, bool) {
+	reg := a.connectorRegistry
+	if reg == nil {
+		reg = sharedDefaultRegistry()
+	}
+	conn, ok := reg.Get(name)
+	if !ok {
+		return nil, false
+	}
+	provider, ok := conn.(connector.HookProfileProvider)
+	return provider, ok
+}
+
+// sandboxSetupOpts is the profile input for a sandbox binding. The
+// workspace directory stays empty: the sandbox's project is not a host
+// workspace the connector may configure. The contract resolves for Linux,
+// which every sandbox runs, so host-OS contract adjustments (such as the
+// macOS-only OpenHands native OTLP lane) never apply to a sandboxed harness.
+func sandboxSetupOpts(a *APIServer, binding sandboxauth.Binding) connector.SetupOpts {
+	return connector.SetupOpts{
+		DataDir:        a.configDataDir(),
+		APIAddr:        a.apiAddrForCapabilities(),
+		AgentVersion:   binding.AgentVersion,
+		HookContractID: binding.HookContractID,
+		GOOS:           sandboxauth.SandboxGOOS,
+	}
 }

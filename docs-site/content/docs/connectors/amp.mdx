@@ -215,6 +215,45 @@ part of this connector's support claim.
 
 <HookEventsList connector="amp" />
 
+## In an OpenShell sandbox
+
+<Callout type="warn" title="Amp cannot run in a sandbox yet">
+DefenseClaw builds an Amp sandbox image, but Amp is **unverified**, so
+`defenseclaw sandbox run amp` refuses the image. Amp needs an Amp account API
+key (`AMP_API_KEY`) for every run: without one it stops at the account check
+before any agent turn, and it has no local or bring-your-own model endpoint.
+DefenseClaw's image check drives the harness with a mock model, so it cannot
+pass for Amp until a check runs with a real key.
+
+`defenseclaw sandbox run amp` builds the whole image first (several GB) and
+only then refuses it. The unverified image stays:
+`defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and
+`defenseclaw sandbox image prune` keeps it because it is the newest Amp
+image. Remove it with `docker image rm <tag>`; the next prune forgets its
+record.
+</Callout>
+
+The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
+the Amp image already holds:
+
+- **User tier.** Amp loads plugins only from `~/.config/amp/plugins` and a
+  project's `.amp/plugins`; it has no system plugin location. The DefenseClaw
+  plugin therefore lives in the image home
+  (`/sandbox/.config/amp/plugins/defenseclaw.ts`), where the agent can edit or
+  delete it. The launcher points Amp at that home, drops the variables that
+  load other plugins or settings, and refuses `--settings-file`. DefenseClaw
+  reports a sandbox whose hooks go silent while the harness is active, and
+  OpenShell's network policy holds either way.
+- **Skip-permissions.** Amp would start with `--dangerously-allow-all`;
+  `--safe` keeps its prompts and drops that flag from the arguments you pass.
+- **Sign-in.** The Amp account API key is the only sign-in. The daemon's
+  `defenseclaw-amp` provider profile binds `AMP_API_KEY` to `ampcode.com`
+  (not tested live); `sandbox run` has no `--llm` choice for Amp.
+- **Image.** Amp 0.0.1785334225-g9abe75, with the npm registry integrity and
+  the native binary's SHA-256 checked. On that build the plugin loads before
+  any server call and fails closed; hooks reaching DefenseClaw and blocking
+  still need a run with a key.
+
 ## Enterprise deployments
 
 In an [enterprise deployment](/docs/enterprise) the guardian writes the

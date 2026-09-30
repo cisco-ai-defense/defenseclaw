@@ -223,3 +223,47 @@ def test_both_installers_bootstrap_the_same_pinned_uv() -> None:
         "uv-aarch64-unknown-linux-musl.tar.gz",
     }
     assert re.search(r'\$UvZipSha256 = "[0-9a-f]{64}"', windows)
+
+
+def test_sandbox_flag_is_a_deprecated_no_op() -> None:
+    """--sandbox keeps parsing for old automation but installs nothing.
+
+    The legacy openshell-sandbox installer was removed; the flag must never
+    fetch or execute a sandbox installer again, nor pass the flag on to
+    another release's installer.
+    """
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert "--sandbox) INSTALL_SANDBOX=true ;;" in text
+    assert "PASSTHROUGH+=(--sandbox)" not in text
+    assert "install-openshell-sandbox.sh" not in text
+    assert "install_openshell_sandbox" not in text
+    assert "SANDBOX_INSTALLER_ASSET_START_VERSION" not in text
+    notice = text.index('if [[ "${INSTALL_SANDBOX}" == true ]]; then')
+    assert "--sandbox is deprecated and ignored" in text[notice : notice + 600]
+    assert "defenseclaw sandbox legacy-cleanup --dry-run" in text[notice : notice + 600]
+    # OpenShell 0.1 sandboxes ship: the notice points at their setup.
+    assert "run 'defenseclaw sandbox setup'" in text[notice : notice + 600]
+    assert "being rebuilt" not in text
+
+
+def test_legacy_sandbox_installer_asset_is_an_inert_stub(tmp_path: Path) -> None:
+    """Cached installers from earlier releases still download this asset."""
+    stub = ROOT / "scripts" / "install-openshell-sandbox.sh"
+    payload = stub.read_bytes()
+    assert payload.splitlines()[-1] == b"# DefenseClaw OpenShell sandbox installer complete v1"
+    text = payload.decode("utf-8")
+    for forbidden in ("curl", "wget", "sudo", "tar ", "install -m", "chmod", "ghcr.io"):
+        assert forbidden not in text, forbidden
+    completed = subprocess.run(
+        [BASH, stub.as_posix(), "--install-dir", (tmp_path / "bin").as_posix()],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "legacy openshell-sandbox (0.0.x) installer has been removed" in completed.stderr
+    assert "defenseclaw sandbox legacy-cleanup" in completed.stderr
+    assert "defenseclaw sandbox setup" in completed.stderr
+    assert "once available" not in completed.stderr
+    assert not (tmp_path / "bin").exists()

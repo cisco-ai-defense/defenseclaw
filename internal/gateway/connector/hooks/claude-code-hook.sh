@@ -58,13 +58,23 @@ fi
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status (a garbage DEFENSECLAW_SANDBOX_TOKEN earns a 401, a request flood a
+# 429, an unversioned placeholder a relay 500), so no failed, refused or
+# unparseable reply may ever turn into an allow.
+FAIL_MODE="closed"
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -113,13 +123,16 @@ if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; t
 fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+{{if .Sandbox}}defenseclaw_sandbox_require_token claudecode claude-code-hook "claude-code tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
-fi
+fi{{end}}
 
 API_ADDR="{{.APIAddr}}"
 
-# Source the token file written by defenseclaw setup (0o600, never baked
+{{if .Sandbox}}# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}# Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). Connector-scoped sidecars override an inherited generic
 # gateway token; legacy .token files retain the explicit env override.
 if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
@@ -132,7 +145,7 @@ elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 
 # FAIL_MODE was already set above (before the missing-token branch).
 # Response-layer and transport-layer failures both respect FAIL_MODE;
@@ -140,7 +153,12 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
 fail_unreachable() {
   defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
-  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"
+{{if .Sandbox}}  # Claude shows this line under the blocked step: a prompt hook blocks the
+  # prompt, every other hook a tool call.
+  case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+    UserPromptSubmit|UserPromptExpansion) defenseclaw_emit_unreachable_stderr "claude-code prompt" "$1" ;;
+    *) defenseclaw_emit_unreachable_stderr "claude-code tool" "$1" ;;
+  esac{{else}}  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"{{end}}
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
@@ -181,7 +199,17 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
@@ -191,7 +219,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -214,8 +242,10 @@ fi
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+# alert is advisory (would_block=false): the notice printed above is all
+# Claude Code gets, and the tool runs, as with allow.
 case "$ACTION" in
-  allow|block|confirm) ;;
+  allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 

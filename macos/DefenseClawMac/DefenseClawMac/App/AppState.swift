@@ -31,6 +31,7 @@ enum PanelID: String, CaseIterable, Identifiable {
     case skills, mcps, plugins, tools
     case inventory, aiDiscovery, aiRuntime, registries
     case setup
+    case sandboxes
 
     var id: String { rawValue }
 
@@ -50,6 +51,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .aiRuntime: "Runtime"
         case .registries: "Registries"
         case .setup: "Setup"
+        case .sandboxes: "Sandboxes"
         }
     }
 
@@ -69,6 +71,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .aiRuntime: "waveform.path.ecg"
         case .registries: "books.vertical"
         case .setup: "gearshape.2"
+        case .sandboxes: "cube.transparent"
         }
     }
 }
@@ -92,6 +95,7 @@ enum SettingsKeys {
     static let notifyCritical = "notifyCritical"
     static let notifyHigh = "notifyHigh"
     static let notifyGatewayOffline = "notifyGatewayOffline"
+    static let notifySandboxEvents = "notifySandboxEvents"
     static let seenAlertHighWater = "seenAlertHighWater"
 }
 
@@ -251,6 +255,17 @@ final class AppState {
     var ackInProgress = false
     var scanInFlight = false
 
+    // OpenShell sandboxes (/api/v1/sandbox): menu bar, Overview, Sandboxes panel.
+    var sandbox = SandboxSnapshot()
+    /// Last sandbox action outcome (a plain sentence), shown where it ran.
+    var sandboxActionMessage: String?
+    var sandboxActionFailed = false
+    /// Unblock / decide keys in flight (double-click guard).
+    var sandboxActionsInFlight: Set<String> = []
+    @ObservationIgnored private var sandboxRefreshInProgress = false
+    /// The first activity read returns the daemon's buffer; it never notifies.
+    @ObservationIgnored private var sandboxActivitySynced = false
+
     // UI state
     var selectedPanel: PanelID = .overview
     var monitoringPaused = false
@@ -284,6 +299,7 @@ final class AppState {
     @ObservationIgnored @AppStorage(SettingsKeys.notifyCritical) var notifyCritical = true
     @ObservationIgnored @AppStorage(SettingsKeys.notifyHigh) var notifyHigh = true
     @ObservationIgnored @AppStorage(SettingsKeys.notifyGatewayOffline) var notifyGatewayOffline = true
+    @ObservationIgnored @AppStorage(SettingsKeys.notifySandboxEvents) var notifySandboxEvents = true
     @ObservationIgnored @AppStorage(SettingsKeys.seenAlertHighWater) var seenAlertHighWater: Double = 0
 
     @ObservationIgnored private var hasStarted = false
@@ -491,6 +507,11 @@ final class AppState {
         ackError = nil
         scanInFlight = false
         seenAlertHighWater = 0
+        sandbox = SandboxSnapshot()
+        sandboxActionMessage = nil
+        sandboxActionFailed = false
+        sandboxActionsInFlight = []
+        sandboxActivitySynced = false
 
         connectorFilter = ""
         connectorStatsCache = [:]
@@ -526,6 +547,9 @@ final class AppState {
             await checkForUpdates()
         }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+        AppDelegate.sandboxNotificationHandler = { [weak self] action, info in
+            self?.handleSandboxNotification(action: action, userInfo: info)
+        }
     }
 
     private func gatewayStartupSnapshot() -> GatewayAutoStartSnapshot {
@@ -773,6 +797,8 @@ final class AppState {
         _ = await activeStream.poll(canonicalHistory: history)
         guard installationSnapshotIsCurrent(generation) else { return }
         await refreshAlerts()
+        guard installationSnapshotIsCurrent(generation) else { return }
+        await refreshSandboxes()
         guard installationSnapshotIsCurrent(generation) else { return }
         await checkForUpdates() // no-op unless 6h have passed
     }
@@ -1032,6 +1058,157 @@ final class AppState {
     func dismiss(_ rows: [AlertRow]) {
         for row in rows { dismissedIDs.insert(row.id) }
         unackedAlerts.removeAll { row in rows.contains { $0.id == row.id } }
+    }
+
+    // MARK: - OpenShell sandboxes
+
+    /// Whether the sandbox API is worth polling: sandboxes are on in
+    /// config.yaml or at the daemon, or the operator is looking at them.
+    private var sandboxesWatched: Bool {
+        config.raw["openshell.enabled"]?.bool == true || sandbox.status.enabled || selectedPanel == .sandboxes
+    }
+
+    /// Refresh status, sandboxes, asks and new activity (pulse-driven). A
+    /// failed refresh keeps the last good snapshot: an empty list during a
+    /// daemon restart would read as "no sandboxes", not as a lost connection.
+    func refreshSandboxes() async {
+        guard !sandboxRefreshInProgress, !installationBindInProgress, sandboxesWatched else { return }
+        guard gatewayReachable else {
+            // Say so, rather than "Loading…" forever or the last snapshot
+            // (with live buttons) as if it were current.
+            var next = sandbox
+            next.markUnreachable(lastGatewayError.map { SandboxDecoding.message(for: $0) } ?? "")
+            if next.error != sandbox.error { sandbox = next }
+            return
+        }
+        sandboxRefreshInProgress = true
+        defer { sandboxRefreshInProgress = false }
+        let generation = installationGeneration
+        let status: SandboxStatus
+        do {
+            status = try await gateway.sandboxStatus()
+        } catch {
+            guard installationSnapshotIsCurrent(generation) else { return }
+            sandbox.error = SandboxDecoding.message(for: error)
+            return
+        }
+        var rows: [SandboxRow]? = status.enabled ? nil : []
+        var asks: [SandboxAsk]? = status.enabled ? nil : []
+        var events: [SandboxActivity] = []
+        var listError = ""
+        var feedStartedOver = false
+        if status.enabled {
+            do { rows = try await gateway.sandboxes() } catch { listError = SandboxDecoding.message(for: error) }
+            do { asks = try await gateway.sandboxApprovals() } catch {
+                if listError.isEmpty { listError = SandboxDecoding.message(for: error) }
+            }
+            // Read from one event early: a restarted daemon numbers its
+            // events from one again, which resuming after the old number
+            // would skip (resumePointLost).
+            do {
+                events = try await gateway.sandboxActivity(since: max(0, sandbox.lastSeq - 1))
+                if sandbox.resumePointLost(events) {
+                    feedStartedOver = true
+                    events = try await gateway.sandboxActivity(since: 0)
+                }
+            } catch {
+                events = []
+            }
+        }
+        guard installationSnapshotIsCurrent(generation) else { return }
+        var next = sandbox
+        if feedStartedOver {
+            // The new daemon's buffer is read as at start: no notifications.
+            next.restartFeed()
+            sandboxActivitySynced = false
+        }
+        next.apply(status: status, sandboxes: rows, asks: asks)
+        if !listError.isEmpty { next.error = listError }
+        let notes = next.merge(events: events, notify: sandboxActivitySynced)
+        if status.enabled { sandboxActivitySynced = true }
+        sandbox = next
+        guard notifySandboxEvents else { return }
+        for note in notes { postSandboxNotification(note) }
+    }
+
+    /// Unblock a destination for one sandbox (or, with `always`, every sandbox).
+    func unblockSandboxDestination(host: String, sandbox name: String, always: Bool) async {
+        let key = "unblock|\(always ? "*" : name)|\(host)"
+        await runSandboxAction(key: key) {
+            let message = try await self.gateway.unblockSandboxEgress(
+                host: host, sandbox: always ? "" : name, always: always
+            )
+            // The daemon's egress.unblocked event says the same; do not wait for it.
+            self.sandbox.markUnblocked(sandbox: name, host: host, always: always)
+            return message
+        }
+    }
+
+    /// Approve (once or always) or reject a rare ask.
+    func decideSandboxAsk(_ ask: SandboxAsk, approve: Bool, always: Bool = false) async {
+        await runSandboxAction(key: "ask|\(ask.id)") {
+            let message = try await self.gateway.decideSandboxApproval(id: ask.id, approve: approve, always: always)
+            self.sandbox.asks.removeAll { $0.id == ask.id }
+            return message
+        }
+    }
+
+    func sandboxActionInFlight(_ key: String) -> Bool { sandboxActionsInFlight.contains(key) }
+
+    /// Sandbox buttons act on what the daemon says now: not on a read-only
+    /// installation, nor on the last good snapshot while the daemon is down.
+    var sandboxActionsAvailable: Bool { installationMutationsAllowed && gatewayReachable }
+
+    private func runSandboxAction(key: String, _ body: @escaping () async throws -> String) async {
+        guard installationMutationsAllowed else {
+            sandboxActionMessage = installationReadOnlyReason ?? "This installation is read only."
+            sandboxActionFailed = true
+            return
+        }
+        guard !sandboxActionsInFlight.contains(key) else { return }
+        sandboxActionsInFlight.insert(key)
+        defer { sandboxActionsInFlight.remove(key) }
+        let generation = installationGeneration
+        do {
+            let message = try await body()
+            guard installationSnapshotIsCurrent(generation) else { return }
+            sandboxActionMessage = message
+            sandboxActionFailed = false
+        } catch {
+            guard installationSnapshotIsCurrent(generation) else { return }
+            sandboxActionMessage = SandboxDecoding.message(for: error)
+            sandboxActionFailed = true
+        }
+        await refreshSandboxes()
+    }
+
+    private func postSandboxNotification(_ note: SandboxNotification) {
+        let content = UNMutableNotificationContent()
+        content.title = note.title
+        content.body = note.body // destination and sandbox only, never request content
+        content.sound = .default
+        content.categoryIdentifier = note.kind == .blocked
+            ? AppDelegate.sandboxBlockedCategory : AppDelegate.sandboxReviewCategory
+        content.userInfo = ["kind": note.kind.rawValue, "sandbox": note.sandbox, "host": note.host,
+                            "approvalID": note.approvalID]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: note.id, content: content, trigger: nil))
+    }
+
+    /// A notification button: Unblock lifts the block for that sandbox; every
+    /// other response opens the Sandboxes panel.
+    func handleSandboxNotification(action: String, userInfo: [AnyHashable: Any]) {
+        let host = (userInfo["host"] as? String) ?? ""
+        let name = (userInfo["sandbox"] as? String) ?? ""
+        if action == AppDelegate.sandboxUnblockAction, !host.isEmpty, !name.isEmpty {
+            Task { await unblockSandboxDestination(host: host, sandbox: name, always: false) }
+            return
+        }
+        openSandboxes()
+        AppDelegate.openMainWindow()
+    }
+
+    func openSandboxes() {
+        selectedPanel = .sandboxes
     }
 
     // MARK: - Panel deep links

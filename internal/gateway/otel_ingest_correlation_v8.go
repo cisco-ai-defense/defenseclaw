@@ -76,7 +76,7 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 	if ctx == nil || receiptTime.IsZero() {
 		return result, errNativeOTLPCorrelationV8
 	}
-	spec, err := a.correlationSpecForConnectorV8(authenticatedSource)
+	spec, err := a.correlationSpecForRequestV8(ctx, authenticatedSource)
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
 	}
@@ -116,7 +116,7 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
 	}
-	instance, err := repo.ResolveConnectorInstance(ctx, authenticatedSource,
+	instance, err := resolveConnectorInstanceForRequest(ctx, repo, authenticatedSource,
 		string(spec.ProfileVersion), audit.ConnectorCustodyExternal)
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
@@ -426,7 +426,7 @@ func (a *APIServer) finalizeNativeOTLPCustodyV8(ctx context.Context, result nati
 	if result.instance.ExportCustody == audit.ConnectorCustodyDefenseClaw {
 		return nil
 	}
-	promoted, err := repo.ResolveConnectorInstance(ctx, result.connector,
+	promoted, err := resolveConnectorInstanceForRequest(ctx, repo, result.connector,
 		result.profileVersion, audit.ConnectorCustodyDefenseClaw)
 	if err != nil {
 		return err

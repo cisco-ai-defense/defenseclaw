@@ -1,0 +1,19 @@
+id: defenseclaw-bedrock-mantle-openai-us-east-1
+display_name: Amazon Bedrock Mantle (OpenAI-compatible routes) (DefenseClaw)
+description: Binds a Bedrock API key to the Mantle OpenAI-compatible routes (https://bedrock-mantle.us-east-1.api.aws/v1) as a bearer; only the pinned harness binaries may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Amazon Bedrock API key (short-term or long-term)
+    env_vars: [BEDROCK_MANTLE_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: "bedrock-mantle.us-east-1.api.aws"
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/hermes/python/cpython-3.12.13-linux-aarch64-gnu/bin/python3.12"]

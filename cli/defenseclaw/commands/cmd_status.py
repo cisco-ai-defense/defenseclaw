@@ -23,14 +23,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path
+from defenseclaw.config import config_path, legacy_standalone_configured
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.scanner_binary import resolve_scanner_binary
 
@@ -236,19 +235,6 @@ def _status_row(key: str, value: str) -> None:
     ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
-def _openshell_available(cfg) -> bool:
-    binary = getattr(getattr(cfg, "openshell", None), "binary", "")
-    if binary and shutil.which(str(binary)):
-        return True
-    # ``openshell`` is the historical default launcher name. Older installs
-    # may instead provide the companion ``openshell-sandbox`` executable, so
-    # retain that compatibility fallback only for the default/unset value.
-    # A missing operator-supplied path must not silently select another binary.
-    if binary and str(binary) != "openshell":
-        return False
-    return bool(shutil.which("openshell-sandbox"))
-
-
 @click.command()
 @click.option(
     "--json",
@@ -264,7 +250,7 @@ def _openshell_available(cfg) -> bool:
 def status(app: AppContext, as_json: bool) -> None:
     """Show DefenseClaw status.
 
-    Displays environment, sandbox health, scanner availability,
+    Displays environment, sandbox state, scanner availability,
     enforcement counts, and activity summary. On multi-connector installs
     it also lists the active connector roster with each peer's mode.
 
@@ -299,14 +285,16 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
 
-    # Sandbox
-    if _openshell_available(cfg):
-        _status_row("Sandbox", ux._style("available", fg="green"))
-    else:
+    # Sandbox. The legacy openshell-sandbox mode was removed; a host that
+    # still carries its config is pointed at the cleanup command.
+    if legacy_standalone_configured(cfg):
         _status_row(
             "Sandbox",
-            ux._style("not available", fg="yellow") + ux.dim(" (OpenShell not found)"),
+            ux._style("legacy install detected", fg="yellow")
+            + ux.dim(" (run: defenseclaw sandbox legacy-cleanup)"),
         )
+    else:
+        _status_row("Sandbox", ux.dim("not configured"))
 
     # Scanners
     ux.section("Scanners")
@@ -377,11 +365,9 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Sidecar status
     ux.echo()
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
+    bind = gateway_api_client_host(cfg)
     client = OrchestratorClient(
         host=bind,
         port=cfg.gateway.api_port,
@@ -1251,7 +1237,7 @@ def _status_payload(app) -> dict:
             "config": str(config_path()),
             "audit_db": cfg.audit_db,
             "scope": _connector_scope_text(cfg),
-            "sandbox": {"available": _openshell_available(cfg)},
+            "sandbox": {"available": False, "legacy_standalone": legacy_standalone_configured(cfg)},
             "scanners": _scanner_status_map(cfg),
         }
     )
@@ -1278,11 +1264,9 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
+    bind = gateway_api_client_host(cfg)
     try:
         client = OrchestratorClient(
             host=bind,

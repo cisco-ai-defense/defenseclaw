@@ -68,6 +68,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		result = "panic"
 	}
 	effectiveAction := normalizeHookActionLabel(resp.Action)
+	sandboxID, sandboxName := hookDecisionV8Sandbox(audit.EnvelopeFromContext(ctx))
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -162,6 +163,8 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), 65536),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawSandboxID:                sandboxID,
+			DefenseClawSandboxName:              sandboxName,
 		})
 	})
 }
@@ -401,6 +404,24 @@ func hookDecisionMetricMeta(ctx context.Context, connectorName string) llmEventM
 		AgentType: identity.AgentType, PolicyID: envelope.PolicyID,
 		DestinationApp: envelope.DestinationApp, ToolName: envelope.ToolName, ToolID: envelope.ToolID,
 	}
+}
+
+// maxHookDecisionV8SandboxName is the registered max_utf8_bytes override of
+// defenseclaw.sandbox.name.
+const maxHookDecisionV8SandboxName = 128
+
+// hookDecisionV8Sandbox projects the sandbox binding that authenticated the
+// hook, stamped on the audit envelope, onto the decision's correlation.sandbox
+// attributes. A value that does not fit the registered identifier shape is
+// omitted rather than rewritten, so the decision itself is never lost. The
+// hook decision metrics never read these: sandbox identities are not labels.
+func hookDecisionV8Sandbox(envelope audit.CorrelationEnvelope) (observability.Optional[string], observability.Optional[string]) {
+	id := hookV8OptionalIdentifier(envelope.SandboxID)
+	name := hookV8OptionalIdentifier(envelope.SandboxName)
+	if value, ok := name.Get(); ok && len(value) > maxHookDecisionV8SandboxName {
+		name = observability.Absent[string]()
+	}
+	return id, name
 }
 
 func hookDecisionV8Outcome(action, result string) observability.Outcome {

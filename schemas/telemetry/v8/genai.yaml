@@ -4550,41 +4550,6 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
-- id: metric.defenseclaw.openshell.exit
-  type: metric
-  brief: OpenShell subprocess exits by command and exit code
-  stability: stable
-  introduced_in: telemetry-registry-v1
-  extends: []
-  attributes:
-  - ref: defenseclaw.metric.command
-    requirement_level: recommended
-  - ref: defenseclaw.tool.exit_code
-    requirement_level: recommended
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.openshell.exit
-    instrument_type: counter
-    value_type: int64
-    unit: '{exit}'
-    description: OpenShell subprocess exits by command and exit code
-    temporality: delta
-    label_projections:
-    - profile: local-observability-v1
-      mappings:
-      - ref: defenseclaw.metric.command
-        label: command
-      - ref: defenseclaw.tool.exit_code
-        label: exit_code
-  x-defenseclaw:
-    bucket: tool.activity
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-    legacy_bindings:
-    - source: schemas/otel/metrics.schema.json x-emitted-metrics
-      disposition: preserved
 - id: metric.defenseclaw.stream.bytes_sent
   type: metric
   brief: Bytes sent on an SSE/stream before close

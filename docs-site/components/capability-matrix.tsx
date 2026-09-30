@@ -25,6 +25,24 @@ interface ConnectorRow {
     supportsFailClosed: boolean;
     scope: 'user' | 'workspace';
   };
+  // OpenShell sandbox support. "artifacts" means DefenseClaw renders the
+  // connector's overlay-image hook files (tamperTier and hookConfig, the
+  // file the harness reads its hooks from, come from its SandboxArtifacts);
+  // "pending" means it renders none yet. verified says whether the harness
+  // has run end to end in a sandbox; unverifiedReason says why not, and
+  // untestedAuth lists the sign-in paths no live run exercised (provider
+  // profile IDs, or "login" for the in-sandbox vendor login). All of it is
+  // checked against internal/openshell/harness by
+  // TestDocsCapabilityMatrixSandboxColumn.
+  sandbox: {
+    status: 'artifacts' | 'pending';
+    tamperTier?: 'managed' | 'user';
+    hookConfig?: string;
+    harnessPin?: string;
+    verified?: 'verified' | 'unverified';
+    unverifiedReason?: string;
+    untestedAuth?: string[];
+  };
   hilt: string;
   notes?: string;
 }
@@ -60,10 +78,101 @@ function Family({ family }: { family: ConnectorRow['family'] }) {
   );
 }
 
+function Sandbox({ sandbox }: { sandbox: ConnectorRow['sandbox'] }) {
+  if (sandbox.status !== 'artifacts' || !sandbox.tamperTier) {
+    return <span className="text-xs text-fd-muted-foreground">pending</span>;
+  }
+  return (
+    <>
+      <span className="rounded-full bg-fd-muted px-2 py-0.5 text-xs font-medium text-fd-foreground">
+        {sandbox.tamperTier} tier
+      </span>
+      {sandbox.hookConfig && (
+        <div className="mt-1 max-w-[220px] break-all font-mono text-[11px] text-fd-muted-foreground">
+          {sandbox.hookConfig}
+        </div>
+      )}
+      {sandbox.harnessPin && (
+        <div className="mt-1 text-xs text-fd-muted-foreground">image pin {sandbox.harnessPin}</div>
+      )}
+      {sandbox.verified && (
+        <div className="mt-1 text-xs text-fd-muted-foreground">
+          {sandbox.verified === 'verified' ? 'verified end to end' : 'unverified: cannot run yet'}
+        </div>
+      )}
+    </>
+  );
+}
+
+// The OpenShell sandbox harnesses in one table: image pin, tamper tier,
+// the hook file in the image, and how far each harness is verified.
+export function SandboxHarnessTable() {
+  const rows = data.connectors.filter((c) => c.sandbox.status === 'artifacts' && c.sandbox.tamperTier);
+  return (
+    <CapabilityMatrixWrapper
+      className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border"
+      ariaLabel="OpenShell sandbox harnesses"
+    >
+      <table className="w-full min-w-[820px] border-collapse text-sm">
+        <thead>
+          <tr className="bg-fd-card text-left">
+            <Th>Connector</Th>
+            <Th>Image pin</Th>
+            <Th>Tamper tier</Th>
+            <Th>Hook config in the image</Th>
+            <Th>Verification</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((c, i) => (
+            <tr key={c.id} className="fd-row border-t border-fd-border" style={{ animationDelay: `${i * 35}ms` }}>
+              <Td>
+                <Link href={`/docs/connectors/${c.id}`} className="connector-matrix-name font-medium text-[var(--brand-cisco-strong)] hover:underline">
+                  <ConnectorBrand id={c.id} size="sm" />
+                  <span>{c.label}</span>
+                </Link>
+                <div className="connector-matrix-id text-xs text-fd-muted-foreground">{c.id}</div>
+              </Td>
+              <Td className="font-mono text-xs">{c.sandbox.harnessPin}</Td>
+              <Td>
+                <span className="rounded-full bg-fd-muted px-2 py-0.5 text-xs font-medium text-fd-foreground">
+                  {c.sandbox.tamperTier}
+                </span>
+              </Td>
+              <Td className="max-w-[240px] break-all font-mono text-[11px] text-fd-muted-foreground">{c.sandbox.hookConfig}</Td>
+              <Td className="max-w-[320px] text-xs leading-relaxed">
+                {c.sandbox.verified === 'verified' ? (
+                  <span className="font-medium text-emerald-600 dark:text-emerald-400">Verified end to end</span>
+                ) : (
+                  <>
+                    <span className="font-medium text-[var(--brand-cisco-strong)]">Unverified: cannot run yet.</span>{' '}
+                    <span className="text-fd-muted-foreground">{c.sandbox.unverifiedReason}.</span>
+                  </>
+                )}
+                {c.sandbox.untestedAuth && c.sandbox.untestedAuth.length > 0 && (
+                  <div className="mt-1 text-fd-muted-foreground">
+                    Not tested live:{' '}
+                    {c.sandbox.untestedAuth.map((entry, j) => (
+                      <span key={entry}>
+                        {j > 0 && ', '}
+                        {entry === 'login' ? 'in-sandbox login' : <code className="text-[11px]">{entry}</code>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </CapabilityMatrixWrapper>
+  );
+}
+
 export function CapabilityMatrix() {
   return (
     <CapabilityMatrixWrapper className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border">
-      <table className="w-full min-w-[900px] border-collapse text-sm">
+      <table className="w-full min-w-[1000px] border-collapse text-sm">
         <thead>
           <tr className="bg-fd-card text-left">
             <Th>Connector</Th>
@@ -73,6 +182,7 @@ export function CapabilityMatrix() {
             <Th>Block</Th>
             <Th>Native ask</Th>
             <Th>Fail-closed</Th>
+            <Th>OpenShell sandbox</Th>
             <Th>HITL behavior</Th>
           </tr>
         </thead>
@@ -112,6 +222,9 @@ export function CapabilityMatrix() {
               </Td>
               <Td>
                 <Tick on={c.hooks.supportsFailClosed} />
+              </Td>
+              <Td>
+                <Sandbox sandbox={c.sandbox} />
               </Td>
               <Td className="max-w-[280px] text-xs leading-relaxed text-fd-muted-foreground">{c.hilt}</Td>
             </tr>

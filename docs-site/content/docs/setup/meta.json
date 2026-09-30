@@ -5,6 +5,7 @@
     "guardrail",
     "semantic-routing",
     "sandbox",
+    "sandbox-policy",
     "unified-llm-key",
     "skill-scanner",
     "mcp-scanner",

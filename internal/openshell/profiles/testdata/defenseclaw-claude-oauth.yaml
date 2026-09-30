@@ -1,0 +1,19 @@
+id: defenseclaw-claude-oauth
+display_name: Claude subscription token for Claude Code (DefenseClaw)
+description: Binds a Claude Code OAuth token (claude setup-token) to the Anthropic Messages API as a bearer; only the Claude Code binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: oauth_token
+    description: Claude Code long-lived OAuth token
+    env_vars: [CLAUDE_CODE_OAUTH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/claudecode/bin/claude"]

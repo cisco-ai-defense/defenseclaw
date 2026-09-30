@@ -155,9 +155,14 @@ func DefaultConfig() *Config {
 			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),
 		},
 		OpenShell: OpenShellConfig{
-			Binary:    "openshell",
-			PolicyDir: "/etc/openshell/policies",
-			Version:   DefaultOpenShellVersion,
+			Binary:  DefaultOpenShellBinary,
+			PackDir: filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName),
+			Workdir: OpenShellWorkdirConfig{
+				GitDepth: DefaultOpenShellGitDepth,
+				OnExit:   DefaultOpenShellOnExit,
+			},
+			Approvals:     OpenShellApprovalsConfig{DebounceMs: DefaultOpenShellApprovalDebounceMs},
+			TokenDelivery: DefaultOpenShellTokenDelivery,
 		},
 		Watch: WatchConfig{
 			DebounceMs:          500,
