@@ -288,3 +288,14 @@ def test_version_reads_a_sandbox_only_config(tmp_path, no_openclaw_binary, monke
     openclaw.mkdir()
     (openclaw / "openclaw.json").write_text("{}", encoding="utf-8")
     assert cmd_version._openclaw_connector_active() is True
+
+
+def test_expand_matches_the_gateways_rule(monkeypatch, tmp_path):
+    # internal/config/claw.go expandPath expands only a leading "~/": a bare
+    # "~" or "~user/..." stays as written on both sides, so the gateway and
+    # doctor check the same candidates.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert openclaw_presence._expand("~/.openclaw/openclaw.json") == str(tmp_path / ".openclaw" / "openclaw.json")
+    assert openclaw_presence._expand("~alice/.openclaw") == "~alice/.openclaw"
+    assert openclaw_presence._expand("~") == "~"
+    assert openclaw_presence._expand("/opt/openclaw") == "/opt/openclaw"

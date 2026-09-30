@@ -42,7 +42,8 @@ _DEFAULT_OPENCLAW_CONFIG = "~/.openclaw/openclaw.json"
 
 
 def _expand(path: str) -> str:
-    return os.path.expanduser(path) if path.startswith("~") else path
+    """Expand a leading ``~/`` only, as ``expandPath`` in internal/config/claw.go does."""
+    return os.path.expanduser(path) if path.startswith("~/") else path
 
 
 def _is_loopback_gateway_host(host: object) -> bool:
