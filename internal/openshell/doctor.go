@@ -85,6 +85,7 @@ const (
 	CheckIDTelemetry         = "telemetry"
 	CheckIDPortPrefix        = "port-"
 	installOpenShellCommand  = "defenseclaw sandbox setup --install-openshell"
+	setupCommand             = "defenseclaw sandbox setup"
 )
 
 // CheckStatus is a doctor verdict.
@@ -165,30 +166,32 @@ func (r *DoctorReport) OK() bool {
 
 // OpenShellOutsideFormula reports a Mac whose OpenShell CLI was installed
 // another way than the Homebrew formula DefenseClaw runs the gateway
-// through: setup refuses it (DefenseClaw's install step would find the CLI
-// and not run NVIDIA's installer), and OpenShellOutsideFormulaFix is the
-// way on.
+// through (from the release binaries, say): see GatewayUnmanaged.
 func (r *DoctorReport) OpenShellOutsideFormula() bool {
 	cli := r.Get(CheckIDCLI)
 	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "brew" && !r.Service.Installed
 }
 
-// OpenShellOutsideFormulaFix is what to do about OpenShellOutsideFormula,
-// before installOpenShellCommand.
-const OpenShellOutsideFormulaFix = "on macOS DefenseClaw starts and restarts the gateway through the " + GatewayFormula +
-	" Homebrew formula's service: stop that gateway and remove the OpenShell installed another way, then install the formula"
-
 // OpenShellOutsideUnit reports a Linux host whose supported OpenShell CLI
 // came without the openshell-gateway user unit DefenseClaw starts and
 // restarts the gateway through: it was installed another way than NVIDIA's
-// installer (from the release binaries, say). Setup refuses it, as it
-// refuses OpenShellOutsideFormula on a Mac: installOpenShellCommand alone
-// would not bring the unit (DefenseClaw's install step finds a supported
-// CLI and does not run NVIDIA's installer), and the gateway changes setup
-// makes go through the unit.
+// installer (from the release binaries, say). See GatewayUnmanaged.
 func (r *DoctorReport) OpenShellOutsideUnit() bool {
 	cli := r.Get(CheckIDCLI)
 	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "systemd" && !r.Service.Installed
+}
+
+// GatewayUnmanaged reports an OpenShell installed another way than the one
+// whose service DefenseClaw starts and restarts the gateway through
+// (OpenShellOutsideFormula on a Mac, OpenShellOutsideUnit on Linux): its
+// gateway runs by hand, or under something of the user's. DefenseClaw uses
+// that gateway while it answers, but cannot start or restart it: setup
+// writes a gateway change for its operator to restart the gateway on, and
+// stops only where it would have to start it. installOpenShellCommand
+// alone does not bring the service: DefenseClaw's install step finds the
+// supported CLI and does not run NVIDIA's installer.
+func (r *DoctorReport) GatewayUnmanaged() bool {
+	return r.OpenShellOutsideFormula() || r.OpenShellOutsideUnit()
 }
 
 // OpenShellInstallNeeded reports whether DefenseClaw's install step
@@ -545,7 +548,6 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkLinger(ctx)
 	r.checkService(ctx)
 	r.checkCLI(ctx)
-	r.cliWithoutUnit()
 	r.checkSSHSharing(ctx)
 	r.checkRegistration()
 	r.checkGateway(ctx)
@@ -942,14 +944,12 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 // no gateway service to start (serviceMissing), OpenShell's installer is
 // what puts one there: `brew services start` of a formula that is not
 // installed fails ("Formula `openshell` is not installed"). Where an
-// OpenShell installed another way is there, DefenseClaw's install step
-// would find it and install nothing, so that OpenShell comes first.
+// OpenShell installed another way is there, its gateway is the user's to
+// start (unmanagedFix).
 func (r *doctorRun) gatewayRecoveryFix() *Fix {
 	switch {
-	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
-		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
-	case r.serviceMissing() && r.report.OpenShellOutsideUnit():
-		return r.outsideUnitFix()
+	case r.serviceMissing() && r.report.GatewayUnmanaged():
+		return r.unmanagedFix(startYourself)
 	case r.serviceMissing():
 		return &Fix{Summary: "install OpenShell, whose " + r.service.Unit + " service runs the gateway", Command: installOpenShellCommand}
 	case r.service != nil && r.service.Active:
@@ -966,33 +966,34 @@ func (r *doctorRun) gatewayRecoveryFix() *Fix {
 // way. It is false when the service's state is unknown.
 func (r *doctorRun) serviceMissing() bool { return r.service != nil && !r.service.Installed }
 
-// outsideUnitFix is the way on for an OpenShell installed without the
-// openshell-gateway user unit (OpenShellOutsideUnit), which the doctor
-// cannot take: stop its gateway and remove that OpenShell, so that
-// installOpenShellCommand runs NVIDIA's installer, which sets the unit up.
-// Running that gateway by hand is no way on: setup refuses the OpenShell,
-// and the gateway changes it makes go through the unit.
-func (r *doctorRun) outsideUnitFix() *Fix {
+// unmanagedFix is the fix of an OpenShell installed another way than the
+// one whose service DefenseClaw starts and restarts the gateway through
+// (DoctorReport.GatewayUnmanaged), which the doctor cannot take: first is
+// what to do with that OpenShell's gateway, which its user runs. The other
+// way on is a gateway DefenseClaw runs, for which that OpenShell goes
+// first: DefenseClaw's install step would find its CLI and install
+// nothing.
+func (r *doctorRun) unmanagedFix(first string) *Fix {
 	found := strings.TrimSpace("OpenShell " + r.report.CLIVersion)
 	if r.report.CLIPath != "" {
 		found += " at " + r.report.CLIPath
 	}
-	return &Fix{Summary: "on Linux DefenseClaw starts and restarts the gateway through the " + GatewayService + " user service, which NVIDIA's installer sets up. " +
-		"The " + found + " was installed another way, without that service, and DefenseClaw's install step finds it and installs nothing: " +
-		"stop its gateway if one runs and remove that OpenShell, then install OpenShell with NVIDIA's installer",
+	service, install := "Homebrew's "+GatewayFormula+" service", "install the formula"
+	if r.GOOS != "darwin" {
+		service, install = "the "+GatewayService+" user service, which NVIDIA's installer sets up", "install OpenShell with NVIDIA's installer"
+	}
+	return &Fix{Summary: first + ". DefenseClaw starts and restarts the gateway only through " + service + ", and the " + found +
+		" was installed another way. For a gateway DefenseClaw starts and restarts, stop that one and remove that OpenShell " +
+		"(DefenseClaw's install step would find it and install nothing), then " + install,
 		Command: installOpenShellCommand}
 }
 
-// cliWithoutUnit gives the Gateway service check on Linux, whose fix is
-// otherwise installOpenShellCommand, the way on for an OpenShell installed
-// without the user unit (outsideUnitFix): the command alone would find
-// that OpenShell and install nothing. It runs after checkCLI, which the
-// judgement needs.
-func (r *doctorRun) cliWithoutUnit() {
-	if c := r.report.Get(CheckIDGatewayService); c != nil && r.report.OpenShellOutsideUnit() {
-		c.Fix = r.outsideUnitFix()
-	}
-}
+// unmanagedFix's first steps: for an unmanaged gateway that answers, and
+// for one that does not.
+const (
+	restartYourself = "after a gateway change, restart this gateway yourself, the way you started it"
+	startYourself   = "start that OpenShell's gateway yourself, the way you started it before"
+)
 
 // gatewayVersionFix is the fix of a gateway that answers with an
 // unsupported OpenShell release, or another one than the CLI's. install
@@ -1004,7 +1005,8 @@ func (r *doctorRun) cliWithoutUnit() {
 // is automatic only where that service runs the gateway, and only once for
 // these releases: after a restart that left them (releaseRestarted), the
 // service runs another OpenShell's gateway (otherOpenShellFix). Without
-// the service, the OpenShell installed another way comes first.
+// the service, the gateway of an OpenShell installed another way is the
+// user's to replace (unmanagedFix).
 func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
 	if r.cli == (Version{}) || CheckSupported(r.cli) != nil {
 		return install
@@ -1014,10 +1016,8 @@ func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
 		" installed here, so installing OpenShell would change nothing"
 	service := r.serviceName()
 	switch {
-	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
-		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
-	case r.serviceMissing() && r.report.OpenShellOutsideUnit():
-		return r.outsideUnitFix()
+	case r.serviceMissing() && r.report.GatewayUnmanaged():
+		return r.unmanagedFix(answers + ": stop that gateway, then start the OpenShell " + r.cli.String() + " one yourself")
 	case r.service != nil && r.service.Installed && r.service.Active && r.releaseRestarted(release):
 		return r.otherOpenShellFix(release)
 	case r.service != nil && r.service.Installed && r.service.Active:
@@ -1526,6 +1526,11 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
+	if errors.Is(envErr, ErrNoGatewayService) {
+		// A gateway run another way: its environment is not known, and
+		// its settings are the files DefenseClaw reads.
+		env, envErr = nil, nil
+	}
 	if d, known := r.traits(); known && !d.HostMounts {
 		// Nothing to enable, and no reason to edit docker settings or
 		// restart the gateway for them.
@@ -1557,8 +1562,8 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		switch why := errors.Join(blocked, unverified); {
 		case why == nil && r.serviceMissing():
 			// A gateway run another way, which DefenseClaw cannot restart
-			// on the change.
-			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway it restarts through the " + r.service.Unit + " service, which is not installed"}
+			// on the change: setup writes it, and its operator restarts it.
+			mounts.Fix = r.gatewayChangeFix("let sandboxes mount the project folder: `"+setupCommand+"` enables bind mounts in "+st.TOMLPath, "", nil)
 		case why == nil:
 			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
 				RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}

@@ -598,10 +598,17 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		for _, f := range p.gateway {
 			res.Files = append(res.Files, openshell.AppliedFile{Path: f.Path, Backup: f.Backup})
 		}
-		if err := a.Gateway.Rollback(ctx, res); err != nil {
+		err := a.Gateway.Rollback(ctx, res)
+		switch {
+		case errors.Is(err, openshell.ErrNoGatewayService):
+			// A gateway run another way, which DefenseClaw cannot restart.
+			a.ok("restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
+		case err != nil:
 			fail("restore the gateway configuration", err)
-		} else {
+		default:
 			a.ok("restored the OpenShell gateway configuration and restarted it")
+		}
+		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) {
 			if r, err := a.loadReceipt(); err == nil {
 				r.GatewayFiles = nil
 				_ = a.saveReceipt(r)

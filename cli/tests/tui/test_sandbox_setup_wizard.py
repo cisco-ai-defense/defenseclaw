@@ -351,74 +351,121 @@ def test_the_install_hint_says_how_openshell_is_installed(os_name: str, says: st
         assert says in hint and never not in hint, hint
 
 
-@pytest.mark.parametrize("service_status", ["warn", "fail"])
-def test_an_openshell_outside_the_homebrew_formula_is_refused_as_setup_refuses_it(service_status: str) -> None:
-    # sandboxcli/setup.go refuses it before it reads --install-openshell.
-    service = {"id": "gateway-service", "status": service_status, "detail": "runs under launchd (com.example.gw)"}
-    report = {
-        **READY,
-        "checks": [*READY["checks"][:3], service],
-        "service": {"manager": "brew", "unit": "nvidia/openshell/openshell", "installed": False},
-    }
-    check = sandbox_machine_check(report)
-    assert check.openshell_refused and not check.openshell_needed
-    assert "✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula" in check.summary.split("\n")
-    install = next(
-        f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "Install OpenShell"
-    )
-    assert install.value == "no" and "stop its gateway and remove it" in install.hint, install.hint
-    # Setup refuses it before it gets to e2fsprogs.
-    assert "e2fsprogs" not in install.hint
-    # The formula's own service, stopped, is started through it.
-    formula = {**report, "service": {"manager": "brew", "installed": True}}
-    assert sandbox_machine_check(formula).openshell_refused is False
+# The doctor's Gateway fix for the gateway of an OpenShell installed another
+# way that does not answer (openshell doctor.go unmanagedFix).
+UNMANAGED_DOWN_FIX = {
+    "summary": "start that OpenShell's gateway yourself, the way you started it before. DefenseClaw starts and restarts "
+    "the gateway only through Homebrew's nvidia/openshell/openshell service, and the OpenShell 0.1.1 at "
+    "/Users/dev/openshell-direct/prefix/bin/openshell was installed another way",
+    "command": "defenseclaw sandbox setup --install-openshell",
+}
 
 
-@pytest.mark.parametrize(
-    ("gateway_status", "gateway_detail"),
-    [
-        ("fail", "the gateway is not answering: connection refused"),
-        ("pass", "0.1.1 healthy at https://127.0.0.1:17670"),
-    ],
-)
-def test_an_openshell_without_the_linux_user_unit_is_refused_as_setup_refuses_it(
-    gateway_status: str, gateway_detail: str
-) -> None:
-    # A supported CLI from the release binaries, no openshell-gateway unit:
-    # the wizard preset "Install OpenShell" to yes, whose
-    # `setup --install-openshell` installed nothing. Setup refuses it up
-    # front (sandboxcli/setup.go), with its gateway down or run by hand.
-    cli = "/home/dev/.local/bin/openshell"
-    report = {
+def _unmanaged(manager: str, cli: str, service_status: str, service_detail: str, gateway: str) -> dict:
+    """READY on an OpenShell whose gateway no gateway service runs; gateway is its Gateway check's status."""
+    version = {"id": "gateway-version", "status": gateway, "detail": "0.1.1 healthy at https://127.0.0.1:17670"}
+    if gateway == "fail":
+        version = {**version, "detail": "the gateway is not answering: connection refused", "fix": UNMANAGED_DOWN_FIX}
+    unit = "openshell-gateway" if manager == "systemd" else "nvidia/openshell/openshell"
+    return {
         **READY,
         "cli_path": cli,
         "checks": [
             *READY["checks"][:2],
             {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": f"0.1.1 at {cli}"},
-            {"id": "gateway-service", "status": "fail", "detail": "openshell-gateway is not installed"},
-            {"id": "gateway-version", "status": gateway_status, "detail": gateway_detail},
+            {"id": "gateway-service", "status": service_status, "detail": service_detail},
+            version,
         ],
-        "service": {"manager": "systemd", "unit": "openshell-gateway", "installed": False},
+        "service": {"manager": manager, "unit": unit, "installed": False},
     }
+
+
+def test_an_openshell_outside_the_homebrew_formula_is_used_while_its_gateway_answers() -> None:
+    # RT U1: the doctor said "✓ ready for sandboxes" on a Mac whose gateway
+    # was started by hand, while setup refused that OpenShell up front
+    # ("✗ … is not from Homebrew's nvidia/openshell formula"). Setup uses the
+    # gateway that answers (sandboxcli/setup.go), and the wizard says what
+    # DefenseClaw will not do with it.
+    cli = "/Users/dev/openshell-direct/prefix/bin/openshell"
+    by_hand = (
+        "…/openshell-gateway (process 4666) was started by hand, not Homebrew's nvidia/openshell/openshell service"
+    )
+    check = sandbox_machine_check(_unmanaged("brew", cli, "warn", by_hand, "pass"))
+    assert check.openshell_unmanaged and not check.openshell_needed and check.openshell_attention == ""
+    assert "⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula" in check.summary.split("\n")
+    install = _install_field(check, "darwin")
+    assert install.value == "no"
+    assert install.hint.startswith(
+        f"OpenShell 0.1.1 at {cli} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
+        "whose service DefenseClaw starts and restarts the gateway through: setup uses its gateway as it runs, but "
+        "DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, the way you started it; "
+        "nothing to install."
+    ), install.hint
+    # Setup goes on to e2fsprogs; the MicroVM switch is the user's restart.
+    assert "e2fsprogs" in install.hint
+    micro = next(f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "MicroVMs")
+    assert "you restart the gateway yourself" in micro.hint and "restarts it once" not in micro.hint
+
+    # With its gateway down setup stops where it would have to start it,
+    # with the doctor's fix, before e2fsprogs.
+    down = sandbox_machine_check(_unmanaged("brew", cli, "fail", "nvidia/openshell/openshell is not installed", "fail"))
+    assert down.openshell_unmanaged and not down.openshell_needed and down.openshell_attention == "gateway-version"
+    assert down.summary.split("\n")[-2:] == [
+        "⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula",
+        "✗ OpenShell gateway not running",
+    ]
+    install = _install_field(down, "darwin")
+    assert install.value == "no" and install.hint == (
+        f"the OpenShell gateway needs attention: {UNMANAGED_DOWN_FIX['summary']} "
+        f"(`{UNMANAGED_DOWN_FIX['command']}`); installing OpenShell would change nothing."
+    )
+    # The formula's own service, stopped, is started through it.
+    formula = {**_unmanaged("brew", cli, "fail", "stopped", "fail"), "service": {"manager": "brew", "installed": True}}
+    assert sandbox_machine_check(formula).openshell_unmanaged is False
+
+
+@pytest.mark.parametrize("gateway", ["pass", "fail"])
+def test_an_openshell_without_the_linux_user_unit_is_used_while_its_gateway_answers(gateway: str) -> None:
+    # A supported CLI from the release binaries, no openshell-gateway unit:
+    # the wizard preset "Install OpenShell" to yes, whose
+    # `setup --install-openshell` installed nothing; then setup refused it
+    # up front even with its gateway run by hand. Setup uses a gateway that
+    # answers and writes a gateway change for the user to restart it on;
+    # with none answering it stops on the doctor's fix.
+    cli = "/home/dev/.local/bin/openshell"
+    service = "openshell-gateway is not installed" + (
+        "; the gateway that answers runs another way" if gateway == "pass" else ""
+    )
+    report = _unmanaged("systemd", cli, "warn" if gateway == "pass" else "fail", service, gateway)
     check = sandbox_machine_check(report)
-    assert check.openshell_refused and not check.openshell_needed
-    assert "✗ OpenShell 0.1.1 has no openshell-gateway user service" in check.summary.split("\n")
+    assert check.openshell_unmanaged and not check.openshell_needed
+    lines = check.summary.split("\n")
+    assert "⚠ OpenShell 0.1.1 has no openshell-gateway user service" in lines
     model = SetupPanelModel({}, os_name="linux")
     model.open_goal_menu(SetupWizard.SANDBOX)
     model.apply_sandbox_machine_check(check)
     install = _row(model, "Install OpenShell")
     assert install.value == "no", install
-    assert install.hint == (
-        f"OpenShell 0.1.1 at {cli} was installed another way, without the openshell-gateway user service "
-        "DefenseClaw runs the gateway through on Linux (NVIDIA's installer sets it up), so DefenseClaw's install step "
-        "would find it and install nothing: stop its gateway if one runs and remove that OpenShell, "
-        "then install OpenShell here, which runs NVIDIA's installer and sets up the service."
-    )
     assert "--install-openshell" not in model.wizard_command_preview()
+    if gateway == "pass":
+        assert check.openshell_attention == "" and "✗ OpenShell gateway not running" not in lines
+        assert install.hint == (
+            f"OpenShell 0.1.1 at {cli} was installed another way, without the openshell-gateway user service "
+            "DefenseClaw starts and restarts the gateway through on Linux: setup uses its gateway as it runs, but "
+            "DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, the way you "
+            "started it; nothing to install."
+        )
+        # The mounts and telemetry changes are written, not restarted.
+        for label in ("Mount Project Folder", "Disable OpenShell Telemetry"):
+            hint = _row(model, label).hint
+            assert "you restart it yourself, the way you started it" in hint and "doctor --fix" not in hint, hint
+    else:
+        assert check.openshell_attention == "gateway-version" and "✗ OpenShell gateway not running" in lines
+        assert install.hint.startswith("the OpenShell gateway needs attention: start that OpenShell's gateway yourself")
     # The unit installed and stopped is started through it; without a CLI
     # NVIDIA's installer runs and sets the unit up.
     unit = {**report, "service": {"manager": "systemd", "unit": "openshell-gateway", "installed": True}}
-    assert sandbox_machine_check(unit).openshell_refused is False
+    assert sandbox_machine_check(unit).openshell_unmanaged is False
     assert sandbox_machine_check({**NO_OPENSHELL, "service": report["service"]}).openshell_needed
 
 
@@ -426,7 +473,7 @@ def test_a_warning_gateway_service_is_shown() -> None:
     service = {"id": "gateway-service", "status": "warn", "detail": "runs but does not start at login"}
     check = sandbox_machine_check({**READY, "checks": [*READY["checks"][:3], service]})
     assert "⚠ OpenShell 0.1.1: runs but does not start at login" in check.summary.split("\n")
-    assert not check.openshell_needed and not check.openshell_refused
+    assert not check.openshell_needed and not check.openshell_unmanaged
 
 
 START = "systemctl --user enable --now openshell-gateway"
@@ -457,7 +504,7 @@ def test_a_stopped_gateway_is_not_an_install(openshell_install) -> None:
     # reports no openshell_install.
     report = _stopped() if openshell_install is None else _stopped(openshell_install=openshell_install)
     check = sandbox_machine_check(report)
-    assert not check.openshell_needed and not check.openshell_refused
+    assert not check.openshell_needed and not check.openshell_unmanaged
     assert check.openshell_attention == "gateway-service"
     assert "✗ OpenShell gateway not running" in check.summary.split("\n")
     model = SetupPanelModel({}, os_name="linux")
@@ -530,7 +577,7 @@ def test_a_gateway_of_another_release_than_the_cli_is_not_an_install() -> None:
         "fix": {"summary": restart, "command": "systemctl --user restart openshell-gateway", "automatic": True},
     }
     check = sandbox_machine_check({**READY, "gateway_version": "0.0.40", "checks": [*READY["checks"], version]})
-    assert not check.openshell_needed and not check.openshell_refused
+    assert not check.openshell_needed and not check.openshell_unmanaged
     assert "✗ OpenShell 0.1.1, but the gateway runs 0.0.40" in check.summary.split("\n")
     install = next(
         f for f in sandbox_wizard_fields({}, machine=check, os_name="linux") if f.label == "Install OpenShell"

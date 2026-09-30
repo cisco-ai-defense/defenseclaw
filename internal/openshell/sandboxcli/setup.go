@@ -121,6 +121,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if err := a.machineFailure(rep, macOS && !microVM); err != nil {
 		return err
 	}
+	// An OpenShell installed another way than the one whose service
+	// DefenseClaw starts and restarts the gateway through: setup uses its
+	// gateway while it answers, and writes a gateway change for the user
+	// to restart it on (restartYourself).
+	unmanaged := rep.GatewayUnmanaged()
+	restartYourself := false
 	// Steps left out say so at the end, with the command that does them.
 	var skipped []string
 
@@ -135,8 +141,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		if st, err := a.Gateway.State(); err == nil && st.TOMLPath != "" {
 			where = a.tildePath(st.TOMLPath)
 		}
+		restarts := " and restarts the gateway"
+		if unmanaged {
+			restarts = "; you restart the gateway yourself to apply it"
+		}
 		yes, err := a.ask(`Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in `+
-			where+" and restarts the gateway; OpenShell calls this driver experimental)", true, assume)
+			where+restarts+"; OpenShell calls this driver experimental)", true, assume)
 		if err != nil {
 			return err
 		}
@@ -184,35 +194,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 
 	// 3. OpenShell. On macOS DefenseClaw starts and restarts the gateway
 	// through the Homebrew formula's service, on Linux through the
-	// openshell-gateway user unit. An OpenShell installed another way is
-	// found, but its gateway is not one DefenseClaw can restart, and
-	// DefenseClaw's install step (openshell.Installer.Install), finding its
-	// supported CLI, would not run NVIDIA's installer, which would install
-	// the formula or set up the unit. Setup names where that OpenShell is,
-	// as the doctor's CLI row does, and says what comes before the install:
-	// run now, `--install-openshell` comes back here.
-	found := strings.TrimSpace("OpenShell " + rep.CLIVersion)
-	if rep.CLIPath != "" {
-		found += " at " + rep.CLIPath
-	}
-	if a.GOOS == "darwin" && rep.OpenShellOutsideFormula() {
-		a.bad("Gateway service: the " + openshell.GatewayFormula + " Homebrew formula is not installed")
-		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The " + found +
-			" was installed another way, so DefenseClaw cannot restart its gateway, and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. " +
-			"First stop that gateway and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, which installs the formula")
-		return &Silent{Err: fmt.Errorf("on macOS OpenShell must come from the %s Homebrew formula", openshell.GatewayFormula)}
-	}
-	// On Linux a gateway run by hand gets no further either: the gateway
-	// changes of step 4 go through the unit's environment
-	// (GatewayConfigurator.Plan), and its restarts through systemd.
-	if a.GOOS == "linux" && rep.OpenShellOutsideUnit() {
-		a.bad("Gateway service: the " + openshell.GatewayService + " user service is not installed")
-		a.note("→ on Linux DefenseClaw starts and restarts the OpenShell gateway through that user service, which NVIDIA's installer sets up. The " + found +
-			" was installed another way, without it, and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. " +
-			"First stop its gateway if one runs and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, " +
-			"which runs NVIDIA's installer and sets up the service")
-		return &Silent{Err: fmt.Errorf("on Linux OpenShell must come with the %s user service NVIDIA's installer sets up", openshell.GatewayService)}
-	}
+	// openshell-gateway user unit. The gateway of an OpenShell installed
+	// another way (unmanaged) is the user's to start and restart: setup
+	// uses it while it answers, and stops, like the doctor, with the way on
+	// (the Gateway check's fix) where it would have to start it. The
+	// install would not help: DefenseClaw's install step
+	// (openshell.Installer.Install), finding its supported CLI, would not
+	// run NVIDIA's installer, which would install the formula or set up the
+	// unit.
+	//
 	// The install is offered only where DefenseClaw's install step would
 	// run NVIDIA's installer: no CLI, or one it upgrades
 	// (DoctorReport.OpenShellInstallNeeded). Over a supported CLI it
@@ -271,6 +261,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
 		}
 	}
+	if unmanaged = rep.GatewayUnmanaged(); unmanaged {
+		// Its gateway answers (the Gateway check passed).
+		detail := "no gateway service runs the OpenShell gateway"
+		if c := rep.Get(openshell.CheckIDGatewayService); c != nil && c.Detail != "" {
+			detail = c.Detail
+		}
+		a.warn("Gateway service: " + detail)
+		a.note("→ setup uses this gateway as it runs: after a gateway change, restart it yourself, the way you started it")
+	}
 	if microVM {
 		var err error
 		if rep, err = a.prepareMicroVMs(ctx, o, rep); err != nil {
@@ -307,7 +306,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		// environment files it can check (the doctor skips the telemetry
 		// check here). The Homebrew service's wrapper sources gateway.env
 		// too, so say how to turn it off by hand.
-		if telemetryOff {
+		switch {
+		case telemetryOff && unmanaged:
+			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, start the gateway with " +
+				openshell.EnvTelemetryEnabled + "=false in its environment")
+		case telemetryOff:
 			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
 				openshell.EnvTelemetryEnabled + "=false in " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
 				", which the Homebrew service reads, and restart the gateway (`brew services restart " + openshell.GatewayFormula + "`)")
@@ -320,7 +323,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			// Say what a yes costs before it is given: an edit of
 			// gateway.env and a restart of the shared gateway.
 			question := "Disable OpenShell's anonymous usage telemetry?"
-			if !assume {
+			switch {
+			case assume:
+			case unmanaged:
+				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
+					"; you restart the gateway yourself, with its variables in the gateway's environment, to apply it)"
+			default:
 				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
 					" and restarts the OpenShell gateway" + a.restartImpact(ctx) + ")"
 			}
@@ -346,6 +354,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		if err != nil {
 			return fmt.Errorf("plan the gateway change: %w", err)
 		}
+		plan.Manual = unmanaged
 		switch {
 		case !plan.Empty():
 			for _, l := range strings.Split(strings.TrimRight(plan.String(), "\n"), "\n") {
@@ -354,6 +363,28 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			if id := changes.VMIdentity; id != nil && state.VM.Identity() != *id {
 				a.note(fmt.Sprintf("sandbox_uid and sandbox_gid are gateway-wide: every MicroVM sandbox on this gateway, including ones made "+
 					"outside DefenseClaw with `openshell sandbox create`, then runs as %s (one whose image expects another user may find its HOME read-only)", id))
+			}
+			if unmanaged {
+				// Nothing restarts: the gateway loads the change when its
+				// user restarts it.
+				write, err := a.ask("Write this change? DefenseClaw cannot restart this gateway: you restart it, the way you started it, to apply it", true, assume)
+				if err != nil {
+					return err
+				}
+				if !write {
+					skipped = append(skipped, "the OpenShell gateway change above (`"+CommandName+" setup` writes it; then you restart the gateway, the way you started it)")
+					break
+				}
+				res, err := a.Gateway.Write(ctx, plan)
+				if rerr := a.recordGatewayApply(res); rerr != nil {
+					a.warn("could not record the gateway change for teardown: " + rerr.Error())
+				}
+				if err != nil {
+					return fmt.Errorf("change the gateway configuration: %w", err)
+				}
+				a.ok("gateway configuration written; it takes effect when you restart the gateway")
+				restartYourself = true
+				break
 			}
 			restart, err := a.consentGatewayRestart(ctx, o, assume, microVM, switching)
 			if err != nil {
@@ -381,6 +412,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			// The configuration already selects MicroVMs, but the gateway
 			// was not restarted on it.
 			a.note("the gateway configuration already selects the MicroVM driver; the gateway has not been restarted on it")
+			if unmanaged {
+				restartYourself = true
+				break
+			}
 			restart, err := a.consentGatewayRestart(ctx, o, assume, microVM, switching)
 			if err != nil {
 				return err
@@ -529,10 +564,17 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.note("skipped: " + s)
 	}
 	a.println()
-	if stuck {
+	switch {
+	case stuck && unmanaged:
+		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the MicroVM driver; then `" +
+			CommandName + " run " + cmd + "`")
+		return nil
+	case stuck:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
 		return nil
+	case restartYourself:
+		a.warn("restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it)")
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
@@ -831,15 +873,16 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 		case openshell.CheckIDCLI:
 			switch {
 			case a.GOOS == "darwin" && rep.OpenShellOutsideFormula():
-				// Setup refuses it on the next line, as the TUI's machine
-				// check marks it (RT-A-1).
-				label, mark = "OpenShell", a.mark(false)
+				// Its gateway is the user's to start and restart, as the
+				// TUI's machine check marks it (RT-A-1): setup says so, or
+				// stops where it would have to start it.
+				label, mark = "OpenShell", a.style("⚠", ansiYellow)
 				if rep.CLIVersion != "" {
 					label += " " + rep.CLIVersion
 				}
 				label += " is not from Homebrew's nvidia/openshell formula"
 			case a.GOOS == "linux" && rep.OpenShellOutsideUnit():
-				label, mark = "OpenShell", a.mark(false)
+				label, mark = "OpenShell", a.style("⚠", ansiYellow)
 				if rep.CLIVersion != "" {
 					label += " " + rep.CLIVersion
 				}

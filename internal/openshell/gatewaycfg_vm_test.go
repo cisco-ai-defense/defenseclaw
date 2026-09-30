@@ -48,6 +48,7 @@ var microVMs = openshell.GatewayChanges{ComputeDriver: openshell.DriverVM, VMIde
 func (f *gatewayFixture) onHomebrew(t *testing.T, content string, running *openshell.ComputeDriver) string {
 	t.Helper()
 	f.cfg.GOOS = "darwin"
+	f.cfg.BrewFormulaInstalled = func() bool { return true }
 	f.runner.On("brew services restart nvidia/openshell/openshell", "", nil)
 	f.cfg.RunningDriver = func(context.Context) (openshell.Driver, error) {
 		d, _ := openshell.LookupDriver(string(*running))

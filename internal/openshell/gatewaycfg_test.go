@@ -567,9 +567,13 @@ func TestGatewayConfigFollowsTheService(t *testing.T) {
 	t.Run("unit not installed", func(t *testing.T) {
 		f := newGatewayFixture(t)
 		f.unit = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n"
-		if _, err := f.cfg.Plan(context.Background(), bindMounts); err == nil || !strings.Contains(err.Error(), "not installed") {
-			t.Fatalf("Plan = %v", err)
+		f.write(t, "gateway.toml", operatorTOML)
+		// Apply restarts through the unit: it refuses before it writes
+		// (TestGatewayConfigWritesForAGatewayRunAnotherWay writes).
+		if _, err := f.apply(f.plan(t, bindMounts)); !errors.Is(err, openshell.ErrNoGatewayService) {
+			t.Fatalf("Apply = %v, want ErrNoGatewayService", err)
 		}
+		f.untouched(t, operatorTOML)
 	})
 	t.Run("Homebrew has no gateway.env to check", func(t *testing.T) {
 		f := newGatewayFixture(t)
@@ -580,6 +584,56 @@ func TestGatewayConfigFollowsTheService(t *testing.T) {
 			t.Fatal("asked systemd about a Homebrew service")
 		}
 	})
+}
+
+// TestGatewayConfigWritesForAGatewayRunAnotherWay: on Linux with OpenShell
+// from the release binaries and its gateway started by hand, setup refused
+// that OpenShell, and before that failed planning the change ("the
+// openshell-gateway user service is not installed"), though sandboxes ran
+// on the gateway (RT U1). Plan plans the files DefenseClaw reads, checking
+// bind mounts against the gateway that answers; Write writes them without
+// a restart and without a pending-restart mark nothing would clear; and
+// Rollback restores them, saying the gateway is the user's to restart.
+func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.unit = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n"
+	f.write(t, "gateway.toml", operatorTOML)
+	plan := f.plan(t, bothChanges)
+	if f.probes != 1 || len(plan.Files) != 2 {
+		t.Fatalf("plan %+v, probes %d", plan.Files, f.probes)
+	}
+	plan.Manual = true
+	text := plan.String()
+	if !strings.Contains(text, "then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it)") ||
+		strings.Contains(text, "systemctl") {
+		t.Fatalf("plan:\n%s", text)
+	}
+	res, err := f.cfg.Write(context.Background(), plan)
+	if err != nil || res.Restarted || len(res.Files) != 2 || f.restarts() != 0 || f.flushes != 0 || f.probes != 2 {
+		t.Fatalf("Write = %+v, %v; restarts %d, flushes %d, probes %d", res, err, f.restarts(), f.flushes, f.probes)
+	}
+	if !strings.Contains(f.read(t, "gateway.toml"), "enable_bind_mounts = true") || f.read(t, "gateway.env") != "OPENSHELL_TELEMETRY_ENABLED=false\n" {
+		t.Fatalf("gateway.toml:\n%s\ngateway.env:\n%s", f.read(t, "gateway.toml"), f.read(t, "gateway.env"))
+	}
+	if st, err := f.cfg.Read(); err != nil || !st.RestartPendingSince.IsZero() {
+		t.Fatalf("Write left a pending-restart mark: %+v, %v", st, err)
+	}
+	// Bind mounts on a gateway others can reach are refused before anything is written.
+	f.write(t, "gateway.toml", operatorTOML)
+	exposed := f.plan(t, bindMounts)
+	f.probe = func() error { return openshell.ErrGatewayExposed }
+	if _, err := f.cfg.Write(context.Background(), exposed); !errors.Is(err, openshell.ErrBindMountsRefused) || f.read(t, "gateway.toml") != operatorTOML {
+		t.Fatalf("Write on an exposed gateway = %v", err)
+	}
+	if err := f.cfg.Rollback(context.Background(), res); !errors.Is(err, openshell.ErrNoGatewayService) || f.restarts() != 0 || f.flushes != 0 {
+		t.Fatalf("Rollback = %v; restarts %d, flushes %d", err, f.restarts(), f.flushes)
+	}
+	if f.read(t, "gateway.toml") != operatorTOML {
+		t.Fatalf("gateway.toml not restored:\n%s", f.read(t, "gateway.toml"))
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "gateway.env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created gateway.env not removed: %v", err)
+	}
 }
 
 // TestGatewayConfigRecordsPendingRestart covers a restart that never

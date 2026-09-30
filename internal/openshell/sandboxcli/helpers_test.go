@@ -829,9 +829,11 @@ func (f *fakeCopy) Apply(_ context.Context, o workspace.ApplyOptions) (*workspac
 
 // fakeGateway is an in-memory GatewayService.
 type fakeGateway struct {
-	state     openshell.GatewayConfigState
-	planned   []openshell.GatewayChanges
-	applied   int
+	state   openshell.GatewayConfigState
+	planned []openshell.GatewayChanges
+	applied int
+	// written are the plans Write wrote, without a restart.
+	written   []*openshell.GatewayPlan
 	rollbacks []*openshell.GatewayApplyResult
 	applyRes  *openshell.GatewayApplyResult
 	restarts  int
@@ -856,6 +858,11 @@ func (f *fakeGateway) Plan(_ context.Context, ch openshell.GatewayChanges) (*ope
 
 func (f *fakeGateway) Apply(context.Context, *openshell.GatewayPlan) (*openshell.GatewayApplyResult, error) {
 	f.applied++
+	return f.applyRes, nil
+}
+
+func (f *fakeGateway) Write(_ context.Context, plan *openshell.GatewayPlan) (*openshell.GatewayApplyResult, error) {
+	f.written = append(f.written, plan)
 	return f.applyRes, nil
 }
 

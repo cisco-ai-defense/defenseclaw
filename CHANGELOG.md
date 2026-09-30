@@ -429,11 +429,25 @@ deleted.
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,
   saying how the gateway runs (a launchd label, or started by hand, which
-  does not start at login) and that DefenseClaw cannot restart it. Its fix
-  is the one setup, which refuses such an OpenShell, gives: stop that
-  gateway and remove that OpenShell, then `sandbox setup
-  --install-openshell` installs the formula; the TUI's machine check says
-  the same instead of "✓ OpenShell". A driver outside the formula's keg that lacks the Hypervisor entitlement
+  does not start at login) and that DefenseClaw cannot restart it. Setup
+  uses such a gateway too, as the doctor does, on a Mac and on Linux with
+  an OpenShell that came without the `openshell-gateway` user unit (whose
+  gateway-service check now warns the same way): its machine line marks
+  `⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula` (or
+  `has no openshell-gateway user service`), it warns that DefenseClaw
+  cannot start or restart that gateway, and it goes on. A gateway change
+  it needs (MicroVM sandbox user or resources, bind mounts, telemetry) is
+  asked about as `Write this change? DefenseClaw cannot restart this
+  gateway: …`, written without a restart, and ends with `restart the
+  OpenShell gateway yourself, the way you started it, so it runs on the
+  change above`; teardown restores those files the same way. Setup stops
+  only where it would have to start that gateway (none answers), with the
+  doctor's fix: start it yourself, or, for a gateway DefenseClaw starts
+  and restarts, remove that OpenShell and run `sandbox setup
+  --install-openshell`. Before, setup refused such an OpenShell up front
+  (`✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`,
+  exit 1) while the doctor said `✓ ready for sandboxes`. The TUI's
+  machine check says what setup says. A driver outside the formula's keg that lacks the Hypervisor entitlement
   gets a fix that names it; `doctor --fix` and setup re-sign only the
   formula's driver (`brew postinstall` signs no other).
   The doctor's disk line counts only the MicroVM disks prepared from images,
