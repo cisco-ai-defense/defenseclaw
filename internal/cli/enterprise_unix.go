@@ -54,8 +54,13 @@ var (
 		Use:   "secret",
 		Short: "Manage protected credentials of a standalone managed deployment",
 		Long: `Store, inspect or remove the protected credentials a standalone managed
-deployment reads, such as the Cisco AI Defense API key named by
-enterprise.inspection.ai_defense.credential.
+deployment reads:
+
+  - the Cisco AI Defense API key named by
+    enterprise.inspection.ai_defense.credential;
+  - observability destination credentials named by a header value
+    {credential: NAME} (otlp, http_jsonl), token_credential (splunk_hec)
+    or bearer_credential (http_jsonl).
 
 Values are read from standard input or a file and are never printed.
 Status shows only presence, modification time and a digest prefix.`,
