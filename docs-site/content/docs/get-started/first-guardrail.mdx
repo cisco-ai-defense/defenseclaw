@@ -13,7 +13,7 @@ directory under `/var/tmp`. The example is intentionally harmless even if the
 guardrail is misconfigured. It takes a few minutes.
 
 The sequence is: install, run the first-run setup (`quickstart` or `init`),
-wire Claude Code with `setup claude-code`, then turn on action mode.
+which wires Claude Code in observe mode, then turn on action mode.
 
 <Callout type="info" title="macOS/Linux walkthrough">
 This fixture intentionally exercises the POSIX-specific `CMD-RM-RF` rule and
@@ -44,21 +44,14 @@ curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/downl
 defenseclaw quickstart --connector claudecode
 ```
 
-This writes the config, seeds the audit database and starts the gateway. To
+This writes the config, seeds the audit database, wires Claude Code in
+observe mode and starts the gateway. Observe mode records events but does not
+block yet, so you can check the data path before you turn enforcement on. To
 answer the questions yourself, run `defenseclaw init` instead. See
 [Quickstart](/docs/get-started/quickstart).
 
-</Step>
-
-<Step>
-
-### Wire DefenseClaw into Claude Code
-
-```bash
-defenseclaw setup claude-code
-```
-
-This runs the [observability-only alias](/docs/connectors/claudecode) — DefenseClaw collects telemetry but does not yet block. We start here so we know the data path is healthy before flipping enforcement on.
+If Claude Code is already open, fully quit and reopen it so it loads the new
+hooks. Check the connector is listed with `defenseclaw status`.
 
 </Step>
 
@@ -72,7 +65,7 @@ In one terminal, open the live dashboard (audit + alerts + logs panels):
 defenseclaw tui
 ```
 
-Or take a scripted snapshot from mandatory SQLite event history:
+Or take a scripted snapshot from the local audit database:
 
 ```bash
 defenseclaw-gateway audit export --output - \
@@ -151,7 +144,7 @@ Three safer options:
 
 - **Use a narrower cleanup command** — avoid force-recursive deletion when it is unnecessary.
 - **Customize a copied rule pack** — change `rules/commands.yaml` in a custom pack, then select it with `--rule-pack-dir`. Editing a bundled pack in place makes upgrades harder to review.
-- **Switch to observe mode** — `defenseclaw setup guardrail --mode observe`. Use this for the first week of every new connector.
+- **Switch to observe mode** — `defenseclaw setup guardrail --connector claudecode --mode observe`. Use this for the first week of every new connector.
 
 CRITICAL findings are not eligible for HITL approval.
 
@@ -185,5 +178,6 @@ CRITICAL findings are not eligible for HITL approval.
 
 <Cards>
   <Card title="Setup Guardrail (full reference)" href="/docs/setup/guardrail" description="Every flag, every option, every consequence." />
+  <Card title="Protect a second agent" href="/docs/setup/guardrail/multi-connector#add-a-connector" description="Add Codex or another agent to the same gateway without removing Claude Code." />
   <Card title="Stop a destructive Claude Code command" href="/docs/stories/observe-claude-code" description="The same flow, with the policy walkthrough and exact rule boundaries." />
 </Cards>

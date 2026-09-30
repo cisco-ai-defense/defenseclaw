@@ -44,6 +44,11 @@ Restart the CLI or run `/agent swap defenseclaw` so `/hooks` lists them.
   valid one. With `--v3`, only the `.*` hooks fire, so each tool call reaches
   DefenseClaw once. Bare `kiro-cli` (the 2.x engine) does not read
   `.kiro/hooks` at all. Hook entries you added yourself are not changed.
+- **Upgrading from an earlier release.** Earlier releases wrote the agent
+  matcher `.*`, which matches no tool in Kiro CLI, and set no timeout, so
+  those tool hooks never ran. The gateway rewrites DefenseClaw's entries the
+  first time it starts after an upgrade, and `defenseclaw setup kiro` rewrites
+  them too.
 - **Timeouts.** Each agent hook sets `timeout_ms` 30000, and the `.kiro/hooks`
   file sets `"timeout": 30`. Kiro runs the tool when a hook does not answer
   within its timeout, and its default is about ten seconds, which a slow scan
@@ -220,7 +225,7 @@ replaces that list, so name every harness you want:
   where the agent can read it and send it out, and a kept sandbox reuses it.
   The daemon's `defenseclaw-kiro` provider profile, which binds a Kiro API key
   (`KIRO_API_KEY`) as a placeholder, is not offered by `sandbox run`. Neither
-  sign-in is tested yet.
+  sign-in has been tested live yet: no Kiro account was available.
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
   and Codex sandboxes only.
 - **Kiro's own behaviour in a sandbox.**

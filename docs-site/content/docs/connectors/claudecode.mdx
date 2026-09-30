@@ -61,8 +61,10 @@ outside this native connector path.
 
 `setup claude-code` is the Claude Code alias for the shared guardrail setup.
 It adds or reconfigures `claudecode`, wires hooks and native OTel, and can join
-an existing hook-connector roster when you choose **Add**. It defaults to
-observe mode. No proxy listener binds in either mode.
+the agents you already protect when you choose
+**Add** (see [Add a connector](/docs/setup/guardrail/multi-connector#add-a-connector)).
+Fully quit and reopen Claude Code after setup so it loads the new hooks and
+OTel settings. Setup defaults to observe mode. No proxy listener binds in either mode.
 
 - For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
 - For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
@@ -76,7 +78,7 @@ Claude Code-specific settings:
   source capture on.
 - The scoped credential cannot authenticate management or another connector.
   Never print or copy it.
-- Redaction follows the v8 bucket and profile policy. Edit
+- Redaction follows your observability redaction settings. Edit
   `observability.destinations[].routes[].selector.buckets` and
   `observability.redaction_profiles`, then follow
   [Redaction → Verify policy](/docs/reference/redaction#verify-policy).

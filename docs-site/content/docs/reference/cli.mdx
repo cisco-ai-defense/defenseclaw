@@ -608,7 +608,7 @@ you, so most operators never need them.
 | `defenseclaw setup guardrail --disable` | Roll back the guardrail. Connector files are restored from backup. |
 | `defenseclaw uninstall` | Runs connector teardown, stops the sidecar and removes the OpenClaw plugin. It keeps `~/.defenseclaw/` (audit DB, config, secrets). |
 | `defenseclaw uninstall --all` | The same, and also deletes `~/.defenseclaw/`. |
-| `defenseclaw uninstall --binaries` | Also removes the CLI, gateway, ACP guard and helper binaries from `~/.local/bin`. Combine it with `--all` for a full removal. |
+| `defenseclaw uninstall --binaries` | Also removes the CLI, gateway, ACP guard and helper binaries from `~/.local/bin` (on macOS and Linux also the managed `skill-scanner`, `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`, `mcp-scanner-api` and `litellm` launchers). Combine it with `--all` for a full removal. |
 | `defenseclaw uninstall --keep-openclaw` | Leaves the OpenClaw config and plugin in place. Teardown of the other connectors still runs. |
 | `defenseclaw uninstall --skip-sandbox-teardown` | Skips the OpenShell sandbox teardown that uninstall runs first. Use it when Docker or OpenShell is gone or broken, and run `defenseclaw sandbox teardown` later. `reset` takes it too. |
 | `defenseclaw uninstall --dry-run` | Show what uninstall would do without changing anything. `--yes` skips the confirmation prompt. |

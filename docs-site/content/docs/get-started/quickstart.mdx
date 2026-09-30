@@ -124,7 +124,8 @@ If `status` is `needs_attention`, the command exits non-zero. The failed steps a
 
 ### Drive the agent
 
-Open Claude Code (or whichever connector you picked). DefenseClaw now receives
+Open Claude Code (or whichever connector you picked). If it was already
+running, fully quit and reopen it so it loads the new hooks. DefenseClaw now receives
 the lifecycle events and interception surfaces supported by that connector.
 Watch the resulting decisions land in the live dashboard:
 
@@ -132,15 +133,14 @@ Watch the resulting decisions land in the live dashboard:
 defenseclaw tui
 ```
 
-Or take a scriptable snapshot from mandatory SQLite event history:
+Or take a scriptable snapshot from the local audit database:
 
 ```bash
 defenseclaw-gateway audit export --output - | tail -n 200 | jq .
 ```
 
-JSONL is no longer an implicit mirror. If you need a continuous external file,
-configure an explicit v8 `kind: jsonl` destination with the buckets, signals,
-and redaction profile that file is allowed to receive.
+DefenseClaw does not write a JSONL file by default. To send events to a file
+or another system, add a destination; see [Observability](/docs/observability).
 
 </Step>
 
@@ -218,6 +218,7 @@ and redaction profile that file is allowed to receive.
 
 <Cards>
   <Card title="First guardrail in a few minutes" href="/docs/get-started/first-guardrail" description="A macOS/Linux walkthrough that ends with a real block decision; Windows operators are directed to the native verification checklist." />
+  <Card title="Protect a second agent" href="/docs/setup/guardrail/multi-connector#add-a-connector" description="Quickstart configures one agent. Add Codex or another agent to the same gateway." />
   <Card title="ACP guard" href="/docs/acp-guard" description="Guard ACP editors such as Zed and JetBrains. Run defenseclaw setup acp when the report lists unguarded ACP agents." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface — modes, judge, rule packs, HITL — for tuning after the first run." />
   <Card title="AI Discovery" href="/docs/ai-discovery" description="See what AI is already running on the host before you start applying rules." />

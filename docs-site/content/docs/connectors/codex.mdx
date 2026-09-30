@@ -58,9 +58,11 @@ it does not use a POSIX hook shell or WSL.
 </Tabs>
 
 `setup codex` is the Codex alias for the shared guardrail setup. It adds or
-reconfigures Codex, wires hooks, OTel and the notify bridge, and can join an
-existing hook-connector roster when you choose **Add**. It defaults to observe
-mode. No proxy listener binds in either mode.
+reconfigures Codex, wires hooks, OTel and the notify bridge, and can join the
+agents you already protect when you choose **Add** (see
+[Add a connector](/docs/setup/guardrail/multi-connector#add-a-connector)).
+Fully quit and reopen Codex after setup so it loads the new hooks and OTel
+settings. Setup defaults to observe mode. No proxy listener binds in either mode.
 
 - For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
 - For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
@@ -78,7 +80,7 @@ Codex-specific settings:
   configured environment (Codex otherwise defaults it to `dev`). Doctor
   compares that value with live runtime metadata and telemetry health, so a
   stale gateway or configuration drift is visible.
-- Redaction follows the v8 bucket and profile policy. Edit
+- Redaction follows your observability redaction settings. Edit
   `observability.destinations[].routes[].selector.buckets` and
   `observability.redaction_profiles`, then follow
   [Redaction → Verify policy](/docs/reference/redaction#verify-policy).

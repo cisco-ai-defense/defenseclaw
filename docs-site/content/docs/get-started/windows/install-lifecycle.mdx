@@ -60,7 +60,7 @@ To choose options, run the script block with parameters:
 | `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `-Rollback` | Restore the install that the last upgrade replaced |
 | `-Connector NAME` | First install only: the agent to guard |
-| `-NoOpenclaw` | Same as `-Connector none` |
+| `-NoOpenclaw` | Legacy alias for `-Connector none`, kept for older scripts (OpenClaw does not run on Windows) |
 | `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
 | `-QuickstartMode observe\|action` | Mode for `-Quickstart`; implies `-Quickstart` |
 | `-NoPersistPath` | Do not add `%USERPROFILE%\.local\bin` to your user `PATH` |
@@ -85,38 +85,29 @@ For guided configuration:
 defenseclaw init
 ```
 
-For explicit supported connectors:
+For a zero-prompt setup of one agent:
+
+```powershell
+defenseclaw quickstart --connector codex
+```
+
+To set up one agent yourself, run its setup command, for example:
 
 ```powershell
 defenseclaw setup codex --mode observe
-defenseclaw setup claude-code --mode observe
-defenseclaw setup amp --mode observe
-defenseclaw setup cursor --mode observe
-defenseclaw setup devin --mode observe
-defenseclaw setup hermes --mode observe
-defenseclaw setup omnigent --mode observe
-defenseclaw setup opencode --mode observe
-defenseclaw setup copilot --mode observe
-defenseclaw setup antigravity --mode observe
-defenseclaw setup kiro --mode observe
 ```
 
-One local gateway can host all eleven native lifecycle connectors. Add connectors without removing the
-first:
+Run `defenseclaw setup <name>` again for each other agent you use. The
+[connector platform table](/docs/connectors#platform-support) lists the
+eleven native Windows connectors (`codex`, `claude-code`, `amp`, `cursor`,
+`devin`, `hermes`, `omnigent`, `opencode`, `copilot`, `antigravity` and
+`kiro`). One local gateway can host all of them. To add several in one step
+without removing the first:
 
 ```powershell
 defenseclaw setup `
   --connector codex `
   --connector claudecode `
-  --connector amp `
-  --connector cursor `
-  --connector devin `
-  --connector hermes `
-  --connector omnigent `
-  --connector opencode `
-  --connector copilot `
-  --connector antigravity `
-  --connector kiro `
   --mode observe `
   --restart `
   --yes

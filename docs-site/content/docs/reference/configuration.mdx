@@ -123,6 +123,7 @@ config_version: 8             # strict current schema; upgrade migrates supporte
 
 claw:
   mode: claudecode             # the connector setup selected; guardrail.connectors lists every active one
+                               # (exported as the OTel resource attribute `defenseclaw.claw.mode`)
 
 gateway:
   host: 127.0.0.1              # upstream agent gateway host (OpenClaw/ZeptoClaw fleet link)

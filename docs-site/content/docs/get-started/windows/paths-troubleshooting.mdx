@@ -342,8 +342,11 @@ Use harmless prompts only. Do not use real secrets or destructive tools.
    `--plugin-ready-timeout 30`.
 6. In an empty folder, send each agent a harmless prompt such as "Reply with
    the word ready."
-7. Open `defenseclaw tui` or run `defenseclaw alerts` and check the new
-   activity shows under the right connector. Repeat for each connector.
+7. Open `defenseclaw tui` and check the new event shows in the audit panel
+   under the right connector, or run
+   `defenseclaw-gateway audit export --output -` and look for it. A harmless
+   prompt creates an audit event, not an alert, so `defenseclaw alerts` can
+   stay empty. Repeat for each connector.
 
 ## Post-upgrade checklist
 

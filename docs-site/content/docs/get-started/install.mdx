@@ -23,10 +23,12 @@ Windows (PowerShell):
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-When it finishes, run [`defenseclaw init`](/docs/get-started/quickstart) to
-configure DefenseClaw. To pick an agent during the install, pass options: on
-macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
-instead of `bash`; on Windows, run
+On a first install the installer asks which agent to guard (the default is
+`codex`). When it finishes it prints the next command,
+`defenseclaw init --connector <name>`, which configures DefenseClaw; see
+[Quickstart](/docs/get-started/quickstart). To skip the menu and the
+questions, pass options: on macOS/Linux, end the command above with
+`bash -s -- --connector claudecode --quickstart` instead of `bash`; on Windows, run
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
@@ -49,7 +51,7 @@ which runs the latest release's installer for you.
 | `--local DIR` / `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `--rollback` / `-Rollback` | Restore the install that the last upgrade replaced |
 | `--connector NAME` / `-Connector NAME` | First install only: the agent to guard |
-| `--no-openclaw` / `-NoOpenclaw` | First install only: do not install OpenClaw (same as connector `none`) |
+| `--no-openclaw` / `-NoOpenclaw` | First install only: legacy alias for connector `none` (skip the agent menu and configure no agent) |
 | `--quickstart` / `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
 | `--quickstart-mode observe\|action` / `-QuickstartMode observe\|action` | Quickstart mode; implies `--quickstart` |
 | `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
@@ -90,7 +92,7 @@ Source builds are for development, not for installing or upgrading a release.
     <File name="audit.db" />
     <Folder name="hooks">
       <File name="codex-hook.sh" />
-      <File name="claudecode-hook.sh" />
+      <File name="claude-code-hook.sh" />
       <File name="cursor-hook.sh" />
       <File name="…" />
     </Folder>
@@ -120,6 +122,10 @@ environment, and `%USERPROFILE%\.local\bin\` holds `defenseclaw.cmd`,
 `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`.
 The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
 
+On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is
+not on it, the installer prints the line to add to your shell profile. Add it,
+then open a new shell before you run `defenseclaw`.
+
 ## Verify
 
 ```bash
@@ -134,7 +140,8 @@ scanners and observability. It exits 1 when a check fails. See the
 ## Uninstall
 
 `defenseclaw uninstall` removes the connector integrations and keeps `~/.defenseclaw/` and the binaries.
-Add `--all` to delete `~/.defenseclaw/`, and `--binaries` to remove the CLI, gateway, ACP guard and helper binaries.
+Add `--all` to delete `~/.defenseclaw/`, and `--binaries` to remove the CLI, gateway, ACP guard and helper binaries
+(on macOS and Linux this includes the `skill-scanner*`, `mcp-scanner*` and `litellm` launchers in `~/.local/bin`).
 For every flag, including `--dry-run`, see [Uninstall](/docs/reference/cli#uninstall).
 
 ## Next steps
