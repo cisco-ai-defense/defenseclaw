@@ -874,7 +874,7 @@ func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
 	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, UpToDate: true, Branch: "dc/copybox"}
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
 	ta.wantCalls(t, 1, "POST", "copybox/start")
-	has(t, ta.output(), "copybox has not run since its last pull at "+ta.clock(ta.Now())+"; using that pull instead of starting it",
+	has(t, ta.output(), "copybox's copy has not changed since its last pull at "+ta.clock(ta.Now())+"; using that pull instead of starting it",
 		"copybox: 1 file changed (+4 −0)", "nothing to do: branch dc/copybox already has these changes")
 	lacks(t, ta.output(), "starting copybox", "stopped copybox again")
 	if !slices.Equal(ta.copy.steps, []string{"check branch", "reuse copybox r1", "apply branch"}) {
@@ -895,6 +895,25 @@ func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
 	ta.daemon.add(copySandbox("copybox"))
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
 	ta.wantCalls(t, 4, "POST", "copybox/start")
+}
+
+// After a start and a stop whose look found the copy as the last pull read
+// it, that pull is reused, and the note says what holds: the copy has not
+// changed since that pull (it said the sandbox "has not run since" the pull,
+// which it had, the #1019 retest).
+func TestPullReuseNoteAfterAStartAndAStop(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	pulledAt := ta.Now().Add(-time.Hour)
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: pulledAt,
+		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	ta.ok(t, ta.Start(bg, "copybox", StartOptions{}))
+	ta.copy.pending, ta.copy.pendingPulled = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnpulled}, map[string]string{"copybox": "r1"}
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "copybox"}))
+	ta.ok(t, ta.fresh().Pull(bg, PullOptions{Name: "copybox"}))
+	ta.wantCalls(t, 2, "POST", "copybox/start")
+	has(t, ta.output(), "copybox's copy has not changed since its last pull at "+ta.clock(pulledAt)+"; using that pull instead of starting it")
+	lacks(t, ta.output(), "has not run since", "starting copybox")
 }
 
 // An apply that had fewer paths to write than the pull changed says the

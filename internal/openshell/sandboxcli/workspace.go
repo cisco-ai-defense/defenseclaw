@@ -824,8 +824,9 @@ func (a *App) reviewGlobs(sb *sandboxapi.Sandbox) []string {
 }
 
 // reusePull is the pull of stopped sandbox sb made from its last one, when
-// sb has not run since that pull read its copy (stoppedCopyOf), so starting
-// it would read the same state again: nil when that is not known.
+// its copy was in the state that pull read as it last stopped, and it has
+// not run since (stoppedCopyOf), so starting it would read the same state
+// again: nil when that is not known.
 func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace.PullResult, error) {
 	st := a.stoppedCopyOf(sb)
 	if st == nil || st.Pulled == "" {
@@ -838,7 +839,9 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.diskFullHint(err))
 	}
-	a.note(sb.Name + " has not run since its last pull at " + a.clock(res.PulledAt) + "; using that pull instead of starting it")
+	// The mark may come from a later look than that pull (a start and a
+	// stop that found the same state): what holds is the copy's state.
+	a.note(sb.Name + "'s copy has not changed since its last pull at " + a.clock(res.PulledAt) + "; using that pull instead of starting it")
 	return res, nil
 }
 

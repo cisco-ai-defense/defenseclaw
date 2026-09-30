@@ -496,10 +496,11 @@ deleted.
   changes, at a session's end too. A branch that holds only the last pull is
   refused before the start too when the stopped sandbox has run since that
   pull (`… it holds <name>'s pull at 14:03, and <name> has run since, so its
-  work may have changed`). A stopped sandbox that has not run since
+  work may have changed`). A stopped sandbox whose copy has not changed since
   its last pull read it is not started: `sandbox pull` and `review` use that
-  pull again (`… has not run since its last pull at 14:03; using that pull
-  instead of starting it`), which on a Mac saves booting the MicroVM (#965).
+  pull again (`…'s copy has not changed since its last pull at 14:03; using
+  that pull instead of starting it`), which on a Mac saves booting the
+  MicroVM (#965).
   Every driver.
 - Node's `[UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental` no
   longer prints in a sandbox

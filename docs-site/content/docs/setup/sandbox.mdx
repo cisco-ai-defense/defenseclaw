@@ -898,8 +898,8 @@ does. A folder without git has no branches, so use `--apply` or
 The patch file of a conflicting `--apply` is `<name>.patch` in your folder,
 so deleting the sandbox does not take it along. A pull from a stopped
 sandbox starts it to read its work and stops it again, unless the sandbox
-has not run since its last pull read it: that pull is used then, without
-starting anything. A branch that holds other work or a patch file that
+stopped with its copy as its last pull read it: that pull is used then,
+without starting anything. A branch that holds other work or a patch file that
 exists is refused before the sandbox starts, and a branch that already holds
 the work is reported as done. A branch that holds only the last pull is
 refused before the start too when the stopped sandbox has run since that pull

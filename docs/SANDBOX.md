@@ -1403,9 +1403,9 @@ Nothing is applied without a review: a session without a terminal, or with
    as mount mode. Nothing in the project changes yet. With
    `PullOptions.Reuse` naming the last pull's result, the pull is made from
    that result, which `base.git` holds, without reading the sandbox: the
-   caller knows the sandbox has not run since (below). Its changes, review
-   and `Since` are made anew, so an apply or undo since counts; a last pull
-   that is another one fails with `ErrNoReusablePull`.
+   caller knows the copy is in the state that pull read (below). Its
+   changes, review and `Since` are made anew, so an apply or undo since
+   counts; a last pull that is another one fails with `ErrNoReusablePull`.
 4. **Apply.** `apply` merges the result into the working tree three ways (git
    2.38 or newer; older git, or a conflict, falls back to a `dc/<name>`
    branch for git projects plus a patch file), `branch` creates `dc/<name>`,

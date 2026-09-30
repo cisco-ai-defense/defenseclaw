@@ -1032,7 +1032,7 @@ defenseclaw sandbox undo myapp-7f3a --yes --restart
 ### `sandbox pull`
 
 Brings a copy-mode sandbox's work back, starting the sandbox first if it is
-stopped (unless it has not run since its last pull, see below). Without a
+stopped (unless its copy has not changed since its last pull, see below). Without a
 mode it shows the review: the changed files, the ones that
 can run code on your machine, and files held back from the sandbox. Choose
 one mode to bring the work back: `--apply` (a
@@ -1067,11 +1067,12 @@ stopped sandbox has run since that pull, since only starting it tells whether
 its work changed (`branch dc/<name> already exists: it holds <name>'s pull at
 14:03, and <name> has run since, so its work may have changed`): pass
 `--branch-name NAME`, or `--force` to move the branch to the new work.
-A stopped sandbox that has not run since its last pull read it (the pull, the
-session's end or the `stop` that stopped it saw its copy in that state) is not
-started: that pull is made again, its changes and review measured anew
-(`fix-tests has not run since its last pull at 14:03; using that pull instead
-of starting it`). On a Mac this saves booting the MicroVM.
+A stopped sandbox whose copy has not changed since its last pull read it (the
+pull, the session's end or the `stop` that stopped it saw its copy in that
+state, and it has not run since) is not started: that pull is made again, its
+changes and review measured anew (`fix-tests's copy has not changed since its
+last pull at 14:03; using that pull instead of starting it`). On a Mac this
+saves booting the MicroVM.
 
 ```bash
 defenseclaw sandbox pull fix-tests
