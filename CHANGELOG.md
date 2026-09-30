@@ -71,6 +71,14 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **A Linux gateway whose file was replaced while it ran can be stopped.**
+  After `~/.local/bin/defenseclaw-gateway` was renamed or replaced under a
+  running gateway, `defenseclaw-gateway stop` said "Gateway sidecar is not
+  running" with exit 0 and dropped its PID record, `watchdog stop` refused
+  after 15 seconds, and `uninstall --all` failed on that timeout; only
+  `kill` recovered. Status now reports that gateway as running, `stop` asks
+  its authenticated control plane to shut down (it still never signals it
+  by PID), and the watchdog recognizes its own replaced file.
 - **Re-running `defenseclaw setup <connector>` keeps its mode.** `--mode`
   defaulted to observe, so `defenseclaw setup opencode --yes`, which doctor
   recommends to repair the OpenCode plugin, turned an action install into
