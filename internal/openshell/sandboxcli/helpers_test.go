@@ -546,6 +546,14 @@ type fakeImages struct {
 	// set, fails it.
 	buildOutput string
 	buildErr    error
+	// preflightErr, when set, is Preflight's refusal.
+	preflightErr error
+}
+
+func (f *fakeImages) Preflight(context.Context, *harness.Spec, bool, bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.preflightErr
 }
 
 func (f *fakeImages) Current(spec *harness.Spec, _ bool) (bool, error) {

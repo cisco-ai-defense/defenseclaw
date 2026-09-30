@@ -70,7 +70,7 @@ const (
 )
 
 // ErrUnknownContract is returned when the pinned harness version has no
-// reviewed Linux hook contract; the build never starts.
+// reviewed hook contract for sandboxes; the build never starts.
 var ErrUnknownContract = harness.ErrUnknownContract
 
 // BuildSpec is every input of one overlay image.

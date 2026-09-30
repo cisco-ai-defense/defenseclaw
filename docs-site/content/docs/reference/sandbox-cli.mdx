@@ -198,7 +198,11 @@ defenseclaw sandbox image list
 Builds and hook-checks the images of the named harnesses, or of
 `openshell.harnesses` (then Claude Code and Codex) when you name none. A
 current, checked image is kept unless you pass `--force`. The build log is
-written to `<data_dir>/logs/sandbox-image-<harness>.log`. On a MicroVM gateway
+written to `<data_dir>/logs/sandbox-image-<harness>.log`. Some builds are
+refused before docker runs: an `openshell.image.harness_versions` pin that is
+not an exact release, a pin with no reviewed hook contract for sandboxes, or a
+docker without BuildKit. Such a refusal says only why. It starts no build and
+keeps the previous build's log. On a MicroVM gateway
 it warns after a build when the volume of the driver's image cache lacks the
 room the first start of the new image needs (see `sandbox run`).
 

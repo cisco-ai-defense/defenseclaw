@@ -752,11 +752,12 @@ func SetNoProxy(env map[string]string, list string) {
 
 var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
-// ErrUnknownContract reports a harness version outside DefenseClaw's reviewed
-// Linux hook contracts; overlay builds refuse it.
-var ErrUnknownContract = errors.New("harness version has no reviewed Linux hook contract")
+// ErrUnknownContract reports a harness version outside the hook contracts
+// DefenseClaw reviewed for sandboxes (connector.ResolveSandboxHookContract,
+// which may start above the host contract); overlay builds refuse it.
+var ErrUnknownContract = errors.New("harness version has no reviewed hook contract for sandboxes")
 
-// CheckContract refuses a harness version whose Linux hook contract is not
+// CheckContract refuses a harness version whose sandbox hook contract is not
 // Known.
 func CheckContract(connectorName, version string) error {
 	resolution := connector.ResolveSandboxHookContract(connectorName, version)

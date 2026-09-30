@@ -73,17 +73,13 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 	if err != nil {
 		return Record{}, err
 	}
-	if !opts.Force {
-		if rec, ok, err := b.Store.Get(c.Tag); err != nil {
-			return Record{}, err
-		} else if ok && recordMatches(rec, c) {
-			if id, err := b.imageID(ctx, c.Tag); err == nil && id == rec.ImageID {
-				if (rec.HookFireVerified && !rec.MicroVMUnchecked()) || opts.SkipHookFire {
-					return rec, nil
-				}
-				return b.verifyBuilt(ctx, c, rec, opts)
-			}
+	if rec, ok, err := b.cached(ctx, c, opts); err != nil {
+		return Record{}, err
+	} else if ok {
+		if (rec.HookFireVerified && !rec.MicroVMUnchecked()) || opts.SkipHookFire {
+			return rec, nil
 		}
+		return b.verifyBuilt(ctx, c, rec, opts)
 	}
 
 	if err := buildImage(ctx, b.Docker, c.Files, c.Labels, c.Tag, b.Log); err != nil {
@@ -135,6 +131,43 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		return rec, nil
 	}
 	return b.verifyBuilt(ctx, c, rec, opts)
+}
+
+// cached returns the record of c's image when Build(opts) builds nothing:
+// not forced, recorded from exactly c's inputs, and Docker's tag still
+// names the recorded image.
+func (b *Builder) cached(ctx context.Context, c *Context, opts BuildOptions) (Record, bool, error) {
+	if opts.Force {
+		return Record{}, false, nil
+	}
+	rec, ok, err := b.Store.Get(c.Tag)
+	if err != nil || !ok || !recordMatches(rec, c) {
+		return Record{}, false, err
+	}
+	if id, err := b.imageID(ctx, c.Tag); err != nil || id != rec.ImageID {
+		return Record{}, false, nil
+	}
+	return rec, true, nil
+}
+
+// Preflight returns the refusal Build(spec, opts) would return before
+// docker build runs, without building: a build context that cannot be
+// rendered (a harness version that is not an exact release, or has no
+// reviewed hook contract for sandboxes) and, when Build would build, a
+// docker without BuildKit. A caller that says a build starts, or opens a
+// build log, does so past it.
+func (b *Builder) Preflight(ctx context.Context, spec BuildSpec, opts BuildOptions) error {
+	c, err := b.Context(spec)
+	if err != nil {
+		return err
+	}
+	if _, ok, err := b.cached(ctx, c, opts); err != nil || ok {
+		return err
+	}
+	if err := checkBuildKit(ctx, b.Docker); err != nil {
+		return fmt.Errorf("openshell image: docker build %s: %w", c.Tag, err)
+	}
+	return nil
 }
 
 // verifyBuilt runs VerifyHooks for a just-built or cached image and returns

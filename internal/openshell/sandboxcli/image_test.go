@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -549,13 +550,54 @@ func TestImageBuildFailureShowsDockersLastLines(t *testing.T) {
 }
 
 // A build refused because docker would not use BuildKit never ran docker
-// build: its error says why and how to fix it, and names no build log.
+// build: its error says why and how to fix it, and names no build log,
+// and the last build's log stays.
 func TestImageBuildWithoutBuildKitNamesNoBuildLog(t *testing.T) {
 	ta := newTestApp(t, "")
+	logPath := filepath.Join(ta.dataDir(), "logs", "sandbox-image-claudecode.log")
+	writeFile(t, logPath, "the last build\n")
 	ta.images.buildErr = fmt.Errorf("openshell image: docker build defenseclaw/sandbox:claudecode-x-u1000: %w; install Docker's buildx plugin",
 		image.ErrNoBuildKit)
 	err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claudecode"}})
 	if want := "Claude Code image: " + ta.images.buildErr.Error(); err == nil || err.Error() != want || !errors.Is(err, image.ErrNoBuildKit) {
 		t.Fatalf("ImageBuild error = %v, want %s", err, want)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != "the last build\n" {
+		t.Fatalf("build log after a build that wrote nothing = %q, %v", data, err)
+	}
+}
+
+// FIN-B-2: a harness_versions pin refused before docker runs (no reviewed
+// hook contract for sandboxes, not an exact release, a docker without
+// BuildKit) says only why: no "Building …" line, no build, no build log
+// named, and the last build's log stays.
+func TestImageBuildRefusedBeforeDockerRunsSaysOnlyWhy(t *testing.T) {
+	contract := harness.CheckContract("omnigent", "0.12.0")
+	_, release := harness.Hermes.InstallSteps("0.0.0-nonexistent")
+	for name, refusal := range map[string]error{
+		"contract":      fmt.Errorf("openshell image: %w", contract),
+		"exact release": fmt.Errorf("openshell image: %w", release),
+		"BuildKit":      fmt.Errorf("openshell image: docker build defenseclaw/sandbox:hermes-x-u1000: %w", image.ErrNoBuildKit),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			logPath := filepath.Join(ta.dataDir(), "logs", "sandbox-image-hermes.log")
+			writeFile(t, logPath, "the last build\n")
+			ta.images.preflightErr = refusal
+			err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"hermes"}})
+			if want := "Hermes Agent image: " + refusal.Error(); err == nil || err.Error() != want {
+				t.Fatalf("ImageBuild error = %v, want %s", err, want)
+			}
+			if out := ta.output(); strings.Contains(out, "Building") || len(ta.images.built) != 0 {
+				t.Fatalf("a refused build started (built %v):\n%s", ta.images.built, out)
+			}
+			if data, err := os.ReadFile(logPath); err != nil || string(data) != "the last build\n" {
+				t.Fatalf("build log after a refusal = %q, %v", data, err)
+			}
+		})
+	}
+	if contract == nil || !strings.Contains(contract.Error(), "harness version has no reviewed hook contract for sandboxes: omnigent 0.12.0") ||
+		release == nil || !strings.Contains(release.Error(), `version "0.0.0-nonexistent" is not an exact release`) {
+		t.Fatalf("refusals: %v; %v", contract, release)
 	}
 }
