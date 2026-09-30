@@ -1134,10 +1134,33 @@ def _note_proxy_connectors(disc) -> None:
     )
 
 
-def _prompt_action_connectors(connectors: list[str]) -> list[str]:
+def _current_action_connectors(
+    connectors: list[str],
+    data_dir: str | os.PathLike[str] | None = None,
+) -> list[str]:
+    """Connectors an existing config already runs in action mode.
+
+    A re-run of init preselects them so pressing Enter keeps the current
+    posture instead of quietly asking for observe."""
+    try:
+        from defenseclaw import config as cfg_mod
+
+        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
+            return []
+        guardrail = cfg_mod.load(data_dir=data_dir).guardrail
+        return [c for c in connectors if guardrail.effective_mode(c).lower() == "action"]
+    except Exception:  # noqa: BLE001 - an unreadable config preselects nothing
+        return []
+
+
+def _prompt_action_connectors(
+    connectors: list[str],
+    current_action: list[str] | None = None,
+) -> list[str]:
     """Ask which of the selected active connectors should run in ACTION mode.
 
-    Every selected connector defaults to observe. The operator
+    Connectors default to observe, except those the existing config already
+    runs in action mode (``current_action``). The operator
     names the subset to enforce; a blank answer keeps everything in observe.
     The reply is intersected with the selected active list so a typo can't
     enable a connector that isn't being set up."""
@@ -1147,7 +1170,7 @@ def _prompt_action_connectors(connectors: list[str]) -> list[str]:
     ux.subhead("Unchecked connectors stay in observe mode and only report findings.")
     requested = _prompt_checkbox_selection(
         connectors,
-        default_selected=[],
+        default_selected=[c for c in connectors if c in set(current_action or ())],
         title="Select connector(s) for action enforcement.",
         empty_ok=True,
     )
@@ -1585,7 +1608,10 @@ def _prompt_first_run(
     elif connector and profile is not None and len(connectors) == 1:
         requested_action = list(connectors) if profile.lower() == "action" else []
     else:
-        requested_action = _prompt_action_connectors(host_connectors)
+        requested_action = _prompt_action_connectors(
+            host_connectors,
+            _current_action_connectors(host_connectors, data_dir),
+        )
 
     # Gate action connectors on hook-contract support; unverified ones are
     # downgraded to observe (still guarded, just non-blocking).

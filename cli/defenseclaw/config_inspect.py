@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
 from defenseclaw.gateway import resolve_trusted_gateway_binary
 from defenseclaw.pinned_exec import run_pinned_executable
 
@@ -163,7 +163,7 @@ def _helper_argv(
     try:
         binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
     except UnsafePathError as exc:
-        raise ConfigInspectError(f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw") from exc
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     if not binary:
         raise ConfigInspectError(
             "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"
@@ -207,7 +207,7 @@ def _run(
     except subprocess.TimeoutExpired as exc:
         raise ConfigInspectError("configuration helper timed out without producing a result") from exc
     except UnsafePathError as exc:
-        raise ConfigInspectError(f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw") from exc
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     except OSError as exc:
         raise ConfigInspectError("configuration helper could not be started; run defenseclaw upgrade") from exc
 

@@ -31,7 +31,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
 from defenseclaw.gateway import resolve_trusted_gateway_binary
 
 RULEPACK_WIRE_VERSION: Final = 1
@@ -111,7 +111,7 @@ def validate_rule_pack(
         binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
     except UnsafePathError as exc:
         raise RulePackValidationBridgeError(
-            f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw",
+            unsafe_gateway_remedy(exc),
             code="gateway_untrusted",
         ) from exc
     if not binary:

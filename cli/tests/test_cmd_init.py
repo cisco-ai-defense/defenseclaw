@@ -3596,6 +3596,21 @@ class TestMultiConnectorInit(unittest.TestCase):
         with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]):
             self.assertEqual(cmd_init._prompt_action_connectors(["codex"]), [])
 
+    def test_rerun_preselects_connectors_already_in_action_mode(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]) as prompt:
+            cmd_init._prompt_action_connectors(["codex", "opencode"], ["opencode"])
+        self.assertEqual(prompt.call_args.kwargs["default_selected"], ["opencode"])
+
+        guardrail = MagicMock()
+        guardrail.effective_mode.side_effect = lambda c: "action" if c == "opencode" else "observe"
+        with (
+            patch("defenseclaw.config.config_path_for_data_dir", return_value=__file__),
+            patch("defenseclaw.config.load", return_value=SimpleNamespace(guardrail=guardrail)),
+        ):
+            self.assertEqual(cmd_init._current_action_connectors(["codex", "opencode"], "/x"), ["opencode"])
+
     def test_single_connector_selection_prompts_trust_without_picker(self):
         from defenseclaw.commands import cmd_init
         from defenseclaw.inventory import agent_discovery as ad

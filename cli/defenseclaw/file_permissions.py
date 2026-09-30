@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -59,6 +60,13 @@ class UnsafePathError(OSError):
     def __init__(self, message: str, *, code: str = UNSAFE_PATH_UNKNOWN) -> None:
         super().__init__(message)
         self.code = code
+
+
+def unsafe_gateway_remedy(exc: UnsafePathError) -> str:
+    """The refusal plus a fix, without repeating one it already names."""
+    if "chmod go-w" in str(exc):
+        return str(exc)
+    return f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
 
 
 MAX_DOTENV_BYTES = 1024 * 1024
@@ -653,7 +661,8 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
     current_uid = geteuid() if callable(geteuid) else info.st_uid
     if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
         raise UnsafePathError(
-            "gateway executable is writable by an untrusted principal",
+            f"gateway executable {resolved} can be changed by another account; "
+            f"make this account or root its owner and run: chmod go-w {shlex.quote(str(resolved))}",
             code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
         )
     if sys.platform == "darwin" and darwin_acl_write_error(resolved):
@@ -679,8 +688,12 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         if parent_info.st_uid not in {0, current_uid} or (
             stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky
         ):
+            # Name the folder: a chmod on the (possibly symlinked) command
+            # path changes the file, not the folder other accounts can write.
             raise UnsafePathError(
-                "gateway executable ancestor is writable by an untrusted principal",
+                f"folder {current} holding the gateway executable {resolved} can be changed by "
+                f"another account; make this account or root its owner and run: "
+                f"chmod go-w {shlex.quote(str(current))}",
                 code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
             )
         if sys.platform == "darwin" and darwin_acl_write_error(current):

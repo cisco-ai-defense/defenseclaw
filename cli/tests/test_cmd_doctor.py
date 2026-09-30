@@ -535,6 +535,42 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(api["status"], "fail")
         self.assertIn("absent from health response", api["detail"])
 
+    def test_sidecar_check_says_gateway_is_stopped_once(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_http_probe", return_value=(0, "<urlopen error [Errno 111] Connection refused>")):
+            self.assertIsNone(_check_sidecar(cfg, result))
+        with patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("t", "", "")):
+            self.assertTrue(cmd_doctor._check_gateway_auth(cfg, result))
+        self.assertEqual(len(result.checks), 1, result.checks)
+        self.assertIn("the gateway is not running", result.checks[0]["detail"])
+        self.assertIn("defenseclaw-gateway start", result.checks[0]["detail"])
+
+    def test_sidecar_check_names_foreign_holder_without_its_health_rows(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with (
+            patch.object(
+                cmd_doctor,
+                "_trusted_gateway_listener",
+                return_value=cmd_doctor._GatewayTrust("missing", "managed gateway PID file is missing"),
+            ),
+            patch.object(cmd_doctor, "_gateway_port_holder", return_value="PID 4242 (defenseclaw-gateway)"),
+        ):
+            result = self._run_sidecar_health(self._sidecar_alignment_cfg(), self._complete_sidecar_health())
+        self.assertEqual(len(result.checks), 1, result.checks)
+        self.assertEqual(result.checks[0]["status"], "fail")
+        self.assertIn("held by PID 4242 (defenseclaw-gateway), not by this account's gateway", result.checks[0]["detail"])
+        self.assertEqual(result.gateway_down, "foreign")
+
+    def test_refused_token_send_is_not_a_transport_failure(self):
+        from defenseclaw.commands import cmd_doctor
+
+        detail = cmd_doctor._token_probe_failure(0, "listener is not verified" + cmd_doctor._GATEWAY_TOKEN_REFUSED)
+        self.assertEqual(detail, "the token was not sent: listener is not verified")
+
     def test_sidecar_check_accepts_intentionally_disabled_fleet_gateway(self):
         for scenario, fleet_mode in (
             ("codex loopback standalone", ""),
@@ -2404,6 +2440,12 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
     def setUp(self):
         import http.server
         import threading
+
+        # The in-process server stands in for this account's gateway, so it
+        # is not reported as a foreign process holding the port.
+        holder = patch("defenseclaw.commands.cmd_doctor._gateway_port_holder", return_value="")
+        holder.start()
+        self.addCleanup(holder.stop)
 
         # Records every path + header set the server received, so a test can
         # prove the auth header was NOT replayed to the redirect target.
