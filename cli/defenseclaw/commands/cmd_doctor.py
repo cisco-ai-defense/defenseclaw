@@ -11599,7 +11599,7 @@ def _fix_gateway_service(
             "warn",
             f"gateway service {action}ed and ownership verified; {verified_detail}",
         )
-    return ("pass", f"gateway service {action}ed and ownership verified")
+    return ("pass", f"gateway service {action}ed and ownership verified (repaired because {reason})")
 
 
 def _fix_dotenv_perms(
