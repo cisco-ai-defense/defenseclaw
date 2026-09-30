@@ -981,8 +981,9 @@ and `sandbox policy explain` says so to whoever turned it on.
 
 A cut shows in the activity feed as an `egress.blocked` event of category
 `large_upload` whose reason names the threshold ("✗ files.example.net (large
-upload blocked: more than 10 MiB was sent to a destination this sandbox had
-not contacted before) → unblock: …"), and in telemetry as a HIGH
+upload blocked: this sandbox tried to send more than 10 MiB to a destination
+it had not contacted before) → unblock: …"; the block stopped the upload
+before it crossed, so the sentence says what was tried), and in telemetry as a HIGH
 `sandbox.large_upload` finding and a blocked egress record
 (`SANDBOX_EGRESS_LARGE_UPLOAD`). Each later refusal is an ordinary blocked
 egress event with the same category. Without the block, a large upload stays

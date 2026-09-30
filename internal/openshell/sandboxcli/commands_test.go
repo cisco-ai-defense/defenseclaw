@@ -153,7 +153,7 @@ func TestActivityRendering(t *testing.T) {
 		{Seq: 12, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 403 Forbidden"},
 		// The large-upload block names the threshold the upload crossed.
 		{Seq: 13, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "files.example.net", Category: sandboxapi.CategoryLargeUpload,
-			Reason: "More than 10 MiB was sent to a destination this sandbox had not contacted before.", Unblockable: true},
+			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true},
 		{Seq: 14, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "drop.example.net", BytesUp: 30 << 20},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
@@ -171,7 +171,7 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2",
 		"12:01:02 ✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)",
 		"12:01:02 ✗ a hook call failed (HTTP 403 Forbidden), so the harness's action was blocked",
-		"12:01:02 ✗ files.example.net (large upload blocked: more than 10 MiB was sent to a destination this sandbox had not contacted before)" +
+		"12:01:02 ✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)" +
 			"  → unblock: defenseclaw sandbox unblock files.example.net --sandbox box",
 		"12:01:02 ⚠ large upload to drop.example.net (30.0 MiB)",
 	}

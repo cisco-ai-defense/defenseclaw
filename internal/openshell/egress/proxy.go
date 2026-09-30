@@ -836,9 +836,9 @@ func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (
 // the destination's own. An unblock of the destination lifts the block.
 func (p *Proxy) largeUploadRefusal(pr Principal, d *Decider, dec Decision, scope string) Decision {
 	refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-	refused.Reason, refused.Unblockable = p.largeUploadReason(pr), d.UnblocksAllowed()
+	refused.Reason, refused.Unblockable = p.largeUploadReason(pr, true), d.UnblocksAllowed()
 	if scope != "" {
-		refused.Reason = p.largeUploadScopeReason(pr, scope)
+		refused.Reason = p.largeUploadScopeReason(pr, scope, true)
 	}
 	return refused
 }
@@ -850,13 +850,26 @@ func exemptFromUploadBlock(dec Decision) bool {
 	return dec.Source == SourceUnblock || dec.Source == SourceOperator || dec.Source == SourceAdmin
 }
 
-func (p *Proxy) largeUploadReason(pr Principal) string {
-	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", FormatThreshold(p.counter.thresholdFor(pr)))
+// largeUploadReason says what crossed pr's large-upload threshold. The block
+// stops an upload before the chunk that would cross it, so under the block
+// (blocked) at most the threshold left: the sentence says what the sandbox
+// tried to send, for the cut and the refusals after it alike.
+func (p *Proxy) largeUploadReason(pr Principal, blocked bool) string {
+	threshold := FormatThreshold(p.counter.thresholdFor(pr))
+	if blocked {
+		return fmt.Sprintf("This sandbox tried to send more than %s to a destination it had not contacted before.", threshold)
+	}
+	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", threshold)
 }
 
-func (p *Proxy) largeUploadScopeReason(pr Principal, scope string) string {
-	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
-		FormatThreshold(p.counter.thresholdFor(pr)), scope)
+// largeUploadScopeReason is largeUploadReason for the total of scope (the
+// destinations under a domain, or at an address).
+func (p *Proxy) largeUploadScopeReason(pr Principal, scope string, blocked bool) string {
+	threshold := FormatThreshold(p.counter.thresholdFor(pr))
+	if blocked {
+		return fmt.Sprintf("This sandbox tried to send more than %s to %s it had not contacted before.", threshold, scope)
+	}
+	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.", threshold, scope)
 }
 
 // FormatThreshold is a large-upload threshold as refusals and events name
@@ -1218,9 +1231,9 @@ func (p *Proxy) emitFailed(pr Principal, method string, dec Decision, status int
 func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e := p.event(EventLargeUpload, t.principal, t.method, t.dec)
 	e.TunnelID = t.id
-	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason(t.principal)
+	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason(t.principal, v.cut)
 	if v.scope != "" {
-		e.Reason = p.largeUploadScopeReason(t.principal, v.scope)
+		e.Reason = p.largeUploadScopeReason(t.principal, v.scope, v.cut)
 	}
 	e.BytesUp, e.Threshold = v.total, p.counter.thresholdFor(t.principal)
 	if d := t.flow.dest.Load(); d != nil {

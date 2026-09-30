@@ -742,7 +742,8 @@ func TestProxyLargeUploadAlert(t *testing.T) {
 	}
 	e := h.sink.wait(t, EventLargeUpload, 1)
 	if len(e) != 1 || e[0].Host != "example.com" || e[0].BytesUp <= 1024 || !e[0].FirstSeen || e[0].Terminated ||
-		e[0].Category != CategoryLargeUpload || e[0].BindingID != "binding-one" || e[0].TunnelID == "" {
+		e[0].Category != CategoryLargeUpload || e[0].BindingID != "binding-one" || e[0].TunnelID == "" ||
+		!strings.Contains(e[0].Reason, "More than 1024 bytes was sent") {
 		t.Errorf("large_upload events = %+v", e)
 	}
 }
@@ -791,8 +792,13 @@ func TestProxyLargeUploadBlock(t *testing.T) {
 		})
 	}
 	h := newHarness(t, uploadBlock(0))
-	if got := h.proxy.largeUploadReason(Principal{LargeUploadBytes: 3 << 20}); !strings.Contains(got, "More than 3 MiB was sent") {
+	if got := h.proxy.largeUploadReason(Principal{LargeUploadBytes: 3 << 20}, false); !strings.Contains(got, "More than 3 MiB was sent") {
 		t.Errorf("reason for a 3 MiB threshold = %q", got)
+	}
+	// The block stops the upload before it crosses: it says what was tried.
+	if got := h.proxy.largeUploadReason(Principal{LargeUploadBytes: 3 << 20}, true); got !=
+		"This sandbox tried to send more than 3 MiB to a destination it had not contacted before." {
+		t.Errorf("reason of the block for a 3 MiB threshold = %q", got)
 	}
 }
 
@@ -810,11 +816,14 @@ func TestProxyLargeUploadBlockPerSandbox(t *testing.T) {
 	conn, br := h.openTunnelTo(blocking, "example.com:443")
 	upload(conn, br, 4096)
 	e := h.sink.wait(t, EventLargeUpload, 1)[0]
+	// At most the threshold left: the reason says what the sandbox tried,
+	// not that more was sent.
 	if e.SandboxName != "sb-two" || !e.Terminated || !e.Unblockable || e.Threshold != 1024 || e.BytesUp > 1024 ||
-		!strings.Contains(e.Reason, "More than 1024 bytes was sent") {
+		!strings.Contains(e.Reason, "tried to send more than 1024 bytes") || strings.Contains(e.Reason, "was sent") {
 		t.Errorf("large_upload event of the blocking sandbox = %+v", e)
 	}
-	if resp, b := h.refused(blocking, "example.com:443"); resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload {
+	if resp, b := h.refused(blocking, "example.com:443"); resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload ||
+		!strings.Contains(b.Reason, "tried to send more than 1024 bytes") {
 		t.Fatalf("tunnel after the block = %d %+v", resp.status, b)
 	}
 

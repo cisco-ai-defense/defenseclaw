@@ -218,9 +218,9 @@ struct SandboxModelTests {
         expect(lifecycle.summary == "now stopped", "lifecycle summary")
         // The large-upload block names the threshold the upload crossed.
         let upload = SandboxActivity(kind: "egress.blocked", host: "files.example.net", category: "large_upload",
-                                     reason: "More than 10 MiB was sent to a destination this sandbox had not contacted before.")
-        expect(upload.summary == "files.example.net (large upload blocked: more than 10 MiB was sent to a destination "
-               + "this sandbox had not contacted before)", "large upload summary \(upload.summary)")
+                                     reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.")
+        expect(upload.summary == "files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB "
+               + "to a destination it had not contacted before)", "large upload summary \(upload.summary)")
     }
 
     private static func decodesSandboxAPIErrorBodies() {

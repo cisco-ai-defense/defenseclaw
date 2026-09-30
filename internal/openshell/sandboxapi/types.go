@@ -750,10 +750,11 @@ const CategoryLargeUpload = "large_upload"
 
 // LargeUploadBlockedText is how the feed words an egress.blocked event of
 // category large_upload, whose Reason is the egress proxy's sentence
-// ("More than 25 MiB was sent to a destination this sandbox had not
-// contacted before."): "large upload blocked: more than 25 MiB was sent to
-// …". The large-upload block (egress.block_large_uploads) cut the upload
-// that crossed the threshold, or refused a later one to the destination.
+// ("This sandbox tried to send more than 25 MiB to a destination it had
+// not contacted before."): "large upload blocked: this sandbox tried to
+// send more than 25 MiB to …". The large-upload block
+// (egress.block_large_uploads) stopped the upload before it crossed the
+// threshold, or refused a later one to the destination.
 func LargeUploadBlockedText(reason string) string {
 	if why := LargeUploadReason(reason); why != "" {
 		return "large upload blocked: " + why
@@ -761,9 +762,9 @@ func LargeUploadBlockedText(reason string) string {
 	return "large upload blocked"
 }
 
-// LargeUploadReason is the proxy's large-upload sentence as a clause: "more
-// than 25 MiB was sent to a destination this sandbox had not contacted
-// before". Empty for an empty reason.
+// LargeUploadReason is the proxy's large-upload sentence as a clause: "this
+// sandbox tried to send more than 25 MiB to a destination it had not
+// contacted before". Empty for an empty reason.
 func LargeUploadReason(reason string) string {
 	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
 	if reason == "" {

@@ -638,7 +638,7 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 		return false
 	})
 	if ev.Host != "example.org" || !ev.Unblockable || ev.Severity != "HIGH" || ev.BytesUp > 1<<20 ||
-		ev.Message != "✗ example.org (large upload blocked: more than 1 MiB was sent to a destination this sandbox had not contacted before)" {
+		ev.Message != "✗ example.org (large upload blocked: this sandbox tried to send more than 1 MiB to a destination it had not contacted before)" {
 		t.Fatalf("feed event = %+v", ev)
 	}
 	if n := len(e.events("upbox", sandboxapi.ActivityEgressLargeUpload, "")); n != 0 {
@@ -655,7 +655,7 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	}
 	rec := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Blocked })[0]
 	if rec.DecisionCode != "SANDBOX_EGRESS_LARGE_UPLOAD" || rec.Severity != "HIGH" || rec.Host != "example.org" ||
-		!strings.Contains(rec.Reason, "More than 1 MiB") {
+		!strings.Contains(rec.Reason, "tried to send more than 1 MiB") {
 		t.Fatalf("egress record = %+v", rec)
 	}
 
@@ -666,7 +666,7 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	eventually(t, "the refusal in the feed", func() bool {
 		for _, got := range e.events("upbox", sandboxapi.ActivityEgressBlocked, "") {
 			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" &&
-				strings.Contains(got.Message, "(large upload blocked: more than 1 MiB") {
+				strings.Contains(got.Message, "(large upload blocked: this sandbox tried to send more than 1 MiB") {
 				return true
 			}
 		}

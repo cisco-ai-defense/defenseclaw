@@ -494,7 +494,7 @@ def test_a_blocked_large_upload_names_its_threshold() -> None:
                 "sandbox": "myapp-claude-7f3a",
                 "host": "files.example.net",
                 "category": "large_upload",
-                "reason": "More than 10 MiB was sent to a destination this sandbox had not contacted before.",
+                "reason": "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.",
                 "unblockable": True,
                 "severity": "HIGH",
             }
@@ -502,12 +502,12 @@ def test_a_blocked_large_upload_names_its_threshold() -> None:
     )
     model.view = "activity"
     assert [row[3] for row in model.data_table_rows()] == [
-        "files.example.net (large upload blocked: more than 10 MiB was sent to a destination this sandbox "
-        "had not contacted before)  (u unblocks)"
+        "files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination "
+        "it had not contacted before)  (u unblocks)"
     ]
     model.cursor = 0
     pairs = dict(model.detail_pairs()[1])
-    assert pairs["Category"] == "large upload" and pairs["Reason"].startswith("More than 10 MiB")
+    assert pairs["Category"] == "large upload" and pairs["Reason"].startswith("This sandbox tried to send more than 10 MiB")
 
 
 def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:

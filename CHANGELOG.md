@@ -721,8 +721,8 @@ deleted.
   the chunk that crosses the threshold, and later requests to that host, or to
   other new hosts under its domain or at its address, get a 403 of category
   `large_upload`. The feed shows a ✗ with the threshold and the unblock
-  command (`✗ files.example.net (large upload blocked: more than 10 MiB was
-  sent to a destination this sandbox had not contacted before)`) instead of
+  command (`✗ files.example.net (large upload blocked: this sandbox tried to
+  send more than 10 MiB to a destination it had not contacted before)`) instead of
   the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
   egress audit records the cut as blocked (`SANDBOX_EGRESS_LARGE_UPLOAD`).
   Unblocked hosts and those on an allow list the user or the administrator

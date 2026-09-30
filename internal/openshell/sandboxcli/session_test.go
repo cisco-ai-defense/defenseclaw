@@ -351,10 +351,10 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 			Message: "⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)"},
 		{Seq: 6, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "INFO", Reason: "note", Message: "nothing to see"},
 		{Seq: 7, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "files.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
-			Reason: "More than 10 MiB was sent to a destination this sandbox had not contacted before.", Unblockable: true},
+			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true},
 	}
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
-	upload := "✗ DefenseClaw blocked a large upload to files.example.net (more than 10 MiB was sent to a destination this sandbox had not " +
+	upload := "✗ DefenseClaw blocked a large upload to files.example.net (this sandbox tried to send more than 10 MiB to a destination it had not " +
 		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
 	ta.term.during = func() {
 		waitFor(t, "the tamper notice", func() bool { return strings.Contains(stderr.String(), "hook tamper") })
