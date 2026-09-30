@@ -298,7 +298,7 @@ def host_port(host: str, port: int) -> str:
     ("[fd00:ec2::254]:80"; "fd00:ec2::254:80" is another address)."""
     if port and port != 443:
         if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
+            host = "[" + host + "]"  # plain data (callers escape it), not a Rich tag
         return f"{host}:{port}"
     return host
 
