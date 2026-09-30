@@ -299,3 +299,21 @@ def test_expand_matches_the_gateways_rule(monkeypatch, tmp_path):
     assert openclaw_presence._expand("~alice/.openclaw") == "~alice/.openclaw"
     assert openclaw_presence._expand("~") == "~"
     assert openclaw_presence._expand("/opt/openclaw") == "/opt/openclaw"
+
+
+@pytest.mark.parametrize("health", [None, {"connectors": [{"name": "openclaw", "state": "running"}]}])
+def test_status_says_the_openclaw_gateway_is_off_when_it_is_not_installed(tmp_path, no_openclaw_binary, health):
+    # `defenseclaw status` listed OpenClaw as RUNNING on a machine where it
+    # is only the claw.mode default and not installed, while the gateway
+    # reported its OpenClaw gateway off (#958).
+    import contextlib
+    import io
+
+    from defenseclaw.commands import cmd_status
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_status._print_agents(_cfg(tmp_path), health=health)
+    out = buf.getvalue()
+    assert "OFF" in out and "OpenClaw is not installed" in out, out
+    assert "RUNNING" not in out, out
