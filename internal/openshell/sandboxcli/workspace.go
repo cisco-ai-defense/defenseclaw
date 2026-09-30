@@ -138,13 +138,10 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	// restore): say so, and what it ends, before asking.
 	sb, _ := api.Get(ctx, o.Name)
 	running := sb != nil && sb.Phase == "ready"
-	var cli *openshell.CLI
 	run := detachedRun{State: runNone}
 	if running {
 		if gateway, err := a.gatewayName(ctx); err == nil {
-			c := a.cli(gateway)
-			cli = &c
-			if r, err := a.detachedRun(ctx, c, sb); err == nil {
+			if r, err := a.detachedRun(ctx, a.cli(gateway), sb); err == nil {
 				run = r
 			}
 		}
@@ -172,9 +169,8 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		}
 		return nil
 	}
-	if cli != nil {
-		a.keepRunLog(ctx, *cli, sb, run)
-	}
+	// The daemon's stop marks a detached run it ends interrupted and keeps
+	// its log for `sandbox logs`.
 	res, err := api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Stop: true, Restart: o.Restart, KeepRefs: o.KeepRefs})
 	if err != nil {
 		return apiError(err)

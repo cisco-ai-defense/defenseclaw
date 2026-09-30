@@ -12,7 +12,8 @@
 // Overview card. All three render AppState.sandbox (pulse-refreshed from the
 // daemon's /api/v1/sandbox API). Unblock and ask decisions go to the daemon;
 // stop, review, undo and a pull to a branch run the CLI so their output lands
-// in Activity (stop and undo also keep a detached run's log there for
+// in Activity (the CLI says when a stop ends a detached run, and remembers
+// what a copy held as it stopped; the daemon's stop keeps the run's log for
 // `sandbox logs`). Harness sessions (run, connect) need a terminal, and so
 // does a pull that applies to the working tree after showing the changes,
 // so the app offers the command to copy rather than a window pretending to
@@ -64,8 +65,9 @@ struct SandboxesView: View {
             isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } }),
             presenting: confirmStop
         ) { row in
-            // The CLI looks for a detached run first: it says so in Activity,
-            // marks the run interrupted and keeps its log for `sandbox logs`.
+            // The CLI looks for a detached run first and says so in Activity;
+            // the daemon's stop marks the run interrupted and keeps its log
+            // for `sandbox logs`.
             Button("Stop", role: .destructive) { runCLI("Stop \(row.name)", ["sandbox", "stop", row.name, "--yes"]) }
         } message: { row in
             Text("Ends the harness session running in \(row.name), and a detached run (sandbox run --detach) if one "

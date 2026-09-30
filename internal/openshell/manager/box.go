@@ -421,8 +421,9 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	bindingID := b.rec.BindingID
 	shared := sharedLimitsOf(b)
 	blocked := b.blockedHostList()
+	accepted := b.rec.Accepted
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID, blocked)
+	m.decorate(&v, proxy, bindingID, blocked, accepted)
 	views := []sandboxapi.Sandbox{v}
 	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
 	return views[0]
@@ -523,13 +524,14 @@ func (b *box) blockedHostList() []string {
 }
 
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's counts and the snapshot. The egress counts are destinations:
+// the proxy's counts and the snapshot, with its acceptance (accepted, the
+// record's Accepted) when it applies. The egress counts are destinations:
 // Destinations those the sandbox reached, Blocked those refused at least
 // once (by the DefenseClaw proxy or by OpenShell, whose refused
 // destinations openshellBlocked lists), the way the feed and a session's
 // ✗ lines name them; BlockedRequests counts the refused requests. Callers
 // must not hold Manager.mu.
-func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string) {
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string, accepted *acceptedSnapshot) {
 	blocked := make(map[string]struct{}, len(openshellBlocked))
 	for _, h := range openshellBlocked {
 		blocked[h] = struct{}{}
@@ -555,6 +557,9 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 		}
 		if snap.UndoneAt != nil {
 			info.UndoneAt = *snap.UndoneAt
+		}
+		if accepted.acceptedFor(snap) {
+			info.AcceptedAt = accepted.At
 		}
 		v.Snapshot = info
 	}

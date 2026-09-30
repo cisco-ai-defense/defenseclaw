@@ -366,6 +366,9 @@ class SandboxRow:
     last_hook_failure: str = ""
     orphaned: bool = False
     undo_available: bool = False
+    # The user kept the last session's changes (the daemon's accept): the
+    # next start takes a new undo point, whoever starts the sandbox.
+    undo_accepted: bool = False
     nested_repos: tuple[NestedRepoRow, ...] = ()
     warnings: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
@@ -504,6 +507,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         last_hook_failure=_text(hooks.get("last_hook_failure")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
+        undo_accepted=bool(snapshot) and _time(snapshot.get("accepted_at")) is not None,
         nested_repos=nested,
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
@@ -1715,6 +1719,9 @@ class SandboxesPanelModel:
         if row.copy_mode:
             pairs.append(("Pull", "P brings the work back: it shows the changes, then applies them or makes a branch"))
             pairs.append(("Undo", "reverts the last pull --apply (U)"))
+        elif row.undo_available and row.undo_accepted:
+            kept = "the last session's changes were kept, so the next start takes a new undo point"
+            pairs.append(("Undo", f"available (U); {kept}"))
         else:
             pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))
         for alert in row.alerts:

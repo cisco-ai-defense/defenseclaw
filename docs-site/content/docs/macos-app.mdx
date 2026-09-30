@@ -15,8 +15,8 @@ and setup flows, and a runtime installer. It connects only to the local
 DefenseClaw installation: the gateway REST API on `127.0.0.1`, the audit
 database, logs and configuration under `~/.defenseclaw`. Actions that change
 something run through the `defenseclaw` CLI, and their output appears in the
-**Activity** panel. Sandbox unblocks, ask decisions and stops go straight to
-the DefenseClaw daemon's API instead.
+**Activity** panel. Sandbox unblocks and ask decisions go straight to the
+DefenseClaw daemon's API instead.
 
 ## Panels
 
@@ -110,7 +110,10 @@ The panel has four parts:
   calls, last tool block, undo, the run image when it has one (on a MicroVM
   gateway, the image its harness settings are baked into) and alerts, with
   these actions:
-  - **Stop** stops it; `defenseclaw sandbox connect <name>` resumes it.
+  - **Stop…** asks first, then runs `defenseclaw sandbox stop <name> --yes`;
+    `defenseclaw sandbox connect <name>` resumes it. A detached run still
+    going ends: DefenseClaw marks it interrupted and keeps its log for
+    `defenseclaw sandbox logs <name>`.
   - **Review changes** runs `defenseclaw sandbox review <name>`.
   - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
     which stops the sandbox and puts the project folder back to its

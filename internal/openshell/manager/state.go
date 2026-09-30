@@ -206,6 +206,13 @@ type record struct {
 	// changed in place.
 	Guard *guardRecord `json:"guard,omitempty"`
 
+	// Accepted records that the user kept the changes made on top of the
+	// mounted project's current pre-session snapshot (Manager.Accept): the
+	// next start takes a fresh snapshot instead of keeping this one for
+	// undo. It names the snapshot, so it never applies to another one, and
+	// the next start drops it. It is replaced, never changed in place.
+	Accepted *acceptedSnapshot `json:"accepted,omitempty"`
+
 	// Retained marks a sandbox that is gone (deleted with --keep-snapshot,
 	// or outside DefenseClaw) whose record is kept only for its
 	// pre-session snapshot: undo, review and delete still reach it.
@@ -299,9 +306,10 @@ func (s recordStore) has(name string) bool {
 
 // OrphanedSandboxData lists the sandboxes that have data under
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
-// files) or a pre-session snapshot under <data_dir>/snapshots/<name> (with
-// its refs in the project) but no daemon record: an interrupted create or
-// delete, or an older build, left it. RemoveOrphanedSandboxData removes it.
+// files, a kept run log) or a pre-session snapshot under
+// <data_dir>/snapshots/<name> (with its refs in the project) but no daemon
+// record: an interrupted create or delete, or an older build, left it.
+// RemoveOrphanedSandboxData removes it.
 func OrphanedSandboxData(dataDir string) []string {
 	records := newRecordStore(dataDir)
 	seen := map[string]bool{}
@@ -335,9 +343,9 @@ const orphanSnapshotTimeout = 2 * time.Minute
 // RemoveOrphanedSandboxData releases and removes the data an orphaned
 // sandbox left (see OrphanedSandboxData): its mount pins and mask files,
 // its pre-session snapshot and the refs it holds in the project, its
-// copy-mode state and its run files, then the directory. A sandbox the
-// daemon still records is refused, and a directory that holds anything
-// else is left in place.
+// copy-mode state, its run files and a kept run log, then the directory. A
+// sandbox the daemon still records is refused, and a directory that holds
+// anything else is left in place.
 func RemoveOrphanedSandboxData(dataDir, name string) error {
 	if !openshell.ValidSandboxName(name) || name == recordDirName {
 		return fmt.Errorf("invalid sandbox name %q", name)
@@ -360,6 +368,7 @@ func RemoveOrphanedSandboxData(dataDir, name string) error {
 	keep(workspace.DeleteCopy(dataDir, name))
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
+	keep(os.RemoveAll(filepath.Join(dir, runLogDirName)))
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("%s holds files DefenseClaw did not write there; it is left in place", dir))
 	}
@@ -403,11 +412,12 @@ func RecordedSandboxes(dataDir string) []RecordedSandbox {
 // directly, and turns openshell.enabled off, so no daemon would reconcile
 // it later. It releases a live mount (the protection pins PlanMount set in
 // the project's .git, and the mask files), deletes the pre-session snapshot
-// and its refs or the copy-mode state, the run files and the ingress
-// binding, then the record and the sandbox directory. The gateway side (the
-// sandbox, its providers) is the caller's, and so is making sure no daemon
-// runs on dataDir. Every step is attempted and the errors are joined; the
-// record stays while one failed, so a retry finds the sandbox again.
+// and its refs or the copy-mode state, the run files, a kept run log and the
+// ingress binding, then the record and the sandbox directory. The gateway
+// side (the sandbox, its providers) is the caller's, and so is making sure
+// no daemon runs on dataDir. Every step is attempted and the errors are
+// joined; the record stays while one failed, so a retry finds the sandbox
+// again.
 func RemoveSandboxState(ctx context.Context, dataDir, name string) error {
 	if !openshell.ValidSandboxName(name) || name == recordDirName {
 		return fmt.Errorf("invalid sandbox name %q", name)
@@ -437,6 +447,7 @@ func RemoveSandboxState(ctx context.Context, dataDir, name string) error {
 	keep(workspace.DeleteCopy(dataDir, name))
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
+	keep(os.RemoveAll(filepath.Join(dir, runLogDirName)))
 	if rec.BindingID != "" {
 		keep(revokeStoredBinding(dataDir, rec.BindingID))
 	}

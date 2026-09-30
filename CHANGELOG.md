@@ -649,6 +649,25 @@ deleted.
   (`openshell.binary`, an `openshell.egress` pattern) is placed by the
   Python mirror of those checks. Messages still never contain the rejected
   value.
+- The daemon now does the detached-run and undo-point bookkeeping the CLI
+  did alone (#947), so the TUI, the macOS app, a tamper stop
+  (`hooks.on_tamper: stop`) and `undo` get it too. Every stop of a running
+  sandbox marks a detached run still going interrupted (its runner is found
+  by `latest.pid` and a command line naming `latest.exit`), says so on the
+  activity feed (`run_interrupted`), and keeps the last 1 MiB of the run's
+  log under `<data_dir>/sandboxes/<name>/runlog/`; `sandbox logs` of a
+  stopped sandbox reads it from the new `GET
+  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows a log an earlier
+  CLI kept. Keeping the changes at the end of a session is recorded through
+  the new `POST /api/v1/sandbox/sandboxes/{name}/accept` instead of
+  `cli/accepted.json` (one an earlier CLI wrote is honoured once), so the
+  next start takes a new undo point whoever starts the sandbox, and the
+  sandbox's snapshot carries `accepted_at` (the TUI and the macOS app say
+  so). A start with `--no-snapshot` now uses the acceptance up, so that
+  session's changes keep the undo point at the next start. The CLI still
+  asks before `sandbox stop` ends a run, and reads the same from the user's
+  side. The Python client has `sandbox_run_log` and
+  `accept_sandbox_changes`. Both drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 

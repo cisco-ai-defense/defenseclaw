@@ -697,8 +697,10 @@ server with `--no-tty` to get the prompt back at once.
 
 Shows the output of a detached run (`run --detach`) and whether the run is
 still going, finished (with its exit status) or was interrupted. `-f` follows
-the output until the run ends. Once the sandbox is stopped, it shows the log
-`stop` kept on this machine. The agent writes this log, so on a terminal
+the output until the run ends. Once the sandbox is stopped, it shows the last
+1 MiB of the log that DefenseClaw kept on this machine as it stopped the
+sandbox, whoever stopped it (`stop`, the TUI, the macOS app, `undo`, a tamper
+stop). The agent writes this log, so on a terminal
 its escape sequences (other than colors) and control characters print as
 `�` rather than acting on the terminal; piped or redirected to a file, the
 log is written as it is. A one-prompt `run --prompt` prints the harness's
@@ -763,8 +765,8 @@ defenseclaw sandbox status myapp-7f3a --output json
 
 Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
 detached run is still going, `stop` asks first on a terminal (`--yes` skips
-the question; without a terminal it warns), marks the run interrupted and
-keeps its log for `sandbox logs`.
+the question; without a terminal it warns). The stop marks the run
+interrupted and keeps its log for `sandbox logs`, as every stop does.
 
 For a copy-mode sandbox that no detached run and no other session is using,
 `stop` first looks at its copy. When nothing in it is left to bring back (it
@@ -792,7 +794,8 @@ one was undone, or the folder hasn't changed since it. If an earlier
 session's changes are still in the folder, the old snapshot is kept, so
 `undo` can still revert them, and the activity feed says so. Changes you
 kept at the end of a session ("Keep changes?", `--yes` or `on_exit: keep`)
-count as accepted: the next `start` or `connect` takes a fresh snapshot.
+count as accepted: DefenseClaw records it, and the next start takes a fresh
+snapshot, whether `start`, `connect`, the TUI or the macOS app starts it.
 `--new-snapshot` accepts the changes and takes a fresh snapshot;
 `--no-snapshot` always keeps the old one. `start` says which undo point
 applies, and when it kept the old one, that stopping the sandbox and

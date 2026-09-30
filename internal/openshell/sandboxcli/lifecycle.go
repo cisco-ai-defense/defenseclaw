@@ -516,7 +516,8 @@ type StopOptions struct {
 }
 
 // Stop is `sandbox stop`. A detached run the stop would end is confirmed
-// on a terminal (said otherwise), and its log is kept for `sandbox logs`.
+// on a terminal (said otherwise); the daemon's stop marks it interrupted
+// and keeps its log for `sandbox logs`.
 // The copy of a copy-mode sandbox nothing runs in any more is looked at
 // first: what it holds as it stops is remembered (markStoppedCopy), so
 // `delete` need not warn about work that came back already, and the next
@@ -745,7 +746,7 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	}
 	out, flush := a.runLogWriter(sb)
 	if sb.Phase != "ready" {
-		return a.keptLogs(sb, lines, out, flush)
+		return a.keptLogs(ctx, api, sb, lines, out, flush)
 	}
 	gateway, err := a.gatewayName(ctx)
 	if err != nil {
@@ -818,27 +819,46 @@ func (a *App) runLogWriter(sb *sandboxapi.Sandbox) (io.Writer, func() error) {
 }
 
 // keptLogs prints the run log DefenseClaw kept when it stopped the sandbox.
-func (a *App) keptLogs(sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
-	meta, log, err := a.savedRunLog(sb)
+func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
+	kept, err := a.keptRunLog(ctx, api, sb, lines)
 	if err != nil {
 		return err
 	}
-	if meta == nil {
+	if kept == nil {
 		return fmt.Errorf("%s is %s, and no log of a detached run was kept when it stopped; its log is inside it (`%s start %s`, then `%s logs %s`)",
 			sb.Name, sb.Phase, CommandName, sb.Name, CommandName, sb.Name)
 	}
-	if _, err := out.Write(lastLines(log, lines)); err != nil {
+	if _, err := io.WriteString(out, kept.Log); err != nil {
 		return err
 	}
 	_ = flush()
-	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(meta.SavedAt)))
-	switch meta.State {
+	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(kept.KeptAt)))
+	switch runState(kept.State) {
 	case runExited:
-		a.note("the run exited with status " + meta.Exit)
+		a.note("the run exited with status " + kept.Exit)
 	case runInterrupted:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
 	case runRunning:
 		a.note("the run was still going when the log was kept")
 	}
 	return nil
+}
+
+// keptRunLog is the log of sb's latest detached run the daemon kept when it
+// stopped the sandbox, its last lines lines; failing that, one an earlier
+// CLI kept (legacyRunLog). nil when neither kept one.
+func (a *App) keptRunLog(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int) (*sandboxapi.RunLog, error) {
+	kept, err := api.RunLog(ctx, sb.Name, lines)
+	if err == nil {
+		return kept, nil
+	}
+	if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return nil, apiError(err)
+	}
+	meta, log, err := a.legacyRunLog(sb)
+	if err != nil || meta == nil {
+		return nil, err
+	}
+	return &sandboxapi.RunLog{Name: sb.Name, State: string(meta.State), Exit: meta.Exit, KeptAt: meta.SavedAt,
+		Log: string(lastLines(log, lines))}, nil
 }

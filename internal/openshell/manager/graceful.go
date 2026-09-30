@@ -19,7 +19,6 @@ package manager
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,10 +36,16 @@ import (
 // asks the harness to exit first (SIGTERM to its processes, found by the
 // install root their executable or script lies under) and waits a moment
 // for them to go: a harness that exits runs its end-of-session hook, and its
-// terminal ends like a /exit. A detached run the stop ends this way is
-// marked interrupted first, so `sandbox logs` does not take the status the
-// SIGTERM gave it for the run's own ending. The stop goes ahead whatever
-// the sandbox answers.
+// terminal ends like a /exit. The stop goes ahead whatever the sandbox
+// answers.
+//
+// The same exec looks at the sandbox's latest detached run (`sandbox run
+// --detach`, harness.RunDir) first, whoever asked for the stop (the CLI,
+// the TUI, the macOS app, undo, a tamper stop): one that has not ended is
+// marked interrupted, so `sandbox logs` does not take the status the
+// SIGTERM gave it for the run's own ending, and once the harness has
+// exited the stop keeps the end of the run's log on this machine
+// (runlog.go), where `sandbox logs` reads it while the sandbox is stopped.
 //
 // On a driver whose stop does not flush the workload's writes (the MicroVM
 // driver, openshell.Driver.StopFlushes), a file written and not synced
@@ -70,13 +75,38 @@ const flushTrap = "trap '/bin/sync && echo synced' EXIT\n"
 // install root; a script harness's interpreter runs a script there), lies
 // under the install root $1. The harness's executable link is often not
 // readable to the exec (a process that is not dumpable), its command line
-// always is. Before any of that, a detached run in the run directory $3
-// (harness.RunDir) that has not ended is marked interrupted, as `sandbox
-// stop` marks it: its runner keeps the mark. It prints how it ended:
-// "none", "exited" or "running".
+// always is. It prints how it ended: "none", "exited" or "running".
+//
+// Before any of that it looks at the latest detached run in the run
+// directory $3 (harness.RunDir), as `sandbox logs` does (sandboxcli's
+// runAlive): the run is going while the pid in latest.pid is a live
+// process whose command line names latest.exit, its runner's (a pid reused
+// after a restart is not the run's; a process table that hides command
+// lines trusts the pid). A run that has not ended is marked interrupted in
+// latest.exit, a mark its runner keeps. It prints run=running (a live run
+// the stop ends), run=exited with run_exit=<status>, or run=interrupted
+// (the sandbox stopped under it before), and run_started=<epoch seconds>;
+// nothing without a run. The run directory is the workload's: only
+// regular files are read, and only their first bytes.
 const endHarnessScript = `root=$1; ticks=$2; runs=$3; self=$$; pids=
-if [ -n "$runs" ] && [ -e "$runs/latest.pid" ] && [ ! -s "$runs/latest.exit" ]; then
-  { printf 'interrupted\n' > "$runs/latest.exit"; } 2>/dev/null
+if [ -n "$runs" ] && { [ -e "$runs/latest.pid" ] || [ -e "$runs/latest.log" ]; }; then
+  run=interrupted; pid=; started=
+  [ -f "$runs/latest.pid" ] && pid=$(head -c 32 "$runs/latest.pid" 2>/dev/null | tr -d '\n')
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) if kill -0 "$pid" 2>/dev/null && { [ ! -r "/proc/$pid/cmdline" ] || tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q latest.exit; }; then
+         run=running
+       fi ;;
+  esac
+  if [ -f "$runs/latest.exit" ] && [ -s "$runs/latest.exit" ]; then
+    s=$(head -c 32 "$runs/latest.exit" 2>/dev/null | tr -dc 'A-Za-z0-9_.-')
+    [ "$s" = interrupted ] || { run=exited; echo "run_exit=$s"; }
+  elif [ -e "$runs/latest.pid" ]; then
+    { printf 'interrupted\n' > "$runs/latest.exit"; } 2>/dev/null
+  fi
+  [ -f "$runs/latest.started" ] && started=$(head -c 32 "$runs/latest.started" 2>/dev/null | tr -dc 0-9)
+  echo "run=$run"
+  echo "run_started=$started"
 fi
 for d in /proc/[0-9]*; do
   p=${d#/proc/}
@@ -101,17 +131,55 @@ while [ "$i" -lt "$ticks" ]; do
 done
 echo running`
 
+// harnessEnd is what endHarnessScript printed: how the harness ended
+// (none, exited or running), whether the flush trap ran, and the latest
+// detached run as the stop found it (State runNone without one).
+type harnessEnd struct {
+	Harness string
+	Synced  bool
+	Run     detachedRun
+}
+
+// parseHarnessEnd reads endHarnessScript's output.
+func parseHarnessEnd(out []byte) harnessEnd {
+	end := harnessEnd{Run: detachedRun{State: runNone}}
+	for _, tok := range strings.Fields(string(out)) {
+		k, v, kv := strings.Cut(tok, "=")
+		switch {
+		case !kv && tok == "synced":
+			end.Synced = true
+		case !kv:
+			if end.Harness == "" {
+				end.Harness = tok
+			}
+		case k == "run":
+			switch s := runState(v); s {
+			case runRunning, runExited, runInterrupted:
+				end.Run.State = s
+			}
+		case k == "run_exit":
+			end.Run.Exit = v
+		case k == "run_started":
+			end.Run.Started, _ = strconv.ParseInt(v, 10, 64)
+		}
+	}
+	return end
+}
+
 // endHarness asks a ready sandbox's harness to exit before the sandbox is
 // stopped, so its end-of-session hook reaches DefenseClaw, and flushes the
-// sandbox's disk when the driver's stop would not. Failures are logged:
-// the stop goes ahead either way.
-func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) {
+// sandbox's disk when the driver's stop would not. It returns the latest
+// detached run as it found it (State runNone: there is none, or the
+// sandbox did not answer), whose log the stop keeps next. Failures are
+// logged: the stop goes ahead either way.
+func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) detachedRun {
+	none := detachedRun{State: runNone}
 	m.mu.Lock()
 	name, harnessName := b.rec.Name, b.rec.Harness
 	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
 	m.mu.Unlock()
 	if !ready {
-		return
+		return none
 	}
 	flush := !gw.Driver.StopFlushes
 	spec, ok := harness.Get(harnessName)
@@ -119,7 +187,7 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) {
 		if flush {
 			m.flushSandbox(ctx, gw, name)
 		}
-		return
+		return none
 	}
 	script, budget, timeout := endHarnessScript, harnessExitBudget, harnessExitWait+3*time.Second
 	if flush {
@@ -137,15 +205,16 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) {
 			// on its own.
 			m.flushSandbox(ctx, gw, name)
 		}
-		return
+		return none
 	}
-	out := strings.Fields(string(res.Stdout))
-	if len(out) > 0 && out[0] == "running" {
+	end := parseHarnessEnd(res.Stdout)
+	if end.Harness == "running" {
 		m.logf("sandbox %s: the harness did not exit within %s; stopping the sandbox under it", name, harnessExitWait)
 	}
-	if flush && !slices.Contains(out, "synced") {
-		m.flushFailed(name, fmt.Errorf("sync(1) did not finish (the sandbox answered %q)", strings.Join(out, " ")))
+	if flush && !end.Synced {
+		m.flushFailed(name, fmt.Errorf("sync(1) did not finish (the sandbox answered %q)", strings.Join(strings.Fields(string(res.Stdout)), " ")))
 	}
+	return end.Run
 }
 
 // flushSandbox runs sync(1) in a ready sandbox before a stop its driver

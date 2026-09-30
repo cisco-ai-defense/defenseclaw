@@ -41,8 +41,7 @@ import (
 // as the next session's base.
 func unaccepted(t *testing.T, ta *testApp, name string) {
 	t.Helper()
-	dir, _ := ta.cliStateDir(name)
-	if _, err := os.Stat(filepath.Join(dir, "accepted.json")); err == nil {
+	if ta.calls("POST", name+"/accept") != 0 {
 		t.Fatal("changes nobody may accept yet were accepted as the next session's base")
 	}
 }
@@ -283,9 +282,14 @@ func TestHeadlessSessionOnATerminalAsksToKeepChanges(t *testing.T) {
 			if asked := strings.Contains(ta.output(), "Keep changes?"); asked != tty || len(ta.term.runs) != 0 {
 				t.Fatalf("asked = %v, terminal runs %d:\n%s", asked, len(ta.term.runs), ta.output())
 			}
+			if accepts := ta.bodies("POST", "m1-a/accept"); len(accepts) != map[bool]int{true: 1, false: 0}[tty] ||
+				(tty && !strings.Contains(accepts[0], `"snapshot_created_at":"`)) {
+				t.Fatalf("accepts = %q; the changes must be accepted against the reviewed snapshot: %t", accepts, tty)
+			}
 			ta.ok(t, ta.Start(bg, "m1-a", StartOptions{}))
-			if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || strings.Contains(starts[1], `"new_snapshot":true`) != tty {
-				t.Fatalf("starts = %q; the second must ask for a new snapshot: %t", starts, tty)
+			// The daemon takes the new snapshot of accepted changes itself.
+			if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
+				t.Fatalf("starts = %q", starts)
 			}
 		})
 	}
@@ -846,18 +850,22 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 }
 
 // `sandbox stop` on a sandbox whose detached run is still going asks first
-// on a terminal, marks the run interrupted and keeps its log on this
-// machine, where `sandbox logs` reads it once the sandbox is stopped (manual
-// test M1). Deleting the sandbox drops what the CLI kept of it.
+// on a terminal; the daemon's stop marks the run interrupted and keeps its
+// log on this machine, which `sandbox logs` reads once the sandbox is
+// stopped (manual test M1). The CLI no longer does either itself, so a stop
+// from the TUI, the macOS app or a tamper stop keeps it the same way.
 func TestStopWithALiveDetachedRun(t *testing.T) {
 	const log = "working on it\nstill working\n"
 	going := "started=1790000000\nstate=running\n"
+	daemonKeeps := func(ta *testApp) {
+		ta.daemon.stopRunLogs["box"] = &sandboxapi.RunLog{State: sandboxapi.RunInterrupted, StartedAt: time.Unix(1790000000, 0), Log: log}
+	}
 	t.Run("declined", func(t *testing.T) {
 		ta := newTestApp(t, "n\n", sampleSandbox("box"))
 		runAnswers(ta, going, log)
 		ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
-		if ta.calls("POST", "box/stop") != 0 || ranScript(ta, runMarkScript) {
-			t.Fatal("the sandbox was stopped, or its run marked, although the user kept the run going")
+		if ta.calls("POST", "box/stop") != 0 {
+			t.Fatal("the sandbox was stopped although the user kept the run going")
 		}
 		has(t, ta.output(), "box's detached run (started ", "Stop anyway? [y/N]", "box keeps running")
 	})
@@ -872,16 +880,20 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 			ta := newTestApp(t, c.in)
 			ta.IO.TTY = c.tty
 			ta.daemon.add(sampleSandbox("box"))
+			daemonKeeps(ta)
 			runAnswers(ta, going, log)
 			ta.ok(t, ta.Stop(bg, StopOptions{Name: "box", Yes: c.yes}))
-			if ta.calls("POST", "box/stop") != 1 || !ranScript(ta, runMarkScript) {
-				t.Fatal("the run was not marked interrupted and the sandbox stopped")
+			if ta.calls("POST", "box/stop") != 1 {
+				t.Fatal("the sandbox was not stopped")
+			}
+			if cmds := ta.stream.commands(); slices.ContainsFunc(cmds, func(c string) bool { return strings.Contains(c, `> "$d/latest.exit"`) }) {
+				t.Fatalf("the CLI marked the run itself (the daemon's stop does): %q", cmds)
 			}
 			has(t, ta.output(), "is still going; stopping the sandbox ends it")
 			if strings.Contains(ta.output(), "Stop anyway?") != c.asks {
 				t.Fatalf("asked = %t:\n%s", !c.asks, ta.output())
 			}
-			// Stopped, the kept log is what `logs` shows.
+			// Stopped, the daemon's kept log is what `logs` shows.
 			ta.out.Reset()
 			ta.stream.runs = nil
 			ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
@@ -890,30 +902,39 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 			if len(ta.stream.runs) != 0 {
 				t.Fatalf("logs of a stopped sandbox ran %q in it", ta.stream.commands())
 			}
-			dir, _ := ta.cliStateDir("box")
-			if _, err := os.Stat(filepath.Join(dir, "run.log")); err != nil {
-				t.Fatalf("kept log: %v", err)
-			}
-			ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}, Yes: true}))
-			if _, err := os.Stat(dir); !os.IsNotExist(err) {
-				t.Fatalf("the kept state outlived the sandbox: %v", err)
+			if logs := ta.daemon.callsTo("GET", sandboxapi.PathSandboxes+"/box/logs"); len(logs) != 1 || logs[0].Query != "lines=1" {
+				t.Fatalf("logs calls = %+v", logs)
 			}
 		})
 	}
 }
 
-// A kept log belongs to one sandbox: a later sandbox of the same name does
-// not show it, and a stopped sandbox without one says how to read its log.
-// Without the kept marker, a run whose process is gone reads "did not
-// finish", not "still going".
+// A stopped sandbox without a kept log says how to read its log; a log an
+// earlier CLI kept on this machine (before the daemon kept them) is still
+// shown, for its own sandbox only, and the daemon's wins over it. Without
+// the kept marker, a run whose process is gone reads "did not finish", not
+// "still going".
 func TestLogsOfAStoppedSandbox(t *testing.T) {
 	ta := newTestApp(t, "")
 	sb := sampleSandbox("box")
-	ta.daemon.add(sb)
-	ta.ok(t, ta.saveRunLog(&sb, detachedRun{State: runExited, Exit: "0"}, []byte("done\n")))
-	sb.Phase, sb.ID = "stopped", "sb-another-box"
+	sb.Phase = "stopped"
 	ta.daemon.add(sb)
 	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept", "defenseclaw sandbox start box")
+	dir, _ := ta.cliStateDir("box")
+	writeFile(t, filepath.Join(dir, "run.json"), `{"state":"exited","exit":"0","sandbox_id":"sb-box","name":"box","saved_at":"2026-09-29T10:00:00Z"}`)
+	writeFile(t, filepath.Join(dir, "run.log"), "earlier\ndone\n")
+	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
+	has(t, ta.output(), "done", "the log kept when it stopped", "the run exited with status 0")
+	lacks(t, ta.output(), "earlier")
+	ta.out.Reset()
+	ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "newer\n"}
+	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))
+	has(t, ta.output(), "newer", "the run did not finish")
+	lacks(t, ta.output(), "done")
+	delete(ta.daemon.runLogs, "box")
+	sb.ID = "sb-another-box"
+	ta.daemon.add(sb)
+	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
 
 	ta = newTestApp(t, "")
 	ta.IO.TTY = false
@@ -993,11 +1014,15 @@ func TestResumeKeepsAnUnacceptedUndoPoint(t *testing.T) {
 	has(t, ta.output(), "kept the undo point from "+ta.clock(earlier),
 		"undo point from "+ta.clock(earlier)+" kept → `defenseclaw sandbox undo m1-a` reverts every session since")
 	lacks(t, ta.output(), "undo point taken")
-	// The user kept the changes: the next connect asks for a new snapshot.
+	// The user kept the changes, which the daemon records against the undo
+	// point they were reviewed against: its next start takes a new one.
+	if accepts := ta.bodies("POST", "m1-a/accept"); len(accepts) != 1 || !strings.Contains(accepts[0], `"snapshot_created_at":"2026-09-27T09:30:00Z"`) {
+		t.Fatalf("accepts = %q", accepts)
+	}
 	ta.out.Reset()
 	ta.daemon.edit("m1-a", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" })
 	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-a"}))
-	if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || !strings.Contains(starts[1], `"new_snapshot":true`) {
+	if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
 		t.Fatalf("start after keeping = %q", starts)
 	}
 	has(t, ta.output(), "undo point taken → `defenseclaw sandbox undo m1-a` restores it")
@@ -1035,6 +1060,38 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 		}
 		has(t, ta.output(), c.want...)
 		lacks(t, ta.output(), c.not)
+	}
+}
+
+// An acceptance an earlier CLI recorded on this machine (cli/accepted.json),
+// before the daemon kept them, still makes the next start take a new undo
+// point, once; one for another snapshot is not honoured.
+func TestStartHonoursAnEarlierCLIsAcceptance(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.TTY = false
+	sb := sampleSandbox("box")
+	sb.Phase = "stopped"
+	taken := time.Date(2026, 9, 27, 9, 30, 0, 0, time.UTC)
+	sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: taken}
+	ta.daemon.add(sb)
+	ta.daemon.pendingChanges = true
+	dir, _ := ta.cliStateDir("box")
+	accepted := filepath.Join(dir, "accepted.json")
+	writeFile(t, accepted, `{"sandbox_id":"sb-box","snapshot_created_at":"2026-09-27T09:30:00Z"}`)
+	ta.ok(t, ta.Start(bg, "box", StartOptions{}))
+	if starts := ta.bodies("POST", "box/start"); len(starts) != 1 || !strings.Contains(starts[0], `"new_snapshot":true`) {
+		t.Fatalf("start = %q", starts)
+	}
+	if _, err := os.Stat(accepted); !os.IsNotExist(err) {
+		t.Fatalf("the used acceptance is still there: %v", err)
+	}
+	ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
+		sb.Phase, sb.Snapshot = "stopped", &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: taken.Add(time.Hour)}
+	})
+	writeFile(t, accepted, `{"sandbox_id":"sb-box","snapshot_created_at":"2026-09-27T09:30:00Z"}`)
+	ta.ok(t, ta.Start(bg, "box", StartOptions{}))
+	if starts := ta.bodies("POST", "box/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
+		t.Fatalf("start with another snapshot's acceptance = %q", starts)
 	}
 }
 

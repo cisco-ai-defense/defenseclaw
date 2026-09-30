@@ -1,0 +1,105 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package manager
+
+import (
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+)
+
+// Changes the user kept at the end of a session are accepted in the daemon,
+// so the next start takes a new undo point whoever starts the sandbox (the
+// TUI, the macOS app, a plain REST start), and survive a daemon restart; the
+// start uses the acceptance up, so the next session's changes keep the undo
+// point again.
+func TestAcceptTakesANewUndoPointAtTheNextStart(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "acceptbox"})
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "acceptbox", sandboxapi.AcceptRequest{})), sandboxapi.CodeConflict)
+	e.stopBox("acceptbox")
+	snap := e.ws.snapshots["acceptbox"]
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "acceptbox", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt.Add(-time.Hour)})),
+		sandboxapi.CodeConflict)
+	sb, err := e.m.Accept(t.Context(), "acceptbox", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt})
+	if err != nil || sb.Snapshot == nil || sb.Snapshot.AcceptedAt.IsZero() {
+		t.Fatalf("accept = %+v, %v", sb, err)
+	}
+	if len(e.events("acceptbox", sandboxapi.ActivityWorkspace, "accepted")) != 1 {
+		t.Fatal("the feed does not say the changes were kept")
+	}
+	e.restartDaemon()
+	if got := e.get("acceptbox"); got.Snapshot == nil || got.Snapshot.AcceptedAt.IsZero() {
+		t.Fatalf("the acceptance did not survive a restart: %+v", got.Snapshot)
+	}
+	e.startBox("acceptbox", sandboxapi.StartRequest{})
+	if e.ws.snapshots["acceptbox"] == snap {
+		t.Fatal("the start after an accept kept the old undo point")
+	}
+	if got := e.get("acceptbox"); got.Snapshot == nil || !got.Snapshot.AcceptedAt.IsZero() {
+		t.Fatalf("the new undo point reads accepted: %+v", got.Snapshot)
+	}
+	// The new session's changes were not accepted: the next start keeps the
+	// undo point for them.
+	kept := e.ws.snapshots["acceptbox"]
+	e.stopBox("acceptbox")
+	e.startBox("acceptbox", sandboxapi.StartRequest{})
+	if e.ws.snapshots["acceptbox"] != kept {
+		t.Fatal("an acceptance applied twice")
+	}
+}
+
+// A --no-snapshot start keeps the accepted undo point and uses the
+// acceptance up: what that session changes was never accepted.
+func TestNoSnapshotStartDropsTheAcceptance(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "nosnap"})
+	e.stopBox("nosnap")
+	snap := e.ws.snapshots["nosnap"]
+	if _, err := e.m.Accept(t.Context(), "nosnap", sandboxapi.AcceptRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	e.startBox("nosnap", sandboxapi.StartRequest{NoSnapshot: true})
+	e.stopBox("nosnap")
+	e.startBox("nosnap", sandboxapi.StartRequest{})
+	if e.ws.snapshots["nosnap"] != snap {
+		t.Fatal("the changes of a --no-snapshot session were taken into a new undo point")
+	}
+}
+
+// Accept applies to a stopped mounted sandbox with an undo point that was
+// not undone.
+func TestAcceptRefusals(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "copybox", Copy: true, Project: e.otherProject("copybox")})
+	e.stopBox("copybox")
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "copybox", sandboxapi.AcceptRequest{})), sandboxapi.CodeInvalid)
+	e.create(sandboxapi.CreateRequest{Name: "undone"})
+	if _, err := e.m.Undo(t.Context(), "undone", sandboxapi.UndoRequest{Stop: true}); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "undone", sandboxapi.AcceptRequest{})), sandboxapi.CodeConflict)
+	e.create(sandboxapi.CreateRequest{Name: "nosnapshot", NoSnapshot: true, Project: e.otherProject("nosnapshot")})
+	e.stopBox("nosnapshot")
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "nosnapshot", sandboxapi.AcceptRequest{})), sandboxapi.CodeNotFound)
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "nobox", sandboxapi.AcceptRequest{})), sandboxapi.CodeNotFound)
+}
+
+func acceptErr(_ *sandboxapi.Sandbox, err error) error { return err }

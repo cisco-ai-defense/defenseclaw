@@ -721,7 +721,9 @@ The sandbox is then stopped, not deleted, so you can resume it later.
 every run. With no changes, nothing is asked.
 
 Keeping the changes (Enter, `y`, `--yes`, or `on_exit: keep`) makes them
-the base of the next session: its start takes a fresh snapshot. That needs
+the base of the next session: DefenseClaw records it, and the next start
+takes a fresh snapshot, whether it comes from the CLI, the TUI or the macOS
+app. That needs
 the sandbox stopped before the review: in one that keeps running (it was
 running when you connected) the undo point stays, since what it changes
 after the review was not reviewed. A session
@@ -966,8 +968,10 @@ until the run ends, `-n` sets the number of lines) and says whether the run
 is still going, finished (with its exit status) or was interrupted. A
 detached Claude Code run streams its events, so the log grows as it works.
 `stop` asks first while a detached run is still going (`--yes` skips the
-question), marks the run interrupted and keeps its log on your machine, so
-`logs` still shows it once the sandbox is stopped. A detached run has no
+question). Every stop, from the CLI, the TUI, the macOS app, `undo` or a
+tamper stop (`hooks.on_tamper: stop`), marks the run interrupted and keeps
+the last 1 MiB of its log on your machine, so `logs` still shows it once the
+sandbox is stopped. A detached run has no
 end-of-session prompt: use `review` and `undo`, or `pull` in copy mode.
 Because nobody kept its changes, the next start keeps the undo point from
 before the run, so `undo` still reverts it. `--detach` cannot be combined
@@ -1213,7 +1217,7 @@ myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 blocked  ~
 | --- | --- |
 | `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead, and `--prompt TEXT` runs one prompt headless, without a terminal. A session stops only a sandbox it started, and leaves a sandbox whose detached run is still going, or that another session is attached to, running. |
 | `defenseclaw sandbox exec <name> -- <command>` | Run one command in a running sandbox, through its egress proxy. |
-| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not) and keeps the run's log. |
+| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not); like every stop, it marks the run interrupted and keeps its log for `sandbox logs`. |
 | `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder and you did not keep them at the end of that session, in which case the old snapshot is kept so `undo` still reverts them; it says which. `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
 | `defenseclaw sandbox delete <name>` | Delete sandboxes with their credentials and, unless `--keep-snapshot`, their undo snapshot. |
 | `defenseclaw sandbox status` | The sandbox subsystem: OpenShell, the gateway, the listeners, the policy, and how many sandboxes run. With a name, one sandbox in detail. |

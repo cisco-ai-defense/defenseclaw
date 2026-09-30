@@ -211,7 +211,7 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `a` / `A` / `x` | Approve the selected ask once, always approve it (asks again; every future sandbox may reach it too, and a toast confirms what was saved), or reject it. An approval applies when the agent is idle. `A` is not offered for a port on this machine, a private or IP-literal address, or a proposal with allowed IPs: those open for one sandbox only. Outside Asks, `a` switches to Asks when one waits |
 | `c` | Connect: start the sandbox if it is stopped and attach its harness |
 | `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
-| `s` | Stop the sandbox (asks first); it is kept, so `c` resumes it |
+| `s` | Stop the sandbox (asks first); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
 | `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
 | `U` | Undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
 | `R` | Review the changed files that can run code on your machine (a sandbox that mounts its folder) |

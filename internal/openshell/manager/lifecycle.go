@@ -145,18 +145,20 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	bindings := make([]string, 0, len(m.boxes))
 	shared := make([]openshell.ComputeDriver, 0, len(m.boxes))
 	blocked := make([][]string, 0, len(m.boxes))
+	accepted := make([]*acceptedSnapshot, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
 			out = append(out, m.view(b))
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
 			blocked = append(blocked, b.blockedHostList())
+			accepted = append(accepted, b.rec.Accepted)
 		}
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
 	for i := range out {
-		m.decorate(&out[i], proxy, bindings[i], blocked[i])
+		m.decorate(&out[i], proxy, bindings[i], blocked[i], accepted[i])
 	}
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -236,8 +238,11 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		return err
 	}
 	// The harness exits on its own first, so its end-of-session hook runs
-	// and its terminal ends as after /exit (graceful.go).
-	m.endHarness(ctx, gw, b)
+	// and its terminal ends as after /exit (graceful.go); a detached run
+	// the stop ends is marked interrupted, and its log is kept for `sandbox
+	// logs` of the stopped sandbox (runlog.go).
+	run := m.endHarness(ctx, gw, b)
+	m.keepRunLog(ctx, gw, b, run)
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
@@ -315,7 +320,7 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 // Start starts a stopped sandbox. The ingress token is rotated first, so a
 // credential from an earlier session is useless, and a mounted project gets
 // a fresh snapshot for the new session unless the folder still holds an
-// earlier session's changes (keepSnapshot).
+// earlier session's changes that nobody accepted (keepSnapshot, Accept).
 func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -431,7 +436,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
-		if kept, why := m.keepSnapshot(ctx, rec.Name, req.NewSnapshot); kept {
+		// Changes the user kept at the end of a session (Accept) are the
+		// base of the next one, as with --new-snapshot.
+		if kept, why := m.keepSnapshot(ctx, rec.Name, req.NewSnapshot || m.acceptedNow(rec)); kept {
 			// Replacing it would take the earlier session's changes into the
 			// new baseline, and undo could never revert them.
 			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
@@ -449,6 +456,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			}
 			m.recordSnapshot(ctx, b)
 		}
+	}
+	// An acceptance covers the sessions before this start, not what the new
+	// one changes on top (a --no-snapshot start keeps the accepted
+	// snapshot).
+	if err := m.dropAcceptance(b); err != nil {
+		return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 	}
 	// The harness starts with the sandbox: every tool call of the new
 	// session reaches this process, so its tool-call ledger is complete.
@@ -810,6 +823,7 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 		warn(err)
 	}
 	warn(m.removeRunConfig(rec.Name))
+	warn(m.removeRunLog(rec.Name))
 	if !retained {
 		warn(m.removeRecord(b))
 		m.removeSandboxDir(rec.Name)

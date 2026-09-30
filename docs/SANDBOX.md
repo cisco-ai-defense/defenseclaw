@@ -1221,15 +1221,35 @@ unless the folder still holds changes an earlier session made that were
 neither undone nor accepted. Then the manager keeps the earlier snapshot, so
 undo still reverts them (and everything since), and says so on the activity
 feed. It keeps it too when it cannot compare the folder with the snapshot.
-`sandbox start --new-snapshot` accepts the changes and takes a fresh one;
-`--no-snapshot` always keeps the previous one.
+The manager decides for every start, whoever asks for it (the CLI, the TUI,
+the macOS app, `undo --restart`). The user accepts the changes by keeping
+them at the end of a session ("Keep changes?" answered yes, `--yes`, or
+`on_exit: keep`), which the CLI reports to the manager (`Accept`, `POST
+…/accept`, with the snapshot it reviewed them against) once the session
+stopped the sandbox; the record keeps the acceptance (`record.Accepted`),
+and the next start takes a fresh snapshot and drops it, as a `--no-snapshot`
+start does. `sandbox start --new-snapshot` accepts the changes and takes a
+fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
+earlier CLI recorded in `cli/accepted.json` is honoured once, as
+`--new-snapshot`.
 
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
 preview mode. A stop of a ready sandbox first sends SIGTERM to the harness's
 processes (found by the install root their executable or script lies under)
 and waits up to eight seconds for them to exit, so the harness ends its
 session as after `/exit` and its `SessionEnd` hook reaches DefenseClaw; the
-stop goes ahead whatever the sandbox answers. In a git project undo:
+stop goes ahead whatever the sandbox answers. The same exec looks at the
+sandbox's latest detached run in `/sandbox/.defenseclaw/runs` first (the run
+is going while `latest.pid` is a live process whose command line names
+`latest.exit`, its runner's) and marks one that has not ended interrupted in
+`latest.exit`, which the runner keeps. When there is a run, the stop then
+keeps the last 1 MiB of its log and how it stood under
+`<data_dir>/sandboxes/<name>/runlog/`, tied to the OpenShell sandbox id, and
+says on the feed when it ended one still going (`run_interrupted`); `GET
+…/logs` serves it, and `sandbox logs` of the stopped sandbox prints it. Every
+stop goes through this: the CLI's, the TUI's, the macOS app's, undo's and a
+tamper stop's. The CLI only asks first, on a terminal, before `sandbox stop`
+ends a run still going. In a git project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;
@@ -1479,7 +1499,8 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 <data_dir>/shadows/<project-key>.git         shadow git directory
 <data_dir>/sandboxes/<name>/workspace/       mask files and mount state
 <data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
-<data_dir>/sandboxes/<name>/cli/             the CLI's: run options, kept run log, copy hand-over
+<data_dir>/sandboxes/<name>/runlog/          the log of the last detached run, kept at a stop
+<data_dir>/sandboxes/<name>/cli/             the CLI's: run options, copy hand-over
 <data_dir>/sandboxes/bindings.json           ingress bindings
 <data_dir>/sandboxes/images.json             overlay image records
 <data_dir>/sandboxes/manager/<name>.json     the daemon's sandbox record

@@ -402,8 +402,9 @@ func newSandboxStopCmd() *cobra.Command {
 		Use:   "stop <name>",
 		Short: "Stop a sandbox (it is kept for start or connect)",
 		Long: `Stops a sandbox and keeps it for start or connect. When its detached run is still
-going, the stop ends it: stop asks first on a terminal (--yes does not), marks the run
-interrupted and keeps its log, so "sandbox logs" still shows it.`,
+going, the stop ends it: stop asks first on a terminal (--yes does not). Every stop,
+this one or one from the TUI, the macOS app or undo, marks the run interrupted and
+keeps its log, so "sandbox logs" still shows it.`,
 		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			o.Name = args[0]

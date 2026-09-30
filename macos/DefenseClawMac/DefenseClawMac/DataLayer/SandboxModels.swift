@@ -102,6 +102,9 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var lastHookFailure = ""
     var orphaned = false
     var undoAvailable = false
+    /// The user kept the last session's changes (the daemon's accept): the
+    /// next start takes a new undo point, whoever starts the sandbox.
+    var undoAccepted = false
     var nestedRepos: [String] = []
     /// The image the sandbox runs when it is not the harness image: on the
     /// MicroVM (vm) driver, the image its per-run harness files are baked into.
@@ -113,7 +116,11 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     /// reverts its last `pull --apply` (it needs no snapshot).
     var copyMode: Bool { workdirMode == "copy" }
     var undoOffered: Bool { copyMode || undoAvailable }
-    var undoLabel: String { copyMode ? "reverts the last pull --apply" : (undoAvailable ? "available" : "no snapshot") }
+    var undoLabel: String {
+        if copyMode { return "reverts the last pull --apply" }
+        if !undoAvailable { return "no snapshot" }
+        return undoAccepted ? "available; the last session's changes were kept, so the next start takes a new undo point" : "available"
+    }
     /// Pull shows the work first; --apply, --branch or --patch-out FILE brings it back.
     var pullCommand: String { "defenseclaw sandbox pull \(name)" }
     /// The work on branch dc/<name>; the working tree stays as it is.
@@ -589,6 +596,8 @@ enum SandboxDecoding {
         row.runImage = str(d["run_image"])
         // undone_at is omitted until undo ran (Go omitzero).
         row.undoAvailable = !snapshot.isEmpty && DCDates.parse(snapshot["undone_at"]) == nil
+        // accepted_at is omitted until the user keeps a session's changes.
+        row.undoAccepted = !snapshot.isEmpty && DCDates.parse(snapshot["accepted_at"]) != nil
         row.nestedRepos = list(d["nested_repos"]).compactMap { item in
             let repo = dict(item)
             let path = str(repo["path"])

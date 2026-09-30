@@ -817,6 +817,31 @@ class OrchestratorClient:
         )
         return self._sandbox_object(result, "review")
 
+    def accept_sandbox_changes(self, name: str, *, snapshot_created_at: str = "") -> dict[str, Any]:
+        """Record that the user kept the changes on top of a stopped mounted sandbox's undo point.
+
+        Its next start takes a new undo point, whoever starts it.
+        ``snapshot_created_at`` names the undo point the changes were
+        reviewed against (the sandbox's ``snapshot.created_at``); the daemon
+        refuses with ``conflict`` when the sandbox has another one by now.
+        """
+        body = {"snapshot_created_at": snapshot_created_at} if snapshot_created_at else {}
+        result = self._sandbox_call(
+            "POST", self._sandbox_path(name, "accept"), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT
+        )
+        return self._sandbox_object(result, "sandbox")
+
+    def sandbox_run_log(self, name: str, *, lines: int = 0) -> dict[str, Any]:
+        """The log of the sandbox's latest detached run, kept when the daemon last stopped it.
+
+        ``state`` is ``exited`` (with ``exit``) or ``interrupted``, and
+        ``log`` the end of the run's output (its last ``lines`` lines when
+        given). ``not_found`` when no log was kept.
+        """
+        params = {"lines": str(lines)} if lines > 0 else None
+        result = self._sandbox_call("GET", self._sandbox_path(name, "logs"), params=params)
+        return self._sandbox_object(result, "run log")
+
     def sandbox_approvals(self, sandbox: str = "") -> list[dict[str, Any]]:
         """Pending asks, optionally for one sandbox."""
         params = {"sandbox": sandbox} if sandbox else None
