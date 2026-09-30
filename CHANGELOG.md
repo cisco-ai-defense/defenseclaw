@@ -292,6 +292,14 @@ rest also reach per-user installs.
 
 ### Added
 
+- **Per-user credential rotation (enterprise standalone, Linux and macOS).**
+  `defenseclaw-gateway enterprise linux|macos rotate-credentials` replaces
+  the key every enrolled user's per-user credentials derive from.
+  The gateway accepts the old and the new key while the guardian moves and
+  verifies every user; the new key takes effect only then, and any failure
+  moves every user back to the old key. Agents already running lose
+  telemetry until they restart. On Windows the command refuses (exit
+  `1639`); see the enterprise operations guide.
 - **`defenseclaw-gateway audit export --since`, `--until` and `--newest`.**
   `--since` and `--until` take an RFC3339 time or a duration ago (`30m`,
   `2h`). With `--limit N`, `--newest` keeps the N most recent rows; output
@@ -308,6 +316,11 @@ rest also reach per-user installs.
 
 ### Changed
 
+- **`defenseclaw setup rotate-token` on a managed computer.** Where the
+  organization manages DefenseClaw (the standalone profile), the command
+  now refuses before changing anything and names the administrator's
+  rotation command, instead of failing when it tried to stop the per-user
+  gateway. Other computers, Secure Client ones included, are unchanged.
 - **Plugin teardown without a backup receipt.** Removing the OpenCode or Amp
   connector (or uninstalling) deletes DefenseClaw's plugin file when its
   backup receipt is missing, as long as the file still starts with the

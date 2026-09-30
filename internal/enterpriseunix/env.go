@@ -194,6 +194,11 @@ type Env struct {
 	// HookSocketPeer connects to the hook socket and returns the kernel
 	// credentials of the process serving it.
 	HookSocketPeer func(ctx context.Context) (peercred.Credentials, error)
+	// ListenerProof asks the gateway's loopback API to prove it accepts the
+	// per-user hook credential named by keyID (its SHA-256) for
+	// connectorName, over the route the standalone plugins use, and returns
+	// the proof (see rotation.go).
+	ListenerProof func(ctx context.Context, connectorName, keyID, nonce string) (string, error)
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -289,6 +294,12 @@ func (e *Env) fillDefaults() {
 	if e.HookSocketPeer == nil {
 		path := e.P(e.Layout.HookSocketPath)
 		e.HookSocketPeer = func(ctx context.Context) (peercred.Credentials, error) { return hookSocketPeer(ctx, path) }
+	}
+	if e.ListenerProof == nil {
+		addr := e.Layout.APIAddr
+		e.ListenerProof = func(ctx context.Context, connectorName, keyID, nonce string) (string, error) {
+			return listenerProof(ctx, addr, connectorName, keyID, nonce)
+		}
 	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)

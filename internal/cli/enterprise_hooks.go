@@ -3633,19 +3633,21 @@ func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, 
 	if err := validateEnterpriseHookUserTokenKeyLocation(dataDir); err != nil {
 		return "", "", err
 	}
-	var (
-		key string
-		err error
-	)
-	if mint {
-		key, err = connector.EnsureUserScopedTokenKey(dataDir)
-		if err == nil {
-			err = alignEnterpriseHookUserTokenKeyOwner(dataDir)
-		}
-	} else {
-		key, err = connector.LoadUserScopedTokenKey(dataDir)
-		if err == nil && key == "" {
-			err = errors.New("the per-user credential key is missing")
+	// While a credential rotation has staged the next key, every target is
+	// rendered (and verified) with credentials derived from it; the gateway
+	// accepts both keys until the rotation commits the staged one.
+	key, err := loadEnterpriseHookPendingUserTokenKey(dataDir)
+	if err == nil && key == "" {
+		if mint {
+			key, err = connector.EnsureUserScopedTokenKey(dataDir)
+			if err == nil {
+				err = alignEnterpriseHookUserTokenKeyOwner(dataDir)
+			}
+		} else {
+			key, err = connector.LoadUserScopedTokenKey(dataDir)
+			if err == nil && key == "" {
+				err = errors.New("the per-user credential key is missing")
+			}
 		}
 	}
 	if err != nil {

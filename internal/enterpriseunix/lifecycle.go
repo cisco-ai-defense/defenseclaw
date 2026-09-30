@@ -44,7 +44,7 @@ const (
 )
 
 // Actions lists the lifecycle actions in documentation order.
-var Actions = []string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure, ActionReconcile, ActionStatus, ActionVerify, ActionUninstall}
+var Actions = []string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure, ActionReconcile, ActionRotateCredentials, ActionStatus, ActionVerify, ActionUninstall}
 
 // Options are one lifecycle invocation's inputs.
 type Options struct {
@@ -226,6 +226,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if record != nil {
 		r.Installed = true
 		r.InstalledVersion = record.ProductVersion
+		if l.opts.Action != ActionUninstall {
+			l.recoverInterruptedRotation(ctx, record)
+		}
 	}
 	if l.supersededApplyRun(record) {
 		// A transaction leaves a queued apply run alone. When that
@@ -299,6 +302,8 @@ func (l *lifecycle) run(ctx context.Context) int {
 			return 0
 		}
 		return l.reconcile(ctx, record)
+	case ActionRotateCredentials:
+		return l.rotateCredentials(ctx, record)
 	case ActionUninstall:
 		return l.uninstall(ctx, record)
 	}

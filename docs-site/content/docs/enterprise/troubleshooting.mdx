@@ -78,6 +78,7 @@ one can appear.
 | `gateway_start_failed` | Windows | `status` or `verify` found the gateway service not running; the message gives the last error the service logged and the log path | Fix what the error names. If it says `Access is denied`, run `repair` from an elevated prompt |
 | `preflight_failed` | Windows | A check before the lifecycle started failed | Read the message |
 | `change_failed` | Linux, macOS | `enterprise secret set` or another protected-state change could not be written before `ensure` applied it | Read the message. Check that you ran it as root and that the secrets folder is writable by root |
+| `rotation_failed` | Linux, macOS | `rotate-credentials` did not commit the new key. The message names the step and the users; the previous key stays in use. When it ends with "nothing was changed", the check before the rotation failed | Fix what the message names (often a user the guardian cannot protect), then rotate again. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
 
 ### Warnings
 
@@ -87,6 +88,8 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | --- | --- | --- |
 | `rolled_back` | Linux, macOS | A failed action restored the previous deployment. The error beside it says why |
 | `recovered_interrupted_transaction` | Linux, macOS | This run found an interrupted run and rolled it back first |
+| `rotation_recovered` | Linux, macOS | This run found an interrupted `rotate-credentials` and completed it (the new key had replaced the old one) or rolled it back |
+| `rotation_incomplete` | Linux, macOS | `status` or `verify` found a `rotate-credentials` run that did not finish. Run `rotate-credentials` again, or any other mutating action, to complete it or roll it back |
 | `recovered_failed_install` | Windows | This run rolled back a failed first install |
 | `machine_policy_incomplete` | Linux, macOS | DefenseClaw's hooks are not in place in a vendor policy file for the named connectors, for example because a higher-precedence source outranks it. `verify` also fails with `verify_failed` |
 | `claude_version_floor_missing` | Linux, macOS | DefenseClaw's Claude Code version floor drop-in (`00-defenseclaw-version-floor.json`) is missing. The hooks are still in place and `verify` still passes. The next `ensure`, `repair` or `reconcile` writes it back. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor) for the builds it applies to |

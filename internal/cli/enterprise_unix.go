@@ -95,16 +95,17 @@ arguments, 75 another lifecycle run holds the lock.`,
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
 	summaries := map[string]string{
-		"install":   "Install the deployment (refuses when one is already installed)",
-		"upgrade":   "Upgrade an installed deployment from a new payload or package",
-		"repair":    "Re-apply the installed deployment's files, modes and services",
-		"ensure":    "Install, upgrade or repair as needed; a no-op when nothing changed",
-		"reconcile": "Run one immediate hook guardian reconcile",
-		"status":    "Report the deployment state (read-only)",
-		"verify":    "Verify every file, permission, service and readiness check (read-only)",
-		"uninstall": "Stop and remove the deployment; --purge also removes config and state",
+		"install":            "Install the deployment (refuses when one is already installed)",
+		"upgrade":            "Upgrade an installed deployment from a new payload or package",
+		"repair":             "Re-apply the installed deployment's files, modes and services",
+		"ensure":             "Install, upgrade or repair as needed; a no-op when nothing changed",
+		"reconcile":          "Run one immediate hook guardian reconcile",
+		"rotate-credentials": "Rotate the per-user credential key, moving every user before the new key takes effect",
+		"status":             "Report the deployment state (read-only)",
+		"verify":             "Verify every file, permission, service and readiness check (read-only)",
+		"uninstall":          "Stop and remove the deployment; --purge also removes config and state",
 	}
-	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "status", "verify", "uninstall"} {
+	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "rotate-credentials", "status", "verify", "uninstall"} {
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
 	return group
@@ -150,7 +151,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs")
 		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "with --purge, also delete the gateway service account")
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
-	case "reconcile":
+	case "reconcile", "rotate-credentials":
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
