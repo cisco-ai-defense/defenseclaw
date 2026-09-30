@@ -131,8 +131,11 @@ const (
 	cursorWindowsHookCleanupBudgetMS    = 5_000
 	cursorWindowsHookAdapterTimeoutMS   = cursorWindowsHookContractTimeoutMS - cursorWindowsHookCleanupBudgetMS
 	copilotWindowsHookContractTimeoutMS = 30_000
-	copilotWindowsHookCleanupBudgetMS   = 5_000
-	copilotWindowsHookAdapterTimeoutMS  = copilotWindowsHookContractTimeoutMS - copilotWindowsHookCleanupBudgetMS
+	// PowerShell startup and a timed-out child's kill/drain can consume more
+	// than five seconds on Windows runners. Keep the complete adapter inside
+	// Copilot's 30-second command-hook deadline.
+	copilotWindowsHookCleanupBudgetMS  = 10_000
+	copilotWindowsHookAdapterTimeoutMS = copilotWindowsHookContractTimeoutMS - copilotWindowsHookCleanupBudgetMS
 )
 
 // cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
