@@ -1131,10 +1131,38 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 	},
 	"persistence.ssh_authorized_keys_command": {
-		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return sshAuthorizedKeysCommandPrerequisite(facts)
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return sshAuthorizedKeysCommandPrerequisite(facts) ||
+				homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite)
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite)
 		},
 	},
+}
+
+// homeResolvedTwinProves reports whether check holds on the enforcement
+// projection of the home-resolved twin of a partial action: the same command
+// with its ~/ and $HOME/ paths (> ~/.ssh/authorized_keys, tee -a
+// "$HOME/.ssh/authorized_keys") resolved under the caller's home. The shell
+// expands those at run time, so the action's own analysis has no path fact
+// for them and a rule about that exact path never matched: the write was
+// allowed with no finding while the absolute path blocked. Only a check that
+// holds counts; a check that fails on the twin proves nothing.
+func homeResolvedTwinProves(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+	check func(actionfacts.Facts) bool,
+) bool {
+	if facts.Authoritative() {
+		return false
+	}
+	twin, ok := actionfacts.HomeResolvedTwin(input)
+	if !ok {
+		return false
+	}
+	enforcement := twin.EnforcementProjection()
+	return enforcement.EnforcementEligible() && check(enforcement)
 }
 
 func exactUnboundedCPUFanoutAction(

@@ -154,6 +154,12 @@ rest also reach per-user installs.
   so a CRITICAL CEL match was only detected. CEL rules that cannot depend on
   that redirect now see the command with a static target. A built-in rule's
   code check must hold with and without that target (#925).
+- **Writes to `~/.ssh/authorized_keys` block in every spelling.** The
+  shell expands `~/` and `$HOME/` when the command runs, so
+  `>> ~/.ssh/authorized_keys`, `>> "$HOME/.ssh/authorized_keys"` and
+  `tee -a ~/.ssh/authorized_keys` were allowed with no finding while the
+  absolute path blocked. The authorized-keys rule now also checks the command
+  with those paths resolved under the caller's home.
 - **A command rule blocks every command of an `&&` or `||` list.** Any list
   made the parse partial, so a rule that blocks `<cmd>` only detected
   `cd <dir> && <cmd>` or `<cmd> || true`. A list is now judged as if all of

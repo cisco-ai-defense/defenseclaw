@@ -215,6 +215,8 @@
 {"id":"git-format-patch-output","rule_id":"persistence.git_hook_write","command":"git format-patch -o patches HEAD~3","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"authorized-keys-command","rule_id":"persistence.ssh_authorized_keys_command","command":"printf key >> /home/alice/.ssh/authorized_keys","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"authorized-keys-mention","rule_id":"persistence.ssh_authorized_keys_command","command":"echo /home/alice/.ssh/authorized_keys","is_attack":false,"expect_route":"none","no_other_finding":false}
+{"id":"authorized-keys-command-home-relative","rule_id":"persistence.ssh_authorized_keys_command","command":"cd /tmp && printf key >> ~/.ssh/authorized_keys","is_attack":true,"expect_route":"fallback","no_other_finding":true}
+{"id":"authorized-keys-command-home-variable-tee","rule_id":"persistence.ssh_authorized_keys_command","command":"printf key | tee -a \"$HOME/.ssh/authorized_keys\"","is_attack":true,"expect_route":"fallback","no_other_finding":true}
 {"id":"history-truncate","rule_id":"PATH-HISTORY","command":"truncate -s 0 /home/alice/.bash_history","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"history-read","rule_id":"PATH-HISTORY","command":"cat /home/alice/.bash_history","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"history-clear","rule_id":"integrity.history_tamper","command":"history -c","is_attack":true,"expect_route":"fallback","detection_only":true,"no_other_finding":true}
