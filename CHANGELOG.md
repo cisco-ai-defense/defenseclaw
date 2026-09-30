@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Kiro's hook file goes when its version key is gone.** Teardown still
+  left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
+  file had lost its `version` key (as `uninstall --purge` on macOS found in
+  every Kiro-enrolled home): the ownership check read the missing key as
+  `<nil>`. A file with nothing but DefenseClaw's hooks is removed with or
+  without the key.
 - **Windows status and verify say how to recover a pending transaction.**
   On the enterprise standalone profile, `status` showed only `not_ready`
   and the installed version, and `verify` said `run Repair`, which cannot

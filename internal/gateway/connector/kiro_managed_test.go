@@ -75,9 +75,13 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 	// A hook file changed since Setup recorded it (here only its
 	// formatting) loses DefenseClaw's entries one by one; with nothing of
 	// the user's left, the file DefenseClaw created goes too.
-	if cfg, err := readJSONObject(global); err != nil {
+	// It also lost its version key, as purge on macOS found it.
+	rewritten, err := readJSONObject(global)
+	if err != nil {
 		t.Fatal(err)
-	} else if data, err := json.Marshal(cfg); err != nil || os.WriteFile(global, data, 0o600) != nil {
+	}
+	delete(rewritten, "version")
+	if data, err := json.Marshal(rewritten); err != nil || os.WriteFile(global, data, 0o600) != nil {
 		t.Fatalf("rewrite %s: %v", global, err)
 	}
 

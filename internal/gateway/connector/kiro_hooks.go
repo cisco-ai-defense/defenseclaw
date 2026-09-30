@@ -238,8 +238,13 @@ func kiroFileIsDefenseClawOwned(cfg map[string]interface{}, hookScript string) b
 	if len(hooks) != 0 {
 		return false
 	}
-	if version := strings.TrimSpace(fmt.Sprint(cfg["version"])); version != "" && version != "v1" {
-		return false
+	// A file without a version (Kiro can drop the key when it rewrites the
+	// file) is still DefenseClaw's; fmt.Sprint of the missing key is "<nil>",
+	// which kept every such file.
+	if raw, present := cfg["version"]; present {
+		if version := strings.TrimSpace(fmt.Sprint(raw)); version != "" && version != "v1" {
+			return false
+		}
 	}
 	for key := range cfg {
 		if key != "version" && key != "hooks" {
