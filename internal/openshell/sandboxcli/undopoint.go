@@ -46,7 +46,8 @@ import (
 // without it, the next start keeps the undo point, which only loses
 // convenience).
 func (a *App) acceptChanges(ctx context.Context, api API, sb *sandboxapi.Sandbox) {
-	if sb == nil || sb.Snapshot == nil || sb.Snapshot.CreatedAt.IsZero() {
+	if sb == nil || sb.Snapshot == nil || sb.Snapshot.CreatedAt.IsZero() || !sb.Snapshot.UndoneAt.IsZero() {
+		// An undone snapshot has no changes on top to accept.
 		return
 	}
 	if _, err := api.Accept(ctx, sb.Name, sandboxapi.AcceptRequest{Snapshot: sb.Snapshot.CreatedAt}); err != nil {
