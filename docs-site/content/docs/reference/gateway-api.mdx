@@ -674,9 +674,10 @@ whoever starts the sandbox. `POST …/{name}/accept` records the acceptance of
 a stopped sandbox's changes (the CLI sends it when the user keeps them at the
 end of a session, with the `created_at` of the snapshot it reviewed them
 against and the sandbox's `session` then, so an accept after another start,
-whose changes nobody reviewed, is refused); the next start then takes a fresh snapshot and drops the
-acceptance, and so does a start with `no_snapshot`. `new_snapshot` on a start
-accepts the changes too.
+whose changes nobody reviewed, is refused). The next start then takes a fresh
+snapshot and drops the acceptance; a start with `no_snapshot` keeps the old
+snapshot but drops the acceptance too. `new_snapshot` on a start accepts the
+changes too.
 
 Every stop of a running sandbox (`…/stop`, `…/undo` with `stop`, and a
 tamper stop under `hooks.on_tamper: stop`) looks at the sandbox's latest
