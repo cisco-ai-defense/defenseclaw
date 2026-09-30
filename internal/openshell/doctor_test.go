@@ -994,7 +994,8 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			other := "the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell " + tc.gateway +
-				", not the OpenShell 0.1.1 of the CLI at /usr/bin/openshell. Remove that other OpenShell, then install OpenShell 0.1.1"
+				", not the OpenShell 0.1.1 of the CLI at /usr/bin/openshell. Stop that gateway (`systemctl --user stop openshell-gateway`) " +
+				"and remove that other OpenShell, then install OpenShell 0.1.1"
 			f := newDoctorFixture(t)
 			f.fake.SetHealth(true, tc.gateway)
 			restarts := restartTo(f, restart, tc.gateway)
@@ -1021,6 +1022,15 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 			f.fake.SetHealth(true, "0.1.3")
 			c = expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.3 but CLI 0.1.1")
 			fixIs(t, c, strings.Replace(unit, "0.0.40", "0.1.3", 1), restart, true)
+			// Once the gateway stopped (the fix's first step), the record
+			// ends: the same mismatch back gets its one restart again,
+			// instead of a way on the user already took.
+			f.fake.SetHealth(true, tc.gateway)
+			fixIs(t, expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, tc.status, tc.detail), other, install, false)
+			f.fake.SetHealth(false, tc.gateway)
+			f.run()
+			f.fake.SetHealth(true, tc.gateway)
+			fixIs(t, expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, tc.status, tc.detail), strings.Replace(unit, "0.0.40", tc.gateway, 1), restart, true)
 		})
 	}
 	t.Run("Homebrew's service runs another OpenShell", func(t *testing.T) {

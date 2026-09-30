@@ -1080,12 +1080,22 @@ func describeRelease(release string) string {
 // left a gateway of release, another than the supported CLI's: the service
 // runs another OpenShell's gateway, which another restart would not
 // change, and the install does not replace while the CLI is found
-// (Installer.Install). That other OpenShell goes first; without it setup
-// says what comes next.
+// (Installer.Install). That other OpenShell goes first, its gateway
+// stopped, since removing its files leaves the running one answering;
+// without it setup says what comes next.
 func (r *doctorRun) otherOpenShellFix(release string) *Fix {
 	return &Fix{Summary: r.serviceName() + " runs another OpenShell's gateway: restarted, it still answers with " + describeRelease(release) +
 		", not the OpenShell " + r.cli.String() + " of the CLI at " + r.report.CLIPath +
-		". Remove that other OpenShell, then install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+		". Stop that gateway (`" + r.stopCommand().String() + "`) and remove that other OpenShell, then install OpenShell " + SupportedMin,
+		Command: installOpenShellCommand}
+}
+
+// stopCommand stops the gateway service.
+func (r *doctorRun) stopCommand() serviceCommand {
+	if r.GOOS == "darwin" {
+		return serviceCommand{"brew", []string{"services", "stop", GatewayFormula}}
+	}
+	return serviceCommand{"systemctl", []string{"--user", "stop", GatewayService}}
 }
 
 // restartOnCLIRelease restarts the gateway service (gatewayVersionFix) and
@@ -1154,7 +1164,9 @@ func (r *doctorRun) releaseRestartPath() (string, error) {
 // releaseRestarted reports a restart recorded for a gateway of release
 // and this CLI: restarting again would bring the same gateway back. A
 // release or CLI that changed since (an OpenShell removed or installed)
-// is another mismatch, whose restart is offered again.
+// is another mismatch, whose restart is offered again, and a gateway
+// that stopped answering, or answers with the CLI's release, ends the
+// record (checkGateway): a later mismatch gets one restart again.
 func (r *doctorRun) releaseRestarted(release string) bool {
 	path, err := r.releaseRestartPath()
 	if err != nil {
@@ -1407,6 +1419,9 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		r.gateway, err = client.Health(ctx)
 	}
 	if err != nil || !r.gateway.Healthy {
+		if err == nil || !credentialFailure(err) {
+			r.forgetReleaseRestart()
+		}
 		version.Status = StatusFail
 		switch {
 		case err != nil && credentialFailure(err):
@@ -1433,6 +1448,9 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		version.Fix = r.gatewayVersionFix(&Fix{Summary: "reinstall OpenShell so the CLI and gateway match", Command: installOpenShellCommand})
 	} else {
 		version.Status, version.Detail = StatusPass, fmt.Sprintf("%s healthy at %s", r.gateway.Version, r.reg.Endpoint)
+		if r.cli != (Version{}) {
+			r.forgetReleaseRestart()
+		}
 	}
 
 	info, err := client.GatewayInfo(ctx)

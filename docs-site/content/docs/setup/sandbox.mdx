@@ -1388,11 +1388,14 @@ service), which `--fix` does where that service runs the gateway. When the
 restarted gateway still answers with another release, the service runs
 another OpenShell's gateway, and `--fix` says so
 (``the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell 0.0.40``).
-From then on the check's fix is to remove that other OpenShell, then run
+From then on the check's fix is to stop that gateway (`systemctl --user
+stop openshell-gateway`, or `brew services stop nvidia/openshell/openshell`)
+and remove that other OpenShell, then run
 `defenseclaw sandbox setup --install-openshell`, and the doctor does not
 restart the gateway again for the same releases (it records the restart
 in `.defenseclaw-release-restart` in the gateway's configuration
-directory). With the service stopped while a gateway answers, of any
+directory, until the gateway stops answering or answers with the CLI's
+release). With the service stopped while a gateway answers, of any
 release, something else runs that gateway, whose port the service's
 would not get: the **Gateway service** fix is then to stop it, then start
 the service, which `--fix` leaves to you (its start would see the other
