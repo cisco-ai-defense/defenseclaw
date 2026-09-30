@@ -501,7 +501,9 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		profile.MapVerdict = openCodeProfileMapVerdict
 	}
 	if c.name == "openhands" {
-		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, runtime.GOOS)
+		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, opts.profileGOOS())
+		// The CLI reports PascalCase SDK event types; see
+		// openhands_hook_profile.go.
 		profile.Decode = openHandsProfileDecode
 	}
 	if c.name == "amp" {
@@ -536,85 +538,6 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	// (declared on the hermes hook contract), and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
-}
-
-// openHandsStdinEventNames maps the OpenHands SDK HookEventType values that
-// the CLI writes to a hook command's stdin (event_type, PascalCase) to the
-// contract's event names. OpenHands reads hooks.json keys in snake_case, and
-// the contract's events, block events and tool-call routing use those names
-// exactly; without this mapping a real OpenHands PreToolUse was never routed
-// to tool-call inspection and was never enforceable.
-var openHandsStdinEventNames = map[string]string{
-	"PreToolUse":       "pre_tool_use",
-	"PostToolUse":      "post_tool_use",
-	"UserPromptSubmit": "user_prompt_submit",
-	"Stop":             "stop",
-	"SessionStart":     "session_start",
-	"SessionEnd":       "session_end",
-}
-
-// openHandsProfileDecode supplies the contract event name and the terminal
-// tool's command projection; content, tool name and every other tool input
-// use the generic decoding (tool_name, tool_input).
-func openHandsProfileDecode(payload map[string]interface{}) HookProfileRequest {
-	req := HookProfileRequest{ConnectorName: "openhands"}
-	if event, ok := openHandsStdinEventNames[hookFirstString(payload, "event_type")]; ok {
-		req.HookEventName = event
-	}
-	if args, ok := openHandsTerminalCommandArgs(payload); ok {
-		req.ToolArgs = args
-		req.ToolArgsAuthoritative = true
-	}
-	return req
-}
-
-// openHandsTerminalCommandArgs projects the OpenHands terminal tool's
-// TerminalAction (command, is_input, timeout, reset and the kind
-// discriminator) to the closed shell argument schema the command-fact parser
-// proves. The other fields are execution controls, not command text; without
-// the projection they left every real OpenHands command unproven, so a
-// CRITICAL command finding was still allowed. Text sent to a running process
-// (is_input) is inspected as a command too, because it may be typed into an
-// interactive shell. Any other tool, field or type keeps the generic
-// projection.
-func openHandsTerminalCommandArgs(payload map[string]interface{}) (json.RawMessage, bool) {
-	if hookFirstString(payload, "tool_name") != "terminal" {
-		return nil, false
-	}
-	input, ok := payload["tool_input"].(map[string]interface{})
-	if !ok {
-		return nil, false
-	}
-	command, ok := input["command"].(string)
-	if !ok || strings.TrimSpace(command) == "" {
-		return nil, false
-	}
-	for key, value := range input {
-		switch key {
-		case "command":
-		case "is_input", "reset":
-			if _, ok := value.(bool); !ok {
-				return nil, false
-			}
-		case "timeout":
-			switch value.(type) {
-			case nil, float64, json.Number:
-			default:
-				return nil, false
-			}
-		case "kind":
-			if value != "TerminalAction" {
-				return nil, false
-			}
-		default:
-			return nil, false
-		}
-	}
-	raw, err := json.Marshal(map[string]string{"command": command})
-	if err != nil {
-		return nil, false
-	}
-	return raw, true
 }
 
 func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
@@ -4752,20 +4675,7 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		entry := map[string]interface{}{
-			"type":       "command",
-			"timeoutSec": 30,
-		}
-		eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
-		if goos == "windows" {
-			// Copilot selects this field itself and evaluates it with PowerShell.
-			// eventCommand is therefore the complete vendor-specific program:
-			// do not prepend a call operator or another PowerShell process.
-			entry["powershell"] = eventCommand
-		} else {
-			entry["bash"] = eventCommand
-		}
-		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, entry)
+		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, copilotHookRegistration(goos, event, hookScript))
 	}
 	// A version downgrade must remove only the now-out-of-contract managed
 	// handler (currently userPromptTransformed), while retaining operator hooks
@@ -4783,6 +4693,29 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 	}
 	return writeJSONObject(path, cfg)
 }
+
+// copilotHookRegistration is the one Copilot hook entry DefenseClaw registers
+// for event: user and workspace hook files on the host, and the root-owned
+// policy.d document in OpenShell sandbox images.
+func copilotHookRegistration(goos, event, hookScript string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"type":       "command",
+		"timeoutSec": copilotHookTimeoutSeconds,
+	}
+	eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
+	if goos == "windows" {
+		// Copilot selects this field itself and evaluates it with PowerShell.
+		// eventCommand is therefore the complete vendor-specific program:
+		// do not prepend a call operator or another PowerShell process.
+		entry["powershell"] = eventCommand
+	} else {
+		entry["bash"] = eventCommand
+	}
+	return entry
+}
+
+// copilotHookTimeoutSeconds is Copilot's command-hook envelope.
+const copilotHookTimeoutSeconds = 30
 
 func copilotHookInvocationCommandForEvent(goos, event, hookScript string) string {
 	if goos == "windows" {

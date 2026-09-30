@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -383,5 +384,66 @@ func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
 	}
 	if connectorHookRows != 1 {
 		t.Fatalf("connector-hook audit row count = %d, want exactly 1 (post-finalize panic must not re-run finalizeAgentHook)", connectorHookRows)
+	}
+}
+
+// TestHandleAgentHook_SandboxPanicFailsClosed: a request authenticated with
+// a sandbox binding is blocked, with a reason that says DefenseClaw failed,
+// when the evaluator panics or when a panic after evaluation reaches the
+// handler's outer recover, instead of taking the host's fail-open path. The
+// sandbox hook is the only gate on the tool call.
+func TestHandleAgentHook_SandboxPanicFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		inject func(t *testing.T)
+	}{
+		{"evaluator", func(t *testing.T) {
+			prev := hookEvaluatorPanicHook
+			hookEvaluatorPanicHook = func() { panic("synthetic evaluator panic for sandbox test") }
+			t.Cleanup(func() { hookEvaluatorPanicHook = prev })
+		}},
+		// Managed enterprise mode defers EmitLLMEvent until after
+		// safeEvaluateHook returns, so its panic takes the outer recover.
+		{"post-evaluation", func(t *testing.T) {
+			prev := managedEnterpriseActive.Load()
+			managedEnterpriseActive.Store(true)
+			prevRuntime, had := hookProfileRuntimes["hermes"]
+			hookProfileRuntimes["hermes"] = func(profile connector.HookProfile) hookProfileRuntime {
+				runtime := defaultHookProfileRuntime(profile)
+				runtime.EmitLLMEvent = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}, []string) {
+					panic("synthetic post-evaluation panic for sandbox test")
+				}
+				return runtime
+			}
+			t.Cleanup(func() {
+				managedEnterpriseActive.Store(prev)
+				if had {
+					hookProfileRuntimes["hermes"] = prevRuntime
+				} else {
+					delete(hookProfileRuntimes, "hermes")
+				}
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.inject(t)
+			body, _ := json.Marshal(map[string]interface{}{
+				"hook_event_name": "pre_tool_call", "session_id": "session-sandbox-panic-" + tc.name,
+				"agent_id": "hermes-test", "tool_name": "shell", "tool_input": map[string]interface{}{"command": "echo marker"},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			binding := sandboxauth.Binding{ID: "sb_panic", Connector: sandboxauth.CanonicalConnector("hermes")}
+			req = req.WithContext(sandboxauth.WithRequest(req.Context(), binding, nil))
+			w := httptest.NewRecorder()
+			http.HandlerFunc((&APIServer{}).handleAgentHook("hermes")).ServeHTTP(w, req)
+			var parsed map[string]interface{}
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &parsed) != nil {
+				t.Fatalf("status=%d body=%s, want a 200 JSON verdict", w.Code, w.Body.String())
+			}
+			if parsed["action"] != "block" || parsed["reason"] != sandboxInternalErrorReason {
+				t.Fatalf("sandbox panic verdict = %v, want a block with %q", parsed, sandboxInternalErrorReason)
+			}
+		})
 	}
 }

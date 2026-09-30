@@ -42,6 +42,9 @@ const (
 type SubprocessPolicy string
 
 const (
+	// SubprocessSandbox is retained for inventory/telemetry schema stability.
+	// The legacy openshell-sandbox tier it named was removed; no connector
+	// reports it and ResolveSubprocessPolicy maps it to shims.
 	SubprocessSandbox SubprocessPolicy = "sandbox"
 	SubprocessShims   SubprocessPolicy = "shims"
 	SubprocessNone    SubprocessPolicy = "none"
@@ -215,6 +218,13 @@ type SetupOpts struct {
 	// contract marks the profile incompatible instead of silently using a
 	// different hook surface.
 	HookContractID string
+
+	// GOOS is the operating system the agent runs on when that is not this
+	// host, such as "linux" for a harness inside an OpenShell sandbox.
+	// HookProfile then resolves hook contracts and OS-specific profile
+	// surfaces for it instead of runtime.GOOS. Empty means this host. Setup
+	// and hook-writing paths ignore it: they always configure this host.
+	GOOS string
 
 	// CodexEnforcement signals that the operator turned on hard
 	// enforcement for the codex connector (see avarice F-0681).

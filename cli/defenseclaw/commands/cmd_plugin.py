@@ -58,10 +58,10 @@ if TYPE_CHECKING:
 
 
 def _api_bind_host(app: AppContext) -> str:
-    """Resolve the API bind address, mirroring sidecar.runAPI in Go."""
-    if app.cfg.openshell.is_standalone() and app.cfg.guardrail.host not in ("", "localhost"):
-        return app.cfg.guardrail.host
-    return "127.0.0.1"
+    """Resolve the host to dial for the sidecar API (config.APIBindHost in Go)."""
+    from defenseclaw.gateway import gateway_api_client_host
+
+    return gateway_api_client_host(app.cfg)
 
 
 def _sidecar_client(app: AppContext):
@@ -2383,11 +2383,9 @@ def _get_openclaw_plugin_info(name: str, connector: str = "") -> dict | None:
     """Get plugin info — uses openclaw CLI for OpenClaw, filesystem for others."""
     if connector in ("", "openclaw"):
         try:
-            from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-
-            prefix = openclaw_cmd_prefix()
+            from defenseclaw.config import openclaw_bin
             proc = subprocess.run(
-                [*prefix, openclaw_bin(), "plugins", "info", name, "--json"],
+                [openclaw_bin(), "plugins", "info", name, "--json"],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -2818,11 +2816,9 @@ def _list_openclaw_plugins(connector: str = "") -> list[dict]:
         return []
 
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
         proc = subprocess.run(
-            [*prefix, openclaw_bin(), "plugins", "list", "--json"],
+            [openclaw_bin(), "plugins", "list", "--json"],
             capture_output=True,
             text=True,
             timeout=15,

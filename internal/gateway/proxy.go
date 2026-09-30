@@ -5160,7 +5160,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := guardrailRuntimeActionForGuardrailFindings(
+	action := guardrailToolCallActionForGuardrailFindings(
 		p.cfg, allFindings, false,
 	)
 	if action == guardrailActionConfirm {

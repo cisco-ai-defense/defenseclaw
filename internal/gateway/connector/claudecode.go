@@ -1146,12 +1146,9 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 		opts,
 		filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"),
 	)
-	hooks := map[string]interface{}{}
-	if err := appendClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, opts); err != nil {
-		return nil, fmt.Errorf("render Claude Code managed hook policy: %w", err)
-	}
-	if err := verifyClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
-		return nil, fmt.Errorf("verify Claude Code managed hook policy: %w", err)
+	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, hookArgs, opts)
+	if err != nil {
+		return nil, err
 	}
 	policy := map[string]interface{}{"hooks": hooks}
 	if opts.ClaudeAllowManagedHooksOnly {
@@ -1204,6 +1201,23 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 		return fmt.Errorf("Claude Code managed hook policy differs from the canonical DefenseClaw policy")
 	}
 	return nil
+}
+
+// renderClaudeCodeManagedHookMatrix is the pure renderer behind every
+// managed-tier Claude Code hook document: the contract-selected event matrix
+// bound to one hook command, verified before it is returned. It reads no host
+// state, so the OpenShell image renderer shares it with ManagedHookPolicy.
+func renderClaudeCodeManagedHookMatrix(
+	hookCommand string, hookArgs []string, opts SetupOpts,
+) (map[string]interface{}, error) {
+	hooks := map[string]interface{}{}
+	if err := appendClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, opts); err != nil {
+		return nil, fmt.Errorf("render Claude Code managed hook policy: %w", err)
+	}
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
+		return nil, fmt.Errorf("verify Claude Code managed hook policy: %w", err)
+	}
+	return hooks, nil
 }
 
 func appendClaudeCodeHookMatrix(hooks map[string]interface{}, hookCommand string, hookArgs []string) {

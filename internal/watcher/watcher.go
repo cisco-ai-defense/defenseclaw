@@ -38,7 +38,6 @@ import (
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -115,7 +114,6 @@ type InstallWatcher struct {
 	managedArtifacts []string
 	store            *audit.Store
 	logger           *audit.Logger
-	shell            *sandbox.OpenShell
 	opa              *policy.Engine
 	webhooks         WebhookDispatcher
 	debounce         time.Duration
@@ -149,7 +147,7 @@ func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
 // to the built-in Go admission logic. Watcher observability is exclusively
 // emitted through the audit logger's generated v8 runtime.
-func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
+func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -160,7 +158,6 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		pluginDirs:       pluginDirs,
 		store:            store,
 		logger:           logger,
-		shell:            shell,
 		opa:              opa,
 		debounce:         debounce,
 		onAdmit:          onAdmit,
@@ -921,8 +918,9 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	switch evt.Type {
 	case InstallMCP:
-		me := enforce.NewMCPEnforcer(w.shell)
-		_ = me.BlockEndpoint(evt.Name)
+		// MCP servers have no filesystem artifact to quarantine. The sidecar's
+		// handleMCPAdmission applies the block verdict to the connector's MCP
+		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
 		w.quarantineAsset(ctx, evt)
 	}

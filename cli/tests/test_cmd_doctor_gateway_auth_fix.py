@@ -177,6 +177,34 @@ def test_gateway_subsystem_expectation_is_off_when_discovery_found_no_openclaw(t
     assert _subsystem_expected_enabled(cfg("gw.example.com"), "gateway") is True
 
 
+@pytest.mark.parametrize(
+    ("enabled", "standalone", "platform", "deployment_mode", "expected"),
+    [
+        (True, False, "linux", "", True),
+        (True, False, "darwin", "", True),
+        (False, False, "linux", "", False),
+        (False, True, "linux", "", True),
+        (True, False, "win32", "", None),
+        (True, False, "linux", "managed_enterprise", None),
+    ],
+)
+def test_sandbox_subsystem_expectation_follows_openshell_enabled(
+    enabled,
+    standalone,
+    platform,
+    deployment_mode,
+    expected,
+):
+    # The gateway runs the sandbox subsystem when openshell.enabled is set,
+    # not only for the legacy standalone install.
+    cfg = SimpleNamespace(
+        openshell=SimpleNamespace(enabled=enabled, is_standalone=lambda: standalone),
+        deployment_mode=deployment_mode,
+    )
+    with patch("defenseclaw.commands.cmd_doctor.sys.platform", platform):
+        assert _subsystem_expected_enabled(cfg, "sandbox") is expected
+
+
 def test_gateway_auth_fails_actionably_when_token_missing(tmp_path):
     result = _DoctorResult()
 

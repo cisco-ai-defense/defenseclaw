@@ -31,7 +31,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -83,8 +82,6 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		cfg.Gateway.Port = sidecarPort
 	}
 
-	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
-
 	fmt.Println("╔══════════════════════════════════════════════╗")
 	fmt.Println("║       DefenseClaw Gateway Sidecar            ║")
 	fmt.Println("╚══════════════════════════════════════════════╝")
@@ -112,7 +109,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Println()
 
-	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell)
+	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}

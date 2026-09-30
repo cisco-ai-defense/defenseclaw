@@ -23,6 +23,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -135,6 +136,33 @@ def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
     )
 
 
+def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
+    """Return whether a ``sandbox`` stub runs without a DefenseClaw config.
+
+    The Go command tree loads the configuration itself. These commands work
+    without one, mirroring internal/cli/sandbox.go: ``sandbox teardown`` (an
+    uninstall of a half-installed host), a nested ``sandbox run`` inside a
+    sandbox, which runs the harness natively, and the read-only ``sandbox
+    pack list|show|validate`` (an administrator reads a pack's digest before
+    writing the config that pins it). An existing non-v8 document is still
+    refused by the preflight.
+    """
+    if ctx.invoked_subcommand != "sandbox":
+        return False
+    argv = sys.argv[1:]
+    try:
+        index = argv.index("sandbox")
+    except ValueError:
+        return False
+    child = argv[index + 1] if index + 1 < len(argv) else ""
+    if child == "teardown":
+        return True
+    if child == "pack":
+        grandchild = argv[index + 2] if index + 2 < len(argv) else ""
+        return grandchild in {"list", "show", "validate"}
+    return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
+
+
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
@@ -194,7 +222,9 @@ def cli(ctx: click.Context) -> None:
     if invoked in SKIP_LOAD_COMMANDS:
         if invoked not in LEGACY_CONFIG_BOUNDARY_COMMANDS:
             try:
-                cfg_mod.require_v8_config(allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT)
+                cfg_mod.require_v8_config(
+                    allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT or _is_config_optional_sandbox_command(ctx),
+                )
             except cfg_mod.ConfigVersionError as exc:
                 ux.echo(str(exc), err=True)
                 raise SystemExit(1) from exc

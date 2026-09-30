@@ -118,7 +118,7 @@ async def test_f0801_credentials_secret_fed_via_stdin_not_argv(tmp_path) -> None
 
     action = model.submit_wizard_form()
     assert action.intent is not None
-    assert action.intent.args == ("keys", "set", "OPENAI_API_KEY")
+    assert action.intent.args == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert secret not in action.intent.args
     assert "--value" not in action.intent.args
     assert action.intent.secret_stdin == secret + "\n"

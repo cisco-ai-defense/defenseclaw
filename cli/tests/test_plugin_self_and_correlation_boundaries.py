@@ -118,6 +118,13 @@ def _write_bridge_publication(
     lock_path.chmod(0o600)
 
 
+def _bridge_host_templates(repository_root: Path) -> Path:
+    # The bridge templates share their source with the OpenShell sandbox
+    # variants, so the host bytes come from the Go-rendered host templates
+    # (TestBridgeHostTemplatesGolden keeps them in step with the source).
+    return repository_root / "internal" / "gateway" / "connector" / "testdata" / "bridge_host"
+
+
 def _render_bridge_publication(
     repository_root: Path,
     data_dir: Path,
@@ -131,9 +138,9 @@ def _render_bridge_publication(
         "amp": "amp-plugin.ts",
         "opencode": "opencode-plugin.js",
     }[connector]
-    template = (
-        repository_root / "internal" / "gateway" / "connector" / "hooks" / template_name
-    ).read_text(encoding="utf-8")
+    template = (_bridge_host_templates(repository_root) / template_name).read_text(
+        encoding="utf-8"
+    )
     token_path = os.path.abspath(
         os.path.join(data_dir, "hooks", f".hook-{connector}.token")
     )
@@ -576,9 +583,13 @@ def test_bridge_template_fingerprints_match_gateway_sources(
     # The current template and the pinned copy the Secure Client profile
     # renders are both DefenseClaw's own bridge.
     repository_root = Path(__file__).resolve().parents[2]
+    # The current template is fingerprinted by its host bytes (its OpenShell
+    # sandbox branches resolved to the host ones); the pinned copy has none.
+    current, pinned = template_names
     hooks = repository_root / "internal" / "gateway" / "connector" / "hooks"
     digests = {
-        hashlib.sha256((hooks / name).read_bytes()).hexdigest() for name in template_names
+        hashlib.sha256((_bridge_host_templates(repository_root) / current).read_bytes()).hexdigest(),
+        hashlib.sha256((hooks / pinned).read_bytes()).hexdigest(),
     }
 
     assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]

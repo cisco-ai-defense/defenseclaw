@@ -1020,13 +1020,26 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 }
 
 func hookContractByID(connectorName, contractID string) (HookContract, bool) {
+	return hookContractByIDForOS(connectorName, contractID, runtime.GOOS)
+}
+
+func hookContractByIDForOS(connectorName, contractID, goos string) (HookContract, bool) {
 	contractID = strings.TrimSpace(contractID)
 	if contractID == "" {
 		return HookContract{}, false
 	}
-	for _, contract := range KnownHookContracts(connectorName) {
+	for _, contract := range hookContractsForOS(connectorName, goos) {
 		if contract.ContractID == contractID {
 			return contract, true
+		}
+	}
+	// A sandbox binding pins the sandbox-only contract its image was built
+	// for; every OpenShell sandbox runs Linux.
+	if goos == "linux" {
+		for _, contract := range sandboxOnlyHookContracts(connectorName) {
+			if contract.ContractID == contractID {
+				return contract, true
+			}
 		}
 	}
 	return HookContract{}, false
@@ -1058,7 +1071,12 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	contracts := hookContractsForOS(name, goos)
+	return resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+}
+
+// resolveHookContractAgainst matches rawVersion against contracts, the
+// registered contracts of connector name.
+func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,
@@ -1179,9 +1197,10 @@ func resolveHookContractForOptions(
 	connectorName string,
 	opts SetupOpts,
 ) HookContractResolution {
-	resolution := ResolveHookContract(connectorName, opts.AgentVersion)
+	goos := opts.profileGOOS()
+	resolution := resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
 	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
-		pinned, ok := hookContractByID(connectorName, pinnedID)
+		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)
 		switch {
 		case !ok:
 			resolution.Status = HookCompatibilityUnknown
@@ -1196,6 +1215,15 @@ func resolveHookContractForOptions(
 		}
 	}
 	return resolution
+}
+
+// profileGOOS is the operating system a profile is resolved for: opts.GOOS
+// when the agent runs elsewhere (a sandbox), otherwise this host.
+func (opts SetupOpts) profileGOOS() string {
+	if goos := strings.ToLower(strings.TrimSpace(opts.GOOS)); goos != "" {
+		return goos
+	}
+	return runtime.GOOS
 }
 
 func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {

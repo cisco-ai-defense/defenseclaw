@@ -91,7 +91,7 @@ func projectSuccessfulSQLResultCandidate(
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
 		Tool: actionTool, Args: args, CWD: req.CWD,
-		ActiveHome:           trustedActiveHome(ctx),
+		ActiveHome:           hookActiveHome(ctx),
 		ToolResourceIdentity: resourceIdentity,
 	})
 	reads := actionfacts.ExactSensitiveSQLRowsetReads(facts)
@@ -151,7 +151,7 @@ func projectSQLValuePersistenceSink(
 	}
 	input := actionfacts.Input{
 		Tool: actionTool, Args: args, CWD: req.CWD,
-		ActiveHome:           trustedActiveHome(ctx),
+		ActiveHome:           hookActiveHome(ctx),
 		ToolResourceIdentity: resourceIdentity,
 	}
 	digests, ok := toolValueLineageStructuredPersistenceDigests(

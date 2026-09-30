@@ -143,6 +143,45 @@ func TestIsActive_TruthyValues(t *testing.T) {
 	}
 }
 
+// TestIsActive_NonEmptyValues covers the variables that carry a value rather
+// than a switch (activeWhenNonEmpty; Python: _ACTIVE_WHEN_NONEMPTY).
+func TestIsActive_NonEmptyValues(t *testing.T) {
+	r := MustLoad()
+	for name, value := range map[string]string{
+		"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100,172.16.0.5",
+		"DEFENSECLAW_SANDBOX_ID":              "dcmarker-binding",
+	} {
+		e, ok := r.Get(name)
+		if !ok {
+			t.Fatalf("%s missing from registry", name)
+		}
+		for _, tc := range []struct {
+			value string
+			want  bool
+		}{{"", false}, {"  ", false}, {value, true}} {
+			got := e.isActiveWithGetter(func(string) string { return tc.value })
+			if got != tc.want {
+				t.Errorf("%s: isActive(%q) = %v, want %v", name, tc.value, got, tc.want)
+			}
+		}
+	}
+}
+
+// A planted DEFENSECLAW_SANDBOX_ID turns sandboxing off, so doctor reports it.
+func TestSandboxIDSurfacesAsSecurityOverride(t *testing.T) {
+	for _, name := range MustLoad().Names() {
+		t.Setenv(name, "")
+	}
+	t.Setenv("DEFENSECLAW_SANDBOX_ID", "dcmarker-binding")
+	var names []string
+	for _, e := range MustLoad().ActiveSecurityOverrides(false) {
+		names = append(names, e.Name)
+	}
+	if len(names) != 1 || names[0] != "DEFENSECLAW_SANDBOX_ID" {
+		t.Fatalf("active overrides = %v, want [DEFENSECLAW_SANDBOX_ID]", names)
+	}
+}
+
 // TestCrossLanguageSync asserts the Python loader and the Go loader
 // see the exact same set of names. We invoke python3 in a subprocess
 // to dump the Python-side names; if python3 isn't available (CI Go-

@@ -229,6 +229,84 @@ the presence of a file.
   <Edge from="notify" to="gateway" />
 </Flow>
 
+## In an OpenShell sandbox
+
+`defenseclaw sandbox run codex` runs Codex in an NVIDIA OpenShell sandbox on
+Linux, or on a Mac with Apple silicon in a MicroVM of its own that works on a
+copy of your folder ([macOS](/docs/setup/sandbox#macos)): the agent sees only
+your project folder, and DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/setup/sandbox) covers setup,
+the session and every flag. The files below exist only in the sandbox image;
+your own Codex configuration does not change.
+
+- **Managed tier.** The hooks are in root-owned `/etc/codex/requirements.toml`,
+  which pins `allow_managed_hooks_only` and `features.hooks` on, so user and
+  project config cannot add hooks or switch DefenseClaw's off. Root-owned
+  `/etc/codex/managed_config.toml` turns off the update check, analytics and
+  the features that reach remote services, sends Codex's OTel to DefenseClaw,
+  and pins `BASH_ENV`, `ENV` and the dynamic-loader variables to empty for
+  every command Codex runs. The hooks fail closed and authenticate with a
+  per-sandbox token, which never goes on a command line: the launcher hands
+  it to Codex's OTel exporters in their header variables (blanked for the
+  commands Codex runs), and the hooks and the notify bridge give it to curl
+  as configuration on a file descriptor. The notify bridge only sends
+  telemetry, so it never blocks Codex.
+- **Startup tip download.** The Codex TUI fetches its startup tip from
+  `raw.githubusercontent.com` at every start, around the egress proxy.
+  OpenShell refuses it and DefenseClaw's triage rejects the drafted rule
+  (`harness_background_fetch`) instead of opening a direct one; the refusal
+  is not counted as a blocked site, and Codex shows a built-in tip.
+- **Skip-permissions.** On by default (the `open` and `balanced` packs):
+  Codex starts with `--dangerously-bypass-approvals-and-sandbox`. Codex's own
+  sandbox cannot run inside OpenShell, so `--safe` (or the `strict` pack) keeps
+  its approval prompts with `sandbox_mode="danger-full-access"` and
+  `approval_policy="untrusted"`: Codex asks before every command outside its
+  read-only set and before every edit. A headless `--safe` run (`--prompt`,
+  `codex exec`) cannot ask, so it refuses those commands. The sandbox's
+  `requirements.toml` then refuses the `never` approval policy (falling back
+  to `untrusted`), and
+  `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--full-auto`,
+  `--ask-for-approval never` and `-c approval_policy="never"` are dropped from
+  the arguments you pass.
+- **Model sign-in.** `--llm auto` (the default) shares `OPENAI_API_KEY` (or
+  `CODEX_API_KEY`) from your shell, or else the API key that
+  `codex login --with-api-key` stored in `~/.codex/auth.json`. A ChatGPT
+  sign-in is not shared. OpenShell holds the secret, and the sandbox gets a
+  placeholder that works only at `api.openai.com`. `--llm bedrock` shares a
+  short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for a Codex
+  custom provider on the Bedrock Mantle endpoint in `--bedrock-region`
+  (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`), with
+  Codex's multi-agent and web search tools off. Mantle does not serve Codex's
+  own default model, so a Bedrock run uses `openai.gpt-oss-20b` unless you
+  pick another with `-- -m MODEL` (a `-c model=` override does not change
+  it); the banner's Model line names the model either way.
+- **Bedrock follow-up turns.** Bedrock Mantle rejects every turn after the
+  first of a Codex conversation, which Codex shows as `stream disconnected
+  before completion`; no provider setting avoids it. Start each task with
+  `/new` in the TUI, or run one `--prompt` per task. The banner of an
+  interactive Codex session on Bedrock says so.
+- **Per-sandbox settings.** Codex reads one `managed_config.toml` and one
+  `requirements.toml`, so each sandbox gets both again, read-only, with its
+  own settings. `managed_config.toml` pins the model provider the run chose,
+  so a `config.toml` the agent writes cannot redirect Codex, and defines the
+  MCP servers DefenseClaw brought along from your Codex setup. Unless the
+  sandbox pack sets
+  [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox),
+  `requirements.toml` allows exactly those servers, which disables every
+  other one, a repository's included. `--no-mcp` leaves your servers behind.
+- **MCP gap.** Codex matches an allowed server by its command only, and merges
+  a repository's `[mcp_servers.<name>]` table into yours key by key, so a
+  repository could add environment variables to an imported server of the
+  same name. DefenseClaw leaves such a server behind and names it when the run
+  starts.
+- **Image and verification.** The image installs Codex 0.146.0 by default,
+  replacing the base image's older Codex, and refuses a version without a
+  reviewed Linux hook contract. Verified end to end: against a mock model
+  every required hook fired and a blocked tool call did not run, also with
+  hostile user and project config (`features.hooks = false`, hooks, a notify
+  program and OTel exporters of their own, a planted `BASH_ENV`, fake tools
+  on `PATH` and a forged sandbox token), and a live sandbox run fired the hooks
+  and honoured a deny with a Bedrock Mantle model.
+
 ## Disable
 
 ```bash

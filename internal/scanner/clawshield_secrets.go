@@ -133,6 +133,13 @@ func (s *ClawShieldSecretsScanner) Scan(ctx context.Context, target string) (*Sc
 	return result, nil
 }
 
+// ScanContent applies the secret rules to one in-memory file. path is only
+// used for finding locations. Callers that hold file bytes already (sandbox
+// workspace review, git blobs) use it instead of Scan's directory walk.
+func (s *ClawShieldSecretsScanner) ScanContent(path string, content []byte) []Finding {
+	return csSecretsScanContent(content, path)
+}
+
 func csSecretsScanContent(content []byte, path string) []Finding {
 	text := string(content)
 	var findings []Finding

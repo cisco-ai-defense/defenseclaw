@@ -32,7 +32,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import defenseclaw.config as config_mod
 from defenseclaw.config import (
-    DEFAULT_OPENSHELL_VERSION,
     DEFAULT_SANDBOX_HOME,
     AIDiscoveryConfig,
     AssetPolicyConfig,
@@ -1760,14 +1759,7 @@ class TestOpenShellModeField(unittest.TestCase):
 
 
 class TestOpenShellSandboxFields(unittest.TestCase):
-    def test_default_version(self):
-        oc = OpenShellConfig()
-        self.assertEqual(oc.version, DEFAULT_OPENSHELL_VERSION)
-        self.assertEqual(oc.effective_version(), DEFAULT_OPENSHELL_VERSION)
-
-    def test_custom_version(self):
-        oc = OpenShellConfig(version="0.7.0")
-        self.assertEqual(oc.effective_version(), "0.7.0")
+    """The openshell section is the legacy shim's read-only remnant."""
 
     def test_default_sandbox_home(self):
         oc = OpenShellConfig()
@@ -1783,37 +1775,24 @@ class TestOpenShellSandboxFields(unittest.TestCase):
         self.assertTrue(OpenShellConfig(mode="standalone").is_standalone())
         self.assertFalse(OpenShellConfig(mode="cluster").is_standalone())
 
-    def test_auto_pair_default(self):
-        oc = OpenShellConfig()
-        self.assertTrue(oc.should_auto_pair())
-
-    def test_auto_pair_explicit_true(self):
-        oc = OpenShellConfig(auto_pair=True)
-        self.assertTrue(oc.should_auto_pair())
-
-    def test_auto_pair_explicit_false(self):
-        oc = OpenShellConfig(auto_pair=False)
-        self.assertFalse(oc.should_auto_pair())
-
     def test_merge_openshell_none(self):
         oc = _merge_openshell(None)
-        self.assertEqual(oc.version, DEFAULT_OPENSHELL_VERSION)
+        self.assertEqual(oc.mode, "")
         self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
-        self.assertIsNone(oc.auto_pair)
 
-    def test_merge_openshell_with_data(self):
+    def test_merge_openshell_ignores_legacy_keys(self):
         oc = _merge_openshell({
             "mode": "standalone",
+            "binary": "openshell",
+            "policy_dir": "/etc/openshell/policies",
             "version": "0.7.0",
             "sandbox_home": "/opt/sandbox",
             "auto_pair": False,
+            "host_networking": True,
         })
-        self.assertEqual(oc.mode, "standalone")
-        self.assertEqual(oc.version, "0.7.0")
-        self.assertEqual(oc.sandbox_home, "/opt/sandbox")
-        self.assertFalse(oc.auto_pair)
+        self.assertEqual(oc, OpenShellConfig(mode="standalone", sandbox_home="/opt/sandbox"))
 
-    def test_load_openshell_sandbox_fields(self):
+    def test_load_accepts_legacy_openshell_keys(self):
         import yaml
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_data = {
@@ -1822,6 +1801,7 @@ class TestOpenShellSandboxFields(unittest.TestCase):
                     "version": "0.7.0",
                     "sandbox_home": "/opt/sandbox",
                     "auto_pair": False,
+                    "host_networking": False,
                 },
             }
             with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
@@ -1831,9 +1811,73 @@ class TestOpenShellSandboxFields(unittest.TestCase):
                 mock_dp.return_value = Path(tmpdir)
                 cfg = load()
                 self.assertEqual(cfg.openshell.mode, "standalone")
-                self.assertEqual(cfg.openshell.version, "0.7.0")
                 self.assertEqual(cfg.openshell.sandbox_home, "/opt/sandbox")
-                self.assertFalse(cfg.openshell.auto_pair)
+                self.assertFalse(hasattr(cfg.openshell, "version"))
+
+
+class TestLegacyStandaloneAPIHost(unittest.TestCase):
+    """Python twin of internal/config/legacy_openshell.go LegacyStandaloneAPIHost."""
+
+    def _cfg(self, mode: str, guardrail_host: str) -> Config:
+        cfg = Config()
+        cfg.openshell = OpenShellConfig(mode=mode)
+        cfg.guardrail.host = guardrail_host
+        return cfg
+
+    def test_matches_go_shim_table(self):
+        from defenseclaw.config import legacy_standalone_api_host
+
+        cases = [
+            ("", "10.200.0.1", None),
+            ("cluster", "10.200.0.1", None),
+            ("standalone", "10.200.0.1", "10.200.0.1"),
+            ("standalone", " 10.200.0.1 ", "10.200.0.1"),
+            ("standalone", "localhost", None),
+            ("standalone", "", None),
+        ]
+        for mode, host, want in cases:
+            with self.subTest(mode=mode, host=host):
+                self.assertEqual(legacy_standalone_api_host(self._cfg(mode, host)), want)
+        self.assertIsNone(legacy_standalone_api_host(object()))
+
+    def test_gateway_client_host_prefers_api_bind_then_shim(self):
+        from defenseclaw.gateway import gateway_api_client_host
+
+        cfg = self._cfg("standalone", "10.200.0.1")
+        self.assertEqual(gateway_api_client_host(cfg), "10.200.0.1")
+        cfg.gateway.api_bind = "127.0.0.2"
+        self.assertEqual(gateway_api_client_host(cfg), "127.0.0.2")
+        self.assertEqual(gateway_api_client_host(self._cfg("", "10.200.0.1")), "127.0.0.1")
+
+    def test_api_bind_host_matches_the_shared_go_corpus(self):
+        from defenseclaw.config import api_bind_host
+
+        corpus_path = Path(__file__).resolve().parents[2] / "testdata" / "api_bind_host" / "cases.json"
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        self.assertEqual(corpus["schema_version"], 1)
+        for case in corpus["cases"]:
+            with self.subTest(case=case["name"]):
+                cfg = self._cfg(case["mode"], case["guardrail_host"])
+                cfg.gateway.api_bind = case["api_bind"]
+                self.assertEqual(api_bind_host(cfg), case["want"])
+        self.assertEqual(api_bind_host(None), "127.0.0.1")
+
+    def test_cli_sidecar_clients_honor_an_explicit_api_bind(self):
+        # A legacy host that pinned gateway.api_bind: 127.0.0.1 has its
+        # gateway there; plugin, skill, and status must not dial 10.200.0.1.
+        # (`defenseclaw upgrade` runs the release installer and dials no
+        # sidecar.)
+        from defenseclaw.commands import cmd_plugin, cmd_skill
+
+        cfg = self._cfg("standalone", "10.200.0.1")
+        cfg.gateway.api_bind = "127.0.0.1"
+        app = SimpleNamespace(cfg=cfg)
+        self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
+        self.assertEqual(cmd_skill._api_bind_host(app), "127.0.0.1")
+        cfg.gateway.api_bind = "0.0.0.0"
+        self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
+        cfg.gateway.api_bind = ""
+        self.assertEqual(cmd_skill._api_bind_host(app), "10.200.0.1")
 
 
 class TestWebhookConfig(unittest.TestCase):

@@ -1,0 +1,383 @@
+# DefenseClaw sandbox egress blocklist feed.
+#
+# The DefenseClaw egress proxy (internal/openshell/egress) embeds this file and
+# blocks matching destinations for every sandbox in every profile. Entries are
+# services whose main use from an unattended coding agent is moving data off
+# the machine to a place anyone can read (paste sites, anonymous file drops,
+# webhook catchers), exposing or relaying traffic past network controls
+# (tunnels), or hiding where traffic goes (anonymizers).
+#
+# Host patterns:
+#   example.com     exactly that host
+#   *.example.com   any subdomain of example.com at any depth (not the apex)
+#
+# Every exact host comes with its "*." companion (a test enforces it): a
+# service's API and www hosts (api.paste.gg, www.controlc.com) are the same
+# service. A wildcard may stand alone where the apex itself is harmless, such
+# as *.ngrok.com.
+#
+# Categories are a closed set (paste_site, file_drop, webhook_catcher, tunnel,
+# anonymizer) because they label telemetry. An entry's reason defaults to its
+# category's reason. A host may appear in only one entry.
+#
+# False positives are unblocked per sandbox or permanently with
+# `defenseclaw sandbox unblock <host>`; operators add their own entries through
+# `openshell.egress.block`.
+#
+# Bump feed_version (YYYY.MM.DD[.N]) whenever entries change.
+schema_version: 1
+kind: blocklist
+name: defenseclaw-blocklist
+feed_version: "2026.09.26.2"
+entries:
+  # --- paste sites -----------------------------------------------------------
+  - name: Pastebin
+    category: paste_site
+    hosts: [pastebin.com, "*.pastebin.com"]
+  - name: paste.ee
+    category: paste_site
+    hosts: [paste.ee, "*.paste.ee"] # the upload API is api.paste.ee
+  - name: Rentry
+    category: paste_site
+    hosts: [rentry.co, "*.rentry.co", rentry.org, "*.rentry.org"]
+  - name: dpaste
+    category: paste_site
+    hosts: [dpaste.org, "*.dpaste.org", dpaste.com, "*.dpaste.com"]
+  - name: Command-line pastebins
+    category: paste_site
+    reason: Command-line pastebins publish anything piped to them (curl -F or nc) at a public URL.
+    hosts:
+      - paste.rs
+      - "*.paste.rs"
+      - ix.io
+      - "*.ix.io"
+      - sprunge.us
+      - "*.sprunge.us"
+      - termbin.com
+      - "*.termbin.com"
+      - clbin.com
+      - "*.clbin.com"
+      - paste.c-net.org
+      - "*.paste.c-net.org"
+      - p.ip.fi
+      - "*.p.ip.fi"
+      - vpaste.net
+      - "*.vpaste.net"
+      - paste.sh
+      - "*.paste.sh"
+  - name: Hastebin and Ghostbin
+    category: paste_site
+    hosts:
+      - hastebin.com
+      - "*.hastebin.com"
+      - hastebin.skyra.pw
+      - "*.hastebin.skyra.pw"
+      - ghostbin.com
+      - "*.ghostbin.com"
+      - ghostbin.co
+      - "*.ghostbin.co"
+  - name: PrivateBin and ZeroBin public instances
+    category: paste_site
+    hosts: [privatebin.net, "*.privatebin.net", 0bin.net, "*.0bin.net"]
+  - name: General paste sites
+    category: paste_site
+    hosts:
+      - controlc.com
+      - "*.controlc.com"
+      - justpaste.it
+      - "*.justpaste.it"
+      - pastes.io
+      - "*.pastes.io"
+      - paste.gg
+      - "*.paste.gg"
+      - pastie.io
+      - "*.pastie.io"
+      - paste2.org
+      - "*.paste2.org"
+      - pastelink.net
+      - "*.pastelink.net"
+      - snippet.host
+      - "*.snippet.host"
+      - katb.in
+      - "*.katb.in"
+      - bpa.st
+      - "*.bpa.st"
+      - bpaste.net
+      - "*.bpaste.net"
+      - paste.mozilla.org
+      - "*.paste.mozilla.org"
+      - paste.debian.net
+      - "*.paste.debian.net"
+
+  # --- anonymous file drops --------------------------------------------------
+  - name: transfer.sh
+    category: file_drop
+    hosts: [transfer.sh, "*.transfer.sh"]
+  - name: file.io
+    category: file_drop
+    hosts: [file.io, "*.file.io"]
+  - name: Catbox and Litterbox
+    category: file_drop
+    hosts: [catbox.moe, "*.catbox.moe"]
+  - name: Uguu
+    category: file_drop
+    hosts: [uguu.se, "*.uguu.se"]
+  - name: Gofile
+    category: file_drop
+    hosts: [gofile.io, "*.gofile.io"]
+  - name: WeTransfer
+    category: file_drop
+    hosts: [wetransfer.com, "*.wetransfer.com", we.tl, "*.we.tl"]
+  - name: Sendspace
+    category: file_drop
+    hosts: [sendspace.com, "*.sendspace.com"]
+  - name: Filebin
+    category: file_drop
+    hosts: [filebin.net, "*.filebin.net"]
+  - name: Pixeldrain
+    category: file_drop
+    hosts: [pixeldrain.com, "*.pixeldrain.com"]
+  - name: ufile.io
+    category: file_drop
+    hosts: [ufile.io, "*.ufile.io"]
+  - name: KrakenFiles
+    category: file_drop
+    hosts: [krakenfiles.com, "*.krakenfiles.com"]
+  - name: Command-line file drops
+    category: file_drop
+    reason: Command-line file drops return a public download link for any file uploaded with curl.
+    hosts:
+      - 0x0.st
+      - "*.0x0.st"
+      - x0.at
+      - "*.x0.at"
+      - temp.sh
+      - "*.temp.sh"
+      - bashupload.com
+      - "*.bashupload.com"
+      - oshi.at
+      - "*.oshi.at"
+      - keep.sh
+      - "*.keep.sh"
+      - qu.ax
+      - "*.qu.ax"
+      - tmp.ninja
+      - "*.tmp.ninja"
+  - name: General file drops
+    category: file_drop
+    hosts:
+      - tmpfiles.org
+      - "*.tmpfiles.org"
+      - filetransfer.io
+      - "*.filetransfer.io"
+      - easyupload.io
+      - "*.easyupload.io"
+      - tempsend.com
+      - "*.tempsend.com"
+      - send.vis.ee
+      - "*.send.vis.ee"
+      - upload.ee
+      - "*.upload.ee"
+      - fileditch.com
+      - "*.fileditch.com"
+      - anonymfile.com
+      - "*.anonymfile.com"
+      - anonfiles.com
+      - "*.anonfiles.com"
+      - bayfiles.com
+      - "*.bayfiles.com"
+      - buzzheavier.com
+      - "*.buzzheavier.com"
+
+  # --- webhook catchers and out-of-band interaction servers -----------------
+  - name: Webhook.site
+    category: webhook_catcher
+    hosts: [webhook.site, "*.webhook.site"]
+  - name: RequestBin and Pipedream request bins
+    category: webhook_catcher
+    hosts: [requestbin.net, "*.requestbin.net", "*.m.pipedream.net", "*.x.pipedream.net"]
+  - name: Hookbin
+    category: webhook_catcher
+    hosts: [hookbin.com, "*.hookbin.com"]
+  - name: Beeceptor
+    category: webhook_catcher
+    hosts: ["*.beeceptor.com"]
+  - name: RequestCatcher
+    category: webhook_catcher
+    hosts: [requestcatcher.com, "*.requestcatcher.com"]
+  - name: Postbin
+    category: webhook_catcher
+    hosts: [postb.in, "*.postb.in"]
+  - name: Post Test Server
+    category: webhook_catcher
+    hosts: [ptsv2.com, "*.ptsv2.com", ptsv3.com, "*.ptsv3.com"]
+  - name: Webhook.cool
+    category: webhook_catcher
+    hosts: [webhook.cool, "*.webhook.cool"]
+  - name: General request inspectors
+    category: webhook_catcher
+    hosts:
+      - typedwebhook.tools
+      - "*.typedwebhook.tools"
+      - webhook-test.com
+      - "*.webhook-test.com"
+      - putsreq.com
+      - "*.putsreq.com"
+      - requestinspector.com
+      - "*.requestinspector.com"
+      - mockbin.org
+      - "*.mockbin.org"
+      - smee.io
+      - "*.smee.io"
+  - name: Interactsh
+    category: webhook_catcher
+    reason: Interactsh servers log DNS and HTTP interactions for out-of-band exfiltration and SSRF probing.
+    hosts:
+      - interact.sh
+      - "*.interact.sh"
+      - "*.oast.fun"
+      - "*.oast.live"
+      - "*.oast.site"
+      - "*.oast.online"
+      - "*.oast.pro"
+      - "*.oast.me"
+  - name: Burp Collaborator
+    category: webhook_catcher
+    reason: Burp Collaborator servers log DNS and HTTP interactions for out-of-band exfiltration and SSRF probing.
+    hosts: ["*.burpcollaborator.net", "*.oastify.com"]
+  - name: DNS and HTTP interaction loggers
+    category: webhook_catcher
+    reason: Interaction loggers record DNS and HTTP requests to per-user subdomains for out-of-band exfiltration.
+    hosts: [dnslog.cn, "*.dnslog.cn", ceye.io, "*.ceye.io", requestrepo.com, "*.requestrepo.com"]
+
+  # --- tunnels ----------------------------------------------------------------
+  - name: ngrok
+    category: tunnel
+    hosts:
+      - ngrok.io
+      - "*.ngrok.io"
+      - ngrok.app
+      - "*.ngrok.app"
+      - ngrok.dev
+      - "*.ngrok.dev"
+      - ngrok-free.app
+      - "*.ngrok-free.app"
+      - ngrok-free.dev
+      - "*.ngrok-free.dev"
+      - ngrok.pizza
+      - "*.ngrok.pizza"
+      - ngrok-agent.com
+      - "*.ngrok-agent.com"
+      - "*.ngrok.com"
+  - name: Cloudflare Tunnel
+    category: tunnel
+    hosts: [trycloudflare.com, "*.trycloudflare.com", argotunnel.com, "*.argotunnel.com", "*.cfargotunnel.com"]
+  - name: localtunnel
+    category: tunnel
+    hosts: [loca.lt, "*.loca.lt", localtunnel.me, "*.localtunnel.me"]
+  - name: Serveo
+    category: tunnel
+    hosts: [serveo.net, "*.serveo.net", "*.serveousercontent.com"]
+  - name: localhost.run
+    category: tunnel
+    hosts: [localhost.run, "*.localhost.run", lhr.life, "*.lhr.life", lhr.rocks, "*.lhr.rocks"]
+  - name: Pinggy
+    category: tunnel
+    hosts: [pinggy.io, "*.pinggy.io", pinggy.link, "*.pinggy.link", "*.pinggy.online"]
+  - name: Tunnelmole
+    category: tunnel
+    hosts: [tunnelmole.net, "*.tunnelmole.net", "*.tunnelmole.com"]
+  - name: zrok
+    category: tunnel
+    hosts: [zrok.io, "*.zrok.io"]
+  - name: PageKite
+    category: tunnel
+    hosts: [pagekite.net, "*.pagekite.net", "*.pagekite.me"]
+  - name: Expose
+    category: tunnel
+    hosts: [sharedwithexpose.com, "*.sharedwithexpose.com"]
+  - name: LocalXpose
+    category: tunnel
+    hosts: [loclx.io, "*.loclx.io"]
+  - name: Localtonet
+    category: tunnel
+    hosts: [localtonet.com, "*.localtonet.com", "*.localto.net"]
+  - name: Tailscale Funnel
+    category: tunnel
+    hosts: ["*.ts.net"]
+  - name: Microsoft Dev Tunnels
+    category: tunnel
+    hosts: ["*.devtunnels.ms", "*.tunnels.api.visualstudio.com"]
+  - name: Gradio share links
+    category: tunnel
+    hosts: ["*.gradio.live"]
+  - name: Packetriot
+    category: tunnel
+    hosts: [pktriot.net, "*.pktriot.net"]
+  - name: portmap.io
+    category: tunnel
+    hosts: [portmap.io, "*.portmap.io", "*.portmap.host"]
+  - name: playit.gg
+    category: tunnel
+    hosts: [playit.gg, "*.playit.gg"]
+  - name: Small tunnel services
+    category: tunnel
+    hosts: [bore.pub, "*.bore.pub", srv.us, "*.srv.us", "*.loophole.site", jprq.io, "*.jprq.io"]
+
+  # --- anonymizers ------------------------------------------------------------
+  - name: Tor, I2P and exit-node names
+    category: anonymizer
+    reason: Onion, I2P and exit-node names only resolve through anonymity networks.
+    hosts: ["*.onion", "*.i2p", "*.exit"]
+  - name: Tor2web gateways
+    category: anonymizer
+    reason: Tor2web gateways relay requests to Tor hidden services.
+    hosts:
+      - "*.onion.ws"
+      - "*.onion.pet"
+      - "*.onion.ly"
+      - "*.onion.to"
+      - "*.onion.link"
+      - "*.onion.sh"
+      - "*.onion.city"
+      - tor2web.org
+      - "*.tor2web.org"
+      - "*.tor2web.io"
+  - name: Tor Project distribution and bridges
+    category: anonymizer
+    reason: Tor downloads and bridge discovery let an agent route traffic around the egress proxy.
+    hosts: [torproject.org, "*.torproject.org"]
+  - name: Web proxies
+    category: anonymizer
+    reason: Web proxies fetch arbitrary URLs on the caller's behalf and hide the real destination.
+    hosts:
+      - hidester.com
+      - "*.hidester.com"
+      - proxysite.com
+      - "*.proxysite.com"
+      - croxyproxy.com
+      - "*.croxyproxy.com"
+      - croxyproxy.rocks
+      - "*.croxyproxy.rocks"
+      - kproxy.com
+      - "*.kproxy.com"
+      - 4everproxy.com
+      - "*.4everproxy.com"
+      - proxyium.com
+      - "*.proxyium.com"
+      - blockaway.net
+      - "*.blockaway.net"
+      - hide.me
+      - "*.hide.me"
+      - anonymouse.org
+      - "*.anonymouse.org"
+  - name: Open proxy lists
+    category: anonymizer
+    reason: Open proxy lists hand out third-party proxies that bypass the egress proxy.
+    hosts:
+      - proxyscrape.com
+      - "*.proxyscrape.com"
+      - free-proxy-list.net
+      - "*.free-proxy-list.net"
+      - spys.one
+      - "*.spys.one"

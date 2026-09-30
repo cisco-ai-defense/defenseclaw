@@ -885,11 +885,12 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 // Fields preserved:
 //   - Gateway.Token — synthesised by ensureGatewayTokenSynthesis on
 //     first boot; not written into config.yaml on disk.
-//   - Gateway.NoTLS — mapstructure:"-", set at boot from
-//     RequiresTLSWithMode(&OpenShell). Runtime state, not user-
+//   - Gateway.NoTLS — mapstructure:"-", set at boot from RequiresTLS
+//     and the legacy standalone shim. Runtime state, not user-
 //     configurable.
 //   - Gateway.SandboxHome, Gateway.ClawHome — mapstructure:"-",
-//     derived from OpenShell / os.UserHomeDir() at Load time. Stable
+//     derived from the legacy OpenShell shim / os.UserHomeDir() at Load
+//     time. Stable
 //     across reloads on the same host but the initial cached snapshot
 //     may have been rendered before every derivation ran.
 //
@@ -909,7 +910,7 @@ func preserveManagedGatewayRuntimeFields(oldCfg, next *config.Config) {
 	// NoTLS is bool — the "was it set on the runtime side and zeroed
 	// by LoadFromFile?" question reduces to "old=true, new=false".
 	// Copy that specific transition; the reverse (old=false, new=true)
-	// can only happen if the OpenShell mode legitimately flipped,
+	// can only happen if the legacy OpenShell mode legitimately flipped,
 	// which is a real change.
 	if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
 		next.Gateway.NoTLS = true
@@ -997,6 +998,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"tenant_id":        {},
 		"workspace_id":     {},
 		"discovery_source": {},
+		// Sandbox settings are read per launch, and the sandbox listeners
+		// rebind in-process (apiNeedsRestart). Only the legacy standalone
+		// mode behind the bind shim needs a fresh process (below).
+		"openshell": {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)
@@ -1034,6 +1039,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		if _, ok := hotReloadable[path]; !ok {
 			restart = append(restart, path)
 		}
+	}
+	if config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) {
+		// The shim decides gateway TLS, the sandbox home, and the API bind at
+		// construction; entering or leaving legacy mode needs a fresh process.
+		restart = append(restart, "openshell.mode")
 	}
 	if oldCfg.DataDir != newCfg.DataDir {
 		restart = append(restart, "data_dir")

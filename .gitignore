@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+# Sandbox artifact goldens (a harness's root-owned managed .env, no secrets).
+!internal/gateway/connector/testdata/sandbox/**/.env.golden
 
 # Generated config copies (canonical source: internal/configs/providers.json)
 extensions/defenseclaw/src/providers.json
@@ -33,6 +35,9 @@ skills/defenseclaw-dev-host/
 .agents/skills/defenseclaw-dev-host
 .claude/skills/defenseclaw-dev-host
 .codex/skills/defenseclaw-dev-host
+
+# Textual's XTermParser(debug=True) key dump.
+keys.log
 
 # Go build and test artifacts
 bin/

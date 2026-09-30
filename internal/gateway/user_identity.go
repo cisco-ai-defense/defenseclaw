@@ -14,6 +14,7 @@ import (
 	osuser "os/user"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -78,6 +79,11 @@ func gatewayRunsAsServiceAccount() bool {
 // any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
+	if isSandboxHookRequest(ctx) {
+		// A sandbox payload is agent-controlled end to end; the binding's
+		// host user is the only attribution, and no address is inferred.
+		return user
+	}
 	user.Email = hookUserEmail(connector, payload)
 	return user
 }
@@ -87,6 +93,10 @@ func resolveHookUserIdentity(ctx context.Context, connector string, payload map[
 // address lookup in resolveHookUserIdentity reads a credential file, which is
 // wasted work on a path that has nowhere to put the result.
 func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEventUser {
+	if binding, ok := sandboxauth.FromContext(ctx); ok {
+		userID, _, userName := sandboxBindingUser(binding)
+		return newLLMEventUser(userID, userName, userID != "")
+	}
 	fromHeaders := AgentIdentityFromContext(ctx)
 	// The two sources are ranked as pairs rather than field by field. The hook
 	// helper omits the name header on its own whenever the account name fails
@@ -105,6 +115,10 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 // OTLP ingest traffic, where the caller is a library rather than a connector
 // with a local credential file to read.
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
+	if binding, ok := sandboxauth.FromContext(r.Context()); ok {
+		userID, _, userName := sandboxBindingUser(binding)
+		return newLLMEventUser(userID, userName, userID != "")
+	}
 	trustedID := r.Header.Get(llmEventUserIDHeader)
 	trustedName := r.Header.Get(llmEventUserNameHeader)
 	if trustedID != "" || trustedName != "" {

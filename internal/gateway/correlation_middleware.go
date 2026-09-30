@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -325,7 +326,12 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			// attackers cheap noise injection into trace
 			// dashboards.
 			//
-			// Trust gate: loopback only.
+			// Trust gate: loopback only, and never a sandbox. Sandbox
+			// traffic reaches the ingress from loopback through the
+			// OpenShell supervisor, so loopback proves nothing about
+			// who is calling: a sandbox's trace id, policy id and
+			// destination app are its own choice, and adopted they
+			// joined its audit rows to whatever host trace it named.
 			//
 			// Note this is INTENTIONALLY broader than the gate
 			// `shouldExtractHookTrace` enforces in
@@ -349,7 +355,8 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			// trace id on ANY route; for them we drop the
 			// parent and fall back below to any already-active
 			// generated operation's trace id.
-			if connector.IsLoopback(r) {
+			binding, sandboxed := sandboxauth.FromContext(ctx)
+			if !sandboxed && connector.IsLoopback(r) {
 				if tid := traceIDFromHeaders(r.Header); tid != "" {
 					ctx = ContextWithTraceID(ctx, tid)
 				}
@@ -375,7 +382,14 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				// sidecar memory by flooding unique
 				// X-DefenseClaw-Session-Id values.
 				id := registry.ResolvePeek(ctx, SessionIDFromContext(ctx), inboundAgent)
-				if connector.IsLoopback(r) {
+				if sandboxed {
+					// Sandbox traffic reaches the ingress from loopback through
+					// the OpenShell supervisor, so loopback proves nothing about
+					// who is calling. The end user is the host user recorded
+					// on the authenticated binding; identity headers the
+					// sandbox sends are ignored.
+					id.UserID, id.UserIDKind, id.UserName = sandboxBindingUser(binding)
+				} else if connector.IsLoopback(r) {
 					trustedID := sanitizeLLMEventUser(r.Header.Get(llmEventUserIDHeader))
 					trustedName := sanitizeLLMEventUser(r.Header.Get(llmEventUserNameHeader))
 					if trustedID != "" || trustedName != "" {
@@ -428,12 +442,24 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				AgentID:         id.AgentID,
 				AgentName:       id.AgentName,
 				AgentInstanceID: id.AgentInstanceID,
-				PolicyID:        policyIDFromHeaders(r.Header),
-				DestinationApp:  destinationAppFromHeaders(r.Header),
+			}
+			if sandboxed {
+				audEnv = sandboxBindingEnvelope(audEnv, binding)
+			} else {
+				audEnv.PolicyID = policyIDFromHeaders(r.Header)
+				audEnv.DestinationApp = destinationAppFromHeaders(r.Header)
 			}
 			ctx = audit.ContextWithEnvelope(ctx, audEnv)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// sandboxBindingUser is the end-user identity of a sandbox request: the host
+// account recorded on its binding, sanitised like any trusted identity.
+func sandboxBindingUser(binding sandboxauth.Binding) (userID, userIDKind, userName string) {
+	userID = sanitizeLLMEventUser(binding.HostUser.UID)
+	userName = sanitizeLLMEventUser(binding.HostUser.Name)
+	return userID, useridentity.KindForID(userID), userName
 }

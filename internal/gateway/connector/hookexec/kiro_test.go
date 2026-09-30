@@ -36,11 +36,16 @@ func TestKiroNativeHookAnswersLikeKiroHookScript(t *testing.T) {
 		strict     bool
 		wantCode   int
 		wantStderr string
+		// unprefixed: the reason is printed as is, without "defenseclaw: ".
+		unprefixed bool
 	}{
 		{name: "allow", rt: ok(`{"action":"allow"}`), wantCode: 0},
 		{name: "allow with hook_output", rt: ok(`{"action":"allow","hook_output":{"decision":"allow"}}`), wantCode: 0},
 		{name: "block", rt: ok(`{"action":"block","hook_output":{"decision":"block","reason":"marker rule matched"}}`), wantCode: 2, wantStderr: "defenseclaw: marker rule matched"},
 		{name: "deny", rt: ok(`{"hook_output":{"decision":"deny","reason":"marker rule matched"}}`), wantCode: 2, wantStderr: "defenseclaw: marker rule matched"},
+		// A reason that names DefenseClaw is not prefixed again (cert kiro:KR-F10).
+		{name: "DefenseClaw's own reason", rt: ok(`{"action":"block","hook_output":{"decision":"block","reason":"Blocked by DefenseClaw rule R1: marker"}}`),
+			wantCode: 2, wantStderr: "Blocked by DefenseClaw rule R1: marker", unprefixed: true},
 		{name: "block without a hook_output is not a veto", rt: ok(`{"action":"block"}`), wantCode: 0},
 		{name: "invalid response, fail open", rt: ok(`not json`), failMode: "open", wantCode: 0, wantStderr: "kiro hook error"},
 		{name: "invalid response, fail closed", rt: ok(`not json`), failMode: "closed", wantCode: 2, wantStderr: "kiro hook error"},
@@ -62,6 +67,9 @@ func TestKiroNativeHookAnswersLikeKiroHookScript(t *testing.T) {
 			}
 			if r.stdout != "" {
 				t.Fatalf("stdout = %q, want empty: Kiro adds hook stdout to the agent's context", r.stdout)
+			}
+			if tc.unprefixed && strings.Contains(r.stderr, "defenseclaw: ") {
+				t.Fatalf("stderr = %q, want DefenseClaw's own reason without a second prefix", r.stderr)
 			}
 			if tc.wantStderr != "" && !strings.Contains(r.stderr, tc.wantStderr) {
 				t.Fatalf("stderr = %q, want it to contain %q", r.stderr, tc.wantStderr)

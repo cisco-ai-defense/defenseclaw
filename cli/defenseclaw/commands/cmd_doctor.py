@@ -956,6 +956,161 @@ def _gateway_peer_bound_request(
 # ---------------------------------------------------------------------------
 
 
+def _check_legacy_sandbox(cfg, r: _DoctorResult) -> None:
+    """Point a host that still carries the removed openshell-sandbox mode at cleanup.
+
+    Silent when nothing is found. The legacy mode keeps the gateway API on
+    the sandbox veth host until ``defenseclaw sandbox legacy-cleanup`` resets
+    the config, and its root units, ACLs, and ownership changes stay behind.
+    """
+    from defenseclaw import sandbox_legacy
+
+    try:
+        evidence = sandbox_legacy.quick_evidence(cfg)
+    except Exception:  # noqa: BLE001 - a diagnostic must never abort doctor
+        return
+    if not evidence:
+        return
+    _emit(
+        "warn",
+        "Legacy sandbox",
+        "legacy openshell-sandbox standalone install detected (" + ", ".join(evidence) + ")",
+        r=r,
+        check_id="doctor.sandbox.legacy-install",
+        reason_code="legacy-standalone-sandbox",
+        remediation="run 'defenseclaw sandbox legacy-cleanup --dry-run', then 'defenseclaw sandbox legacy-cleanup'",
+    )
+
+
+# ``defenseclaw-gateway sandbox doctor --json`` probes Docker, the OpenShell
+# service and CLI, and the daemon; each probe has its own short deadline.
+SANDBOX_DOCTOR_TIMEOUT_SECONDS = 90
+_SANDBOX_DOCTOR_MAX_OUTPUT_CHARS = 1_000_000
+_SANDBOX_DOCTOR_STATUSES = frozenset({"pass", "warn", "fail", "skip"})
+
+
+def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
+    """Run the Go sandbox doctor and return its JSON report, or why not.
+
+    Also the TUI Sandbox wizard's machine check.
+    """
+    try:
+        completed = subprocess.run(
+            [binary, "sandbox", "doctor", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=SANDBOX_DOCTOR_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"'defenseclaw-gateway sandbox doctor' did not finish within {SANDBOX_DOCTOR_TIMEOUT_SECONDS}s"
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not run 'defenseclaw-gateway sandbox doctor': {exc}"
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    if len(stdout) > _SANDBOX_DOCTOR_MAX_OUTPUT_CHARS:
+        return None, "'defenseclaw-gateway sandbox doctor' returned an oversized report"
+    try:
+        report = json.loads(stdout) if stdout.strip() else None
+    except json.JSONDecodeError:
+        report = None
+    if not isinstance(report, dict) or not isinstance(report.get("checks"), list):
+        stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+        first = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        first = first.lstrip("✗").strip()
+        if first:
+            return None, first
+        return None, (
+            f"'defenseclaw-gateway sandbox doctor --json' exited {completed.returncode} without a report; "
+            "this gateway may predate OpenShell 0.1 sandboxes (run 'defenseclaw upgrade')"
+        )
+    return report, ""
+
+
+def _check_sandbox(cfg, r: _DoctorResult) -> None:
+    """The Sandbox section: the Go ``sandbox doctor`` checks, one row each.
+
+    Skipped (one row) while ``openshell.enabled`` is off, so hosts that never
+    set sandboxes up do not pay for Docker and OpenShell probes.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    openshell = getattr(cfg, "openshell", None)
+    # Identity check: a stand-in config object must not read as enabled.
+    enabled = getattr(openshell, "enabled", False) is True
+    if host_os() == "windows":
+        _emit(
+            "warn" if enabled else "skip",
+            "Sandboxes",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            r=r,
+            check_id="doctor.sandbox.platform",
+            reason_code="sandbox-platform-unsupported",
+        )
+        return
+    if not enabled:
+        _emit(
+            "skip",
+            "Sandboxes",
+            "off (openshell.enabled is false); run 'defenseclaw sandbox setup' to run agents in OpenShell sandboxes",
+            r=r,
+            check_id="doctor.sandbox.enabled",
+            reason_code="sandbox-disabled",
+        )
+        return
+    binary = resolve_gateway_binary()
+    if not binary:
+        _emit(
+            "fail",
+            "Sandbox doctor",
+            "defenseclaw-gateway is not installed, so the sandbox checks cannot run",
+            r=r,
+            check_id="doctor.sandbox.gateway-binary",
+            reason_code="sandbox-gateway-missing",
+            remediation="run 'defenseclaw upgrade' to install the gateway binary",
+        )
+        return
+    report, problem = sandbox_doctor_report(binary)
+    if report is None:
+        _emit(
+            "warn",
+            "Sandbox doctor",
+            problem,
+            r=r,
+            check_id="doctor.sandbox.report",
+            reason_code="sandbox-doctor-unavailable",
+            remediation="run 'defenseclaw sandbox doctor' for the full output",
+        )
+        return
+    for check in report["checks"]:
+        if not isinstance(check, dict):
+            continue
+        status = str(check.get("status") or "").strip().lower()
+        tag = status if status in _SANDBOX_DOCTOR_STATUSES else "warn"
+        check_id = str(check.get("id") or "").strip()
+        title = str(check.get("title") or check_id or "Sandbox check").strip()
+        detail = str(check.get("detail") or "").strip()
+        fix = check.get("fix") if isinstance(check.get("fix"), dict) else {}
+        remediation = str(fix.get("summary") or "").strip()
+        command = str(fix.get("command") or "").strip()
+        if command:
+            remediation = f"{remediation}: {command}" if remediation else command
+        if fix.get("automatic") and tag != "pass":
+            remediation += " (or 'defenseclaw sandbox doctor --fix')"
+        _emit(
+            tag,
+            title,
+            detail,
+            r=r,
+            check_id=f"doctor.sandbox.{check_id}" if check_id else "",
+            reason_code=f"sandbox-{check_id}" if check_id and tag != "pass" else "",
+            remediation=remediation if tag != "pass" else "",
+        )
+        if tag in {"warn", "fail"} and remediation:
+            _emit_hint(remediation)
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
@@ -1755,6 +1910,29 @@ def _check_component_connector_compatibility(
         )
 
 
+_DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
+
+
+def _scanner_repair_hint() -> str:
+    """The command that repairs the skill-scanner launcher of this install.
+
+    On macOS and Linux the release upgrade resolver reconciles the launcher
+    with the managed virtualenv, at the installed version too (the built-in
+    ``defenseclaw upgrade`` stops early when the version is already current);
+    on Windows, DefenseClaw Setup's repair does.
+    """
+
+    if os.name == "nt":
+        return (
+            "repair the install with `DefenseClawSetup-x64.exe /repair` "
+            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
+        )
+    return (
+        "repair the launcher with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
+        f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
+    )
+
+
 def _check_scanners(cfg, r: _DoctorResult) -> None:
     bins = [
         ("skill-scanner", cfg.scanners.skill_scanner.binary),
@@ -1799,7 +1977,8 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} did not answer --version within 30 s; run the authenticated upgrade/repair path",
+                f"{probe_path} did not answer --version within 30 s; a busy machine can cause this, so run "
+                f"`defenseclaw doctor` again, and if it keeps failing, {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -1807,7 +1986,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} could not start: {exc}; run the authenticated upgrade/repair path",
+                f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -1820,7 +1999,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             detail = f"{probe_path} failed --version (exit {probe.returncode})"
             if output:
                 detail += f": {output}"
-            detail += "; run the authenticated upgrade/repair path"
+            detail += "; " + _scanner_repair_hint()
             _emit("fail", f"Scanner: {name}", detail, r=r)
             continue
         _emit(
@@ -1927,11 +2106,25 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
                 return any(enabled_states)
         return True
     if sub == "sandbox":
+        # The gateway runs the sandbox subsystem when OpenShell sandboxes are
+        # on (openshell.enabled: running, or degraded while a listener or the
+        # manager fails) and reports it degraded for a legacy standalone
+        # install until legacy-cleanup runs. Where sandboxes are unsupported
+        # (a platform other than Linux or macOS, managed_enterprise) it
+        # reports them disabled on purpose, which is no stale sidecar.
         oc = getattr(cfg, "openshell", None)
         if oc is None:
             return None
         is_standalone = getattr(oc, "is_standalone", None)
-        return bool(is_standalone()) if callable(is_standalone) else False
+        if callable(is_standalone) and is_standalone():
+            return True
+        if not bool(getattr(oc, "enabled", False)):
+            return False
+        if not sys.platform.startswith(("linux", "darwin")):
+            return None
+        if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            return None
+        return True
     # The local API has no off switch.
     return None
 
@@ -2083,6 +2276,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                                 summary = raw.strip()
                         detail_msg = f"disabled — {summary}" if summary else "disabled (reported by sidecar)"
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
+                elif normalized_state == "degraded":
+                    # Up but needs operator action (the sandbox subsystem
+                    # with a failed listener or manager, or the legacy
+                    # standalone sandbox shim), so warn rather than fail.
+                    last_error = info.get("last_error")
+                    reason = last_error.strip() if isinstance(last_error, str) else ""
+                    _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
             return health
@@ -7753,6 +7953,7 @@ def doctor(
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_device_identity(cfg, r)
+    _check_legacy_sandbox(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -7901,6 +8102,10 @@ def doctor(
         _doctor_subsection("Webhooks")
     r.set_section("webhooks")
     _check_webhooks(cfg, r)
+    if not json_out:
+        _doctor_subsection("Sandbox")
+    r.set_section("sandbox")
+    _check_sandbox(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
     # The registry at internal/envvars/registry.json is the single
@@ -11356,6 +11561,12 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             invalid_reasons.append(f"{subsystem} has malformed health state")
             continue
         state = raw_state.strip().lower()
+        if subsystem == "sandbox" and state == "degraded":
+            # The legacy sandbox shim, or a sandbox listener or manager that
+            # failed: a gateway restart cannot be relied on to fix either,
+            # and neither may block repairs of real drift. The legacy check
+            # and `defenseclaw sandbox doctor` report them.
+            continue
 
         if expected is True and state in inactive_states:
             repair_reasons.append(f"{subsystem} is enabled in config but reports {state}")

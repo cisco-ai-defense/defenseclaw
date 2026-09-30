@@ -7,8 +7,12 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 // The plugin ships as a setup-time template; render it the way setup does
 // (per-user defaults unless a test overrides a value) and load the result.
+// The template also holds the OpenShell sandbox variant behind Go template
+// branches; testdata/bridge_host is its host variant with the placeholders
+// kept (TestBridgeHostTemplatesGolden keeps it current), which is what tsc
+// checks and this test renders.
 const pluginTemplate = readFileSync(
-	join(dirname(fileURLToPath(import.meta.url)), "../../internal/gateway/connector/hooks/amp-plugin.ts"),
+	join(dirname(fileURLToPath(import.meta.url)), "../../internal/gateway/connector/testdata/bridge_host/amp-plugin.ts"),
 	"utf8",
 )
 

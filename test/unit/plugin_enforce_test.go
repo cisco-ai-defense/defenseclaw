@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 )
 
 func TestPluginEnforcerQuarantineAndRestore(t *testing.T) {
@@ -37,8 +36,7 @@ func TestPluginEnforcerQuarantineAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	shell := sandbox.New("nonexistent-openshell", filepath.Join(tmpDir, "policies"))
-	pe := enforce.NewPluginEnforcer(quarantineDir, shell)
+	pe := enforce.NewPluginEnforcer(quarantineDir)
 
 	dest, err := pe.Quarantine(pluginDir)
 	if err != nil {

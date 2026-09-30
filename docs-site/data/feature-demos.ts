@@ -519,7 +519,7 @@ scanner:
     evidence: [
       { id: 'mcp-discovered', label: 'Discovery', value: 'Claude Code MCP config', detail: 'The server is discovered from connector configuration.', tone: 'info' },
       { id: 'mcp-held', label: 'Admission', value: 'Held pending scan', detail: 'Admission waits while the local server is inspected.', tone: 'warning' },
-      { id: 'mcp-sandbox', label: 'Scanner', value: 'Local stdio sandbox', detail: 'The local stdio process starts inside the scanner sandbox.', tone: 'info' },
+      { id: 'mcp-sandbox', label: 'Scanner', value: 'Local stdio subprocess', detail: 'The local stdio server starts as a short-lived scan subprocess with a scrubbed environment.', tone: 'info' },
       { id: 'mcp-effects', label: 'Capability mismatch', value: 'Filesystem + outbound network', detail: 'The descriptor implies more than a read-only lookup.', tone: 'danger' },
       { id: 'mcp-high', label: 'Consolidated severity', value: 'HIGH', detail: 'Findings consolidate before action mapping.', tone: 'warning' },
       { id: 'mcp-map', label: 'mcp_actions.high', value: 'Disable + block install', detail: 'The policy mapping acts on the whole server.', tone: 'danger' },
@@ -529,14 +529,14 @@ scanner:
     steps: [
       step('mcp-discover', 'Discover', 'Read the server entry from Claude Code configuration.', 'mcp-config', ['mcp-discovered'], [{ tabId: 'mcp-config', start: 2, end: 7, tone: 'info' }]),
       step('mcp-hold', 'Hold admission', 'Keep the server unavailable while the scan runs.', 'mcp-config', ['mcp-discovered', 'mcp-held'], [{ tabId: 'mcp-config', start: 3, end: 7, tone: 'warning' }]),
-      step('mcp-start', 'Start sandbox', 'Start the local stdio server inside the scanner sandbox.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 4, end: 6, tone: 'info' }]),
+      step('mcp-start', 'Start server', 'Start the local stdio server as a short-lived scan subprocess.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 4, end: 6, tone: 'info' }]),
       step('mcp-enumerate', 'Enumerate', 'Read tool descriptions and schemas, plus prompts/resources when enabled.', 'tools', ['mcp-sandbox', 'mcp-effects'], [{ tabId: 'tools', start: 2, end: 6, tone: 'danger' }]),
       step('mcp-severity', 'Consolidate', 'The claimed-intent mismatch resolves to HIGH.', 'mcp-result', ['mcp-effects', 'mcp-high'], [{ tabId: 'mcp-result', start: 3, end: 5, tone: 'warning' }]),
       step('mcp-resolve', 'Resolve policy', 'mcp_actions.high disables runtime and blocks installation.', 'mcp-actions', ['mcp-high', 'mcp-map'], [{ tabId: 'mcp-actions', start: 1, end: 4, tone: 'danger' }]),
       step('mcp-record', 'Record', 'The admission action is written to the audit history.', 'mcp-result', ['mcp-map', 'mcp-audit'], [{ tabId: 'mcp-result', start: 5, end: 7, tone: 'success' }], 'mcp-disabled'),
     ],
     boundaries: {
-      did: ['Inspect a local stdio server in the scanner sandbox', 'Compare claimed intent with descriptor side effects', 'Apply policy to the whole server'],
+      did: ['Inspect a local stdio server in a short-lived scan subprocess', 'Compare claimed intent with descriptor side effects', 'Apply policy to the whole server'],
       didNot: ['Add a remote URL to any connector', 'Claim a clean scan proves harmless implementation', 'Require optional LLM intent analysis'],
     },
   },

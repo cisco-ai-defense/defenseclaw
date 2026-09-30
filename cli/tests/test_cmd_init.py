@@ -373,6 +373,63 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
 
+    def test_sidecar_step_names_how_the_start_was_declined(self):
+        # Manual test R2-41: the Sidecar step names the answer given, not a
+        # flag the operator never typed, and the Next list points at
+        # sandbox setup on a machine that could run sandboxes.
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        settings = [
+            {
+                "connector": "codex",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            }
+        ]
+        # Every init below gets a fresh data dir; tearDown removes the last.
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        for possible in (True, False):
+            self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-word-"))
+            self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+            with (
+                patch.object(cmd_init, "_stdin_is_tty", return_value=True),
+                patch.object(
+                    cmd_init,
+                    "_prompt_first_run",
+                    return_value=(settings, "local", False, None, False, False),
+                ),
+                patch.object(cmd_init, "_sandboxes_possible", return_value=possible),
+                patch(
+                    "defenseclaw.bootstrap._quiet_guardrail_setup",
+                    return_value=StepResult("Guardrail", "pass", "test"),
+                ),
+            ):
+                result = self._invoke(["--skip-install"])
+            self.assertIn("not started (you chose not to start it)", result.output)
+            self.assertNotIn("--no-start-gateway", result.output)
+            self.assertEqual(
+                "Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup" in result.output,
+                possible,
+                result.output,
+            )
+
+        for flags, want in (
+            (["--no-start-gateway"], "not started (--no-start-gateway)"),
+            ([], "not started (init starts it only with --start-gateway)"),
+        ):
+            self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-word-"))
+            self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+            result = self._invoke([
+                "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+                "--skip-install", "--no-verify", "--json-summary", *flags,
+            ])
+            summary = json.loads(result.output)
+            sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
+            self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
+
     def test_guided_opencode_primary_records_complete_roster_once(self):
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands import cmd_init
@@ -862,7 +919,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ):
             self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
-    def test_sandbox_flag_reports_explicit_scope(self):
+    def test_sandbox_flag_is_a_deprecated_no_op(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
             result = self._invoke([
                 "--non-interactive",
@@ -885,9 +942,17 @@ class TestInitFirstRunBackend(unittest.TestCase):
         sandbox_steps = [s for s in summary["setup"] if s["name"] == "Sandbox"]
         self.assertEqual(len(sandbox_steps), 1, summary["setup"])
         self.assertEqual(sandbox_steps[0]["status"], "warn")
-        self.assertIn("Linux-only", sandbox_steps[0]["detail"])
-        self.assertIn("OpenClaw/OpenShell-only", sandbox_steps[0]["detail"])
-        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox setup")
+        self.assertIn("deprecated and ignored", sandbox_steps[0]["detail"])
+        self.assertIn("defenseclaw sandbox legacy-cleanup", sandbox_steps[0]["detail"])
+        # OpenShell 0.1 sandboxes ship: the notice points at their setup.
+        self.assertIn("run 'defenseclaw sandbox setup'", sandbox_steps[0]["detail"])
+        self.assertNotIn("being rebuilt", sandbox_steps[0]["detail"])
+        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox legacy-cleanup --dry-run")
+
+    def test_sandbox_flag_is_hidden_from_help(self):
+        result = self._invoke(["--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("--sandbox", result.output)
 
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
@@ -2848,245 +2913,6 @@ class TestIsSidecarRunning(unittest.TestCase):
         self.assertEqual(_read_pid(pid_file), os.getpid())
 
 
-@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
-class TestDetectOpenclawHome(unittest.TestCase):
-    """Tests for _detect_openclaw_home helper."""
-
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-detect-oc-")
-        self.oc_home = os.path.join(self.tmp_dir, ".openclaw")
-        os.makedirs(self.oc_home)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_returns_none_when_no_openclaw(self):
-        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
-        with patch.dict(os.environ, {"SUDO_USER": ""}, clear=False), \
-             patch("os.path.expanduser", return_value=os.path.join(self.tmp_dir, "nonexistent")):
-            result = _detect_openclaw_home()
-            # May find real ~/.openclaw on the host — just check it's str or None
-            self.assertTrue(result is None or isinstance(result, str))
-
-    def test_finds_openclaw_with_config(self):
-        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
-        # Create openclaw.json
-        with open(os.path.join(self.oc_home, "openclaw.json"), "w") as f:
-            f.write('{"gateway": {}}')
-
-        with patch("os.path.expanduser", return_value=self.oc_home), \
-             patch.dict(os.environ, {"SUDO_USER": ""}, clear=False):
-            result = _detect_openclaw_home()
-            self.assertEqual(result, self.oc_home)
-
-    def test_prefers_sudo_user_home(self):
-        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
-
-        # Create two homes with openclaw.json
-        sudo_home = os.path.join(self.tmp_dir, "sudouser")
-        sudo_oc = os.path.join(sudo_home, ".openclaw")
-        os.makedirs(sudo_oc)
-        with open(os.path.join(sudo_oc, "openclaw.json"), "w") as f:
-            f.write('{}')
-        with open(os.path.join(self.oc_home, "openclaw.json"), "w") as f:
-            f.write('{}')
-
-        mock_pw = MagicMock()
-        mock_pw.pw_dir = sudo_home
-
-        with patch.dict(os.environ, {"SUDO_USER": "testuser"}, clear=False), \
-             patch("pwd.getpwnam", return_value=mock_pw), \
-             patch("os.path.expanduser", return_value=self.oc_home):
-            result = _detect_openclaw_home()
-            self.assertEqual(result, sudo_oc)
-
-
-class TestSaveOwnershipBackup(unittest.TestCase):
-    """Tests for _save_ownership_backup helper."""
-
-    def setUp(self):
-        self.data_dir = tempfile.mkdtemp(prefix="dclaw-backup-")
-        self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-home-")
-
-    def tearDown(self):
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        shutil.rmtree(self.oc_home, ignore_errors=True)
-
-    def test_creates_backup_file(self):
-        import json
-
-        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup
-        backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
-        self.assertTrue(os.path.isfile(backup_path))
-
-        with open(backup_path) as f:
-            data = json.load(f)
-        self.assertIn("openclaw_home", data)
-        self.assertIn("original_uid", data)
-        self.assertIn("original_gid", data)
-        self.assertIn("original_mode", data)
-        self.assertEqual(data["original_uid"], os.stat(self.oc_home).st_uid)
-        self.assertEqual(data["original_gid"], os.stat(self.oc_home).st_gid)
-
-    def test_backup_file_path(self):
-        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP, _save_ownership_backup
-        backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
-        expected = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
-        self.assertEqual(backup_path, expected)
-
-    def test_backup_parent_walk_does_not_process_filesystem_root(self):
-        from defenseclaw.commands import cmd_init_sandbox
-
-        real_stat = os.stat
-        stat_paths = []
-
-        def recording_stat(path, *args, **kwargs):
-            stat_paths.append(os.path.normcase(os.path.realpath(path)))
-            return real_stat(path, *args, **kwargs)
-
-        with patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat):
-            cmd_init_sandbox._save_ownership_backup(self.oc_home, self.data_dir)
-
-        filesystem_root = os.path.normcase(os.path.abspath(os.sep))
-        self.assertNotIn(filesystem_root, stat_paths)
-
-    @unittest.skipIf(os.name == "nt", "sandbox traversal permissions are POSIX-only")
-    def test_traversal_parent_walk_does_not_process_filesystem_root(self):
-        from defenseclaw.commands import cmd_init_sandbox
-
-        real_stat = os.stat
-        stat_paths = []
-
-        def recording_stat(path, *args, **kwargs):
-            stat_paths.append(os.path.normcase(os.path.realpath(path)))
-            return real_stat(path, *args, **kwargs)
-
-        # This test covers the parent walk, not host system-binary custody.
-        with (
-            patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat),
-            patch.object(
-                cmd_init_sandbox,
-                "_trusted_privileged_argv",
-                return_value=["/usr/bin/chmod"],
-            ),
-            patch.object(cmd_init_sandbox.subprocess, "run", return_value=MagicMock(returncode=0)),
-        ):
-            cmd_init_sandbox._ensure_parent_traversal(os.path.join(self.oc_home, "target"))
-
-        filesystem_root = os.path.normcase(os.path.abspath(os.sep))
-        self.assertNotIn(filesystem_root, stat_paths)
-
-
-@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
-class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
-    """Tests for _integrate_openclaw_home idempotency."""
-
-    def setUp(self):
-        self.data_dir = tempfile.mkdtemp(prefix="dclaw-integrate-")
-        self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-")
-        self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-real-")
-
-    def tearDown(self):
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        shutil.rmtree(self.sandbox_home, ignore_errors=True)
-        shutil.rmtree(self.oc_home, ignore_errors=True)
-
-    def test_idempotent_when_already_configured(self):
-        import json
-
-        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP, _integrate_openclaw_home
-
-        # Simulate a previous successful integration
-        backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
-        with open(backup_path, "w") as f:
-            json.dump({"openclaw_home": self.oc_home, "original_uid": 1000, "original_gid": 1000, "original_mode": "0o755"}, f)
-
-        # Create the symlink
-        symlink_path = os.path.join(self.sandbox_home, ".openclaw")
-        os.symlink(self.oc_home, symlink_path)
-
-        cfg = MagicMock()
-        cfg.data_dir = self.data_dir
-        # F-0162: the idempotency fast-path now validates the .openclaw
-        # realpath against the pinned original home, so it must be set to the
-        # symlink target for the legitimate (untampered) case to succeed.
-        cfg.claw.openclaw_home_original = self.oc_home
-
-        # The idempotency path performs post-transfer ACL/traversal repair in
-        # production.  This unit test owns only temporary paths, so exercise
-        # the wiring without letting it mutate parent permissions or invoke
-        # sudo against the host's shared temporary root.
-        with (
-            patch("defenseclaw.commands.cmd_init_sandbox._ensure_parent_traversal") as traversal,
-            patch("defenseclaw.commands.cmd_init_sandbox._ensure_sandbox_acls", return_value=True) as acls,
-        ):
-            result = _integrate_openclaw_home(cfg, self.sandbox_home)
-        self.assertTrue(result)
-        canonical_home = os.path.realpath(self.oc_home)
-        traversal.assert_called_once_with(canonical_home)
-        acls.assert_called_once_with(canonical_home)
-
-    def test_returns_false_when_no_openclaw(self):
-        from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home
-
-        cfg = MagicMock()
-        cfg.data_dir = self.data_dir
-
-        with patch("defenseclaw.commands.cmd_init_sandbox._detect_openclaw_home", return_value=None):
-            result = _integrate_openclaw_home(cfg, self.sandbox_home)
-            self.assertFalse(result)
-
-
-@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
-class TestRestoreOpenclawOwnership(unittest.TestCase):
-    """Tests for _restore_openclaw_ownership in cmd_setup."""
-
-    def setUp(self):
-        self.data_dir = tempfile.mkdtemp(prefix="dclaw-restore-")
-        self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-")
-        self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-restore-")
-        self._sudo_patcher = patch(
-            "defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False
-        )
-        self._sudo_patcher.start()
-
-    def tearDown(self):
-        self._sudo_patcher.stop()
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        shutil.rmtree(self.sandbox_home, ignore_errors=True)
-        shutil.rmtree(self.oc_home, ignore_errors=True)
-
-    def test_noop_when_no_backup(self):
-        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
-        # Should not raise
-        _restore_openclaw_ownership(self.data_dir, self.sandbox_home)
-
-    def test_removes_symlink(self):
-        import json
-
-        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP
-        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
-
-        st = os.stat(self.oc_home)
-        backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
-        with open(backup_path, "w") as f:
-            json.dump({
-                "openclaw_home": self.oc_home,
-                "original_uid": st.st_uid,
-                "original_gid": st.st_gid,
-                "original_mode": "0o755",
-            }, f)
-
-        # Create symlink
-        symlink_path = os.path.join(self.sandbox_home, ".openclaw")
-        os.symlink(self.oc_home, symlink_path)
-
-        _restore_openclaw_ownership(self.data_dir, self.sandbox_home)
-
-        self.assertFalse(os.path.islink(symlink_path))
-        self.assertFalse(os.path.isfile(backup_path))
-
-
 class TestInitFailModeFlag(unittest.TestCase):
     """Pin --fail-mode wiring through cmd_init.
 
@@ -3553,6 +3379,92 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertFalse(start_gateway)
         self.assertTrue(verify)
         self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
+
+    def test_prompt_first_run_empty_connector_choice_continues_with_none(self):
+        """Clearing every detected connector must continue as --connector none, not refuse."""
+        from defenseclaw.commands import cmd_init
+
+        for sandboxes in (True, False):
+            with self.subTest(sandboxes=sandboxes):
+                keys = iter(["n", "\r"])  # clear every box, continue
+                prompts = iter(["local"])  # scanner mode
+                confirms = iter([False, True])  # start_gateway, verify
+                emitted: list[str] = []
+
+                with patch.object(
+                    cmd_init.agent_discovery, "discover_agents", return_value=self._disc({"codex", "claudecode"})
+                ), \
+                        patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                        patch.object(cmd_init, "_supports_terminal_redraw", return_value=False), \
+                        patch.object(cmd_init, "_sandboxes_possible", return_value=sandboxes), \
+                        patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                        patch.object(
+                            cmd_init.click, "echo", side_effect=lambda message="", **_k: emitted.append(str(message))
+                        ), \
+                        patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                        patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+                    settings, _scanner, with_judge, _judge, _start, _verify = cmd_init._prompt_first_run(
+                        connector=None, profile=None, scanner_mode="local", with_judge=False,
+                        fail_mode=None, human_approval=None, hilt_min_severity=None,
+                        start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                    )
+
+                output = "\n".join(emitted)
+                self.assertEqual([(s["connector"], s["profile"]) for s in settings], [("none", "observe")])
+                self.assertFalse(with_judge)
+                self.assertIn("Clear every box to protect no host agent now", output)
+                self.assertIn("'defenseclaw setup <connector>' can add one later", output)
+                self.assertEqual("OpenShell sandboxes still work" in output, sandboxes)
+                self.assertIn("No host connector selected", output)
+                self.assertNotIn("Select at least one connector.", output)
+
+    def test_connector_selection_without_detected_connectors_offers_none(self):
+        from defenseclaw.commands import cmd_init
+
+        prompt_types = []
+
+        def prompt(_text, **kwargs):
+            prompt_types.append(kwargs["type"])
+            return "none"
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=self._disc(set())), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init.click, "prompt", side_effect=prompt):
+            got = cmd_init._prompt_connector_selection(None, False)
+
+        self.assertEqual(got, ["none"])
+        self.assertIn("none", prompt_types[0].choices)
+
+    def test_prompt_first_run_connector_none_skips_action_enforcement(self):
+        """``--connector none`` must not offer "none" for action mode or the judge."""
+        from defenseclaw.commands import cmd_init
+
+        for profile in (None, "action"):
+            with self.subTest(profile=profile):
+                prompts = iter(["local"])  # scanner mode
+                confirms = iter([False, True])  # start_gateway, verify
+                checkbox_calls: list[list[str]] = []
+
+                def checkbox(options, **_kwargs):
+                    checkbox_calls.append(list(options))
+                    return list(options)
+
+                with patch.object(
+                    cmd_init.agent_discovery, "discover_agents", return_value=self._disc({"codex"})
+                ), \
+                        patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=checkbox), \
+                        patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                        patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+                    settings, _scanner, with_judge, judge_connectors, _start, _verify = cmd_init._prompt_first_run(
+                        connector="none", profile=profile, scanner_mode="local", with_judge=False,
+                        fail_mode=None, human_approval=None, hilt_min_severity=None,
+                        start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                    )
+
+                self.assertEqual(checkbox_calls, [])
+                self.assertEqual([(s["connector"], s["profile"]) for s in settings], [("none", "observe")])
+                self.assertFalse(with_judge)
+                self.assertEqual(judge_connectors, [])
 
     def test_prompt_first_run_judge_lists_requested_action_after_downgrade(self):
         """A hook-contract downgrade must not hide a requested action connector

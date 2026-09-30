@@ -1747,7 +1747,9 @@ attributes:
       enum:
       - go
       - ts
-    notes: Go gateway or authenticated TypeScript interceptor
+      - openshell
+      - dc-egress-proxy
+    notes: Go gateway, authenticated TypeScript interceptor, the OpenShell sandbox network boundary, or the DefenseClaw sandbox egress proxy
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.network.body_shape
   type: string
@@ -2136,6 +2138,7 @@ groups:
   - correlation.interaction
   - correlation.agent
   - correlation.security
+  - correlation.sandbox
   attributes: []
   body_fields:
   - ref: defenseclaw.hook.event
@@ -2183,7 +2186,14 @@ groups:
   - correlation.tool.identity
   - correlation.security
   - security.approval
-  attributes: []
+  - correlation.sandbox
+  attributes:
+  - ref: defenseclaw.sandbox.approval.kind
+    requirement_level: optional
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
   body_fields:
   - ref: defenseclaw.approval.id
     requirement_level: required
@@ -2198,7 +2208,16 @@ groups:
   - correlation.tool.identity
   - correlation.security
   - security.approval
-  attributes: []
+  - correlation.sandbox
+  attributes:
+  - ref: defenseclaw.sandbox.approval.kind
+    requirement_level: optional
+  - ref: defenseclaw.sandbox.approval.scope
+    requirement_level: optional
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
   body_fields:
   - ref: defenseclaw.approval.id
     requirement_level: required
@@ -2212,6 +2231,7 @@ groups:
   extends:
   - correlation.security
   - security.finding
+  - correlation.sandbox
   attributes:
   - ref: user.id
     requirement_level: recommended
@@ -2278,6 +2298,7 @@ groups:
   - correlation.agent
   - correlation.tool.identity
   - security.network.egress
+  - correlation.sandbox
   attributes: []
   body_fields:
   - ref: defenseclaw.network.target_ref

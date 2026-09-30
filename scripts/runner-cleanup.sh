@@ -175,7 +175,8 @@ repair_persistent_state_permissions() {
     [ -e "$state_dir" ] || continue
     repaired=0
 
-    # Sandbox setup can leave ~/.openclaw as a symlink to a root-owned target.
+    # The removed legacy sandbox setup could leave ~/.openclaw as a symlink to
+    # a root-owned target on long-lived runners.
     # DEFENSECLAW_HOME has already been rejected when it is a symlink; only
     # the persistent OpenClaw state is intentionally followed here.
     # Repair the resolved target first; chown -R on the symlink path itself may

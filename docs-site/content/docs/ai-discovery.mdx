@@ -93,7 +93,7 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 | --- | --- |
 | `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
-| `active_process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
+| `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
 | `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
 | `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
@@ -398,7 +398,7 @@ Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--
 defenseclaw agent processes --limit 20
 ```
 
-Live AI process table — model serving, sandbox runners, scanner subprocesses. Useful when something is running but you can't tell which agent spawned it.
+Live AI process table — running agent CLIs, local model servers, and AI desktop apps whose process name matches the signature catalog. Useful when something is running but you can't tell which agent spawned it.
   </Tab>
   <Tab value="Components">
 ```bash

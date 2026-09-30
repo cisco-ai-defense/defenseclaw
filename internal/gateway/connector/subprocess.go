@@ -30,7 +30,6 @@ import (
 	"text/template"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
-	"gopkg.in/yaml.v3"
 )
 
 //go:embed shims/*.sh
@@ -91,6 +90,18 @@ type templateData struct {
 	// shellHookForeignGuard). Empty for every other hook and install, whose
 	// renders are then byte-identical to one without it.
 	ForeignHookGuardSH string
+
+	// Sandbox selects the OpenShell in-image variant (sandbox_hooks.go):
+	// APIAddr is the baked hook ingress, FailMode is baked rather than
+	// env-overridable, and the token comes only from DEFENSECLAW_SANDBOX_TOKEN.
+	// Host renders leave it false and every Sandbox* field zero.
+	Sandbox bool
+	// Sandbox ingress budgets in whole seconds (curl --connect-timeout and
+	// --max-time for the first attempt, the retry and Codex SessionEnd).
+	SandboxConnectTimeout    int
+	SandboxMaxTime           int
+	SandboxRetryMaxTime      int
+	SandboxSessionEndMaxTime int
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -461,18 +472,13 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
-		content, err := hookFS.ReadFile("hooks/" + name)
+		rendered, err := renderHookTemplate(name, data)
 		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-
-		rendered, err := renderTemplate(string(content), data)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
+			return err
 		}
 
 		hookPath := filepath.Join(hookDir, name)
-		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, rendered, 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -590,22 +596,15 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 	// identity and scoped credential selection happen at invocation time.  The
 	// connector-owned lifecycle scripts retain the selected connector data.
 	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
-	names := hookScriptNamesFromExtras(extras)
-	scripts := make([]renderedHookScript, 0, len(names))
-	for index, name := range names {
-		renderData := connectorData
-		if index < len(genericHookScripts) {
-			renderData = sharedData
-		}
-		content, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			return nil, fmt.Errorf("read hook template %s: %w", name, err)
-		}
-		rendered, err := renderTemplate(string(content), renderData)
-		if err != nil {
-			return nil, fmt.Errorf("render hook %s: %w", name, err)
-		}
-		scripts = append(scripts, renderedHookScript{name: name, body: []byte(rendered)})
+	// renderHookScriptSet is the one renderer the host and sandbox hook
+	// files share (hook_render.go).
+	set, err := renderHookScriptSet(connectorData, sharedData, extras)
+	if err != nil {
+		return nil, err
+	}
+	scripts := make([]renderedHookScript, 0, len(set))
+	for _, file := range set {
+		scripts = append(scripts, renderedHookScript{name: file.Name, body: file.Data})
 	}
 	return scripts, nil
 }
@@ -1595,66 +1594,11 @@ func HookScripts() []string {
 	return out
 }
 
-type sandboxPolicy struct {
-	Sandbox struct {
-		Mode       string         `yaml:"mode"`
-		Exec       sandboxExec    `yaml:"exec"`
-		Network    sandboxNetwork `yaml:"network"`
-		Filesystem sandboxFilesys `yaml:"filesystem"`
-	} `yaml:"sandbox"`
-}
-
-type sandboxExec struct {
-	Allow []string `yaml:"allow"`
-	Deny  []string `yaml:"deny"`
-}
-
-type sandboxNetwork struct {
-	AllowEgress []string `yaml:"allow_egress"`
-	DenyEgress  string   `yaml:"deny_egress"`
-}
-
-type sandboxFilesys struct {
-	DenyWrite []string `yaml:"deny_write"`
-}
-
-// WriteSandboxPolicy generates a sandbox policy YAML for OpenShell enforcement.
-// The policy restricts exec, network egress, and filesystem writes.
-func WriteSandboxPolicy(dataDir, proxyAddr, apiAddr string) error {
-	policyDir := filepath.Join(dataDir, "policies")
-	if err := os.MkdirAll(policyDir, 0o755); err != nil {
-		return fmt.Errorf("create policy dir: %w", err)
-	}
-
-	var pol sandboxPolicy
-	pol.Sandbox.Mode = "enforce"
-	pol.Sandbox.Exec.Allow = []string{
-		"/usr/bin/git", "/usr/bin/node", "/usr/bin/python3", "/usr/bin/npm",
-	}
-	pol.Sandbox.Exec.Deny = []string{
-		"/usr/bin/curl", "/usr/bin/wget", "**/nc", "**/ncat", "**/ssh",
-	}
-	pol.Sandbox.Network.AllowEgress = []string{proxyAddr, apiAddr}
-	pol.Sandbox.Network.DenyEgress = "*"
-	pol.Sandbox.Filesystem.DenyWrite = []string{"/etc/", "~/.ssh/", "~/.aws/credentials"}
-
-	out, err := yaml.Marshal(&pol)
-	if err != nil {
-		return fmt.Errorf("marshal sandbox policy: %w", err)
-	}
-
-	policyPath := filepath.Join(policyDir, "defenseclaw-policy.yaml")
-	return os.WriteFile(policyPath, out, 0o644)
-}
-
-// ResolveSubprocessPolicy determines the effective subprocess policy for
-// this platform. Sandbox requires Linux (Landlock + seccomp); macOS and
-// other platforms fall back to shims.
+// ResolveSubprocessPolicy determines the effective subprocess policy. The
+// legacy openshell-sandbox tier is gone (its generated policy file was never
+// enforced), so a sandbox preference resolves to shims on every platform.
 func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
-	if preferred == SubprocessNone {
-		return SubprocessNone
-	}
-	if preferred == SubprocessSandbox && runtime.GOOS != "linux" {
+	if preferred == SubprocessSandbox {
 		return SubprocessShims
 	}
 	return preferred
@@ -1663,22 +1607,13 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
 // tier based on the resolved policy.
 func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
-	switch policy {
-	case SubprocessSandbox:
-		if err := WriteSandboxPolicy(opts.DataDir, opts.ProxyAddr, opts.APIAddr); err != nil {
-			return fmt.Errorf("sandbox policy: %w", err)
-		}
+	switch ResolveSubprocessPolicy(policy) {
+	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
 		// F-2029 / F-3397: persist the gateway bearer token alongside
 		// the shim scripts so every inspection call carries an
 		// Authorization header. Pre-fix the shim had no auth token
 		// available and silently downgraded a 401 to "allow".
-		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
-			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
-		}
-
-	case SubprocessShims:
-		shimDir := filepath.Join(opts.DataDir, "shims")
 		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
@@ -1689,8 +1624,9 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	return nil
 }
 
-// TeardownSubprocessEnforcement removes shim scripts and the sandbox
-// policy file. It deliberately does NOT touch the shared hooks/
+// TeardownSubprocessEnforcement removes shim scripts and any stale policy
+// file an older release wrote for the removed openshell-sandbox tier. It
+// deliberately does NOT touch the shared hooks/
 // directory anymore: the previous implementation iterated the GLOBAL
 // `hookScripts` slice (= every connector's *-hook.sh + every generic
 // inspect-*.sh) and deleted them all from the shared dir. When called

@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
+from rich.markup import escape as rich_escape
+
 from defenseclaw.tui.services.event_models import ActivityMutation, timestamp_label
 from defenseclaw.tui.services.v8_event_history import (
     V8EventHistoryRow,
@@ -320,7 +322,7 @@ class ActivityPanelModel:
             self.mutation_cursor = max(len(self.mutations) - 1, 0)
 
     def render_text(self, *, height: int = 24) -> str:
-        tab_bar = "  [1] Commands   [2] Mutations (gateway activity)\n\n"
+        tab_bar = "  [1] Commands   [2] Mutations (gateway activity)\n"
         if self.tab == "mutations":
             return tab_bar + self._render_mutations(height=height)
         if not self.entries:
@@ -333,12 +335,14 @@ class ActivityPanelModel:
         if self.cursor < 0 or self.cursor >= len(self.entries):
             self.cursor = len(self.entries) - 1
         entry = self.entries[self.cursor]
-        lines = [f"$ {entry.command}  {entry.status_label}", "-" * 40]
+        # Command text and output are data: escape them so output such as
+        # ``[red]`` or a stray ``[/]`` shows literally in the body.
+        lines = [f"$ {rich_escape(entry.command)}  {entry.status_label}", "-" * 40]
         visible = max(height - 6, 5)
         end = len(entry.output) - self.term_scroll
         end = max(0, min(end, len(entry.output)))
         start = max(0, end - visible)
-        lines.extend(entry.output[start:end])
+        lines.extend(rich_escape(line) for line in entry.output[start:end])
         lines.append("  [Esc] history  [Up/Down] scroll  [Ctrl+C] cancel")
         return "\n".join(lines)
 
@@ -350,9 +354,9 @@ class ActivityPanelModel:
         lines = ["  Command History  \\[Enter] view output  \\[t] terminal mode", ""]
         for index, entry in enumerate(self.entries):
             prefix = "->" if index == self.cursor else "  "
-            lines.append(f"{prefix} {entry.command}  {entry.status_label} ({len(entry.output)} lines)")
+            lines.append(f"{prefix} {rich_escape(entry.command)}  {entry.status_label} ({len(entry.output)} lines)")
             if entry.expanded:
-                lines.extend(f"    {line}" for line in entry.output[:5])
+                lines.extend(f"    {rich_escape(line)}" for line in entry.output[:5])
                 if len(entry.output) > 5:
                     lines.append(f"    ... {len(entry.output) - 5} more lines (Enter to view)")
             lines.append("")
@@ -370,12 +374,17 @@ class ActivityPanelModel:
             to_version = mutation.version_to or "∅"
             reason = f" -- {mutation.reason[:40]}" if mutation.reason else ""
             lines.append(
-                f"{prefix}{timestamp_label(mutation.timestamp)}  {mutation.actor}  {mutation.action}  "
-                f"{mutation.target_label}  {from_version} -> {to_version}{reason}"
+                prefix
+                + rich_escape(
+                    f"{timestamp_label(mutation.timestamp)}  {mutation.actor}  {mutation.action}  "
+                    f"{mutation.target_label}  {from_version} -> {to_version}{reason}"
+                )
             )
             if index in self.diff_open:
                 if mutation.diff:
-                    lines.extend(f"      {item.get('op', '')} {item.get('path', '')}" for item in mutation.diff)
+                    lines.extend(
+                        "      " + rich_escape(f"{item.get('op', '')} {item.get('path', '')}") for item in mutation.diff
+                    )
                 else:
                     lines.append("      (no structured diff)")
         lines.append("\n  [Enter] expand diff")

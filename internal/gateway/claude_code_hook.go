@@ -30,6 +30,7 @@ import (
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -77,6 +78,10 @@ type claudeCodeHookRequest struct {
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
 	Payload              map[string]interface{} `json:"-"`
+	// sandboxView is the binding's filesystem view for a sandbox request and
+	// nil for host traffic. Path-reading helpers go through it instead of the
+	// host filesystem (see sandbox_hook_scope.go).
+	sandboxView *sandboxauth.FSView
 }
 
 type claudeCodeHookResponse struct {
@@ -119,8 +124,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
-	mode := a.claudeCodeMode()
-	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
+	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode())
+	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()
@@ -160,12 +166,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:     "claudecode",
 			MCPServerName: req.MCPServerName,
 		}
-		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
+		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                                     actionTool,
 				Args:                                     toolArgs,
 				CWD:                                      req.CWD,
-				ActiveHome:                               trustedActiveHome(ctx),
+				ActiveHome:                               hookActiveHome(ctx),
 				ToolResourceIdentity:                     resourceIdentity,
 				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 				ActiveAgentFiles:                         activeAgentContext.files,
@@ -177,7 +184,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:          "claudecode",
 			EnforcementCapable: true,
 			record:             toolChainRecorderFromContext(ctx),
-		})
+		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -501,7 +508,7 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 	if event == "SessionStart" {
 		output := map[string]interface{}{
 			"hookEventName": "SessionStart",
-			"watchPaths":    gatewayconnector.ClaudeCodeWatchPaths(watchRoot),
+			"watchPaths":    claudeCodeWatchPathsForRequest(req, watchRoot),
 		}
 		if additional != "" {
 			output["additionalContext"] = additional
@@ -509,7 +516,7 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": gatewayconnector.ClaudeCodeWatchPaths(watchRoot)}
+		out := map[string]interface{}{"watchPaths": claudeCodeWatchPathsForRequest(req, watchRoot)}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -607,7 +614,7 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 	mode string,
 ) *ToolInspectVerdict {
 	content := claudeCodeToolOutput(req)
-	if req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
+	if sandboxToolResultUntrusted(ctx) || req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {
 		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
@@ -749,24 +756,35 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	if !filepath.IsAbs(target) && req.CWD != "" {
 		target = filepath.Join(req.CWD, target)
 	}
-	resolved, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return nil
-	}
-	target = resolved
-	info, err := os.Stat(target)
-	if err != nil || info.IsDir() {
-		return nil
-	}
-
 	rulesDir := ""
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
-	result, err := cg.Scan(ctx, target)
-	if err != nil {
-		return nil
+	var result *scanner.ScanResult
+	if req.sandboxView != nil {
+		// The payload names a sandbox path (or a path under the mapped
+		// working directory); read it only inside the mounted project.
+		results := sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, []string{target})
+		if len(results) == 0 {
+			noteSandboxCoverageGap(ctx, sandboxGapEventFileUnreadable)
+			return nil
+		}
+		result = results[0]
+	} else {
+		resolved, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			return nil
+		}
+		target = resolved
+		info, err := os.Stat(target)
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		cg := scanner.NewCodeGuardScanner(rulesDir)
+		result, err = cg.Scan(ctx, target)
+		if err != nil {
+			return nil
+		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
@@ -804,14 +822,22 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
+	var results []*scanner.ScanResult
+	if req.sandboxView != nil {
+		results = sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, targets)
+	} else {
+		cg := scanner.NewCodeGuardScanner(rulesDir)
+		for _, target := range targets {
+			result, err := cg.Scan(ctx, target)
+			if err != nil {
+				continue
+			}
+			results = append(results, result)
+		}
+	}
 	maxSeverity := scanner.SeverityInfo
 	findings := []string{}
-	for _, target := range targets {
-		result, err := cg.Scan(ctx, target)
-		if err != nil {
-			continue
-		}
+	for _, result := range results {
 		if a.logger != nil {
 			_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 		}
@@ -841,6 +867,13 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 }
 
 func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHookRequest) []string {
+	if req.sandboxView != nil {
+		var scanPaths []string
+		if a.scannerCfg != nil {
+			scanPaths = a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths
+		}
+		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
+	}
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
@@ -879,6 +912,14 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 
 func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCodeHookRequest) int {
 	if a.scannerCfg == nil {
+		return 0
+	}
+	if req.sandboxView != nil {
+		// Component targets are the host user's Claude home plus workspace
+		// trees found by walking up with git. Neither applies to a sandbox,
+		// and the skill/plugin/MCP scanners are subprocesses that must not be
+		// pointed at an agent-writable tree on the host.
+		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
 	if !req.ScanComponents && !a.claudeCodeComponentScanDue() {

@@ -118,6 +118,16 @@ ACTION_CODEX_NOTIFY: Final[str]                     = "codex.notify"
 ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE: Final[str] = "codex.notify.agent-turn-complete"
 ACTION_CODEX_NOTIFY_MALFORMED: Final[str]           = "codex.notify.malformed"
 
+# OpenShell sandbox telemetry. Each key is emitted only by the typed Go
+# SandboxRecorder, which always names the generated v8 family.
+ACTION_SANDBOX_LIFECYCLE: Final[str] = "sandbox-lifecycle"
+ACTION_SANDBOX_WORKSPACE: Final[str] = "sandbox-workspace"
+ACTION_SANDBOX_EGRESS: Final[str]    = "sandbox-egress"
+ACTION_SANDBOX_APPROVAL: Final[str]  = "sandbox-approval"
+ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
+ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
+ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
+
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
 ACTION_SIDECAR_STOP: Final[str] = "sidecar-stop"
@@ -235,7 +245,6 @@ ACTION_UPGRADE: Final[str] = "upgrade"
 ACTION_INIT_GATEWAY: Final[str] = "init-gateway"
 ACTION_INIT_GUARDRAIL: Final[str] = "init-guardrail"
 ACTION_INIT_NOTIFICATIONS_TOGGLE: Final[str] = "init-notifications-toggle"
-ACTION_INIT_SANDBOX: Final[str] = "init-sandbox"
 ACTION_INIT_SIDECAR: Final[str] = "init-sidecar"
 ACTION_POLICY_CREATE: Final[str] = "policy-create"
 ACTION_POLICY_ACTIVATE: Final[str] = "policy-activate"
@@ -322,6 +331,13 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
+    ACTION_SANDBOX_LIFECYCLE,
+    ACTION_SANDBOX_WORKSPACE,
+    ACTION_SANDBOX_EGRESS,
+    ACTION_SANDBOX_APPROVAL,
+    ACTION_SANDBOX_POLICY,
+    ACTION_SANDBOX_HEALTH,
+    ACTION_SANDBOX_FINDING,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,
@@ -428,7 +444,6 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INIT_GATEWAY,
     ACTION_INIT_GUARDRAIL,
     ACTION_INIT_NOTIFICATIONS_TOGGLE,
-    ACTION_INIT_SANDBOX,
     ACTION_INIT_SIDECAR,
     ACTION_POLICY_CREATE,
     ACTION_POLICY_ACTIVATE,

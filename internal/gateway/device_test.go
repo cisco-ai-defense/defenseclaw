@@ -338,7 +338,7 @@ func TestReadZeptoClawProviderKeys_FromConfigJSON(t *testing.T) {
 
 	dataDir := t.TempDir()
 
-	// SubprocessSandbox enforcement requires writing to dataDir/shims —
+	// Subprocess shim enforcement requires writing to dataDir/shims —
 	// fully self-contained inside the tmpdir. No network or external
 	// binaries are touched in Setup.
 	c := connector.NewZeptoClawConnector()

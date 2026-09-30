@@ -61,10 +61,10 @@ Useful inside a skill repo's pre-commit hook — fail the build if the skill reg
   </Tab>
   <Tab value="Remote URL">
 ```bash
-defenseclaw skill scan https://github.com/some-org/skill-bundle
+defenseclaw skill scan https://github.com/some-org/skill-bundle/archive/refs/heads/main.tar.gz
 ```
 
-Pass the URL **as the positional target** — the CLI fetches it into a sandbox, scans, and deletes. Note: `--remote` is for a different scenario (see the next-to-last tab).
+Pass the URL of a `.tar.gz` or `.zip` archive **as the positional target**. The CLI downloads it into a temporary directory, extracts it with size limits, scans it, and deletes the directory. A repository page URL is not an archive and is rejected. Note: `--remote` is for a different scenario (see the next-to-last tab).
   </Tab>
   <Tab value="Clawhub URI">
 ```bash

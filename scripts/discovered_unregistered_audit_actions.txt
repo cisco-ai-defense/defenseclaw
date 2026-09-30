@@ -52,7 +52,6 @@ guardrail-verdict
 init-gateway
 init-guardrail
 init-notifications-toggle
-init-sandbox
 init-sidecar
 inspect-reveal
 inspect-tool-alert

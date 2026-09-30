@@ -155,7 +155,10 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         self.assertEqual(result.checks[0]["status"], "fail")
         self.assertIn("failed --version (exit 1)", result.checks[0]["detail"])
         self.assertIn("ModuleNotFoundError", result.checks[0]["detail"])
-        self.assertIn("upgrade/repair", result.checks[0]["detail"])
+        self.assertIn(
+            "DefenseClawSetup-x64.exe /repair" if os.name == "nt" else "`bash defenseclaw-upgrade.sh --yes`",
+            result.checks[0]["detail"],
+        )
         expected_launcher = (
             r"C:\managed\.venv\Scripts\skill-scanner.exe"
             if os.name == "nt"

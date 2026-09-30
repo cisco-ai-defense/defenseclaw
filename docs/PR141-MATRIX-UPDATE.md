@@ -15,6 +15,12 @@
 > implementation-observed installed `$CODEX_HOME/plugins/cache` hierarchy.
 > The cache is preview inventory evidence, not a promised stable Codex CLI
 > public contract.
+>
+> Sections 11 and 13 describe the legacy standalone sandbox
+> (`openshell-sandbox` 0.0.x), which was removed. Its OpenShell exec wrapper,
+> `defenseclaw sandbox setup`, and `defenseclaw init sandbox` no longer exist;
+> OpenClaw and ZeptoClaw use the `shims` subprocess policy, and the other
+> connectors use none. See [SANDBOX.md](SANDBOX.md).
 
 **Commits covered:**
 - `d3b94fb` — Go-side sentinel elimination, polymorphic config + discovery, hook registration, tests

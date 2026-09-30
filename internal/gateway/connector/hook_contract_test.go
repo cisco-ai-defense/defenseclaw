@@ -251,6 +251,48 @@ func TestOpenHandsPOSIXContractFloorAndWindowsCompatibilityOverride(t *testing.T
 	}
 }
 
+// TestHookProfileResolvesForSetupOptsGOOS pins SetupOpts.GOOS: a profile for
+// an agent that runs on another OS (an OpenShell sandbox is always linux)
+// takes that OS's contract adjustments, whatever this host runs.
+func TestHookProfileResolvesForSetupOptsGOOS(t *testing.T) {
+	conn := NewOpenHandsConnector()
+	for _, tc := range []struct {
+		goos       string
+		version    string
+		wantStatus string
+		wantOTLP   bool
+	}{
+		{"linux", "OpenHands 1.12.0", HookCompatibilityKnown, false},
+		{"darwin", "OpenHands 1.12.0", HookCompatibilityKnown, true},
+		{"linux", "OpenHands 1.11.99", HookCompatibilityUnknown, false},
+		{"windows", "OpenHands 1.11.99", HookCompatibilityKnown, false},
+		{"Linux", "OpenHands 1.12.0", HookCompatibilityKnown, false},
+	} {
+		opts := SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: tc.version, GOOS: tc.goos}
+		profile := conn.HookProfile(opts)
+		if profile.CompatibilityStatus != tc.wantStatus {
+			t.Errorf("%s %s: status = %q, want %q", tc.goos, tc.version, profile.CompatibilityStatus, tc.wantStatus)
+		}
+		if (profile.NativeOTLP != nil) != tc.wantOTLP {
+			t.Errorf("%s %s: native OTLP = %v, want %v", tc.goos, tc.version, profile.NativeOTLP != nil, tc.wantOTLP)
+		}
+		if spec := correlationSpecForOptions("openhands", opts); tc.wantStatus == HookCompatibilityKnown &&
+			spec.CompatibilityStatus == HookCompatibilityUnknown {
+			t.Errorf("%s %s: correlation spec fell back: %+v", tc.goos, tc.version, spec)
+		}
+	}
+	// A pinned contract is looked up for the target OS too.
+	pinned := conn.HookProfile(SetupOpts{AgentVersion: "OpenHands 1.11.99", HookContractID: "openhands-hooks-v1", GOOS: "linux"})
+	if pinned.ContractID != "openhands-hooks-v1" || pinned.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("pinned linux profile = %q/%q", pinned.ContractID, pinned.CompatibilityStatus)
+	}
+	// Empty GOOS keeps the host behaviour.
+	host := conn.HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: "OpenHands 1.12.0"})
+	if want := runtime.GOOS == "darwin"; (host.NativeOTLP != nil) != want {
+		t.Fatalf("host profile native OTLP = %v, want %v", host.NativeOTLP != nil, want)
+	}
+}
+
 func TestClaudeCodeHookContractDirectoryAddedIsObservationOnly(t *testing.T) {
 	tests := []struct {
 		version       string
@@ -556,6 +598,43 @@ func TestOmniGentV070ContractPreservesPostPhaseDenyWithoutPostPhaseAsk(t *testin
 	}
 	if !reflect.DeepEqual(contract.Capabilities.BlockEvents, contract.Events) {
 		t.Fatalf("OmniGent DENY events = %v, want all six %v", contract.Capabilities.BlockEvents, contract.Events)
+	}
+}
+
+// TestOmniGentSandboxStartsAt0130: OmniGent 0.12.0, inside the host
+// contract, built an image that failed the hook-fire probe ("hook
+// AfterAgentResponse never fired", RT-A-2): before 0.13.0 the server never
+// evaluates the response phase for the runner-relayed sandbox agent. A
+// sandbox refuses it before the build, saying why; the host contract keeps
+// its range.
+func TestOmniGentSandboxStartsAt0130(t *testing.T) {
+	for _, version := range []string{"0.7.0", "0.12.0", "0.12.9"} {
+		got := ResolveSandboxHookContract("omnigent", version)
+		if got.Status != HookCompatibilityUnknown || !strings.Contains(got.Reason, "OmniGent before 0.13.0 never runs the response policy phase (AfterAgentResponse)") ||
+			!strings.Contains(got.Reason, "sandbox images accept >=0.13.0,<0.14.0") {
+			t.Fatalf("sandbox %s = %q (%s), want refused with the reason", version, got.Status, got.Reason)
+		}
+		if host := resolveHookContractForOS("omnigent", "omnigent "+version, "linux"); host.Status != HookCompatibilityKnown {
+			t.Fatalf("host %s = %q, want the host contract unchanged", version, host.Status)
+		}
+	}
+	for _, version := range []string{"0.13.0", "0.13.4"} {
+		got := ResolveSandboxHookContract("omnigent", version)
+		if got.Status != HookCompatibilityKnown || got.Contract.ContractID != "omnigent-custom-policy-v1" || got.Contract.MinAgentVersion != OmnigentSandboxMinVersion {
+			t.Fatalf("sandbox %s = %q %+v, want omnigent-custom-policy-v1 from %s", version, got.Status, got.Contract, OmnigentSandboxMinVersion)
+		}
+		host := ResolveHookContract("omnigent", "omnigent "+version).Contract
+		if !reflect.DeepEqual(got.Contract.Events, host.Events) || !reflect.DeepEqual(got.Contract.Capabilities, host.Capabilities) {
+			t.Fatalf("sandbox contract %+v differs from the host's %+v beyond its floor", got.Contract, host)
+		}
+	}
+	// Past the reviewed range both refuse, with the generic reason.
+	if got := ResolveSandboxHookContract("omnigent", "0.14.0"); got.Status != HookCompatibilityUnknown || strings.Contains(got.Reason, "response policy phase") {
+		t.Fatalf("sandbox 0.14.0 = %q (%s)", got.Status, got.Reason)
+	}
+	// A binding that pins the contract ID still resolves on the host side.
+	if c, ok := hookContractByIDForOS("omnigent", "omnigent-custom-policy-v1", "linux"); !ok || c.MinAgentVersion != "0.7.0" {
+		t.Fatalf("contract by ID = %+v, %v", c, ok)
 	}
 }
 

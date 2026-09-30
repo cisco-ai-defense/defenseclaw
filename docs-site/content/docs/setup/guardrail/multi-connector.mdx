@@ -84,7 +84,7 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 
 ## Per-connector overrides
 
-The five fields you can override per connector mirror the global guardrail knobs:
+The fields you can override per connector mirror the global guardrail knobs:
 
 | Field | Meaning | Inherits when unset |
 | --- | --- | --- |
@@ -94,6 +94,8 @@ The five fields you can override per connector mirror the global guardrail knobs
 | `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
 | `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
 | `rule_pack_dir` | Path to the rule pack this connector scans against. | global `guardrail.rule_pack_dir` |
+| `block_at` | Lowest severity that blocks: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. | global `guardrail.block_at`, then the rule pack's level |
+| `alert_at` | Lowest severity that alerts, same values; never above the block level. | global `guardrail.alert_at`, then the rule pack's level |
 
 Set any of these with the per-connector CLI:
 

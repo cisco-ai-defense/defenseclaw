@@ -1085,3 +1085,34 @@ func TestActiveAgentContextInvalidNewSessionCannotEvictExactSession(t *testing.T
 		t.Fatalf("invalid session inserted=%t count=%d", invalidInserted, count)
 	}
 }
+
+// TestSandboxSessionsCannotEvictHostSessions reproduces p2-ingress-3: the
+// session cache shared one capacity between the host and every sandbox, so
+// a sandbox sending many SessionStart hooks could evict host sessions, or
+// set the process-wide uncertain flag.
+func TestSandboxSessionsCannotEvictHostSessions(t *testing.T) {
+	nextTime := int64(0)
+	cache := activeAgentContextCache{now: func() time.Time {
+		nextTime++
+		return time.Unix(nextTime, 0)
+	}}
+	for i := 0; i < 10; i++ {
+		sessionID := fmt.Sprintf("host-session-%d", i)
+		cache.begin("claudecode", sessionID)
+		cache.seedLoadedFile(activeAgentContextKey{connector: "claudecode", sessionID: sessionID}, "/repo/AGENTS.md", false, cache.currentTime())
+	}
+	if len(cache.snapshot("claudecode", "host-session-0").files) == 0 {
+		t.Fatal("host session should have authority")
+	}
+	for i := 0; i < maxActiveAgentContextSessions; i++ {
+		cache.beginKey(activeAgentContextKey{scope: "sb_testbinding123", connector: "claudecode", sessionID: fmt.Sprintf("sandbox-session-%d", i)})
+	}
+	if after := cache.snapshot("claudecode", "host-session-0"); len(after.files) == 0 && !after.uncertain {
+		t.Error("sandbox sessions evicted host session without marking uncertain")
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.uncertain {
+		t.Error("sandbox cache overflow set process-wide uncertain flag")
+	}
+}

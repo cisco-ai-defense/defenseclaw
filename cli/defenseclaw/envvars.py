@@ -91,7 +91,9 @@ ALLOWED_SECURITY_IMPACT = frozenset({"none", "low", "medium", "high"})
 # (internal/envvars/registry.go: isTruthy) so doctor and tests agree.
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-_ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"})
+# Variables that carry a value rather than a switch: any non-empty value is
+# active. Mirrors activeWhenNonEmpty in internal/envvars/registry.go.
+_ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "DEFENSECLAW_SANDBOX_ID"})
 
 @dataclass(frozen=True)
 class Consumer:

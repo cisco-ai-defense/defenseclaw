@@ -152,7 +152,6 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/lookups/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
-    "_data/scripts/*.sh",
     "_data/llm/*.json",
     "_data/config/v8/*.json",
     "_data/config/v8/*.yaml",
@@ -167,8 +166,6 @@ defenseclaw = [
     "inventory/acp_registry.json",
     "inventory/hook_contracts.json",
     "inventory/validated_versions.json",
-    "_data/policies/openshell/*.rego",
-    "_data/policies/openshell/*.yaml",
     "_data/policies/guardrail/default/*.yaml",
     "_data/policies/guardrail/default/judge/*.yaml",
     "_data/policies/guardrail/default/rules/*.yaml",
@@ -178,6 +175,10 @@ defenseclaw = [
     "_data/policies/guardrail/permissive/*.yaml",
     "_data/policies/guardrail/permissive/judge/*.yaml",
     "_data/policies/guardrail/permissive/rules/*.yaml",
+    "_data/policies/guardrail/tool-chains.json",
+    "_data/policies/guardrail-use-cases/*/README.md",
+    "_data/policies/guardrail-use-cases/*/*.yaml",
+    "_data/policies/guardrail-use-cases/*/rules/*.yaml",
     "_data/local_observability_stack/*.md",
     "_data/local_observability_stack/*.yml",
     "_data/local_observability_stack/*.sh",
@@ -229,9 +230,9 @@ override-dependencies = [
     # LiteLLM's transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.14.3,<4",
     # pyjwt 2.13.0 fixes PYSEC-2026-175, PYSEC-2026-177, PYSEC-2026-178 and
-    # PYSEC-2026-179; 2.14.0 fixes CVE-2026-102274; 2.15.0 fixes
-    # CVE-2026-101918. Pulled in transitively; pin it forward so the audit
-    # stays clean.
+    # PYSEC-2026-179; 2.14.0 fixes CVE-2026-101917, CVE-2026-102265..102273
+    # and CVE-2026-102274; 2.15.0 fixes CVE-2026-101918. Pulled in
+    # transitively; pin it forward so the audit stays clean.
     "pyjwt>=2.15.0",
     # PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr): Host-header validation
     # fixed in starlette 1.0.1. fastapi pins starlette<0.51 until
@@ -282,10 +283,8 @@ testpaths = ["cli/tests"]
 # ``@pytest.mark.asyncio`` decorations the codebase has 100+ of today.
 asyncio_mode = "auto"
 markers = [
-    "tui_snapshot: marks SVG snapshot tests (slow on first run)",
-    "tui_property: marks Hypothesis-driven invariant tests",
+    "tui_pilot: full-app or modal Pilot tests driven through app.run_test",
     "allow_subprocess: opts test out of the autouse subprocess ban (use only for executor.py integration tests)",
-    "agent_tty: marks tests that spawn an interactive agent under a PTY (legacy marker)",
     "supported_connector_host: runs platform-neutral connector behavior on an explicitly supported host",
 ]
 filterwarnings = [

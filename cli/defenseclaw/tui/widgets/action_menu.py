@@ -66,6 +66,14 @@ class ActionMenu(Vertical):
         background: {DEFAULT_TOKENS.surface_selected};
         color: {DEFAULT_TOKENS.text_primary};
     }}
+
+    /* A menu built with show_descriptions grows each described row so the
+       description under the label is readable (a 3-row button has room for
+       the label only). */
+    ActionMenu.-descriptions Button {{
+        height: auto;
+        min-height: 3;
+    }}
     """
 
     class Selected(Message):
@@ -80,11 +88,13 @@ class ActionMenu(Vertical):
         actions: tuple[MenuAction, ...],
         *,
         selected_index: int | None = None,
+        show_descriptions: bool = False,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
         self.actions = actions
         self.selected_index = self._initial_selected_index(selected_index)
+        self.set_class(show_descriptions, "-descriptions")
 
     def compose(self) -> ComposeResult:
         for index, action in enumerate(self.actions):
@@ -199,19 +209,29 @@ class ActionMenuScreen(ModalScreen[str | None]):
         subtitle: str = "",
         *,
         selected_index: int | None = None,
+        show_descriptions: bool = False,
     ) -> None:
         super().__init__()
         self.title = title
         self.subtitle = subtitle
         self.actions = actions
         self.selected_index = selected_index
+        self.show_descriptions = show_descriptions
 
     def compose(self) -> ComposeResult:
         with Vertical(id="action-menu-dialog"):
-            yield Static(self.title, id="action-menu-title")
+            # Titles and subtitles carry data (a skill, MCP or host name),
+            # never styling: a name such as ``[/]`` used to raise
+            # MarkupError while composing and take the whole app down.
+            yield Static(self.title, id="action-menu-title", markup=False)
             if self.subtitle:
-                yield Static(self.subtitle, id="action-menu-subtitle")
-            yield ActionMenu(self.actions, selected_index=self.selected_index, id="action-menu")
+                yield Static(self.subtitle, id="action-menu-subtitle", markup=False)
+            yield ActionMenu(
+                self.actions,
+                selected_index=self.selected_index,
+                show_descriptions=self.show_descriptions,
+                id="action-menu",
+            )
 
     def action_cursor_up(self) -> None:
         self.query_one(ActionMenu).select_previous()

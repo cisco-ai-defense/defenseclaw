@@ -258,9 +258,16 @@ def _log_setup_action(
         return
     try:
         app.logger.log_action(action, "config", details)
-    except CanonicalObservabilityUnavailableError:
+    except CanonicalObservabilityUnavailableError as exc:
         if not allow_offline:
-            raise
+            # Stay fail-closed, but say so plainly instead of a traceback: the
+            # change is already saved, only its audit event is missing.
+            raise click.ClickException(
+                "The change was saved, but the gateway isn't running, so its setup audit event "
+                "couldn't be recorded. Start defenseclaw-gateway and run the command again, or use "
+                "the command's offline option (--no-restart or --no-verify, where it has one) to "
+                "stage the change for the next gateway start."
+            ) from exc
         click.echo(
             "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
             "event was not recorded. Start defenseclaw-gateway before the next change.",
@@ -4325,13 +4332,13 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "label": "OpenClaw",
         "description": "fetch interceptor + before_tool_call plugin",
         "tool_mode": "both",
-        "subprocess_policy": "sandbox",
+        "subprocess_policy": "shims",
     },
     "zeptoclaw": {
         "label": "ZeptoClaw",
         "description": "api_base redirect + proxy response-scan",
         "tool_mode": "both",
-        "subprocess_policy": "sandbox",
+        "subprocess_policy": "shims",
     },
     "claudecode": {
         "label": "Claude Code",
@@ -12559,21 +12566,6 @@ def _find_plugin_source() -> str | None:
     if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
         return resolved
     return None
-
-
-def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
-    """Remove the DefenseClaw plugin from the sandbox user's OpenClaw extensions."""
-    import shutil
-
-    target_dir = os.path.join(sandbox_home, ".openclaw", "extensions", "defenseclaw")
-    if os.path.isdir(target_dir):
-        try:
-            shutil.rmtree(target_dir)
-            click.echo(f"  ✓ Sandbox plugin removed from {target_dir}")
-        except OSError as exc:
-            click.echo(f"  ✗ Could not remove sandbox plugin: {exc}")
-    else:
-        click.echo("  ✓ Sandbox plugin not installed (nothing to remove)")
 
 
 # ---------------------------------------------------------------------------

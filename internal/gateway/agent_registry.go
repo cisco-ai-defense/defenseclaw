@@ -275,7 +275,9 @@ func (r *AgentRegistry) ResolvePeek(ctx context.Context, sessionID, inboundAgent
 }
 
 func (r *AgentRegistry) resolve(ctx context.Context, sessionID, inboundAgentID string, mint bool) AgentIdentity {
-	_ = ctx
+	// A sandbox's sessions are kept apart from the host's and from every
+	// other sandbox's, whatever session IDs the agents choose.
+	sessionID = sandboxSessionStateKey(ctx, sessionID)
 	logicalID := strings.TrimSpace(inboundAgentID)
 	if logicalID == "" {
 		logicalID = r.AgentID()

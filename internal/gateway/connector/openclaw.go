@@ -113,7 +113,7 @@ func (c *OpenClawConnector) Name() string                           { return "op
 func (c *OpenClawConnector) Description() string                    { return "fetch interceptor plugin" }
 func (c *OpenClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
-	return ResolveSubprocessPolicy(SubprocessSandbox)
+	return ResolveSubprocessPolicy(SubprocessShims)
 }
 
 // AllowedHosts returns the OpenClaw upstream baseline. The OpenClaw
@@ -165,7 +165,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	// Surface 2: Plugin subprocess enforcement
-	policy := ResolveSubprocessPolicy(SubprocessSandbox)
+	policy := ResolveSubprocessPolicy(SubprocessShims)
 	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}

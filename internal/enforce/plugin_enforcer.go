@@ -20,17 +20,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 )
 
 type PluginEnforcer struct {
 	quarantineDir string
-	shell         *sandbox.OpenShell
 }
 
-func NewPluginEnforcer(quarantineDir string, shell *sandbox.OpenShell) *PluginEnforcer {
-	return &PluginEnforcer{quarantineDir: quarantineDir, shell: shell}
+func NewPluginEnforcer(quarantineDir string) *PluginEnforcer {
+	return &PluginEnforcer{quarantineDir: quarantineDir}
 }
 
 func (e *PluginEnforcer) Quarantine(pluginPath string) (string, error) {

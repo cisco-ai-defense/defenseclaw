@@ -128,7 +128,14 @@ def test_current_security_producers_have_lossless_authored_contracts() -> None:
         "correlation.agent",
         "correlation.tool.identity",
         "security.network.egress",
+        "correlation.sandbox",
     }
+    assert attributes["defenseclaw.network.source"].normalization.effective_constraints["enum"] == (
+        "go",
+        "ts",
+        "openshell",
+        "dc-egress-proxy",
+    )
     assert "security.network.egress" in groups["span.network.request"].extends
     assert attributes["defenseclaw.network.target_path"].field_class == "path"
     assert attributes["defenseclaw.network.policy_outcome"].field_class == "reason"

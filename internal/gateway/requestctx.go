@@ -84,6 +84,10 @@ func RequestIDFromContext(ctx context.Context) string {
 	return v
 }
 
+// clientRequestIDHeaders are the request-ID header names a client may
+// supply, in precedence order.
+var clientRequestIDHeaders = []string{RequestIDHeader, "X-Request-Id", "X-Correlation-Id"}
+
 // requestIDFromHeaders returns the first non-empty correlation ID
 // found in any of the recognised request-ID header names, or "".
 // Clients commonly use X-Request-Id (OpenTelemetry, Envoy) or
@@ -91,7 +95,7 @@ func RequestIDFromContext(ctx context.Context) string {
 // our canonical header so integrations don't require header
 // rewriting.
 func requestIDFromHeaders(h http.Header) string {
-	for _, name := range []string{RequestIDHeader, "X-Request-Id", "X-Correlation-Id"} {
+	for _, name := range clientRequestIDHeaders {
 		if v := strings.TrimSpace(h.Get(name)); v != "" {
 			return sanitizeClientRequestID(v)
 		}

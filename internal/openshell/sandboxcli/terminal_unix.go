@@ -1,0 +1,81 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build unix
+
+package sandboxcli
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"syscall"
+)
+
+// terminalSignals are what the terminal sends the foreground job.
+var terminalSignals = []os.Signal{syscall.SIGINT, syscall.SIGTSTP, syscall.SIGQUIT}
+
+// forwardedSignals end the interactive harness rather than this process:
+// the terminal hung up, or something asked this process to terminate.
+var forwardedSignals = []os.Signal{syscall.SIGHUP, syscall.SIGTERM}
+
+// sessionSignals end a headless harness run rather than this process.
+var sessionSignals = []os.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM}
+
+func signalNumber(exit *exec.ExitError) int {
+	if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return int(ws.Signal())
+	}
+	return 0
+}
+
+// terminationSignals are the signals that end a `sandbox exec` client:
+// a hangup and SIGTERM, and without a terminal the interrupt the terminal
+// sends the whole job (with one, the command gets it as a keystroke).
+func terminationSignals(interactive bool) []os.Signal {
+	if interactive {
+		return []os.Signal{syscall.SIGHUP, syscall.SIGTERM}
+	}
+	return []os.Signal{syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT}
+}
+
+// signalExitCode is the shell's exit status of a process a signal ended.
+func signalExitCode(s os.Signal) int {
+	if n, ok := s.(syscall.Signal); ok {
+		return 128 + int(n)
+	}
+	return 130
+}
+
+// execProcess replaces this process with path.
+func execProcess(path string, argv, env []string) error {
+	return syscall.Exec(path, argv, env)
+}
+
+// freeBytes is the space an unprivileged user may still write on the
+// filesystem holding path.
+func freeBytes(path string) (uint64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), true //nolint:gosec,unconvert // the field types differ by OS
+}
+
+// isNoSpace reports a write that failed because the disk is full.
+func isNoSpace(err error) bool {
+	return errors.Is(err, syscall.ENOSPC)
+}

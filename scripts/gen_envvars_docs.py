@@ -121,6 +121,23 @@ def _escape_table_cell(text: str) -> str:
     return s
 
 
+_CODE_SPAN = re.compile(r"(`[^`]*`)")
+
+
+def _mdx_escape_text(text: str) -> str:
+    """Escape what MDX would parse as JSX or an expression in prose cells.
+
+    Outside code spans, ``<token>`` opens a JSX tag and ``{...}`` a JS
+    expression, so a purpose such as ``http://<user>@host:<port>`` fails the
+    whole page's MDX parse. ``<`` becomes ``&lt;`` and braces are
+    backslash-escaped; code spans are left alone.
+    """
+    parts = _CODE_SPAN.split(text)
+    for i in range(0, len(parts), 2):
+        parts[i] = parts[i].replace("<", "&lt;").replace("{", "\\{").replace("}", "\\}")
+    return "".join(parts)
+
+
 def _impact_badge(impact: str) -> str:
     return {
         "high": "**HIGH**",
@@ -175,10 +192,11 @@ def _consumer_cell(entry: EnvVar) -> str:
     return "<br/>".join(parts)
 
 
-def _security_note_cell(entry: EnvVar) -> str:
+def _security_note_cell(entry: EnvVar, *, mdx: bool) -> str:
     if not entry.security_note:
         return "—"
-    return _escape_table_cell(entry.security_note)
+    note = _escape_table_cell(entry.security_note)
+    return _mdx_escape_text(note) if mdx else note
 
 
 _SENTENCE_SPLIT = re.compile(r"\.\s+(?=[A-Z])")
@@ -216,11 +234,12 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
         name = f"`{e.name}`"
         if e.deprecated:
             name = f"~~`{e.name}`~~"
-        purpose = _escape_table_cell(_first_sentence(e.purpose))
+        prose = _mdx_escape_text if mdx else (lambda text: text)
+        purpose = prose(_escape_table_cell(_first_sentence(e.purpose)))
         if e.replacement_hint:
             purpose += (
                 f" {br}**Fix:** "
-                + _escape_table_cell(e.replacement_hint)
+                + prose(_escape_table_cell(e.replacement_hint))
             )
         # Consumer cell built with <br/> placeholder; rewrite per-target.
         consumer_cell = _consumer_cell(e).replace("<br/>", br)
@@ -229,7 +248,7 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
             f"{_default_cell(e, mdx=mdx)} | "
             f"{_accepted_values_cell(e)} | "
             f"{purpose} | "
-            f"{_security_note_cell(e)} | "
+            f"{_security_note_cell(e, mdx=mdx)} | "
             f"{consumer_cell} |"
         )
         lines.append(row)

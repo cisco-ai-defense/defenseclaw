@@ -293,6 +293,16 @@ type APIServer struct {
 	// rather than queued — a queued hook would stall the agent past
 	// the hook scripts' curl --max-time budget.
 	hookJudgeSem chan struct{}
+
+	// sandboxIngress is the OpenShell sandbox hook listener configured by
+	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
+	sandboxIngressMu sync.RWMutex
+	sandboxIngress   *sandboxIngressState
+
+	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
+	// (api_sandbox.go); nil when sandboxes are off.
+	sandboxCtlMu sync.RWMutex
+	sandboxCtl   SandboxController
 }
 
 // SetCiscoInspector wires the Cisco AI Defense client onto the API
@@ -1023,6 +1033,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// can roll up turn counts + completion reasons per session.
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
+	a.registerSandboxRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)
@@ -2199,6 +2210,9 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action is required"})
 		return
 	}
+	// Sandbox attribution comes only from an authenticated sandbox binding
+	// (audit.CorrelationEnvelope), never from a request body.
+	event.SandboxID, event.SandboxName = "", ""
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -3438,6 +3452,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
+		// Sandbox binding credentials are valid only on the sandbox ingress
+		// listener. Refuse them before any other comparison so that no
+		// loopback carve-out below (hook, OTLP, inspect, ACP) can ever be
+		// reached with one, whatever header or path carries it.
+		if requestCarriesSandboxCredential(r) {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 		if (r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate") &&
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)

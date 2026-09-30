@@ -568,12 +568,24 @@ async def test_posix_cancel_preserves_sigint_before_fallback() -> None:
         "print('ready', flush=True); time.sleep(60)"
     )
     executor = CommandExecutor(use_pty=False, cancel_grace=1.0)
-    collect = asyncio.create_task(_collect(executor, ("-u", "-c", code)))
-    await _wait_until_running(executor)
-    await asyncio.sleep(0.05)
+    events: list = []
+
+    async def collect_events() -> None:
+        async for event in executor.run(sys.executable, ("-u", "-c", code)):
+            events.append(event)
+
+    collect = asyncio.create_task(collect_events())
+    # Cancel only once the child has installed its SIGINT handler (it prints
+    # "ready" after that); a fixed short sleep lost the race on a busy machine.
+    for _ in range(500):
+        if any(event.kind == "output" and "ready" in event.text for event in events):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("child never printed ready")
 
     await executor.cancel()
-    events = await collect
+    await collect
 
     assert "got-sigint" in [event.text for event in events if event.kind == "output"]
     assert events[-1].cancelled is True

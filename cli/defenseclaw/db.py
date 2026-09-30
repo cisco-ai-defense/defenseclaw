@@ -249,6 +249,19 @@ _SUMMARY_DETAILS_BYTES = 4096
 # its permission fix only while no Store here has it open.
 _OPEN_STORES: dict[str, int] = {}
 _OPEN_STORES_LOCK = threading.Lock()
+
+# The rows the TUI's default Audit view shows (see
+# list_actionable_event_summaries); everything else counts as routine.
+_ACTIONABLE_EVENT_WHERE = """(
+    severity IN ('CRITICAL','HIGH','ERROR')
+    OR (
+        action = 'connector-hook'
+        AND (
+            details LIKE '%severity=CRITICAL%'
+            OR details LIKE '%severity=HIGH%'
+        )
+    )
+)"""
 _ALERT_EVENT_ELIGIBILITY_SQL = """(
     bucket IS NULL
     OR (bucket = 'security.finding' AND event_name = 'finding.observed')
@@ -701,24 +714,31 @@ class Store:
         """List high-signal audit rows for the default TUI view."""
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE (
-                   severity IN ('CRITICAL','HIGH','ERROR')
-                   OR (
-                       action = 'connector-hook'
-                       AND (
-                           details LIKE '%severity=CRITICAL%'
-                           OR details LIKE '%severity=HIGH%'
-                       )
-                   )
-               )
+               WHERE {_ACTIONABLE_EVENT_WHERE}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def count_routine_events(self, connector: str = "") -> int:
+        """Count the rows :meth:`list_actionable_event_summaries` leaves out.
+
+        With *connector*, only rows whose details name it (``connector=<name>``,
+        how the TUI attributes events) are counted.
+        """
+
+        sql = f"SELECT COUNT(*) FROM audit_events WHERE NOT COALESCE({_ACTIONABLE_EVENT_WHERE}, 0)"
+        params: tuple[str, ...] = ()
+        if connector:
+            # Match the name literally: % and _ would otherwise be wildcards.
+            name = connector.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            sql += " AND lower(COALESCE(details, '')) LIKE ? ESCAPE '\\'"
+            params = (f"%connector={name}%",)
+        return int(self.db.execute(sql, params).fetchone()[0])
 
     def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
         """List recent connector-hook rows without the actionable filter."""
