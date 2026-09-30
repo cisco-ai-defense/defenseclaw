@@ -132,11 +132,13 @@ type Check struct {
 type DoctorReport struct {
 	Checks []Check `json:"checks"`
 	// Facts gathered on the way, for display.
-	Registration   *Registration `json:"registration,omitempty"`
-	CLIVersion     string        `json:"cli_version,omitempty"`
-	GatewayVersion string        `json:"gateway_version,omitempty"`
-	DockerVersion  string        `json:"docker_version,omitempty"`
-	DockerRootDir  string        `json:"docker_root_dir,omitempty"`
+	Registration *Registration `json:"registration,omitempty"`
+	CLIVersion   string        `json:"cli_version,omitempty"`
+	// CLIPath is the openshell the CLI check found on PATH.
+	CLIPath        string `json:"cli_path,omitempty"`
+	GatewayVersion string `json:"gateway_version,omitempty"`
+	DockerVersion  string `json:"docker_version,omitempty"`
+	DockerRootDir  string `json:"docker_root_dir,omitempty"`
 	// Service is the gateway service as its manager reports it.
 	Service *ServiceState `json:"service,omitempty"`
 	// Driver is the compute driver sandboxes run on: the one the gateway
@@ -988,6 +990,7 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 		c.Status, c.Detail, c.Fix = StatusFail, r.CLI+" is not on PATH", install
 		return
 	}
+	r.report.CLIPath = path
 	out, err := r.Runner.Output(ctx, Command{Name: path, Args: []string{"--version"}, Timeout: 30 * time.Second})
 	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
 	v, perr := VersionFromOutput(line)

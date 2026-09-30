@@ -187,10 +187,17 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// another way is found, but its gateway is not one DefenseClaw can
 	// restart, and the installer, finding its CLI, would change nothing.
 	if a.GOOS == "darwin" && rep.OpenShellOutsideFormula() {
+		// It names that OpenShell as the doctor's CLI row does, and says
+		// what comes before the install: run now, `--install-openshell`
+		// comes back here.
+		found := strings.TrimSpace("OpenShell " + rep.CLIVersion)
+		if rep.CLIPath != "" {
+			found += " at " + rep.CLIPath
+		}
 		a.bad("Gateway service: the " + openshell.GatewayFormula + " Homebrew formula is not installed")
-		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell " +
-			rep.CLIVersion + " found here was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway " +
-			"and remove that OpenShell, then run `" + CommandName + " setup --install-openshell`")
+		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The " + found +
+			" was installed another way, so DefenseClaw cannot restart its gateway, and NVIDIA's installer would find it and install nothing. " +
+			"First stop that gateway and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, which installs the formula")
 		return &Silent{Err: fmt.Errorf("on macOS OpenShell must come from the %s Homebrew formula", openshell.GatewayFormula)}
 	}
 	if cli := rep.Get(openshell.CheckIDCLI); cli == nil || cli.Status == openshell.StatusFail ||
