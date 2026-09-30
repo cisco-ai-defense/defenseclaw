@@ -63,7 +63,7 @@ the last `pull --apply`.
 | Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On a Mac, Docker Desktop running: DefenseClaw builds the harness images in Docker, and OpenShell's MicroVM driver reads them from it. Either way docker needs its buildx plugin, which builds the images with BuildKit: Docker Desktop provides it, and on Linux it is the `docker-buildx-plugin` package from Docker's repository. |
 | Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. Without it OpenShell refuses to start a sandbox. On a Mac each MicroVM boots OpenShell's own Linux kernel, which has Landlock (Docker Desktop's VM kernel has none, see [macOS](#macos)). |
 | Mac | Apple silicon, [Homebrew](https://brew.sh), and Homebrew's `e2fsprogs`, which the MicroVM driver formats its disks with. Setup offers to install it. |
-| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, the MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`, until `sandbox image prune`, `sandbox image rm` or teardown removes that image. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, the MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`, until `sandbox image prune`, `sandbox image rm` or teardown removes that image. Claude Code and Codex start a run image of their own for each run configuration (the `--env`, credentials and model provider a run passes), so a run with other ones prepares another disk of about 5 GB. |
 | Linux login | `sudo loginctl enable-linger $USER` is recommended, so the OpenShell gateway keeps running after you log out. |
 
 You don't need OpenShell installed beforehand: setup offers to install it.
@@ -111,8 +111,10 @@ secrets and insecure code when `pull` brings them back, before they reach
 your folder.
 
 A Mac whose gateway still runs the Docker driver (set up by an earlier
-DefenseClaw) fails every run on the Landlock check. The run says so and
-names `defenseclaw sandbox setup`, which offers the switch.
+DefenseClaw) cannot start a sandbox on Docker Desktop, whose Linux VM has no
+Landlock. `sandbox run` refuses there before it builds an image or makes a
+sandbox, and its next line names `defenseclaw sandbox setup`, which offers
+the switch.
 Sandboxes made on the Docker driver cannot start on the MicroVM driver, so
 setup lists them before it switches; after that they can only be deleted. A
 Docker VM whose kernel does run Landlock (Colima, OrbStack) may keep the
@@ -896,10 +898,12 @@ does. A folder without git has no branches, so use `--apply` or
 The patch file of a conflicting `--apply` is `<name>.patch` in your folder,
 so deleting the sandbox does not take it along. A pull from a stopped
 sandbox starts it to read its work and stops it again, unless the sandbox
-has not run since its last pull read it: that pull is used then, without
-starting anything. A branch that holds other work or a patch file that
+stopped with its copy as its last pull read it: that pull is used then,
+without starting anything. A branch that holds other work or a patch file that
 exists is refused before the sandbox starts, and a branch that already holds
-the work is reported as done.
+the work is reported as done. A branch that holds only the last pull is
+refused before the start too when the stopped sandbox has run since that pull
+(`--branch-name NAME` or `--force` goes on).
 
 A copy-mode sandbox changes your folder only through `pull --apply`, so for
 such a sandbox `undo` reverts its last apply, after a preview. Edits you
@@ -1350,9 +1354,14 @@ reason. Its file sharing check is of your temp directory (`$TMPDIR`, under
 `/var/folders`), from which an image build mounts a MicroVM's `/etc/hosts`
 into the container that checks the image; Docker Desktop shares it by
 default. A gateway configured for the MicroVM driver that
-still runs the Docker driver is reported as a restart pending.
-The command exits 1 when a check fails. With `--json` it prints the report
-as JSON and always exits 0; the report's `ok` field says whether every check
+still runs the Docker driver is reported as a restart pending. On a gateway
+still on the Docker driver whose Docker VM has no Landlock (Docker
+Desktop's), the doctor skips the Docker Desktop host networking and file
+sharing checks and says why: no setting there lets a sandbox start, and
+MicroVMs, the way on, use neither.
+The command exits 1 when a check fails, and its last line then reads
+**✗ not ready for sandboxes: N checks failed**. With `--json` it prints the
+report as JSON and always exits 0; the report's `ok` field says whether every check
 passed, and `ready` says that sandboxes are also turned on. While
 `openshell.enabled` is false the last line reads **not ready for sandboxes
 yet** instead. The image check warns about a configured harness whose image
@@ -1367,7 +1376,7 @@ section, and skips them while `openshell.enabled` is off.
 | --- | --- |
 | ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on`` | Run setup. |
 | `install OpenShell: Homebrew could not install the nvidia/openshell formula` (macOS) | Read Homebrew's `Error:` line just above it. When NVIDIA's tap has no bottle (prebuilt package) for your macOS release, Homebrew builds the formula and first checks your developer tools: it stops when Xcode or the Command Line Tools are older than the newest release (`Your Xcode (26.2) … is too outdated`). Update them as Homebrew says (Xcode from the App Store, the Command Line Tools from Software Update in System Settings), then run `defenseclaw sandbox setup` again. |
-| On macOS, the doctor's **Landlock** check reports no Landlock, or `sandbox run` ends with ``sandbox "<name>" is in error state`` and ``this gateway runs sandboxes on the docker driver`` | The gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock, which OpenShell needs. Switch it to MicroVMs: run `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`) and answer yes to the MicroVM question (see [macOS](#macos)). |
+| On macOS, the doctor's **Landlock** check reports no Landlock, `sandbox run` refuses with ``no sandbox can start on this gateway: it runs sandboxes on the docker driver``, or a run or start ends with ``sandbox "<name>" is in error state`` and a next line ``→ this gateway runs sandboxes on the docker driver`` | The gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock, which OpenShell needs. Switch it to MicroVMs: run `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`) and answer yes to the MicroVM question (see [macOS](#macos)). |
 | On macOS, a run ends with ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: … does not resolve in <name>: its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves`` | The sandbox was made from a harness image built before DefenseClaw's images for MicroVMs answered `localhost`, and a sandbox keeps its image. Do what the next line says (``→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete <name>`) and run it again``): the new sandbox boots a rebuilt image. |
 | On macOS, a run ends with ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: it could not resolve localhost ("…"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and <Harness> does not use the system resolver, which answers localhost here`` | The harness resolves names on its own (as a Go program built without cgo, or a static musl program, does), so no image can answer `localhost` for it in a MicroVM, whose `/etc/hosts` is empty. Run it on a Linux host, whose Docker driver writes `/etc/hosts` (``→ <Harness> cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it``). |
 | ``<Harness> cannot start in an OpenShell MicroVM (the vm driver this gateway runs): <Harness> cannot resolve localhost in an OpenShell MicroVM: it printed "…"`` (a run), or ``<Harness> cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: …`` (`sandbox image build`) | The check of the image found the same before any sandbox was made: the harness resolves names on its own, and the message quotes what it printed. Run it on a Linux host. The refusal stays until the image is checked again, which ``defenseclaw sandbox image build <harness> --force`` does. |

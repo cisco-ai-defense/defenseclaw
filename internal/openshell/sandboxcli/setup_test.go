@@ -1210,6 +1210,31 @@ func TestDoctorVerdict(t *testing.T) {
 	has(t, ta.output(), "hook-verified: claudecode 2.1.156; codex not allowed by your organization's policy (openshell.admin.allowed_harnesses)",
 		"ready for sandboxes")
 	lacks(t, ta.output(), "image build codex", "not built yet: codex")
+
+	// A failing doctor ends with its verdict too, which counts the failed
+	// checks (it ended on the last check's line, the #1019 retest), and
+	// its JSON is as before.
+	ta = newTestApp(t, "")
+	ta.HostDoctor, ta.images.recs = hostReport(func(r *openshell.DoctorReport) {
+		for _, id := range []string{openshell.CheckIDLandlock, openshell.CheckIDDocker} {
+			c := r.Get(id)
+			c.Status, c.Detail = openshell.StatusFail, "broken"
+		}
+	}), readyImages(ta)
+	err := ta.RunDoctor(bg, DoctorOptions{})
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("RunDoctor = %v", err)
+	}
+	if out := strings.TrimRight(ta.output(), "\n"); !strings.HasSuffix(out, "\n\n  ✗ not ready for sandboxes: 2 checks failed") {
+		t.Fatalf("a failing doctor ends:\n%s", out)
+	}
+	lacks(t, ta.output(), "✓ ready for sandboxes")
+	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OK || rep.Ready {
+		t.Fatalf("failing doctor json ok/ready = %+v, %v", rep, err)
+	}
+	lacks(t, ta.output(), "not ready for sandboxes")
 }
 
 // The doctor's image check counts the images for the driver the gateway

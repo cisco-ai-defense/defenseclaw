@@ -599,7 +599,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	// Where the work is to go is checked before the sandbox is started and
 	// read: a branch it cannot go on, a patch file that is there already.
 	if modes > 0 {
-		if _, err := a.checkPull(ctx, sb, o); err != nil {
+		if _, err := a.checkPull(ctx, sb, o, true); err != nil {
 			return err
 		}
 	}
@@ -770,16 +770,31 @@ func (a *App) applyOptions(sb *sandboxapi.Sandbox, o PullOptions) (workspace.App
 // work cannot go where o says: a branch for a folder that is not a git
 // repository, a branch that exists and does not hold the last pull's work,
 // a patch file that exists (without --force) or has no folder. It reports
-// whether the branch holds that work already.
-func (a *App) checkPull(ctx context.Context, sb *sandboxapi.Sandbox, o PullOptions) (bool, error) {
+// whether the branch holds that work already. Before the pull (before), a
+// stopped sandbox that has run since its last pull is started to read it,
+// so a branch that holds only that pull is refused too (without --force):
+// the new pull would land there only if the sandbox changed nothing, and
+// telling takes the boot.
+func (a *App) checkPull(ctx context.Context, sb *sandboxapi.Sandbox, o PullOptions, before bool) (bool, error) {
 	opts, err := a.applyOptions(sb, o)
 	if err != nil {
 		return false, err
 	}
+	if before && sb.Phase != "ready" {
+		opts.Starts = true
+		if st := a.stoppedCopyOf(sb); st != nil {
+			opts.Reuse = st.Pulled
+		}
+	}
 	held, err := a.Workspace.CheckApply(ctx, opts)
+	var earlier *workspace.EarlierPullError
 	switch {
 	case err == nil:
 		return held, nil
+	case errors.As(err, &earlier):
+		return false, &wsError{err: err, msg: fmt.Sprintf("bring back %s's changes: branch %s already exists: it holds %s's pull at %s, "+
+			"and %s has run since, so its work may have changed; %s", sb.Name, earlier.Branch, sb.Name, a.clock(earlier.PulledAt), sb.Name,
+			applyHint(opts.Mode, err))}
 	case errors.Is(err, workspace.ErrNotGitProject):
 		return false, fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
 			"bring them back with --apply or --patch-out FILE", sb.Name)
@@ -795,7 +810,7 @@ func (a *App) branchHolds(ctx context.Context, sb *sandboxapi.Sandbox, o PullOpt
 	if o.applyMode() != workspace.ApplyBranch {
 		return false
 	}
-	held, err := a.checkPull(ctx, sb, o)
+	held, err := a.checkPull(ctx, sb, o, false)
 	return err == nil && held
 }
 
@@ -809,8 +824,9 @@ func (a *App) reviewGlobs(sb *sandboxapi.Sandbox) []string {
 }
 
 // reusePull is the pull of stopped sandbox sb made from its last one, when
-// sb has not run since that pull read its copy (stoppedCopyOf), so starting
-// it would read the same state again: nil when that is not known.
+// its copy was in the state that pull read as it last stopped, and it has
+// not run since (stoppedCopyOf), so starting it would read the same state
+// again: nil when that is not known.
 func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace.PullResult, error) {
 	st := a.stoppedCopyOf(sb)
 	if st == nil || st.Pulled == "" {
@@ -823,7 +839,9 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.diskFullHint(err))
 	}
-	a.note(sb.Name + " has not run since its last pull at " + a.clock(res.PulledAt) + "; using that pull instead of starting it")
+	// The mark may come from a later look than that pull (a start and a
+	// stop that found the same state): what holds is the copy's state.
+	a.note(sb.Name + "'s copy has not changed since its last pull at " + a.clock(res.PulledAt) + "; using that pull instead of starting it")
 	return res, nil
 }
 

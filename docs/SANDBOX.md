@@ -222,7 +222,11 @@ not the driver's name or `runtime.GOOS`.
   Docker, while a rebuilt one gets a new image ID, which the driver
   prepares another rootfs for (another minute and about 5 GB). So each
   posture's run image, and its prepared rootfs of about 5 GB, stays until
-  its overlay image is superseded and pruned. Prune and teardown then remove
+  its overlay image is superseded and pruned. Each run configuration of one
+  harness image is such a posture: runs of Claude Code with and without a
+  `--credential`, `--env` or model provider render other run files, so each
+  boots its own run image and prepares its own rootfs of about 5 GB, which
+  disk budgets on a Mac should count. Prune and teardown then remove
   the rootfs of every image ID they removed (`PruneReport.RemovedImageIDs`:
   no image they keep or leave has it, and `Keep` does not name it), and only
   when the daemon listed the sandboxes (teardown: after its deletes, none
@@ -1403,9 +1407,9 @@ Nothing is applied without a review: a session without a terminal, or with
    as mount mode. Nothing in the project changes yet. With
    `PullOptions.Reuse` naming the last pull's result, the pull is made from
    that result, which `base.git` holds, without reading the sandbox: the
-   caller knows the sandbox has not run since (below). Its changes, review
-   and `Since` are made anew, so an apply or undo since counts; a last pull
-   that is another one fails with `ErrNoReusablePull`.
+   caller knows the copy is in the state that pull read (below). Its
+   changes, review and `Since` are made anew, so an apply or undo since
+   counts; a last pull that is another one fails with `ErrNoReusablePull`.
 4. **Apply.** `apply` merges the result into the working tree three ways (git
    2.38 or newer; older git, or a conflict, falls back to a `dc/<name>`
    branch for git projects plus a patch file), `branch` creates `dc/<name>`,
@@ -1431,7 +1435,11 @@ Nothing is applied without a review: a session without a terminal, or with
    a branch for a plain folder (`ErrNotGitProject`), the branch name, a
    branch that exists and does not hold the last pull's tree, and a patch
    file that exists or whose folder does not. `sandbox pull` runs it before
-   it starts a stopped sandbox.
+   it starts a stopped sandbox, and says so (`ApplyOptions.Starts`, with
+   `Reuse` naming the pull it would be made from): a branch that holds only
+   the last pull's tree is then refused too (`*EarlierPullError`, unless
+   `Force`) when that pull cannot be reused, since the sandbox has run since
+   and only the boot would tell whether its work changed.
 
    A 3-way apply that lands (or finds the folder already has the result)
    sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
@@ -2707,7 +2715,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 
 | Behaviour | Design consequence |
 | --- | --- |
-| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver, and a run that fails the probe there names the switch. |
+| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver. `sandbox run` on a Mac whose gateway runs the Docker driver on Docker Desktop (one `docker info`, no probe) refuses before it builds an image or makes a sandbox, and names the switch on a line of its own; a run that fails the probe on another Docker VM names it too. |
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
 | Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
@@ -2743,7 +2751,11 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
   driver, global policy, bind mounts, OpenShell telemetry and the sandbox
   ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor
   signature, image architecture), `vm-identity` and `vm-resources`, and the
-  disk of the prepared-rootfs cache.
+  disk of the prepared-rootfs cache. On a Mac's docker gateway whose Docker
+  VM fails the Landlock check, the host networking and file sharing checks
+  are skipped with the reason (`mootWithoutLandlock`): no Docker Desktop
+  setting helps there, and MicroVMs use neither. A failing report ends with
+  `✗ not ready for sandboxes: N checks failed`.
 
 ## Code map
 

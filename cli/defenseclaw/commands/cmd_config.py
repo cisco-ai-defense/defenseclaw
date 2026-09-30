@@ -338,7 +338,7 @@ def validate_config() -> ValidationResult:
         try:
             inspected = inspect_v8_config("validate", config_path=cfg_path)
         except ConfigInspectError as exc:
-            res.errors.append(str(exc))
+            res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res
         if inspected.valid is not True:
             res.errors.append("canonical v8 validator returned no validity decision")
@@ -346,6 +346,28 @@ def validate_config() -> ValidationResult:
 
     res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
+
+
+def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
+    """The canonical validator's refusal, with the field when it names none.
+
+    The Go helper reports a failure outside its schema pass (the runtime
+    loader's checks, such as openshell.binary or an openshell.egress
+    pattern) only as "configuration could not be compiled safely" at "$".
+    The Go decision stands; the Python mirror of those checks
+    (``load_validate_v8``, value-free) only says which field it is and what
+    it takes.
+    """
+
+    if exc.field_path != "$":
+        return str(exc)
+    try:
+        load_validate_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
+    except V8ConfigError as mirror:
+        return f"candidate field={mirror.path}; reason=[{mirror.keyword}] {mirror.corrective_action}"
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return str(exc)
 
 
 def _looks_like_v8_config(path: str) -> bool:

@@ -865,7 +865,46 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         "oneOf": "use exactly one supported v8 source shape",
         "type": "use the value type documented by the canonical v8 schema",
     }.get(keyword, "correct the field using the canonical v8 schema and reference")
-    raise V8ConfigError(source_name, path, keyword, action)
+    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+
+
+# An enum longer than this is left to the reference rather than listed.
+_MAX_LISTED_ENUM_VALUES = 16
+
+
+def _declared_action(keyword: str, error: Any) -> str:
+    """What the schema declares at a failed enum or bound, as Go's validator says it.
+
+    Only the schema's own values are named (the allowed values, the minimum
+    and maximum), never the rejected source value.
+    """
+
+    if keyword == "enum":
+        values = error.validator_value
+        if (
+            isinstance(values, list)
+            and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
+            and all(isinstance(value, str) for value in values)
+        ):
+            return "use one of " + ", ".join(values)
+        return ""
+    if keyword not in ("minimum", "maximum") or not isinstance(error.schema, Mapping):
+        return ""
+
+    def bound(key: str) -> str:
+        value = error.schema.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return ""
+        return str(value)
+
+    low, high = bound("minimum"), bound("maximum")
+    if low and high:
+        return f"use a number between {low} and {high}"
+    if low:
+        return f"use a number at or above {low}"
+    if high:
+        return f"use a number at or below {high}"
+    return ""
 
 
 def _json_path(parts: tuple[Any, ...]) -> str:

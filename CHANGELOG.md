@@ -398,8 +398,16 @@ deleted.
   offers `brew install e2fsprogs`, and writes `compute_driver = "vm"` and the
   sandbox identity (your uid and gid) in one plan with one restart;
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
-  checks. On a Mac still on the Docker driver, a run that fails OpenShell's
-  Landlock check names the switch.
+  checks. On a Mac still on the Docker driver, `sandbox run` on Docker
+  Desktop refuses before it builds an image or makes a sandbox (one `docker
+  info`), and a run on another Docker VM that fails OpenShell's Landlock
+  check names the switch too, on a line of its own (`→ …`) after
+  OpenShell's output. A failing `sandbox doctor` ends with `✗ not ready for
+  sandboxes: N checks failed`, as a passing one ends with `✓ ready for
+  sandboxes` (every driver; `--json` is unchanged). Without Landlock in the
+  Docker VM, the doctor skips Docker Desktop's host networking and file
+  sharing checks, saying why, instead of asking for a setting that cannot
+  help.
 - With OpenShell's release binaries outside Homebrew, a gateway that answers
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,
@@ -485,10 +493,14 @@ deleted.
   "starting … to read its work", instead of after the download and review. A
   branch that already holds the work is done (`nothing to do: branch dc/<name>
   already has these changes`), with no question about its sensitive
-  changes, at a session's end too. A stopped sandbox that has not run since
+  changes, at a session's end too. A branch that holds only the last pull is
+  refused before the start too when the stopped sandbox has run since that
+  pull (`… it holds <name>'s pull at 14:03, and <name> has run since, so its
+  work may have changed`). A stopped sandbox whose copy has not changed since
   its last pull read it is not started: `sandbox pull` and `review` use that
-  pull again (`… has not run since its last pull at 14:03; using that pull
-  instead of starting it`), which on a Mac saves booting the MicroVM (#965).
+  pull again (`…'s copy has not changed since its last pull at 14:03; using
+  that pull instead of starting it`), which on a Mac saves booting the
+  MicroVM (#965).
   Every driver.
 - Node's `[UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental` no
   longer prints in a sandbox
@@ -619,6 +631,15 @@ deleted.
   Linux mount mode only: copy mode, every sandbox on a Mac included, has no
   undo point. In the Python config, the v8 schema, and the TUI and macOS app
   config editors; the TUI's undo preview names what it restores.
+- `defenseclaw config validate` names the field and what it takes for a
+  value the v8 schema refuses, such as `openshell.workdir.undo_ignored.max_mb`
+  (`expected a number between 0 and 1048576`) or `openshell.llm` (`expected
+  one of [...]`), as the Go loader does: the canonical validator ran its
+  runtime loader before the schema pass, so it only said "configuration
+  could not be compiled safely" at `$`. A refusal only that loader makes
+  (`openshell.binary`, an `openshell.egress` pattern) is placed by the
+  Python mirror of those checks. Messages still never contain the rejected
+  value.
 
 ### Legacy OpenShell standalone sandbox removed
 
