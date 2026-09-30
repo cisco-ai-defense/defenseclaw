@@ -11,14 +11,10 @@ keywords:
 import { RecipeCatalog } from "@/components/policy-creator/recipe-catalog";
 
 The recipe catalog is the same library the [Policy creator](/docs/policies/creator) draws from. Every entry
-ships with the bundled `strict` policy so you can paste the YAML directly into your own pack —
-or use the wizard to drop one into a draft and tune it interactively.
+ships with the bundled `strict` policy, and the catalog updates when that pack changes. Paste the
+YAML directly into your own pack, or use the wizard to drop one into a draft and tune it
+interactively.
 
-<Callout type="info" title="Where these come from">
-Each rule originates in `policies/guardrail/strict/rules/<category>.yaml` and gets compiled into
-this catalog at build time by `docs-site/scripts/build-policy-assets.ts`. The bundled strict
-pack is the source of truth — when it changes, this catalog regenerates.
-</Callout>
 
 <RecipeCatalog />
 

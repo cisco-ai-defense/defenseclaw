@@ -242,13 +242,19 @@ before enabling action mode.
 
 </Steps>
 
-<Callout type="info" title="Validation is not a CEL fixture runner">
 There is no public CLI that injects synthetic `ActionFacts` into one CEL
-expression. Repository contributors should add focused Go fixtures and run
+expression. Validate the complete pack, then test real calls in observe mode.
+
+<Accordions>
+<Accordion title="For repository contributors">
+
+Add focused Go fixtures and run
 `go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`.
 When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
 `make check-guardrail-catalog`.
-</Callout>
+
+</Accordion>
+</Accordions>
 
 ## Authoring checklist
 

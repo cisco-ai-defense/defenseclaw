@@ -1,6 +1,6 @@
 ---
 title: Regex cookbook
-description: Battle-tested regex patterns for DefenseClaw guardrails — secrets, command injection, exfiltration markers, prompt injection — with explanations and counterexamples.
+description: RE2 regex patterns for DefenseClaw guardrails, covering secrets, prompt injection, exfiltration markers and data shapes, with counterexamples.
 keywords:
   - DefenseClaw regex
   - secrets detection
@@ -10,8 +10,9 @@ keywords:
 ---
 
 DefenseClaw compiles every guardrail pattern with Go's standard `regexp` package, which is
-RE2-based. The wizard's regex tester catches incompatible features before you commit; this page
-is the deeper reference for the patterns that ship in the strict pack.
+RE2-based. The wizard's regex tester catches incompatible features before you commit. This page
+explains how to write good patterns. It quotes shipped strict-pack rules where it names a rule ID;
+examples marked "illustrative" use `MY-` IDs and are patterns you write.
 
 <Callout type="info" title="Regex detection is not trusted-action proof">
 Patterns remain useful for broad, portable detection. On authenticated tool
@@ -35,21 +36,23 @@ feature failed. Re-author with a non-capturing group and tighter quantifiers.
 
 ## Anatomy of a good rule
 
+This is the shipped strict-pack rule for OpenAI project keys:
+
 ```yaml
-- id: SEC-OPENAI-V2
-  title: OpenAI API key (current format)
-  pattern: 'sk-[A-Za-z0-9]{48}'
+- id: SEC-OPENAI
+  pattern: 'sk-proj-[a-zA-Z0-9]{20,}'
+  title: "OpenAI project key"
   severity: CRITICAL
   confidence: 0.95
-  tags: [secret, openai]
+  tags: [credential]
 ```
 
 What makes this work:
 
-- **Anchored prefix.** `sk-` is the OpenAI marker. Without it the pattern would match every
-  ~48-character base62 string.
-- **Bounded quantifier.** `{48}` instead of `{20,}` keeps the false positive rate low.
-- **Conservative confidence.** Even at 0.95, the LLM judge can downgrade in context.
+- **Anchored prefix.** `sk-proj-` is the OpenAI project key marker. Without it the pattern would
+  match every long base62 string.
+- **Bounded minimum length.** `{20,}` skips short strings that only share the prefix.
+- **Confidence below 1.0.** The judge and suppressions can still weigh context.
 - **Self-describing tags.** Useful when you triage thousands of findings in dashboards.
 
 ## Patterns by category
@@ -58,24 +61,23 @@ What makes this work:
 
 | ID | Pattern shape | Catches | Avoids |
 | --- | --- | --- | --- |
-| `SEC-AWS-KEY` | `\b(AKIA\|ASIA)[A-Z0-9]{16}\b` | IAM, STS keys | Random base62 of similar length |
-| `SEC-GITHUB-TOKEN` | `\bgh[posr]_[A-Za-z0-9]{36,}` | New GitHub token formats | Plain `gh-` strings |
-| `SEC-PRIVKEY` | `-----BEGIN [A-Z ]+PRIVATE KEY-----` | RSA, ED25519, OPENSSH | Public certs, certificate signing requests |
-| `SEC-OPENAI-V2` | `sk-[A-Za-z0-9]{48}` | OpenAI keys | `sk-test-` Stripe keys |
-| `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+` | Slack incoming webhooks | Other Slack URLs (channels, files) |
+| `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | IAM, STS keys | Random base62 of similar length |
+| `SEC-GITHUB-TOKEN` | `(?:ghp_\|gho_\|ghu_\|ghs_\|ghr_)[a-zA-Z0-9]{36,}` | Current GitHub token formats | Plain `gh-` strings |
+| `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | RSA, EC, OpenSSH, PGP, DSA keys | Public certs, certificate signing requests |
+| `SEC-OPENAI-V2` | `sk-[a-zA-Z0-9]{40,}` | Long-form OpenAI keys | `sk_test_` Stripe keys (underscore, not hyphen) |
+| `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+` | Slack incoming webhooks | Other Slack URLs (channels, files) |
 
 ### Prompt / tool injection
 
-These rely on the natural-language signal more than character classes. Always pair with an LLM
-judge for confirmation — the regex is the cheap pre-filter.
+These rely on the natural-language signal more than character classes. Pair them with the LLM
+judge for confirmation; the regex is the cheap pre-filter. The shipped strict pack covers this
+family with `TRUST-IGNORE-PREVIOUS`, `TRUST-DISREGARD` and related `TRUST-*` rules, whose patterns
+also anchor on sentence and list boundaries. A simpler illustrative rule:
 
 ```yaml
-- id: INJ-OVERRIDE-INSTRUCTION
+- id: MY-INJ-OVERRIDE
   pattern: '(?i)\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|rules)\b'
   severity: HIGH
-- id: INJ-SHELL-EXEC
-  pattern: '(?i)\b(rm\s+-rf|dd\s+if=|mkfs|truncate\s+-s|format\s+c:)\b'
-  severity: CRITICAL
 ```
 
 ### Unicode zero-width obfuscation
@@ -101,28 +103,34 @@ alphanumeric character. Nine insertions do not match, and a ZWJ between two emoj
 
 ### Exfiltration markers
 
-When a model surfaces a base64 blob, an out-of-band webhook URL, or a tar pipe, you usually want
-to alert before allowing the output downstream:
+When a model surfaces an out-of-band collection URL, you usually want to alert before allowing
+the output downstream. The shipped strict pack has one `C2-*` rule per known service, such as
+`C2-WEBHOOK-SITE`, `C2-REQUESTBIN` and `C2-NGROK`:
 
 ```yaml
-- id: EXFIL-CURL-PIPE-SH
-  pattern: '\bcurl\s+[^\s]+\s*\|\s*(bash|sh|zsh)\b'
-  severity: CRITICAL
-- id: EXFIL-WEBHOOK-DOMAIN
-  pattern: '(?i)\b(webhook\.site|requestbin\.com|ngrok\.io|interactsh\.com)\b'
+- id: C2-WEBHOOK-SITE
+  pattern: '(?i)(?:^|[^a-zA-Z0-9-])webhook\.site(?:[^a-zA-Z0-9.-]|$)'
+  title: "webhook.site (known exfil)"
   severity: HIGH
+  confidence: 0.90
+  tags: [exfiltration, c2]
 ```
+
+The boundary groups stop the rule from matching `notwebhook.site` or `webhook.site.example.com`.
 
 ### Enterprise data shape
 
 Numeric-only patterns are the easiest to false-positive. Always pair them with a `condition`
 in your finding suppressions (see [the suppression cookbook](/docs/policies/suppression-cookbook)).
 
+The shipped `ENT-BULK-SSN` rule excludes invalid SSN area, group and serial ranges rather than
+matching any `ddd-dd-dddd` string. Illustrative rules you might write:
+
 ```yaml
-- id: PII-SSN
+- id: MY-PII-SSN
   pattern: '\b\d{3}-\d{2}-\d{4}\b'
   severity: HIGH
-- id: PII-CREDIT-CARD
+- id: MY-PII-CARD
   pattern: '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
   severity: CRITICAL
 ```
@@ -145,3 +153,9 @@ In the [Policy creator](/docs/policies/creator) Rule pack section:
 3. Once the pill colors line up (green for pass, amber for mismatch, red for compile error),
    review the verdict in the Live Test pane on the right — it'll show how the pattern interacts
    with the severity matrix and admission policy.
+
+## Next steps
+
+- [Rule packs](/docs/policies/rule-packs): where custom rules live and how to switch packs.
+- [Validate rule packs](/docs/policies/rulepack-validation): check a pack before you apply it.
+- [Suppression cookbook](/docs/policies/suppression-cookbook): quiet known-safe matches.

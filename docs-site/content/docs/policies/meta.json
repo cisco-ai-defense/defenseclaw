@@ -2,13 +2,15 @@
   "title": "Policies",
   "pages": [
     "index",
+    "rule-packs",
+    "llm-judge",
     "deterministic-detection",
     "cel",
-    "rulepack-validation",
-    "creator",
-    "verify-locally",
-    "recipes",
     "suppression-cookbook",
-    "regex-cookbook"
+    "regex-cookbook",
+    "recipes",
+    "creator",
+    "rulepack-validation",
+    "verify-locally"
   ]
 }

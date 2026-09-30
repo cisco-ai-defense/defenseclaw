@@ -8,14 +8,19 @@ keywords:
   - tool_suppressions
 ---
 
-DefenseClaw applies suppressions in three places before emitting a finding. Each layer answers a
-different question:
+Suppressions remove known noise so you can run in `action` mode without alert
+fatigue. DefenseClaw applies them in three layers, and each rule pack ships its
+own `suppressions.yaml`. Finding and tool suppressions act on the PII judge's
+entities only; they do not silence local rules or other judge categories.
 
-| Layer                  | Question                                                                              | When to reach for it                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `pre_judge_strips`     | "Is the LLM judge wasting time on a chunk of input that's a known fixture?"           | A README example, sample data, or a benchmarking prompt keeps tripping the judge. |
-| `finding_suppressions` | "Did we already classify this finding as a known false positive?"                    | An id consistently fires on data that's safe (epoch timestamps, platform IDs).      |
-| `tool_suppressions`    | "Is this tool inherently noisy and not worth alerting on?"                          | Read-only or cosmetic shell commands like `git status` flooding your dashboard.     |
+| Layer | Where it runs | When to reach for it |
+| --- | --- | --- |
+| `pre_judge_strips` | Before the LLM judge | Remove known harmless content, such as bridge banners or sample data, before the judge sees it. |
+| `finding_suppressions` | After the PII judge | Drop a PII entity that is safe, such as an epoch timestamp flagged as a phone number. |
+| `tool_suppressions` | After a tool-scoped PII judge result | Drop named PII finding IDs for tools whose output always contains them. |
+
+The session correlator is not a suppression layer. See
+[Post-event correlator](/docs/policies/deterministic-detection#post-event-correlator).
 
 <Callout type="warn" title="Don't blanket-match">
 The wizard's findings tray flags any suppression with a pattern of `.*`, `.+`, or `^.*$`. A
@@ -24,8 +29,12 @@ blanket match silences every finding the layer would otherwise emit. Always anch
 
 ## Pre-judge strips
 
-Strips run on the raw input *before* it ever reaches the judge model. Use them to remove
-predictable, harmless content the judge would otherwise classify as a leak.
+Strips remove matching text from the input *before* it reaches the judge model.
+The stripped text never reaches the judge provider. `applies_to` names the
+judges the strip runs for.
+
+The bundled packs ship strips such as `STRIP-SYSTEM-SENDER` and
+`STRIP-MESSAGING-BRIDGE-STATUS`. This one is an example you write:
 
 ```yaml
 pre_judge_strips:
@@ -38,7 +47,7 @@ pre_judge_strips:
 When to use:
 
 - A documented "fake" credential is included in an example or test fixture.
-- Telemetry payloads from your own services are being flagged as exfiltration markers.
+- Messaging-bridge or framework metadata keeps getting flagged as PII.
 - A known tutorial pattern (e.g., the AWS docs example) shows up in user prompts often enough to
   drown the real signal.
 
@@ -46,47 +55,55 @@ When **not** to use:
 
 - The pattern matches anything that could ever be real production data. Use a finding suppression
   instead, which can be conditional.
-- The judge is wrong about a *category* — that's an LLM judges section problem, not a strip.
+- The judge is wrong about a *category*. Fix the judge category instead.
 
 ## Finding suppressions
 
-Drop a finding only when both the rule id pattern AND a per-finding entity pattern match.
-Optionally narrow further with a `condition` such as `is_epoch` (numeric, looks like a Unix
-timestamp) or `is_platform_id` (matches well-known platform-issued ID formats).
+A finding suppression drops a PII judge entity when both patterns match:
+
+- `finding_pattern` matches the judge finding ID, such as `JUDGE-PII-PHONE`.
+- `entity_pattern` matches the detected value.
+
+You can narrow it further with a `condition`: `is_epoch` (the value looks like a
+Unix timestamp) or `is_platform_id` (the value matches a known platform ID
+format). The schema has no expiry field, so remove time-bounded exceptions
+through your configuration workflow.
+
+The default pack ships this one:
 
 ```yaml
 finding_suppressions:
-  - id: SUPP-EPOCH-TIMESTAMP
-    finding_pattern: '^SEC-DATA-NUMERIC'
-    entity_pattern: '^\d{10,13}$'
+  - id: SUPP-PHONE-EPOCH
+    finding_pattern: JUDGE-PII-PHONE
+    entity_pattern: '^\d{10}$'
     condition: is_epoch
-    reason: Epoch timestamps look like card numbers under a numeric-only rule
+    reason: "Unix timestamp, not phone number"
 ```
 
-Recipes you can copy from [the recipe catalog](/docs/policies/recipes):
-
-- `SUPP-EPOCH-TIMESTAMP`: numeric "secrets" that are actually Unix timestamps.
-- `SUPP-PLATFORM-IDS`: platform-issued IDs (Stripe customer ids, Slack team ids, etc.) that look
-  like API keys to a permissive regex.
+Shipped finding suppressions vary by pack. The strict pack ships only
+`SUPP-USERNAME-METADATA` and `SUPP-EMAIL-CHATID`. The default pack adds
+`SUPP-IP-PRIVATE`, `SUPP-PHONE-EPOCH` and `SUPP-PHONE-PLATFORM-ID`. More
+examples are in [the recipe catalog](/docs/policies/recipes).
 
 ## Tool suppressions
 
-Suppress findings on tools whose name matches a regex. The wizard scopes this *very* tightly so
-you don't accidentally silence write/destructive variants.
+A tool suppression drops the listed PII finding IDs when the tool name matches
+`tool_pattern`. Other findings from the same call still count toward the
+verdict. Tool suppressions filter PII judge entities only; listing any other
+finding ID has no effect.
+
+This example is one you write. It keeps customer email addresses returned by a
+CRM lookup tool from raising PII findings:
 
 ```yaml
 tool_suppressions:
-  - tool_pattern: '^(shell|bash|sh)\.execute$'
-    suppress_findings: [JUDGE-INJ-DESTRUCTIVE]
-    reason: Cosmetic shell commands generate noise without security risk
+  - tool_pattern: '^crm_(lookup_contact|search_accounts)$'
+    suppress_findings: [JUDGE-PII-EMAIL]
+    reason: CRM lookups return customer contact emails by design
 ```
 
-Pair with the rule pack:
-
-1. Add a `JUDGE-INJ-DESTRUCTIVE` category in the LLM judges section that lights up on actual
-   destructive calls (`rm -rf`, `dd`, `mkfs`, `truncate`).
-2. Add the tool suppression here so cosmetic invocations of the same shell tool don't trip the
-   same finding id when the model just wants to `git status`.
+Scope the pattern tightly. Match only read-only tools, so a write or send
+variant of the same tool still raises the finding.
 
 ## Workflow
 
@@ -95,9 +112,15 @@ In the [Policy creator](/docs/policies/creator):
 1. Open the **LLM judges** section and confirm your judge categories actually map to the
    findings you care about. Add or remove categories before tuning suppressions.
 2. Open the **Suppressions** section. Use the recipe picker on each tab to seed your suppressions
-   with the bundled strict-pack entries.
+   with bundled entries.
 3. Use the regex tester in each suppression to verify your pattern matches the entity you intend
    without matching anything else. The wizard will turn the example pill green when the pattern
    matches.
 4. Watch the findings tray (bottom of the wizard) for `SUPP_OVER_BROAD` warnings. Tighten any
    pattern the wizard flags before exporting.
+
+## Next steps
+
+- [LLM judge](/docs/policies/llm-judge): the judge categories these layers filter.
+- [Recipes](/docs/policies/recipes): copy-ready suppressions.
+- [Policy creator](/docs/policies/creator): build and test suppressions in the browser.

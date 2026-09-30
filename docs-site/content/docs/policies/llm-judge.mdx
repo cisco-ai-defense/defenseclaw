@@ -1,0 +1,114 @@
+---
+title: LLM judge
+description: The optional LLM judge for DefenseClaw guardrails, with its shared severity rubric, signal-strength scoring, judge files and model settings.
+keywords:
+  - DefenseClaw LLM judge
+  - severity rubric
+  - signal_strength
+  - guardrail.judge
+---
+
+The LLM judge is an optional second opinion on events that local rules cannot
+decide. It is off by default. This page covers what the judges check, how they
+score, and how to pick the judge model.
+
+## What the judges check
+
+Three judge configuration files ship with every pack: **injection**, **PII**,
+and **tool-injection**. Data exfiltration is a category inside the
+tool-injection judge, not a fourth file. Judges help most with:
+
+- Subtle prompt injection that doesn't match a regex.
+- Tool calls whose stated purpose disagrees with their effects. This is most
+  common in MCP.
+- Categorical content checks, such as "does this prompt try to extract
+  proprietary code?"
+
+## Shared severity rubric
+
+All three judges use the same severity rubric. The rubric is embedded in each
+judge's system prompt, so verdicts stay consistent across categories.
+
+| Tier | Meaning |
+| --- | --- |
+| **CRITICAL** | Direct unambiguous harm, provable from the content alone. Credential exfil, destructive shell, jailbreak succeeded, SSN/passport disclosed. |
+| **HIGH** | Clear adversarial intent or high-impact sensitive data. Prompt injection with explicit override, `/etc/passwd` probe, phone number in completion. |
+| **MEDIUM** | Suspicious but ambiguous. Benign readings are plausible. |
+| **LOW** | Weak indicator; context-dependent (e.g. user self-disclosing their own email). |
+| **NONE** | No concern. |
+
+## Signal-strength scoring
+
+For each category a judge flags, it also emits a `signal_strength` label. The
+label comes from two booleans: *unambiguous* (no plausible benign reading) and
+*high_impact* (hard-to-reverse damage is possible).
+
+| `unambiguous` | `high_impact` | `signal_strength` |
+| --- | --- | --- |
+| ✓ | ✓ | `strong_signal` |
+| ✓ | ✗ | `signal` |
+| ✗ | ✓ | `needs_review` |
+| ✗ | ✗ | `weak_signal` |
+
+- Tool-judge aggregation ignores `weak_signal`.
+- A `needs_review` finding can alert but cannot block by itself.
+- Blocking needs an actionable corroborated category, or strong structural
+  exfiltration or destruction evidence. One ambiguous category in ordinary
+  coding context does not block.
+
+The [contextual judge benchmark](/docs/llm-judge-benchmark) reports F1,
+false-positive, benign-block, latency, token, and cost results.
+
+## Judge files
+
+Judge configuration is split by detector under `judge/`. For example, the
+injection judge declares its categories and severity mapping in
+`judge/injection.yaml`:
+
+```yaml title="policies/guardrail/default/judge/injection.yaml (excerpt)"
+version: 1
+name: injection
+enabled: true
+categories:
+  "Instruction Manipulation":
+    finding_id: JUDGE-INJ-INSTRUCT
+    severity: HIGH
+  "Obfuscation":
+    finding_id: JUDGE-INJ-OBFUSC
+    severity: CRITICAL
+min_categories_for_high: 1
+single_category_max_severity: HIGH
+min_categories_for_critical: 2
+```
+
+## Choose the judge model
+
+The judge call goes through the same Bifrost pipeline as the rest of the stack
+and uses the [unified LLM key](/docs/setup/unified-llm-key). Each judge call
+emits a gateway event with event type `judge`. Token usage is reported on the
+judge trace and the GenAI token-usage metric, so you can watch cost from your
+dashboards.
+
+To use a different model than the rest of the stack, set `guardrail.judge.llm`
+in `config.yaml`:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      provider: <provider>
+      model: <model>
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+Pick a model from the provider list in
+[Unified LLM key](/docs/setup/unified-llm-key).
+
+## Next steps
+
+<Cards>
+  <Card title="Suppression cookbook" href="/docs/policies/suppression-cookbook" description="Remove known judge noise without losing real signals." />
+  <Card title="Rule packs" href="/docs/policies/rule-packs" description="The local rules the judge sits behind." />
+  <Card title="Judge benchmark" href="/docs/llm-judge-benchmark" description="Accuracy, latency and cost results." />
+</Cards>

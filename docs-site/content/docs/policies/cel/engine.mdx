@@ -119,8 +119,8 @@ fallback without stopping unrelated rules.
 | --- | --- |
 | Compile or admission failure | Reject the candidate generation; do not publish it. |
 | Projection is unsupported, partial, ambiguous, invalid, or uncertain | Run this owner's required regex fallback; a raw pattern match remains detection-only. |
-| The only unknown part of a POSIX command is a redirect target the shell expands at run time and that can only name a file (`> ~/out.txt`, `> "$HOME/out.txt"`, `> out-*.txt`) | Analyze the command with a static stand-in target, wrapped commands included, and evaluate CEL on that analysis without the stand-in's redirect and path. A match counts as authoritative semantic evidence when the expression cannot depend on the dropped redirect and path: it reads `redirects`, `paths`, `artifacts` and `archive_lineages` only as the range of `exists()` reached through `&&`, `||` and quantifier predicates, and reads neither `parse` nor a lineage's `authoritative`. A command's `argv_complete` (`c.argv_complete`) may be read: each command on that analysis has the complete, static argv of a full analysis. A built-in owner's code prerequisite must hold both on that analysis and on the one with the stand-in target. A non-match, or any other rule, runs the owner's regex fallback on the whole command. |
-| A POSIX command has `&&` or `\|\|` lists (`cd <dir> && <cmd>`, `<cmd> \|\| true`) | A block stops the whole call before any of it runs, so the command is judged as if every command of each list runs: analyze it with each list read as the sequence of its commands, and evaluate CEL, code prerequisites and the context checks for content and sensitive-path findings on that analysis. For an expression that reads neither `parse` nor a lineage's `authoritative` (a command's `argv_complete` may be read), a match or non-match there counts as it does for the same commands joined by `;`, so a rule that blocks `a; b` also blocks `a && b` and `a \|\| b`. Other rules run the owner's regex fallback, and a fallback finding blocks when that analysis proves it, as for `a; b`. A list with a runtime-expanded redirect target gets both treatments. A negated (`!`), background (`&`) or coprocess statement in a list, a function definition or a here-document keeps the regex fallback, and its matches stay detection-only. |
+| The only unknown part of a POSIX command is a runtime-expanded, file-only redirect target | See [Runtime-expanded redirect targets](#runtime-expanded-redirect-targets). |
+| A POSIX command has `&&` or `\|\|` lists | See [Command lists](#command-lists). |
 | CEL evaluates `false` | Produce no owner finding and suppress only this owner's claimed fallback IDs on the structured route. |
 | CEL matches full facts but not the execute-only projection | Create detection-only evidence; preview behavior cannot synchronously block. |
 | CEL matches both projections on an enforcement-eligible, synchronous surface | Create an enforcement candidate from the YAML metadata; the final same-rule proof gate must still authorize it. |
@@ -136,47 +136,78 @@ evidence, partial or invalid projections, and unpinned results remain visible
 as detection-only findings. The gate never removes a finding; it only prevents
 incomplete evidence from authorizing a block.
 
-### Exact-boundary examples
+### Runtime-expanded redirect targets
 
-| Family | Enforcement-eligible example | Advisory or quiet control |
-| --- | --- | --- |
-| HTTP destination hostname | Static ASCII DNS bytes from generated authority, HTTP CONNECT, remote-resolved SOCKS4a/5h destination fields, plaintext HTTP Host or canonical HTTPS SNI observed after a SOCKS handshake, or canonical HTTPS origin SNI; GNU Wget generated authority/origin SNI additionally requires `--no-config`, and every component is bound to the exact external origin or proxy | A local-only route or numeric hostname, non-ASCII IDN spelling, dynamic or config-derived value, wrapper/pipeline/shell redirection, promptable authentication, unresolved file/TLS setup, a modeled eagerly checked compression/TLS/authentication capability option or modeled final enabled capability toggle, conflicting pre-wire option, direct plaintext HTTP Host override with no remaining proxy-visible authority, target routed through an HTTPS proxy without authenticated feature facts, unsupported multi-hop proxy chain, or bare PowerShell `curl`/`wget` alias |
-| HAProxy client-IP preamble | None until [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770) supplies an authenticated fact for the exact curl executable's version and build support | Every `--haproxy-clientip` form remains LOW and detection-only, including direct HTTP(S), proxy/SOCKS/preproxy, `--noproxy`, multiple targets or `--next`, static/dynamic/oversized values, setup-preempted commands, aliases, and any executable-path spelling |
-| FTP control metadata | POSIX or structured-argv static curl FTP account or alternative bytes bound to one external FTP(S) origin or proven plaintext proxy observer | Dynamic/config-driven values, raw Windows shell input, a local-only destination, or an unproved route |
-| SOCKS authentication | Static SOCKS4 username or SOCKS5 username/password bound to the exact external proxy peer | Disabled/bypassed proxy, unsupported chain, ambiguous credentials, or pre-connect failure |
-| Telnet metadata | POSIX or structured-argv static `USER`, `TTYPE`, `XDISPLOC`, or `NEW_ENV` bytes bound to one direct external Telnet peer | Raw Windows shell input, capability-dependent, proxied, malformed, or local-only negotiation; invalid `WS`/`BINARY` settings |
-| Static stdin upload | Portable literal `echo` or format-only `printf` bytes flowing into one exact external curl stdin upload | Shell options/escapes, expansion, wrappers, intermediate transforms, or local upload |
-| Minix formatting | Exact `mkfs.minix` grammar targeting a raw device | Image target, help/version, invalid block count, near-miss executable, or untrusted path |
+This applies when the only unknown part of a POSIX command is a redirect
+target that the shell expands at run time and that can only name a file, such
+as `> ~/out.txt`, `> "$HOME/out.txt"` or `> out-*.txt`.
 
-For the modeled curl compression/TLS/authentication capability controls, an
-eagerly validated positive option, or the final enabled state of a final-toggle
-option, closes every exact transmission projector, not just the hostname lane.
-A disabled negative form can remain eligible only when no earlier eager
-validation failed, every transfer group ends with the modeled final-toggle
-capability disabled, and every other prerequisite is exact. Other optional
-features remain within the narrower authenticated-capability boundary tracked
-in the follow-up linked from this change.
+- DefenseClaw analyzes the command with a static stand-in target, wrapped
+  commands included. CEL runs on that analysis without the stand-in's redirect
+  and path.
+- A match is authoritative semantic evidence only when the expression cannot
+  depend on the dropped redirect and path. The expression may read
+  `redirects`, `paths`, `artifacts` and `archive_lineages` only as the range of
+  `exists()` reached through `&&`, `||` and quantifier predicates. It must not
+  read `parse` or a lineage's `authoritative`.
+- A command's `argv_complete` (`c.argv_complete`) may be read. Each command on
+  that analysis has the complete, static argv of a full analysis.
+- A built-in owner's code prerequisite must hold both on that analysis and on
+  the one with the stand-in target.
+- A non-match, or any other rule, runs the owner's regex fallback on the whole
+  command.
 
-DefenseClaw has no current HAProxy client-IP enforcement lane. Curl 8.7.1
-primary-source and loopback-wire evidence shows that a capable direct build
-writes the PROXY preamble before the HTTP request and, for HTTPS, before TLS.
-That audit also supplies future-projector constraints: the existing
-no-ambient-defaults boundary, a maximum 1976-byte operand, exact receiver
-binding, and rejection of `--ipv4` with a literal IPv6 peer before any write.
-It does not prove the executable that will run. The option is absent before
-curl 8.2.0 and is compiled out with `CURL_DISABLE_PROXY`; native name, path,
-dialect, and operating system do not authenticate either property. [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770)
-owns the resolved executable identity, version/build capabilities, provenance,
-and invalidation rules required before any of these forms can enforce.
+### Command lists
 
-Raw CMD/PowerShell curl gains exact ordinary HTTP(S) headers, origin
-credentials, inline/body and file-upload projection, plus supported direct
-proxy/SOCKS credentials. Exact hostname projection on PowerShell requires the
-explicit native `curl.exe` or `wget.exe`; the unqualified names belong to
-PowerShell aliases and remain detection-only. FTP account/alternative control
-fields, SMTP envelope fields, and Telnet `USER`/`TTYPE`/`XDISPLOC`/`NEW_ENV`
-remain detection-only on raw Windows shell input; their closed projectors still
-require POSIX or structured argv.
+This applies to POSIX `&&` and `||` lists, such as `cd <dir> && <cmd>` or
+`<cmd> || true`. A block stops the whole call before any of it runs, so the
+command is judged as if every command of each list runs.
+
+- DefenseClaw analyzes the command with each list read as the sequence of its
+  commands. CEL, code prerequisites, and the context checks for content and
+  sensitive-path findings run on that analysis.
+- For an expression that reads neither `parse` nor a lineage's
+  `authoritative`, a match or non-match counts as it does for the same
+  commands joined by `;`. A command's `argv_complete` may be read. A rule that
+  blocks `a; b` also blocks `a && b` and `a || b`.
+- Other rules run the owner's regex fallback. A fallback finding blocks when
+  that analysis proves it, as for `a; b`.
+- A list with a runtime-expanded redirect target gets both treatments.
+- A negated (`!`), background (`&`) or coprocess statement in a list, a
+  function definition, or a here-document keeps the regex fallback, and its
+  matches stay detection-only.
+
+### Exact-boundary families
+
+Some action families can enforce only when every part of the action is static
+and bound to one exact external peer:
+
+- **HTTP destination hostname:** a static ASCII host from the generated
+  authority, HTTP CONNECT, SOCKS destination fields, the plaintext Host header,
+  or canonical HTTPS SNI. GNU Wget also needs `--no-config`.
+- **FTP control metadata:** static curl FTP account or alternative bytes bound
+  to one external FTP(S) origin or a proven plaintext proxy.
+- **SOCKS authentication:** a static SOCKS4 username or SOCKS5
+  username and password bound to the exact external proxy.
+- **Telnet metadata:** static `USER`, `TTYPE`, `XDISPLOC` or `NEW_ENV` bytes
+  bound to one direct external Telnet peer.
+- **Static stdin upload:** literal `echo` or format-only `printf` bytes piped
+  into one exact external curl upload.
+- **Minix formatting:** exact `mkfs.minix` grammar that targets a raw device.
+
+These stay detection-only:
+
+- Dynamic or config-derived values, wrappers, pipelines, shell redirection,
+  local-only destinations, and unproved or multi-hop proxy routes.
+- Modeled compression, TLS, and authentication capability options. An
+  eagerly validated positive option, or a final enabled toggle, closes every
+  exact transmission projector.
+- Every `--haproxy-clientip` form. It stays LOW, because DefenseClaw cannot
+  prove the version and build of the curl executable that will run.
+- On raw CMD or PowerShell input, the bare `curl` and `wget` aliases. Exact
+  hostname projection needs the explicit `curl.exe` or `wget.exe`. FTP, SMTP
+  envelope, and Telnet control fields stay detection-only on raw Windows shell
+  input.
 
 Custom rules own their own rule ID. DefenseClaw may define internal alias,
 prerequisite, and safe-negative contracts for bundled owners, but those maps
@@ -211,7 +242,10 @@ regex, CEL typing and admission, and aggregate-cost checks. It does not inject
 synthetic facts or prove that a connector projects the fields an expression
 expects.
 
-Repository contributors should add focused Go fixtures and run:
+<Accordions>
+<Accordion title="For repository contributors">
+
+Add focused Go fixtures and run:
 
 ```bash
 go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
@@ -219,3 +253,6 @@ go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
 
 When the compiled default catalog changes, also run
 `make generate-guardrail-catalog` and `make check-guardrail-catalog`.
+
+</Accordion>
+</Accordions>

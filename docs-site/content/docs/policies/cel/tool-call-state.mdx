@@ -160,6 +160,13 @@ recorded as successful.
 
 State levels have strict meanings:
 
+- `paired-outcomes` — a pre proposal can become pending and only an exact,
+  authoritative matching result can commit it;
+- `detection-only` — pre and post events can be inspected, but post events do
+  not authorize a durable cross-event transition; and
+- `direct-only` — only the current pre-tool proposal is enforceable; there is
+  no trustworthy post outcome for state.
+
 The stateful route is enabled only for a known compatible agent version or an
 explicitly reviewed unversioned default contract. A detected version mismatch,
 unknown pin, or missing lifecycle contract disables state mutation and artifact
@@ -167,13 +174,6 @@ enforcement even if older hook fields still happen to parse. Compatibility loss
 also clears pending state in the exact authenticated session, and the persisted
 fingerprint binds the resolved contract so an older proposal cannot cross a
 contract or agent-version boundary.
-
-- `paired-outcomes` — a pre proposal can become pending and only an exact,
-  authoritative matching result can commit it;
-- `detection-only` — pre and post events can be inspected, but post events do
-  not authorize a durable cross-event transition; and
-- `direct-only` — only the current pre-tool proposal is enforceable; there is
-  no trustworthy post outcome for state.
 
 | Connector / primary contract | Structured proposal events | Result / outcome evidence | Invocation identity | State level |
 | --- | --- | --- | --- | --- |
@@ -188,6 +188,7 @@ contract or agent-version boundary.
 | [OpenCode](https://github.com/anomalyco/opencode/blob/2b72179c663cadcb54f54d9f19221b3fb3d11fb6/packages/plugin/src/index.ts) | `tool.execute.before` | v7 awaits `tool.execute.after` with the executed args and validated result; `bash` additionally requires numeric `metadata.exit=0` | paired `(sessionID, callID)` | `paired-outcomes` |
 | [Amp](https://ampcode.com/manual/plugin-api) | `tool.call` | terminal `tool.result`; `status=done` succeeds, `error` fails, and `cancelled` discards | paired `toolUseID` on both events | `paired-outcomes` |
 | [OmniGent](https://omnigent.ai/docs/policies/custom) | `tool_call` mapped to `PreToolUse` | `tool_result` repeats request data but has no authoritative success/failure field | no stable call or session ID in `PolicyEvent` | `direct-only` |
+| [Kiro](/docs/connectors/kiro) | `preToolUse` | `postToolUse` is inspected and audited; no reviewed lifecycle contract makes it an authoritative outcome | none reviewed | `direct-only` |
 
 Turn-completion events such as Codex, Claude Code, or Cursor `Stop`, OpenCode
 `session.idle`, and Amp `agent.end` discard only unfinished proposals. They
@@ -245,6 +246,7 @@ claims.
 | OpenCode | yes | yes | yes | yes | yes | yes | generic or MCP only |
 | Amp | yes | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
 | OmniGent | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| Kiro | yes | yes | yes | yes | yes when emitted as a tool | no dedicated lifecycle | generic or MCP only |
 
 ## Files written now and executed later
 
@@ -263,9 +265,8 @@ write. Only relative paths qualify, and they resolve from the trusted
 invocation working directory. Unknown,
 conflicting, oversized, or malformed envelopes stay non-authoritative and use
 the compatible rule fallback; DefenseClaw does not retain patch contents in
-semantic facts or durable chain state. Codex's authenticated hook shape is
-documented in the upstream
-[structured `apply_patch` hook contract](https://github.com/openai/codex/pull/18391).
+semantic facts or durable chain state. For the Codex hook shape, see the
+[Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
 When a later blockable shell proposal executes, sources, or loads a local
 script, the experimental artifact-promotion gate can reopen that exact path at
@@ -354,8 +355,10 @@ which is outside this experimental contract.
   useful, but absent per-call identity keeps cross-event state detection-only.
 - **OmniGent:** no authoritative tool outcome exists in the policy event, so
   only direct pre-tool decisions are eligible for enforcement.
+- **Kiro:** there is no reviewed tool-call lifecycle contract, so Kiro hook
+  events do not advance ordered state. Only direct pre-tool decisions are
+  eligible for enforcement.
 
-These holds are intentional. Coverage moves upward only after the connector's
-official contract, bridge fixtures, and smoke evidence on every applicable
-certified host all agree; missing evidence reduces capability instead of
-guessing success.
+These holds are intentional. Coverage moves up only when the connector's
+official contract proves the outcome and identity. When that proof is missing,
+DefenseClaw reduces capability instead of guessing success.
