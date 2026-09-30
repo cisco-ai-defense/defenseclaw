@@ -1031,7 +1031,9 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         steps.append(
             StepResult(
                 f"{label} mode",
-                "fail",
+                # A connector that stays in observe is protected but not
+                # blocking; it must not fail init/quickstart (and `make all`).
+                "warn",
                 detail,
                 warning.get("next_command", ""),
             )

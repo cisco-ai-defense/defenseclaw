@@ -778,6 +778,29 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # the now-started gateway. _next_commands only reads cfg.data_dir,
             # which the report already exposes.
             report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
+        elif not start_gateway and len(activated) > 1:
+            # Extra connectors get their hooks from the gateway's reconcile on
+            # the next start; say so instead of leaving Doctor to report
+            # "no hooks registered" with no explanation.
+            for s in report.setup:
+                if s.name == "Sidecar" and s.status == "skip":
+                    s.detail = (
+                        f"{s.detail}; hooks for {', '.join(activated[1:])} are installed when the gateway starts"
+                    )
+    elif extras and primary["connector"] != "none":
+        from defenseclaw.bootstrap import StepResult
+
+        report.setup.append(
+            StepResult(
+                "Connectors",
+                "fail",
+                "not configured because setup for "
+                f"{primary['connector']} failed: "
+                + ", ".join(connector_paths.normalize(s["connector"]) for s in extras),
+                "defenseclaw init",
+            )
+        )
+        report.status = _rollup_status(report.setup, report.readiness)
 
     mode_warnings = _connector_mode_warnings(connector_settings)
     if mode_warnings:
@@ -1383,7 +1406,8 @@ def _append_mode_warning_steps(report, warnings: list[dict]) -> None:
         report.setup.append(
             StepResult(
                 f"{label} mode",
-                "fail",
+                # Observe is a working, non-blocking posture: warn, never fail.
+                "warn",
                 detail,
                 warning.get("next_command", ""),
             )
