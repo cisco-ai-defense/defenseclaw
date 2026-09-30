@@ -473,6 +473,12 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 				t.Errorf("%s: tool attribute %s=%q want %q", name, key, attributes[key], want)
 			}
 		}
+		// Galileo shows only the OpenInference metadata attribute as the span's
+		// metadata; it carries the decision there.
+		if name == "galileo" && (!strings.Contains(attributes["metadata"], `"defenseclaw.guardrail.rule_id":"C2-METADATA-AWS"`) ||
+			!strings.Contains(attributes["metadata"], `"status":"ERROR"`)) {
+			t.Errorf("galileo: tool span metadata=%q, want the guardrail decision", attributes["metadata"])
+		}
 		var event *tracepb.Span_Event
 		for _, candidate := range tool.Events {
 			if candidate.Name == "defenseclaw.guardrail.block" {

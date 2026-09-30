@@ -311,6 +311,12 @@ carries the decision on its tool span:
   `defenseclaw.guardrail.severity` attributes, next to `user.id` and
   `defenseclaw.user.name`, let you filter spans by one value.
 
+Galileo does not read the OTLP span status or these attributes into its span
+record, so a blocked call's status code there stays `0`. The Galileo preset
+also sends the decision as the OpenInference `metadata` attribute, which
+Galileo shows as the span's metadata: the three guardrail fields, the user,
+and `status: ERROR` for a block. Filter Galileo spans on those metadata keys.
+
 Decisions that do not belong to a tool call, such as a blocked prompt, produce
 an `apply_guardrail` span with the same status, event, and attributes. Galileo
 has no span type for it, so it reaches local observability and other OTLP

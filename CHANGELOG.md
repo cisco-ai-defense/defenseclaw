@@ -122,6 +122,12 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Galileo shows guardrail decisions.** Galileo ignores the OTLP span
+  status and custom attributes, so a blocked tool call appeared there with
+  status code `0` and no rule. The Galileo preset now also sends the decision
+  (action, rule, severity, user and `status: ERROR` for a block) as the
+  OpenInference `metadata` attribute, which Galileo shows as the span's
+  metadata.
 - **Blocked spans keep the rule title.** The status message and block event
   of a blocked span showed a shipped rule's title as a redacted token
   (`matched: <RULE-ID>:<redacted ...>`). A reason made only of shipped rule
