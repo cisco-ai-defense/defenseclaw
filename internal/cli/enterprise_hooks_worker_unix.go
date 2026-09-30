@@ -286,6 +286,12 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			} else if reason != "" {
 				reasons[name] = reason
 			}
+			if name == "kiro" {
+				// The Kiro IDE is read, never run, so static discovery reads it too.
+				if ide, _ := enterpriseHookWorkerDiscoverKiroIDE(request.Home); ide != "" {
+					versions[enterprisehooks.KiroIDEDiscoveryKey] = ide
+				}
+			}
 		}
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
@@ -320,11 +326,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	}
 }
 
-// enterpriseHookWorkerDiscoverVersion and
-// enterpriseHookWorkerDiscoverStaticVersion are replaceable in tests.
+// enterpriseHookWorkerDiscoverVersion,
+// enterpriseHookWorkerDiscoverStaticVersion and
+// enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
 	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
 	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEVersion
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {

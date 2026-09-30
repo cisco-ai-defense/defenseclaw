@@ -4291,6 +4291,53 @@ _HOOK_HEALTH_LABELS = {
 }
 
 
+# Kiro IDE 1.0.182 is the first build that reads the global ~/.kiro/hooks
+# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"). Keep in
+# parity with KiroIDEGlobalHooksFloor in internal/enterprisehooks.
+_KIRO_IDE_GLOBAL_HOOKS_FLOOR = (1, 0, 182)
+_KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
+
+
+def _kiro_ide_product_candidates() -> list[str]:
+    """Where the Kiro IDE packages keep ``resources/app/product.json``.
+
+    Kiro 1.2.4 ships it in every package: ``Kiro.app/Contents/Resources/app``
+    on macOS, ``/usr/share/kiro`` in the Linux deb, a ``Kiro/`` folder in the
+    Linux tar.gz. The Windows folders are the Code OSS installer defaults and
+    are not live-verified.
+    """
+    home = os.path.expanduser("~")
+    app = os.path.join("resources", "app", "product.json")
+    if sys.platform == "darwin":
+        bundle = os.path.join("Kiro.app", "Contents", "Resources", "app", "product.json")
+        return [os.path.join(home, "Applications", bundle), os.path.join("/Applications", bundle)]
+    if os.name == "nt":
+        roots = [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Kiro"),
+            os.path.join(os.environ.get("ProgramFiles", ""), "Kiro"),
+        ]
+        return [os.path.join(root, app) for root in roots if os.path.isabs(root)]
+    return [os.path.join(home, "Kiro", app), os.path.join("/usr/share/kiro", app), os.path.join("/opt/Kiro", app)]
+
+
+def _installed_kiro_ide_version() -> tuple[str, tuple[int, int, int]] | None:
+    """Return the installed Kiro IDE version, read from product.json, never run."""
+    for path in _kiro_ide_product_candidates():
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
+            product = json.loads(data) if len(data) <= _KIRO_IDE_PRODUCT_MAX_BYTES else None
+        except (OSError, ValueError):
+            continue
+        if not isinstance(product, dict) or product.get("nameShort") != "Kiro" or product.get("applicationName") != "kiro":
+            continue
+        version = str(product.get("version") or "").strip()
+        match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", version)
+        if match:
+            return version, (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+    return None
+
+
 def _check_kiro_global_scope(r: _DoctorResult) -> None:
     """Report the Kiro hook scope of an install without claw.workspace_dir.
 
@@ -4299,20 +4346,37 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
     merged"). Kiro IDE 1.0.182 and later and ``kiro-cli --v3`` read the global
     ``~/.kiro/hooks/defenseclaw.json`` that setup writes, and bare
     ``kiro-cli`` runs the defenseclaw agent. Kiro IDE builds before 1.0.182
-    read only the project's ``.kiro/hooks``; doctor cannot tell which build
-    is installed, so the pass names that limit. Without the global
-    registration nothing runs DefenseClaw's hooks.
+    read only the project's ``.kiro/hooks``: doctor reads the installed IDE's
+    version and warns for such a build; when it finds no IDE the pass names
+    that limit. Without the global registration nothing runs DefenseClaw's
+    hooks.
     """
     global_hooks = os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")
     if _file_references_marker(global_hooks, _HOOK_HEALTH_FALLBACK["kiro"][1]):
-        _emit(
-            "pass",
-            "Connector scope",
-            f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
-            "load it. Kiro IDE builds before 1.0.182 read only the project's "
-            ".kiro/hooks: set claw.workspace_dir for them",
-            r=r,
-        )
+        ide = _installed_kiro_ide_version()
+        if ide is not None and ide[1] < _KIRO_IDE_GLOBAL_HOOKS_FLOOR:
+            _emit(
+                "warn",
+                "Connector scope",
+                f"Kiro IDE {ide[0]} reads only the project's .kiro/hooks, so its agent sessions run "
+                f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
+                r=r,
+                reason_code="kiro_ide_below_global_hooks_floor",
+                remediation=(
+                    "Update Kiro IDE to 1.0.182 or later, or set claw.workspace_dir to the "
+                    "project root and run `defenseclaw setup kiro`"
+                ),
+            )
+            return
+        if ide is not None:
+            detail = f"global user config ({global_hooks}); Kiro IDE {ide[0]} and kiro-cli --v3 load it"
+        else:
+            detail = (
+                f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
+                "load it. Kiro IDE builds before 1.0.182 read only the project's "
+                ".kiro/hooks: set claw.workspace_dir for them"
+            )
+        _emit("pass", "Connector scope", detail, r=r)
         return
     _emit(
         "fail",

@@ -458,6 +458,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			if err != nil {
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
+			report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)
 		}
 		// Only an available home's inode identifies it. A pending home's
 		// inode belongs to whatever is visible while it is unavailable (a
@@ -970,11 +971,11 @@ func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, acc
 		logfSafely(opts.Logger, account.Name, fmt.Sprintf("agents in the untrusted home could not be listed: %v", err))
 		return nil
 	}
+	out := applyKiroIDESurface(account.Name, account.UID, versions, reasons)
 	remedy := ""
 	if check.LooseMode {
 		remedy = "; remove group and other write from the home to enroll it"
 	}
-	var out []UnprotectedAgent
 	for _, conn := range perUser {
 		version := versions[conn]
 		if version == "" && !UnixAgentInstalledWithoutVersion(reasons[conn]) {

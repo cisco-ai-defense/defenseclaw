@@ -92,12 +92,22 @@ Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so for them
 the enforcing file is the workspace copy. For those builds, set
 `claw.workspace_dir` to the project root before running setup. `defenseclaw
 doctor`'s `Connector scope [kiro]` check passes when the global
-`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks, and its detail
-says that Kiro IDE builds before 1.0.182 also need `claw.workspace_dir`,
-because doctor cannot tell which Kiro build you run. It fails
+`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks. Doctor reads the
+installed Kiro IDE's version from its `resources/app/product.json` (it never
+starts the IDE) and warns (`kiro_ide_below_global_hooks_floor`) when that IDE
+is older than 1.0.182; when it finds no IDE, the pass detail says that older
+builds also need `claw.workspace_dir`. It fails
 (`kiro_hooks_not_workspace_scoped`) only when neither the global
 registration nor a workspace copy is present; run `defenseclaw setup kiro`
 to fix that.
+
+Doctor and the enterprise guardian look for the IDE's `product.json` in
+`Kiro.app/Contents/Resources/app` under `~/Applications` or `/Applications`
+on macOS, and on Linux under `/usr/share/kiro` (the deb package), `~/Kiro`
+or `/opt/Kiro` (the tar.gz package's `Kiro/` folder) followed by
+`resources/app`. Doctor on Windows reads `%LOCALAPPDATA%\Programs\Kiro`
+and `%ProgramFiles%\Kiro`, the usual installer folders; those paths are not
+verified against a Kiro install yet.
 </Callout>
 
 ## Native Windows
@@ -169,6 +179,19 @@ per-user `defenseclaw guardrail disable --connector kiro` and
 On macOS the guardian also finds `kiro-cli` inside `Kiro CLI.app`, in
 `~/Applications` or `/Applications`, before the app's shell setup links it
 into a bin directory.
+
+The guardian also discovers the Kiro IDE, reading its version from the
+`product.json` from the locations listed in the hook scope callout above
+as the user, without starting it. A user with the IDE and no kiro-cli
+version is enrolled at the IDE's version, shown with a `+kiro-ide` suffix
+(for example `1.2.4+kiro-ide`); the IDE's floor is 1.0.182, the first build
+that reads the global hook file. An IDE older than that reads only workspace
+hooks: it is reported as `kiro_ide_below_global_hooks_floor` in `status`,
+`enterprise policy show` and `verify`, and the user's kiro-cli row, if any,
+stays enrolled. The global file has to hold every DefenseClaw entry as
+the guardian renders it: an entry turned off with `"enabled": false` (Kiro
+skips it), removed or pointed at another command fails verification, and the
+guardian rewrites the file.
 
 It never writes a workspace copy, even when `claw.workspace_dir` is set. That
 directory is machine-wide, so every enrolled user would share the copy, and
