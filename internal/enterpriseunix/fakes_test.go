@@ -14,6 +14,9 @@ package enterpriseunix
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
@@ -241,6 +245,25 @@ type testHost struct {
 	runner   *fakeRunner
 	healthy  bool
 	owners   map[string][2]int
+}
+
+// publishLedger publishes ledger as the guardian's authorization ledger
+// with a credential attestation of the same reconcile that reports targets,
+// as a guardian reconcile does.
+func (h *testHost) publishLedger(ledger []byte, targets ...enterprisehooks.CredentialAttestationTarget) {
+	h.t.Helper()
+	dir := h.env.P(h.env.Layout.GuardianAuthDir)
+	if err := os.WriteFile(filepath.Join(dir, managed.HookGuardianAuthorizationFile), ledger, 0o640); err != nil {
+		h.t.Fatal(err)
+	}
+	sum := sha256.Sum256(ledger)
+	data, _ := json.Marshal(enterprisehooks.CredentialAttestation{
+		Version: enterprisehooks.CredentialAttestationVersion, ID: strings.Repeat("e", 32), UpdatedAt: "2026-09-29T00:00:00Z",
+		ManifestSHA256: strings.Repeat("d", 64), AuthorizationSHA256: hex.EncodeToString(sum[:]), Targets: append([]enterprisehooks.CredentialAttestationTarget{}, targets...),
+	})
+	if err := os.WriteFile(filepath.Join(dir, managed.HookGuardianCredentialAttestationFile), data, 0o600); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
 func newTestHost(t *testing.T, goos string) *testHost {

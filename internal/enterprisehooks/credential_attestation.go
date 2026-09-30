@@ -5,6 +5,7 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,8 +32,21 @@ type CredentialAttestation struct {
 	// KeyID is the fingerprint (connector.UserScopedTokenKeyFingerprint) of
 	// the key the run derived per-user credentials from; empty when there
 	// is none yet.
-	KeyID   string                        `json:"key_id,omitempty"`
-	Targets []CredentialAttestationTarget `json:"targets"`
+	KeyID string `json:"key_id,omitempty"`
+	// AuthorizationSHA256 is the SHA-256 of the authorization ledger the
+	// run left in place (it writes the ledger first, under the same
+	// reconcile lock). A reader that needs both proves they are from one
+	// reconcile with BoundTo; a record without it (written before the field
+	// existed) is bound to no ledger.
+	AuthorizationSHA256 string                        `json:"authorization_sha256,omitempty"`
+	Targets             []CredentialAttestationTarget `json:"targets"`
+}
+
+// BoundTo reports whether the record was published with ledger, the exact
+// bytes of the guardian's authorization ledger, in place.
+func (a CredentialAttestation) BoundTo(ledger []byte) bool {
+	sum := sha256.Sum256(ledger)
+	return a.AuthorizationSHA256 != "" && a.AuthorizationSHA256 == hex.EncodeToString(sum[:])
 }
 
 // CredentialAttestationTarget is one enabled manifest target.
@@ -77,7 +91,8 @@ func ParseCredentialAttestation(data []byte) (CredentialAttestation, error) {
 	}
 	if attestation.Version != CredentialAttestationVersion ||
 		!lowerHex(attestation.ID, 16) || !lowerHex(attestation.ManifestSHA256, 32) ||
-		(attestation.KeyID != "" && !lowerHex(attestation.KeyID, 32)) || attestation.Targets == nil {
+		(attestation.KeyID != "" && !lowerHex(attestation.KeyID, 32)) ||
+		(attestation.AuthorizationSHA256 != "" && !lowerHex(attestation.AuthorizationSHA256, 32)) || attestation.Targets == nil {
 		return CredentialAttestation{}, errors.New("the guardian credential attestation has an invalid schema")
 	}
 	seen := make(map[string]bool, len(attestation.Targets))

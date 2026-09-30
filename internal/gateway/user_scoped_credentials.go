@@ -50,8 +50,12 @@ import (
 // user whose hooks the guardian has already moved to the new key and a user
 // it has not reached yet both authenticate; committing the rotation renames
 // the staged key over the committed one and the old key's credentials stop
-// authenticating on the next refresh. A staged key that fails its trust
-// checks is ignored. Windows does not stage keys.
+// authenticating on the next refresh. A rotation that rolls back first
+// moves the staged key aside as the retiring key, which still authenticates
+// but which the guardian no longer renders from, so users it had already
+// moved are not refused while the guardian moves them back. A staged or
+// retiring key that fails its trust checks, or that is older than
+// connector.RotationKeyMaxAge, is ignored. Windows does not stage keys.
 
 // userScopedCredentialRefreshInterval bounds how often the key and ledger
 // are revalidated on the request path.
@@ -76,8 +80,11 @@ type userScopedCredentialStore struct {
 	// loadPendingKey reads the key a rotation staged; nil where keys are
 	// never staged.
 	loadPendingKey func(dataDir string) (string, error)
-	newLedger      func(path string) func() (managedHookLedger, uint64, error)
-	now            func() time.Time
+	// loadRetiringKey reads the key a rolling-back rotation retires; nil
+	// where keys are never staged.
+	loadRetiringKey func(dataDir string) (string, error)
+	newLedger       func(path string) func() (managedHookLedger, uint64, error)
+	now             func() time.Time
 
 	mu        sync.Mutex
 	checkedAt time.Time
@@ -101,6 +108,7 @@ func newUserScopedCredentialStore(dataDir func() string) *userScopedCredentialSt
 	}
 	if runtime.GOOS != "windows" {
 		store.loadPendingKey = connector.LoadPendingUserScopedTokenKey
+		store.loadRetiringKey = connector.LoadRetiringUserScopedTokenKey
 	}
 	return store
 }
@@ -185,9 +193,14 @@ func (s *userScopedCredentialStore) refreshLocked() {
 		return
 	}
 	keys := []string{key}
-	if s.loadPendingKey != nil {
-		if pending, err := s.loadPendingKey(dir); err == nil && pending != "" && pending != key {
-			keys = append(keys, pending)
+	// The staged key is read before the retiring one: a rollback renames the
+	// first to the second, so this order sees it under one name or the other.
+	for _, load := range []func(string) (string, error){s.loadPendingKey, s.loadRetiringKey} {
+		if load == nil {
+			continue
+		}
+		if extra, err := load(dir); err == nil && extra != "" && !slices.Contains(keys, extra) {
+			keys = append(keys, extra)
 		}
 	}
 	ledger, generation, err := s.ledger()
@@ -203,7 +216,7 @@ func (s *userScopedCredentialStore) refreshLocked() {
 }
 
 // keyFingerprints names the keys whose credentials authenticate right now:
-// the committed key, then a staged one. The standalone lifecycle reads them
+// the committed key, then a staged or retiring one. The standalone lifecycle reads them
 // from /health to prove a rotation's key is live before any user is moved
 // to it, and that the old key is retired after the commit.
 func (s *userScopedCredentialStore) keyFingerprints() []string {

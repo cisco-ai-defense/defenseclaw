@@ -342,20 +342,29 @@ The rotation moves every user to the new key before the key takes effect:
 4. **Commit.** The new key replaces the current one. The gateway refuses the
    old key's credentials from then on.
 
-If any step before the commit fails, the rotation removes the new key and
-the guardian moves every user back. The old key is never changed, so each
-user gets back exactly the credentials they had. The command exits `1` with
-`rotation_failed`, which names the step and the users. `rollback_failed`
-beside it means the rollback is not complete yet; its message says whether
-the next lifecycle run finishes it or the guardian re-renders the remaining
-users at its next reconcile, within a minute. If the command is interrupted, the
-next lifecycle action (for example `reconcile`) completes a rotation that had
-already committed or rolls back one that had not, and reports
-`rotation_recovered`. The result names keys only by a prefix of their
+If any step before the commit fails, the guardian moves every user back to
+the old key while the gateway still accepts both keys, so users who had
+already moved are not refused. Then the rotation removes the new key. The
+old key is never changed, so each user gets back exactly the credentials
+they had. The command exits `1` with `rotation_failed`, which names the step
+and the users. `rollback_failed` beside it means the rollback is not
+complete yet; its message says whether the next lifecycle run finishes it
+or the guardian re-renders the remaining users at its next reconcile,
+within a minute.
+
+Pressing Ctrl+C (or sending SIGTERM) rolls the rotation back the same way
+before the command exits, unless the new key has already replaced the old
+one. A second Ctrl+C stops at once and prints the `reconcile` command to
+run. After a rotation that was stopped or killed, the next lifecycle action
+(for example `reconcile`) completes a rotation that had already committed or
+rolls back one that had not, and reports `rotation_recovered`; `uninstall`
+removes the new key too. Until then the gateway accepts the new key for at
+most 30 minutes after the rotation wrote it, and the guardian stops
+rendering from it at the same time, so a stopped rotation never leaves both
+keys accepted for longer. The result names keys only by a prefix of their
 SHA-256. A rotation that committed lists in `changes` the new and the
 previous key, how many targets and users it moved, and the targets it
-skipped. If you interrupt the command, it prints the `reconcile` command to
-run.
+skipped.
 
 What users see:
 
