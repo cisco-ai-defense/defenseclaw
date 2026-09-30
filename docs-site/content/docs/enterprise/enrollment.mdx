@@ -143,6 +143,10 @@ A version without a verified contract is not followed: the row keeps its
 last verified version, so the guardian keeps repairing the hooks rendered
 for it, and `status` and `verify` report `hook_contract_unverified` until
 the user returns to a verified version or DefenseClaw adds the contract.
+On the standalone profile a version newer than every tested range is
+followed on the newest contract, and  and  report it as an
+untested newer version; the Secure Client profile keeps exact gating (see
+[Version policy](/docs/connectors/compatibility#version-policy)).
 
 A user controls the version their own install reports, so they can move
 their own rows between verified contracts, but never to a version without

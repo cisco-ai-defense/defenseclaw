@@ -333,6 +333,34 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json
 See [Status and verify](/docs/enterprise/operations#status-and-verify) and
 [Health fields](/docs/enterprise/operations#health-fields) for monitoring.
 
+### Gateway sandbox
+
+The gateway unit runs as `defenseclaw` with an empty capability bounding set
+and a strict systemd sandbox: `NoNewPrivileges`, `ProtectSystem=strict`,
+`ProtectHome=true`, private devices and `/tmp`, kernel, clock, hostname and
+control-group protections, `ProtectProc=invisible`, no SUID or namespace
+changes, and the `@system-service` system-call set without the clock, debug,
+module, mount, raw-I/O, reboot and swap calls. Config, binaries and the ledger
+are read-only to it; it can write only its data, log and runtime directories.
+The guardian runs as root bounded to `CAP_CHOWN CAP_DAC_OVERRIDE
+CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, and the enumerator to
+`CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID` with homes read-only.
+Do not edit the units; `verify` reports local overrides. Put host-specific
+settings in a drop-in, and never widen the gateway sandbox: user discovery and
+hook repair are the guardian's job.
+
+To inspect the sandbox:
+
+```bash
+sudo systemctl show defenseclaw-gateway.service \
+  -p User -p NoNewPrivileges -p CapabilityBoundingSet \
+  -p ProtectSystem -p ProtectHome -p ReadOnlyPaths -p ReadWritePaths
+sudo systemd-analyze security defenseclaw-gateway.service
+```
+
+The `systemd-analyze` exposure score is a comparison aid, not an attestation;
+read the properties themselves.
+
 ### User namespaces
 
 On most distributions as shipped, Ubuntu 24.04 and RHEL 9 included,

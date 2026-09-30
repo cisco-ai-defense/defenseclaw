@@ -6,7 +6,7 @@
 
 - **REQ-01:** DefenseClaw shall emit one versioned AVC build kit from an exact
   source commit and pinned CMID pseudo-version.
-- **REQ-02:** The kit shall contain exactly the six inner payload files named
+- **REQ-02:** The kit shall contain exactly the eight inner payload files named
   in `docs/WINDOWS-AVC-PACKAGING-HANDOFF.md`.
 - **REQ-03:** The kit shall include one generated `payload-metadata.json` that
   binds version, source commit, CMID version, and expected filenames.
