@@ -283,6 +283,24 @@ def test_gateway_auth_fails_closed_when_runtime_attestation_is_invalid(
     assert token not in repr(result.to_dict())
 
 
+def test_sidecar_row_does_not_pass_for_a_listener_that_is_not_the_verified_gateway(tmp_path) -> None:
+    """/health is public: another account's listener on the API port showed as a healthy Sidecar API."""
+    cfg = _cfg(str(tmp_path))
+    result = _DoctorResult()
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=_GatewayTrust("missing", "managed gateway PID file is missing"),
+        ),
+        patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, _healthy_document())),
+    ):
+        _check_sidecar(cfg, result)
+
+    sidecar_row = next(row for row in result.checks if row["label"] == "Sidecar API")
+    assert sidecar_row["status"] == "warn"
+    assert "not as this account's verified gateway" in sidecar_row["detail"]
+
+
 def test_gateway_token_is_written_only_to_the_verified_gateway_peer() -> None:
     """An endpoint served by anyone but the verified gateway gets no request bytes."""
     evidence = GatewayEvidence()

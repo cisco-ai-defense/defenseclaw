@@ -71,6 +71,16 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Doctor names more of what it finds on Linux.** A `Sidecar API` row no
+  longer passes when the process answering on the API port is not your
+  verified gateway; it warns and, on Linux, names the account holding the
+  port. An OpenCode plugin folder that other accounts can write (Ubuntu's
+  umask 002 leaves `~/.config/opencode/plugins` at 0775), which stops the
+  gateway, is named with the `chmod go-w` fix instead of `hook file not
+  found`. `doctor --fix` no longer warns "watchdog runtime - repair is
+  unavailable on platform 'linux'" on every run, the skill-scanner version
+  check allows 30 seconds for a first run after install, and the OpenCode
+  row mentions the Windows DACL only on Windows.
 - **`defenseclaw setup opencode` finishes when OpenCode is closed.** Setup
   waited for OpenCode to report that it loaded the managed plugin after the
   gateway restart. A closed OpenCode cannot report and an open one does not

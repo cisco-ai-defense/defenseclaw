@@ -1789,14 +1789,16 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 env=trusted_system_subprocess_env(),
-                timeout=10.0,
+                # The first run after an install compiles the scanner's
+                # modules and took longer than 10 s on a test host.
+                timeout=30.0,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} timed out during --version; run the authenticated upgrade/repair path",
+                f"{probe_path} did not answer --version within 30 s; run the authenticated upgrade/repair path",
                 r=r,
             )
             continue
@@ -1933,6 +1935,38 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
     return None
 
 
+def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str:
+    """Name the other accounts whose sockets listen on ``port`` (Linux only)."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    uids: set[int] = set()
+    for table_name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+                rows = table.readlines()[1:]
+        except (OSError, UnicodeError):
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 8 or fields[3] != "0A" or not fields[7].isdigit():
+                continue
+            try:
+                if int(fields[1].rsplit(":", 1)[1], 16) == port:
+                    uids.add(int(fields[7]))
+            except (IndexError, ValueError):
+                continue
+    uids.discard(os.getuid())
+    names = []
+    for uid in sorted(uids):
+        try:
+            import pwd
+
+            names.append(f"uid {uid} ({pwd.getpwuid(uid).pw_name})")
+        except (ImportError, KeyError):
+            names.append(f"uid {uid}")
+    return ", ".join(names)
+
+
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     bind = _gateway_api_host(cfg)
     url = _gateway_api_url(cfg, "/health")
@@ -1944,7 +1978,22 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         bypass_proxy=True,
     )
     if code == 200:
-        _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        trust = _trusted_gateway_listener(cfg)
+        if trust.trusted:
+            _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        else:
+            # /health is public: any process on the port answers it. This row
+            # passed while another account's listener held the API port.
+            holders = _linux_foreign_listener_accounts(cfg.gateway.api_port)
+            held = f"; the port is held by {holders}" if holders else ""
+            _emit(
+                "warn",
+                "Sidecar API",
+                f"{bind}:{cfg.gateway.api_port} answers, but not as this account's verified gateway "
+                f"({trust.detail}){held}. Stop that process or set gateway.api_port to a free port, "
+                "then run `defenseclaw-gateway restart`",
+                r=r,
+            )
 
         try:
             health = json.loads(body)
@@ -4148,6 +4197,29 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
 
 
+def _opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
+    """Return a folder of an OpenCode plugin destination that group or other can write.
+
+    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
+    as 0775. Only the folders inside the home directory are checked.
+    """
+    if os.name == "nt":
+        return ""
+    home = os.path.realpath(os.path.expanduser("~"))
+    for plugin_path in plugin_paths:
+        folder = os.path.dirname(os.path.realpath(plugin_path))
+        while folder.startswith(home + os.sep):
+            try:
+                mode = os.lstat(folder).st_mode
+            except OSError:
+                folder = os.path.dirname(folder)
+                continue
+            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
+                return folder
+            folder = os.path.dirname(folder)
+    return ""
+
+
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     """Report whether the managed OpenCode bridge actually loaded.
 
@@ -5364,6 +5436,19 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
+        if connector == "opencode" and (loose := _opencode_writable_plugin_folder(candidates)):
+            # The gateway refuses to publish the plugin into a folder other
+            # accounts can write, and stops; the other rows only showed the
+            # gateway down.
+            _emit(
+                "fail",
+                label,
+                f"{loose} can be written by other accounts, so the gateway refuses to install the "
+                f"OpenCode plugin there and does not start. Run `chmod go-w {shlex.quote(loose)}`, "
+                "then `defenseclaw-gateway restart`",
+                r=r,
+            )
+            return
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
         return
     for path in present:
@@ -5381,13 +5466,16 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
+                    access = (
+                        "Setup targets user/administrator-only access, but this row "
+                        "does not revalidate the Windows DACL and is not tamper-proof"
+                        if os.name == "nt"
+                        else "this row does not recheck the plugin's file permissions and is not tamper-proof"
+                    )
                     _emit(
                         status,
                         label,
-                        f"managed plugin digest current at {path}; "
-                        "Setup targets user/administrator-only access, but this row "
-                        "does not revalidate the Windows DACL and is not tamper-proof; "
-                        f"{runtime_detail}",
+                        f"managed plugin digest current at {path}; {access}; {runtime_detail}",
                         r=r,
                     )
             elif connector == "hermes":
@@ -8825,7 +8913,9 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             ),
             effects=_WATCHDOG_REPAIR_EFFECTS,
             may_restart=True,
-            platforms=("win32",),
+            # Listed on every platform: outside Windows the planner reports
+            # it not applicable (noop). As a Windows-only spec it warned
+            # "repair is unavailable on platform" on every Linux and macOS run.
         ),
     ]
     for (

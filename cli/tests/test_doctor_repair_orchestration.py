@@ -274,6 +274,15 @@ def test_unsupported_platform_never_plans_or_applies(
     assert result.repairs[0]["platform"] == "freebsd14"
 
 
+def test_watchdog_repair_is_a_quiet_noop_outside_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """doctor --fix warned "repair is unavailable on platform 'linux'" on every run."""
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "linux")
+    spec = next(s for s in cmd_doctor._doctor_repair_specs() if s.repair_id == "doctor.gateway.watchdog.reconcile")
+
+    assert "linux" in spec.platforms
+    assert cmd_doctor._plan_watchdog_runtime(_cfg()).state == "noop"
+
+
 def test_planner_exception_becomes_typed_failure_and_later_repairs_continue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
