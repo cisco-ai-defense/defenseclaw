@@ -524,9 +524,8 @@ func (b *box) blockedHostList() []string {
 }
 
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's counts and the snapshot, which accepted (the record's
-// Accepted) may have accepted the changes on top of. The egress counts are
-// destinations:
+// the proxy's counts and the snapshot, with its acceptance (accepted, the
+// record's Accepted) when it applies. The egress counts are destinations:
 // Destinations those the sandbox reached, Blocked those refused at least
 // once (by the DefenseClaw proxy or by OpenShell, whose refused
 // destinations openshellBlocked lists), the way the feed and a session's

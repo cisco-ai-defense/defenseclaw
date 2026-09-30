@@ -306,9 +306,10 @@ func (s recordStore) has(name string) bool {
 
 // OrphanedSandboxData lists the sandboxes that have data under
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
-// files, a kept run log) or a pre-session snapshot under <data_dir>/snapshots/<name> (with
-// its refs in the project) but no daemon record: an interrupted create or
-// delete, or an older build, left it. RemoveOrphanedSandboxData removes it.
+// files, a kept run log) or a pre-session snapshot under
+// <data_dir>/snapshots/<name> (with its refs in the project) but no daemon
+// record: an interrupted create or delete, or an older build, left it.
+// RemoveOrphanedSandboxData removes it.
 func OrphanedSandboxData(dataDir string) []string {
 	records := newRecordStore(dataDir)
 	seen := map[string]bool{}
@@ -342,10 +343,9 @@ const orphanSnapshotTimeout = 2 * time.Minute
 // RemoveOrphanedSandboxData releases and removes the data an orphaned
 // sandbox left (see OrphanedSandboxData): its mount pins and mask files,
 // its pre-session snapshot and the refs it holds in the project, its
-// copy-mode state, its run files and a kept run log, then the directory.
-// A sandbox the
-// daemon still records is refused, and a directory that holds anything
-// else is left in place.
+// copy-mode state, its run files and a kept run log, then the directory. A
+// sandbox the daemon still records is refused, and a directory that holds
+// anything else is left in place.
 func RemoveOrphanedSandboxData(dataDir, name string) error {
 	if !openshell.ValidSandboxName(name) || name == recordDirName {
 		return fmt.Errorf("invalid sandbox name %q", name)
@@ -414,10 +414,10 @@ func RecordedSandboxes(dataDir string) []RecordedSandbox {
 // the project's .git, and the mask files), deletes the pre-session snapshot
 // and its refs or the copy-mode state, the run files, a kept run log and the
 // ingress binding, then the record and the sandbox directory. The gateway
-// side (the
-// sandbox, its providers) is the caller's, and so is making sure no daemon
-// runs on dataDir. Every step is attempted and the errors are joined; the
-// record stays while one failed, so a retry finds the sandbox again.
+// side (the sandbox, its providers) is the caller's, and so is making sure
+// no daemon runs on dataDir. Every step is attempted and the errors are
+// joined; the record stays while one failed, so a retry finds the sandbox
+// again.
 func RemoveSandboxState(ctx context.Context, dataDir, name string) error {
 	if !openshell.ValidSandboxName(name) || name == recordDirName {
 		return fmt.Errorf("invalid sandbox name %q", name)
