@@ -21,7 +21,7 @@ This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/benchmarks).
 
-<Callout type="info" title="Repository snapshot">
+<Callout type="info" title="Current counts">
 The balanced/default enabled rule catalog contains 239 local rules across seven
 families. The repository also contains 26 fixed bounded chains, ten
 MCP-description YARA signatures, two post-event correlator patterns, five
@@ -186,8 +186,7 @@ Pattern-writing guidance and counterexamples are in the
 
 ## Exact atomic semantic rules
 
-This benchmarked change added or materially completed 34 exact semantic rule
-IDs. Twenty-eight combine CEL and regex candidate selection, four use CEL with
+The catalog has 34 exact semantic rule IDs. Twenty-eight combine CEL and regex candidate selection, four use CEL with
 lexical fallback disabled, and two use a code-owned exact proof selected by a
 narrow regex. Neither selector alone can authorize a block.
 
@@ -369,7 +368,7 @@ Policy Creator export, validate the pack, review the declared trust boundary,
 then switch to it with `defenseclaw guardrail use-pack`. Either way, assigning
 a production-protection pack asserts that the selected connector context is
 actually protected. See [Opt-in protection packs](/docs/reference/cli#opt-in-protection-packs)
-and [Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs).
+and [Authoring custom rule packs](/docs/policies/rule-packs#authoring-custom-rule-packs).
 
 ## Other deterministic detection lanes
 
@@ -380,9 +379,45 @@ Two bundled patterns operate on persisted findings:
 - `LETHAL-TRIFECTA`: ordered untrusted ingress, sensitive access, then external egress;
 - `TRIFECTA-WITH-FINGERPRINT-MATCH`: the same content fingerprint appears in sensitive access and later external egress.
 
-Both emit a synthetic CRITICAL `CORR-*` finding. They are post-event detection,
-not retroactive blocking and not a substitute for exact bounded tool-call
-chains.
+Both use a 30-event window and emit a synthetic CRITICAL `CORR-*` finding.
+Broad severity-only and capability-only sequences are not bundled. You can
+still define custom ordered `all_of` or `sequence` patterns when your
+environment has stronger signals.
+
+How it runs:
+
+- Every finding carries a **data axis**: `ingress_untrusted`,
+  `sensitive_access` or `egress_external`. Tool-call findings also carry a
+  **tool capability class**: `read_fs`, `write_fs`, `exec_shell`,
+  `network_fetch`, `send_message` or `none`. Patterns match on these, not on
+  rule IDs.
+- On each new finding, the correlator checks the last N findings in the same
+  session.
+- A match writes a synthetic row into `scan_findings` and sends it to the
+  configured sinks, such as Splunk, webhooks and the TUI audit panel.
+
+```yaml
+scanner: "correlator"
+rule_id: "CORR-LETHAL-TRIFECTA"
+severity: CRITICAL
+tags: ["correlation", "LETHAL-TRIFECTA"]
+description: |
+  contributing findings:
+    - INJ-IGNORE-ALL   at 2026-05-12T14:03:11Z
+    - SENSITIVE-PATH-SSH-KEY at 2026-05-12T14:05:42Z
+    - SRC-FETCH        at 2026-05-12T14:06:18Z
+```
+
+The correlator is post-event detection. It does not stop the contributing
+action, block later requests in the session, or replace exact bounded
+tool-call chains. Each request is still evaluated on its own, which avoids
+spurious blocks on parallel or retried traffic. To act on a correlation:
+
+- Watch `scan_findings` for `rule_id LIKE 'CORR-%'` and run your own script.
+- Route CRITICAL findings to your Splunk or webhook sink; `CORR-*` findings
+  are CRITICAL.
+- Feed the sink event into a response workflow that disables a connector,
+  revokes a credential, or opens an incident.
 
 ### Optional LLM judge
 
@@ -411,14 +446,4 @@ instead, it maps accepted findings and deployment context to policy outcomes.
 | High-assurance packs | `policies/guardrail-use-cases/` |
 | Reproducible public scores | `benchmarks/` |
 
-Run the repository checks after changing a detector:
-
-```bash
-make check-guardrail-catalog
-go test ./internal/actionfacts ./internal/guardrail ./internal/gateway
-go test ./benchmarks/...
-```
-
-The catalog check prevents generated Go rules from drifting from YAML. Focused
-tests exercise parser hard negatives, same-rule proof ownership, bounded chain
-identity, profile action posture, and connector enforcement eligibility.
+Contributors: see [Guardrail rule packs](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/GUARDRAIL_RULE_PACKS.md) for the repository checks to run after changing a detector.

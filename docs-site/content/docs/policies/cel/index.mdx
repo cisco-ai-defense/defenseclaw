@@ -124,16 +124,15 @@ rule to command, path, network, and data-flow cases.
 
 ## Validate and activate
 
-Compile the candidate with the same Go loader used by the gateway, then restart
-with the exact directory. Rule-pack files are not live-watched.
+Validate the candidate with the same loader the gateway uses, then switch to
+it with `use-pack`. `use-pack` validates again, writes the directory, and
+restarts a running gateway. Rule-pack files are not live-watched.
 
 ```bash
 defenseclaw guardrail validate-pack \
   ~/.defenseclaw/policies/guardrail/my-org
 
-defenseclaw setup guardrail \
-  --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
-  --restart
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
 
 defenseclaw doctor
 ```

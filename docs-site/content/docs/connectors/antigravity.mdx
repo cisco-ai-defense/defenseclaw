@@ -17,15 +17,15 @@ Google currently publishes Antigravity 2.0 v2.4.3. Its updater manifest and
 [official CLI releases](https://github.com/google-antigravity/antigravity-cli/releases)
 publish CLI v1.1.10. The
 [official install page](https://antigravity.google/docs/cli/install) documents
-native Windows, macOS, and Linux clients. This is vendor availability metadata,
-not DefenseClaw validation or certification.
+native Windows, macOS, and Linux clients. DefenseClaw has not yet tested
+against these official clients.
 
 ## Platform support
 
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | DefenseClaw installs the portable `antigravity-hook.sh` runtime and writes the five documented handlers to `~/.gemini/config/hooks.json`. |
-| Native Windows x64 | **Supported** | DefenseClaw supports the direct native x64 client and uses a bounded Windows PowerShell launcher for the packaged hook executable. Windows 10 64-bit is the upstream minimum. Upstream ARM64 availability is not a DefenseClaw ARM64 support claim; authentication, HITL, and official-client live evidence remain unverified and `live=false`. |
+| Native Windows x64 | **Supported** | DefenseClaw supports the direct native x64 client and uses a bounded Windows PowerShell launcher for the packaged hook executable. Windows 10 64-bit is the upstream minimum. Upstream ARM64 availability is not a DefenseClaw ARM64 support claim. Not yet tested against the official client. |
 
 <Video
   src="antigravity"
@@ -76,17 +76,13 @@ Credential Manager for secure token profiles, with browser authentication as
 the fallback. The vendor installer verifies the manifest-provided SHA-512.
 DefenseClaw discovery accepts only the token-bound Known Folder form of this
 canonical path, applies its trusted ACL boundary, and checks a stable no-follow
-SHA-512 across the version probe. It does not claim a vendor signer pin or
-certification.
+SHA-512 across the version probe. It does not pin a vendor signer.
 
-No protected-client, authentication, HITL, client-provenance, or official-client
-live evidence is claimed. Provider login through Windows Credential Manager or
-the vendor browser flow remains required; there is no authentication bypass.
-
-The native Setup lifecycle and manual validation harness implement this
-connector's custody and acceptance infrastructure. Ordinary
+Authentication and HITL are not yet tested against the official client.
+Provider login through Windows Credential Manager or the vendor browser flow
+remains required; there is no authentication bypass. Ordinary
 `defenseclaw setup antigravity`, first-run, batch, and CLI/TUI selection are
-supported independently of the optional protected live harness.
+all supported.
 
 DefenseClaw uses a native Windows process chain:
 
@@ -111,7 +107,72 @@ gateway credentials into the protected DefenseClaw runtime; and records the reso
 
 </Tabs>
 
-## Modes and enforcement
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
+
+## Files DefenseClaw modifies
+
+Antigravity setup, repair, and removal write only
+`~/.gemini/config/hooks.json` (on Windows,
+`%USERPROFILE%\.gemini\config\hooks.json`). MCP commands you run yourself,
+such as `defenseclaw mcp set`, edit `~/.gemini/config/mcp_config.json`.
+DefenseClaw never edits `~/.gemini/settings.json`.
+
+Google's [changelog](https://antigravity.google/changelog) records relevant
+Windows and hook transitions: v1.0.8 corrected the shared
+`~/.gemini/config/hooks.json` path; v1.0.10 selected PowerShell as the Windows
+default shell; v1.0.15 fixed Windows output behavior; v1.1.1 fixed workspace
+hook loading; v1.1.7 fixed disabled plugins still running hooks; and v1.1.8 is
+the compatibility floor for the five-event contract. The current v1.1.10
+updater/release metadata does not document a replacement hook schema, so
+DefenseClaw does not infer one from the version delta.
+
+<Files>
+  <Folder name="~/.gemini/config" defaultOpen>
+    <File name="hooks.json" />
+    <File name="mcp_config.json" />
+    <Folder name="agents" />
+    <Folder name="skills">
+      <Folder name="<skill>">
+        <File name="SKILL.md" />
+      </Folder>
+    </Folder>
+    <Folder name="plugins">
+      <Folder name="<plugin>">
+        <Folder name="rules" />
+      </Folder>
+    </Folder>
+  </Folder>
+  <Folder name="~/.gemini">
+    <File name="GEMINI.md" />
+  </Folder>
+  <Folder name="<workspace>/.agents">
+    <File name="hooks.json" />
+    <File name="mcp_config.json" />
+    <Folder name="agents" />
+    <Folder name="skills" />
+    <Folder name="plugins" />
+    <Folder name="rules" />
+  </Folder>
+  <Folder name="<workspace>/.agent">
+    <Folder name="rules" />
+  </Folder>
+</Files>
+
+### Inventory surfaces
+
+DefenseClaw writes hooks only to the global file to avoid duplicated global and
+workspace evaluation. MCP and AgentSkills retain their documented global and
+workspace behavior; rules plus standalone and plugin-contained agents remain
+discovery-only as listed in the connector matrix. Rule inventory reads bounded,
+stable bytes without following links or reparse points from global `GEMINI.md`,
+current `.agents/rules`, legacy `.agent/rules`, and plugin `rules/*.md` sources.
+
+## Hook capabilities
+
+<HookEventsList connector="antigravity" />
+
+### Modes and enforcement
 
 `observe` records findings and always permits tool execution. `action` may deny
 or ask only at `PreToolUse`.
@@ -140,7 +201,7 @@ response in normal fail-open operation. A strict local fallback can emit
 `decision: "deny"` for `PreToolUse`; other events still use their documented
 non-blocking output shapes.
 
-## Official lifecycle schema
+### Official lifecycle schema
 
 All command handlers are synchronous and registered with a 30-second timeout.
 The event name is not present in Antigravity's documented stdin. DefenseClaw
@@ -194,7 +255,7 @@ The on-disk registration intentionally mixes two schemas:
 Claude Code fields such as `systemMessage`, `additionalContext`, and
 `permissionDecision` are not part of this connector's output.
 
-## Repair, Doctor, and removal
+### Doctor and repair
 
 `defenseclaw doctor` passively validates:
 
@@ -209,77 +270,6 @@ Doctor never executes command text read from `hooks.json`. Public
 custody and rollback path. For an existing recorded packaged installation,
 the cached DefenseClaw Setup `/repair` action without a `CONNECTOR` override
 also reloads the recorded connector and reconciles its native registration.
-
-Teardown restores the pre-Setup file when it is unchanged. If an operator
-edited it, teardown removes only DefenseClaw-owned current and legacy commands,
-preserves foreign hooks, tombstones cached hook launchers, and verifies that no
-managed registration remains:
-
-```powershell
-defenseclaw setup guardrail --disable
-```
-
-## Configuration boundary
-
-Antigravity setup, repair, and removal write only
-`~/.gemini/config/hooks.json` (on Windows,
-`%USERPROFILE%\.gemini\config\hooks.json`). MCP commands you run yourself,
-such as `defenseclaw mcp set`, edit `~/.gemini/config/mcp_config.json`.
-DefenseClaw never edits `~/.gemini/settings.json`.
-
-Google's [changelog](https://antigravity.google/changelog) records relevant
-Windows and hook transitions: v1.0.8 corrected the shared
-`~/.gemini/config/hooks.json` path; v1.0.10 selected PowerShell as the Windows
-default shell; v1.0.15 fixed Windows output behavior; v1.1.1 fixed workspace
-hook loading; v1.1.7 fixed disabled plugins still running hooks; and v1.1.8 is
-the compatibility floor for the five-event contract. The current v1.1.10
-updater/release metadata does not document a replacement hook schema, so
-DefenseClaw does not infer one from the version delta and does not promote the
-connector's authentic validation metadata; `live: false` remains unchanged.
-
-## Local customization surfaces
-
-<Files>
-  <Folder name="~/.gemini/config" defaultOpen>
-    <File name="hooks.json" />
-    <File name="mcp_config.json" />
-    <Folder name="agents" />
-    <Folder name="skills">
-      <Folder name="<skill>">
-        <File name="SKILL.md" />
-      </Folder>
-    </Folder>
-    <Folder name="plugins">
-      <Folder name="<plugin>">
-        <Folder name="rules" />
-      </Folder>
-    </Folder>
-  </Folder>
-  <Folder name="~/.gemini">
-    <File name="GEMINI.md" />
-  </Folder>
-  <Folder name="<workspace>/.agents">
-    <File name="hooks.json" />
-    <File name="mcp_config.json" />
-    <Folder name="agents" />
-    <Folder name="skills" />
-    <Folder name="plugins" />
-    <Folder name="rules" />
-  </Folder>
-  <Folder name="<workspace>/.agent">
-    <Folder name="rules" />
-  </Folder>
-</Files>
-
-DefenseClaw writes hooks only to the global file to avoid duplicated global and
-workspace evaluation. MCP and AgentSkills retain their documented global and
-workspace behavior; rules plus standalone and plugin-contained agents remain
-discovery-only as listed in the connector matrix. Rule inventory reads bounded,
-stable bytes without following links or reparse points from global `GEMINI.md`,
-current `.agents/rules`, legacy `.agent/rules`, and plugin `rules/*.md` sources.
-
-Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization
-policy surfaces are outside this connector contract and remain unverified.
 
 ## OpenShell sandbox
 
@@ -324,7 +314,7 @@ exist only in the image; nothing on your host changes.
   and the placeholder resolves only for the agy binary. When the key is set,
   the launcher selects agy's `gemini` model provider in
   `~/.gemini/antigravity-cli/settings.json`, and the key skips the Google
-  sign-in. Signing in with a Google account inside a sandbox is untested.
+  sign-in. Signing in with a Google account inside a sandbox is not yet tested.
   `defenseclaw sandbox run antigravity` shares `GEMINI_API_KEY` when it is
   set.
 - **First-run screens.** A sandbox starts at agy's prompt. The image
@@ -344,28 +334,42 @@ exist only in the image; nothing on your host changes.
   `--dangerously-skip-permissions`. A run with `--safe` drops it in every
   form agy accepts (one or two dashes, `=true`). A headless run is
   `agy -p <prompt>`; pass `-- -p "TEXT"` to `sandbox run` for a detached run.
-- **Other traffic.** Apart from the model, a mock-model run reached only
+- **Other traffic.** Apart from the model, agy reaches only
   `antigravity-unleash.goog` (feature flags) and `play.googleapis.com` (usage
-  logging). In a two-prompt daemon run, the proxy counted about 600 KB sent,
-  nearly all of it to those two hosts, and Enable Telemetry off does not
-  stop either (measured at an interactive start). That traffic goes through
+  logging), about 600 KB over two prompts. Enable Telemetry off does not stop
+  either. That traffic goes through
   the DefenseClaw egress proxy, which logs it and applies the blocklist.
   Block either host with `openshell.egress.block` if your organization
   requires it.
 - **Command directory.** DefenseClaw judges a `run_command` call in the
   directory its `Cwd` names, which is where agy runs it, rather than in the
   session's workspace.
-- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
-  OpenShell sandbox, on a Gemini-API mock behind a credential binding,
-  showed:
-  - hooks reaching the sandbox ingress, with OpenShell substituting the model
-    key;
-  - a command that a DefenseClaw rule blocks refused by the PreToolUse hook,
-    with the rule's reason passed back to the model;
-  - egress through the proxy, including a blocklisted host that a
-    sandbox-scoped unblock then let through.
 
-  The image also passes the hook-fire probe. In that probe a replaced user
-  `hooks.json` is restored, and the launcher refuses to start when the hooks
-  file is a directory. Signing in with a Google account inside a sandbox, and
-  the `defenseclaw-gemini` profile with a real Gemini key, are untested.
+## Enterprise deployments
+
+Enterprise-managed, Team, ProgramData, cloud-dashboard, MDM, and organization
+policy surfaces are outside this connector contract.
+
+## Disable
+
+```bash
+defenseclaw guardrail disable --connector antigravity --yes
+```
+
+`--connector` turns off only Antigravity on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. To remove
+the connector from the config, use `defenseclaw setup remove antigravity`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
+Teardown restores the pre-Setup file when it is unchanged. If an operator
+edited it, teardown removes only DefenseClaw-owned current and legacy commands,
+preserves foreign hooks, tombstones cached hook launchers, and verifies that no
+managed registration remains.
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/hitl" title="Human-in-the-loop" description="How PreToolUse ask works." />
+  <Card href="/docs/setup/sandbox" title="OpenShell sandbox" description="Run agy in a sandbox." />
+</Cards>

@@ -33,7 +33,7 @@ filesystem and terminal callbacks that a hook contract may not expose.
 
 ## Quick start: Kiro in Zed
 
-Build or install DefenseClaw, start the gateway, and configure the managed
+[Install DefenseClaw](/docs/get-started/install), start the gateway, and configure the managed
 entry:
 
 ```bash
@@ -373,25 +373,9 @@ In `managed_enterprise`, `allowed_clients` and `allowed_agents` must explicitly
 name the enrolled pair; an empty wildcard allow-list is deliberately rejected
 by enrollment even though it remains valid for ordinary local profiles.
 
-## Inventory and certification
+## Supported agents
 
-ACP has a separate registry because client/agent protocol compatibility is not
-the same lifecycle as connector hooks or environment variables. The packaged
-snapshot records each entry point as native or bridge, its primary source, its
-upstream ACP Registry ID when one exists, and its DefenseClaw evidence level:
-
-- `internal/inventory/acp_registry.json` inventories the pinned protocol,
-  clients, native/bridge agents, every DefenseClaw connector's ACP coverage,
-  and the upstream registry version/date used for review.
-- `internal/inventory/acp_certifications.json` defines evidence required before
-  an integration can be called certified.
-- `cli/defenseclaw/inventory/hook_contracts.json` records Kiro native hooks,
-  which are installed as an independent second enforcement path. Their veto
-  surface is resolved per request from the hook config that invoked them, not
-  from the release. See [Kiro](/docs/connectors/kiro); ACP needs none of that
-  and vetoes every surface in the table above on its own.
-- ACP adds no secret environment variable. Agent-owned credentials remain in
-  their existing stores; the guard token is a private file referenced by argv.
+The supported agent list is built into the release.
 
 | DefenseClaw connector | ACP form | Entry point |
 | --- | --- | --- |
@@ -409,12 +393,6 @@ third-party process between DefenseClaw and the agent whose argv, schema and
 release cadence DefenseClaw does not control, which is the wrong place for a
 security boundary to depend on. Every other DefenseClaw connector therefore
 reports no ACP claim and is guarded through its native hook surface instead.
-
-Listing an entry point means it was checked against primary documentation or
-the upstream ACP Registry. It does not mean DefenseClaw has executed that
-client/agent pair. Per-integration evidence states live in
-`acp_certifications.json`, and the CLI never silently upgrades one based on a
-live upstream registry response.
 
 The CLI uses the packaged registry as its only executable inventory. It does
 not download or execute commands from the network registry during setup. Every
@@ -436,13 +414,10 @@ For managed mode, `scoped_token_ready` means the complete bounded enterprise
 credential inventory is private and structurally valid. One malformed,
 unexpected, or over-limit record fails the inventory closed.
 
-The Kiro/Zed test binding has been exercised in both normal user mode and
-`managed_enterprise`. Managed action and observe runs were completed on Linux
-and native Windows, including live credential revocation, rotation, route
-isolation, OS ownership/permission checks, and v8 evidence. macOS uses the same
-protocol implementation and has release/package/trust tests; a real managed
-run still requires a root-owned LaunchDaemon installation rather than a
-user-owned development config.
+The Kiro and Zed pair is supported in normal user mode and in
+`managed_enterprise`, in both observe and action mode, on Linux, macOS, and
+native Windows. A managed macOS install needs the root-owned LaunchDaemon, not
+a user-owned config.
 
 Use `defenseclaw acp catalog` for the local catalog and
 `defenseclaw acp remove --client zed --agent kiro` for surgical removal.
