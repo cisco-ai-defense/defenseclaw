@@ -22,6 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -131,6 +134,31 @@ func TestAcceptRefusesASessionStartedSinceTheReview(t *testing.T) {
 	if sb, err := e.m.Accept(t.Context(), "raced", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt, Session: now}); err != nil ||
 		sb.Snapshot == nil || sb.Snapshot.AcceptedAt.IsZero() {
 		t.Fatalf("accept of the session it names = %+v, %v", sb, err)
+	}
+}
+
+// A start that fails before the sandbox runs uses nothing up: the changes
+// the user kept stay accepted (and survive a restart), so the next start
+// still takes a new undo point.
+func TestAFailedStartKeepsTheAcceptance(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "failstart"})
+	e.stopBox("failstart")
+	snap := e.ws.snapshots["failstart"]
+	if _, err := e.m.Accept(t.Context(), "failstart", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt}); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.FailNext(openshelltest.MethodStartSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "driver busy"})
+	if _, err := e.m.Start(t.Context(), "failstart", sandboxapi.StartRequest{NoSnapshot: true}); err == nil {
+		t.Fatal("start succeeded")
+	}
+	if got := e.get("failstart"); got.Phase == "ready" || got.Snapshot == nil || got.Snapshot.AcceptedAt.IsZero() {
+		t.Fatalf("after a start that never ran the sandbox: phase %s, snapshot %+v; want it stopped and still accepted", got.Phase, got.Snapshot)
+	}
+	e.restartDaemon()
+	e.startBox("failstart", sandboxapi.StartRequest{})
+	if e.ws.snapshots["failstart"] == snap {
+		t.Fatal("the start after a failed one kept the undo point the user accepted the changes on")
 	}
 }
 

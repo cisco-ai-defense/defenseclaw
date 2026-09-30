@@ -459,8 +459,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// An acceptance covers the sessions before this start, not what the new
 	// one changes on top (a --no-snapshot start keeps the accepted
-	// snapshot).
-	if err := m.dropAcceptance(b); err != nil {
+	// snapshot). A start that fails before the sandbox runs gives it back.
+	accepted, err := m.dropAcceptance(b)
+	if err != nil {
+		m.restoreAcceptance(b, accepted)
 		return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 	}
 	// The harness starts with the sandbox: every tool call of the new
@@ -484,6 +486,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		b.rec.Guard = rec.Guard
 		m.mu.Unlock()
 		if err := m.saveRecord(b); err != nil {
+			m.restoreAcceptance(b, accepted)
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
@@ -491,6 +494,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		m.restoreAcceptance(b, accepted)
 		return upstream("start sandbox "+rec.Name, err)
 	}
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)

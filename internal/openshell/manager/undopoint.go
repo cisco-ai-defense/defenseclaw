@@ -21,6 +21,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -135,14 +136,41 @@ func (m *Manager) acceptedNow(rec record) bool {
 
 // dropAcceptance forgets an acceptance once a start used it: what the new
 // session changes on top was not accepted (a --no-snapshot start keeps the
-// accepted snapshot, and the next start must keep it again).
-func (m *Manager) dropAcceptance(b *box) error {
+// accepted snapshot, and the next start must keep it again). It returns the
+// acceptance, which a start that fails before the sandbox runs gives back
+// (restoreAcceptance).
+func (m *Manager) dropAcceptance(b *box) (*acceptedSnapshot, error) {
 	m.mu.Lock()
-	had := b.rec.Accepted != nil
+	had := b.rec.Accepted
 	b.rec.Accepted = nil
 	m.mu.Unlock()
-	if !had {
-		return nil
+	if had == nil {
+		return nil, nil
 	}
-	return m.saveRecord(b)
+	return had, m.saveRecord(b)
+}
+
+// restoreAcceptance gives back the acceptance a failed start dropped, when
+// OpenShell reports the sandbox stopped: no session ran, so nothing on top
+// of the snapshot is unreviewed, and the next start still takes a new undo
+// point. A sandbox that may have run (the start went through, or OpenShell
+// could not say) keeps it dropped. Best effort.
+func (m *Manager) restoreAcceptance(b *box, accepted *acceptedSnapshot) {
+	if accepted == nil {
+		return
+	}
+	m.mu.Lock()
+	stopped := b.phase != audit.SandboxPhaseStarting && b.sb != nil && stoppedPhase(b.sb.Status.Phase)
+	restore := stopped && b.rec.Accepted == nil
+	if restore {
+		b.rec.Accepted = accepted
+	}
+	name := b.rec.Name
+	m.mu.Unlock()
+	if !restore {
+		return
+	}
+	if err := m.saveRecord(b); err != nil {
+		m.logf("sandbox %s: keep the acceptance its failed start did not use: %v", name, err)
+	}
 }

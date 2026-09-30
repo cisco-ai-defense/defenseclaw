@@ -1314,7 +1314,9 @@ once the session stopped the sandbox. The manager refuses an accept after
 another start: that session's changes sit on the same snapshot, and nobody
 reviewed them. Otherwise the record keeps the acceptance
 (`record.Accepted`), and the next start takes a fresh snapshot and drops it,
-as a `--no-snapshot` start does. `sandbox start --new-snapshot` accepts the changes and takes a
+as a `--no-snapshot` start does. A start that fails while OpenShell still
+reports the sandbox stopped gives it back (`restoreAcceptance`): no session
+ran on top of it. `sandbox start --new-snapshot` accepts the changes and takes a
 fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
 earlier CLI recorded in `cli/accepted.json` is honoured once, as
 `--new-snapshot`.

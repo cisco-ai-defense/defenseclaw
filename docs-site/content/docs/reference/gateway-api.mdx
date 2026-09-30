@@ -676,8 +676,9 @@ end of a session, with the `created_at` of the snapshot it reviewed them
 against and the sandbox's `session` then, so an accept after another start,
 whose changes nobody reviewed, is refused). The next start then takes a fresh
 snapshot and drops the acceptance; a start with `no_snapshot` keeps the old
-snapshot but drops the acceptance too. `new_snapshot` on a start accepts the
-changes too.
+snapshot but drops the acceptance too. A start that fails while OpenShell
+still reports the sandbox stopped keeps the acceptance for the next one.
+`new_snapshot` on a start accepts the changes too.
 
 Every stop of a running sandbox (`…/stop`, `…/undo` with `stop`, and a
 tamper stop under `hooks.on_tamper: stop`) looks at the sandbox's latest
