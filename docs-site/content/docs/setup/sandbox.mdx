@@ -28,6 +28,11 @@ the changes back from (see [macOS](#macos)). Sandboxes are not supported on
 Windows or WSL2, on Intel Macs, in `managed_enterprise` deployments, or when
 you run DefenseClaw as root.
 
+This page is the full reference. For a shorter, guided path, start with
+[OpenShell sandboxes](/docs/sandboxes): setup on
+[Linux](/docs/sandboxes/linux) or [macOS](/docs/sandboxes/macos), then
+[your first session](/docs/sandboxes/first-session).
+
 ## How it works
 
 Think of the sandbox as a locked room that holds only your project folder.
@@ -176,7 +181,7 @@ applies one gateway plan with one restart (see step 3 below).
 <Tab value="TUI">
 
 Open the TUI (`defenseclaw tui`), press `0` for Setup, and pick the
-**Sandbox** wizard (slot 13). It first runs `defenseclaw sandbox doctor`
+**Sandboxes (OpenShell)** wizard under **Guardrail & scanning**. It first runs `defenseclaw sandbox doctor`
 to check the machine, then shows every question the command line asks as a
 field: the harnesses (Claude Code and Codex), whether to install OpenShell,
 project-folder mounts and OpenShell telemetry (Linux only, see steps 3 and 4
