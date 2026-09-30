@@ -1,4 +1,5 @@
 {
   "title": "Get Started",
-  "pages": ["what-is-defenseclaw", "install", "windows", "upgrade", "quickstart", "first-guardrail"]
+  "defaultOpen": true,
+  "pages": ["what-is-defenseclaw", "install", "quickstart", "first-guardrail", "windows", "upgrade"]
 }
