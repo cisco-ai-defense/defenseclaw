@@ -303,9 +303,13 @@ def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, st
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ValueError(f"hook_contracts.json connector {raw_name!r} has a malformed known-broken entry")
-            item = {key: str(entry.get(key, "") or "") for key in ("exact", "min_inclusive", "max_exclusive", "reason", "issue")}
-            if not item["reason"] or not item["issue"] or not (item["exact"] or item["min_inclusive"] or item["max_exclusive"]):
-                raise ValueError(f"hook_contracts.json connector {raw_name!r} known-broken entry needs a version, reason and issue")
+            keys = ("exact", "min_inclusive", "max_exclusive", "reason", "issue")
+            item = {key: str(entry.get(key, "") or "") for key in keys}
+            has_version = item["exact"] or item["min_inclusive"] or item["max_exclusive"]
+            if not item["reason"] or not item["issue"] or not has_version:
+                raise ValueError(
+                    f"hook_contracts.json connector {raw_name!r} known-broken entry needs a version, reason and issue"
+                )
             parsed.append(item)
         if parsed:
             out[normalize_connector(str(raw_name))] = tuple(parsed)
