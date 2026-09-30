@@ -1357,6 +1357,15 @@ not run. Nor does it restart a gateway for a setting then (such as the
 MicroVM sandbox user or resources): with no gateway running, the check says
 the setting takes effect once the gateway is installed and started, and for
 a gateway you run another way, to restart it the way you started it.
+`--install-openshell` installs nothing where a supported OpenShell CLI is
+already installed. So on Linux, when OpenShell was installed another way (from the
+release binaries, say) and came without the user unit, the **Gateway** and
+**Gateway service** checks name that CLI instead
+(``The OpenShell 0.1.1 at <path> was installed another way``) and give the
+ways on: start and restart its gateway yourself, or remove that OpenShell and
+then run `defenseclaw sandbox setup --install-openshell`, which installs
+OpenShell with NVIDIA's installer and sets the unit up. On a Mac setup refuses such an OpenShell (see
+[Troubleshooting](#troubleshooting)).
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway

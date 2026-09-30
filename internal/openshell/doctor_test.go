@@ -491,8 +491,13 @@ func TestDoctorChecks(t *testing.T) {
 					t.Fatalf("fix did not start and verify the gateway (verified %d)", f.verified)
 				}
 			}},
-		{name: "service not installed", setup: service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil),
-			want: []checkWant{{"gateway-service", fail, "not installed"}}, fix: &fixWant{command: install}},
+		{name: "service not installed", setup: func(f *doctorFixture) {
+			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
+			f.found["openshell"] = false
+		}, want: []checkWant{{"gateway-service", fail, "not installed"}}, fix: &fixWant{command: install, manual: true, text: "install OpenShell"}},
+		{name: "service not installed, OpenShell there", setup: service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil),
+			want: []checkWant{{"gateway-service", fail, "not installed"}},
+			fix:  &fixWant{command: install, manual: true, text: "The OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
 		{name: "service not enabled", setup: service("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\n", nil),
 			want: []checkWant{{"gateway-service", warn, "does not start at login"}}},
 		// `systemctl --user link` without enable: nothing starts it at login.
@@ -543,9 +548,17 @@ func TestDoctorChecks(t *testing.T) {
 		// installed, which fails).
 		{name: "gateway down without its service", setup: func(f *doctorFixture) {
 			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
+			f.found["openshell"] = false
 			health(errors.New("connection refused"))(f)
 		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
 			fix: &fixWant{command: install, manual: true, text: "install OpenShell, whose openshell-gateway service runs the gateway"}},
+		// With an OpenShell there, the install finds it and installs
+		// nothing (TestDoctorOnLinuxWithoutTheUserUnit).
+		{name: "gateway down without its service, OpenShell there", setup: func(f *doctorFixture) {
+			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
+			health(errors.New("connection refused"))(f)
+		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
+			fix: &fixWant{command: install, manual: true, text: "The OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
 		{name: "macOS gateway down without OpenShell", setup: func(f *doctorFixture) {
 			f.onBrew()
 			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
@@ -738,6 +751,105 @@ func TestDoctorChecks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoctorOnLinuxWithoutTheUserUnit: on Linux with OpenShell 0.1.1 from
+// the release binaries in ~/.local/bin, a registered gateway that was
+// stopped and no openshell-gateway user unit, the doctor's Gateway fix was
+// "install OpenShell, whose openshell-gateway service runs the gateway:
+// defenseclaw sandbox setup --install-openshell". That command found the
+// supported CLI and installed nothing ("✓ OpenShell 0.1.1 is already
+// installed"), then stopped on the same fix. The Gateway and Gateway
+// service checks name that OpenShell and the ways on, and `--fix` runs
+// nothing; an OpenShell the install would upgrade, and a host with the
+// unit, keep their fixes.
+func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
+	const (
+		notFound = "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+		install  = "defenseclaw sandbox setup --install-openshell"
+	)
+	release := func(t *testing.T, version string) (*doctorFixture, string) {
+		f := newDoctorFixture(t)
+		cli := filepath.Join(f.home, ".local", "bin", "openshell")
+		f.doctor.LookPath = func(name string) (string, error) {
+			switch {
+			case name == "openshell":
+				return cli, nil
+			case f.found[name]:
+				return "/usr/bin/" + name, nil
+			}
+			return "", errors.New("not found")
+		}
+		f.runner.On(cli+" --version", "openshell "+version+"\n", nil)
+		f.runner.On("systemctl --user show openshell-gateway", notFound, nil)
+		f.runner.OnFunc("systemctl --user enable", func(_ context.Context, c openshell.Command) ([]byte, error) {
+			t.Errorf("ran systemctl %v without the unit", c.Args)
+			return []byte("Failed to enable unit: Unit file openshell-gateway.service does not exist."), errors.New("exit status 1")
+		})
+		f.runner.OnFunc("systemctl --user restart", func(_ context.Context, c openshell.Command) ([]byte, error) {
+			t.Errorf("ran systemctl %v without the unit", c.Args)
+			return []byte("Failed to restart openshell-gateway.service: Unit openshell-gateway.service not found."), errors.New("exit status 5")
+		})
+		return f, cli
+	}
+	outside := func(cli string) string {
+		return "on Linux DefenseClaw starts and restarts the gateway through the openshell-gateway user service, which NVIDIA's installer sets up. " +
+			"The OpenShell 0.1.1 at " + cli + " was installed another way, without that service, and DefenseClaw's install step finds it and installs nothing: " +
+			"start and restart its gateway yourself, or remove that OpenShell, then install OpenShell with NVIDIA's installer"
+	}
+	wantFix := func(t *testing.T, c *openshell.Check, summary string) {
+		t.Helper()
+		if c.Fix == nil || c.Fix.Summary != summary || c.Fix.Command != install || c.Fix.Automatic || c.Fix.Apply != nil {
+			t.Fatalf("%s fix = %+v\nwant summary %q", c.ID, c.Fix, summary)
+		}
+	}
+
+	t.Run("gateway down", func(t *testing.T) {
+		f, cli := release(t, "0.1.1")
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusPass, "0.1.1 at "+cli)
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(cli))
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"), outside(cli))
+		outcomes, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil })
+		for _, o := range outcomes {
+			if o.ID == openshell.CheckIDGatewayService || o.ID == openshell.CheckIDGatewayVersion || o.Error != "" {
+				t.Fatalf("ApplyFixes = %+v, %v", outcomes, err)
+			}
+		}
+	})
+	// A gateway started by hand answers: sandboxes run on it, and only the
+	// Gateway service check's fix changes.
+	t.Run("gateway run by hand", func(t *testing.T) {
+		f, cli := release(t, "0.1.1")
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(cli))
+	})
+	// NVIDIA's installer runs for a CLI it upgrades, and sets the unit up.
+	t.Run("OpenShell the install upgrades", func(t *testing.T) {
+		f, _ := release(t, "0.0.40")
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		r := f.run()
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), "install OpenShell")
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"),
+			"install OpenShell, whose openshell-gateway service runs the gateway")
+	})
+	// With the unit, a stopped gateway is started through it, as before.
+	t.Run("unit loaded", func(t *testing.T) {
+		f, _ := release(t, "0.1.1")
+		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
+		f.runner.On("systemctl --user enable --now openshell-gateway", "", nil)
+		f.fake.SetHealth(false, "0.1.1")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "unhealthy")
+		if c.Fix == nil || c.Fix.Summary != "start the gateway" || c.Fix.Command != "systemctl --user enable --now openshell-gateway" || c.Fix.Apply == nil {
+			t.Fatalf("gateway fix = %+v", c.Fix)
+		}
+		if c := r.Get(openshell.CheckIDGatewayService); c.Fix == nil || c.Fix.Summary != "start the gateway and enable it at login" {
+			t.Fatalf("gateway service fix = %+v", c.Fix)
+		}
+	})
 }
 
 // TestDoctorChecksLandlockInTheDockerVM: on macOS sandboxes run on the

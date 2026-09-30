@@ -177,6 +177,17 @@ func (r *DoctorReport) OpenShellOutsideFormula() bool {
 const OpenShellOutsideFormulaFix = "on macOS DefenseClaw starts and restarts the gateway through the " + GatewayFormula +
 	" Homebrew formula's service: stop that gateway and remove the OpenShell installed another way, then install the formula"
 
+// openShellOutsideUnit reports a Linux host whose supported OpenShell CLI
+// came without the openshell-gateway user unit DefenseClaw starts and
+// restarts the gateway through: it was installed another way than NVIDIA's
+// installer (from the release binaries, say). installOpenShellCommand
+// alone would not bring the unit: DefenseClaw's install step finds a
+// supported CLI and does not run NVIDIA's installer.
+func (r *DoctorReport) openShellOutsideUnit() bool {
+	cli := r.Get(CheckIDCLI)
+	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "systemd" && !r.Service.Installed
+}
+
 // Get returns the check with id, or nil.
 func (r *DoctorReport) Get(id string) *Check {
 	for i := range r.Checks {
@@ -508,6 +519,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkLinger(ctx)
 	r.checkService(ctx)
 	r.checkCLI(ctx)
+	r.cliWithoutUnit()
 	r.checkSSHSharing(ctx)
 	r.checkRegistration()
 	r.checkGateway(ctx)
@@ -902,11 +914,15 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 // (starting it again would do nothing) and starts one that is stopped. With
 // no gateway service to start (serviceMissing), OpenShell's installer is
 // what puts one there: `brew services start` of a formula that is not
-// installed fails ("Formula `openshell` is not installed").
+// installed fails ("Formula `openshell` is not installed"). Where an
+// OpenShell installed another way is there, DefenseClaw's install step
+// would find it and install nothing, so that OpenShell comes first.
 func (r *doctorRun) gatewayRecoveryFix() *Fix {
 	switch {
 	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
 		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
+	case r.serviceMissing() && r.report.openShellOutsideUnit():
+		return r.outsideUnitFix()
 	case r.serviceMissing():
 		return &Fix{Summary: "install OpenShell, whose " + r.service.Unit + " service runs the gateway", Command: installOpenShellCommand}
 	case r.service != nil && r.service.Active:
@@ -922,6 +938,32 @@ func (r *doctorRun) gatewayRecoveryFix() *Fix {
 // restart the gateway through, whether no gateway runs or one runs another
 // way. It is false when the service's state is unknown.
 func (r *doctorRun) serviceMissing() bool { return r.service != nil && !r.service.Installed }
+
+// outsideUnitFix is the way on for an OpenShell installed without the
+// openshell-gateway user unit (openShellOutsideUnit), which the doctor
+// cannot take: run its gateway yourself, or remove that OpenShell so that
+// installOpenShellCommand runs NVIDIA's installer, which sets the unit up.
+func (r *doctorRun) outsideUnitFix() *Fix {
+	found := strings.TrimSpace("OpenShell " + r.report.CLIVersion)
+	if r.report.CLIPath != "" {
+		found += " at " + r.report.CLIPath
+	}
+	return &Fix{Summary: "on Linux DefenseClaw starts and restarts the gateway through the " + GatewayService + " user service, which NVIDIA's installer sets up. " +
+		"The " + found + " was installed another way, without that service, and DefenseClaw's install step finds it and installs nothing: " +
+		"start and restart its gateway yourself, or remove that OpenShell, then install OpenShell with NVIDIA's installer",
+		Command: installOpenShellCommand}
+}
+
+// cliWithoutUnit gives the Gateway service check on Linux, whose fix is
+// otherwise installOpenShellCommand, the way on for an OpenShell installed
+// without the user unit (outsideUnitFix): the command alone would find
+// that OpenShell and install nothing. It runs after checkCLI, which the
+// judgement needs.
+func (r *doctorRun) cliWithoutUnit() {
+	if c := r.report.Get(CheckIDGatewayService); c != nil && r.report.openShellOutsideUnit() {
+		c.Fix = r.outsideUnitFix()
+	}
+}
 
 // nothingToRestart reports no gateway service and no gateway answering:
 // no gateway runs to restart, and the configuration on disk is what the
