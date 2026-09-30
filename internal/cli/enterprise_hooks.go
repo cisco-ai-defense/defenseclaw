@@ -637,6 +637,9 @@ type enterpriseHookStatusReport struct {
 	// Warnings name rows that do not fail the host: those of a deleted
 	// account (enterpriseHookRemovedAccountFailures).
 	Warnings []string `json:"warnings,omitempty"`
+	// RemovedAccountFailures counts those rows, so the Windows lifecycle's
+	// manifest adoption accepts exactly them, as verify does.
+	RemovedAccountFailures int `json:"removed_account_failures,omitempty"`
 }
 
 // enterpriseHookEnrollment is one account's connectors in the last
@@ -776,6 +779,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	} else {
 		report.State = &state
 		removedAccountFailures = enterpriseHookRemovedAccountFailures(state)
+		report.RemovedAccountFailures = removedAccountFailures
 		if removedAccountFailures > 0 {
 			for _, issue := range enterpriseHookGuardianFailureIssues(state) {
 				report.Warnings = append(report.Warnings, issue+enterpriseHookRemovedAccountNote)

@@ -16541,9 +16541,17 @@ function Get-DefenseClawStandaloneManifestAdoption {
             "$InstalledManifestSHA256; $retry"
         ) -1
     }
+    # The rows of a deleted account whose profile folder was removed fail
+    # every reconcile until the enumerator drops them at its next pass. The
+    # guardian status counts them when every failed row is one, and the
+    # adoption accepts exactly those failures, as verify and status do.
+    $excused = & $count $report 'removed_account_failures'
+    if ($excused -lt 0) {
+        $excused = [int64]0
+    }
     # A reconcile that fails only because each failed target's account is
     # signed out stays failed until that account signs in, so a retry cannot
-    # help: name the accounts instead.
+    # help: name the accounts, and say what to do first.
     $signedOut = [Collections.Generic.List[string]]::new()
     $otherFailure = $false
     foreach ($row in @(& $field $records.state 'results')) {
@@ -16559,6 +16567,16 @@ function Get-DefenseClawStandaloneManifestAdoption {
         }
         $account = [string](& $field $row 'user')
         $sid = [string](& $field $row 'sid')
+        if ([string]::IsNullOrWhiteSpace($account) -and -not [string]::IsNullOrWhiteSpace($sid)) {
+            # The guardian's row may carry only the SID; name the account.
+            try {
+                $account = ([Security.Principal.SecurityIdentifier]::new($sid)).Translate(
+                    [Security.Principal.NTAccount]).Value
+            }
+            catch {
+                $account = ''
+            }
+        }
         if ([string]::IsNullOrWhiteSpace($account)) {
             $account = $sid
         }
@@ -16569,11 +16587,12 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $signedOut.Add($account)
         }
     }
+    $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {
-        $retry = (
-            'the guardian finishes only after these signed-out accounts sign in, because it repairs ' +
-            'their DefenseClaw hooks in their own Windows session: ' + ($signedOut -join ', ') +
-            '; have each account sign in, or remove it with its profile, then run this command again'
+        $nextStep = (
+            'have each of these signed-out accounts sign in, or remove it with its profile, then run ' +
+            'this command again: ' + ($signedOut -join ', ') + '. The guardian repairs their ' +
+            'DefenseClaw hooks only in their own Windows session'
         )
     }
     $targetCount = & $count $records.activation 'target_count'
@@ -16583,18 +16602,26 @@ function Get-DefenseClawStandaloneManifestAdoption {
         $success = & $count $record 'success_count'
         $failure = & $count $record 'failure_count'
         $pending = & $count $record 'pending_count'
-        if (-not [bool](& $field $record 'ok') -or
-            $failure -ne 0 -or
+        $complete = if ($excused -gt 0) {
+            $failure -eq $excused -and $success + $pending + $failure -eq $targetCount
+        }
+        else {
+            [bool](& $field $record 'ok') -and $failure -eq 0 -and $success + $pending -eq $targetCount
+        }
+        if (-not $complete -or
             $success -lt 0 -or
             $pending -lt 0 -or
             (& $count $record 'target_count') -ne $targetCount -or
-            $success + $pending -ne $targetCount -or
             [string]::IsNullOrWhiteSpace($activationStamp) -or
             (& $stamp $record) -cne $activationStamp) {
-            return & $result $false (
+            $incomplete = (
                 'the hook guardian has not completed one failure-free reconcile ' +
-                "of the republished targets.yaml ($name record; $diagnostic); $retry"
-            ) -1
+                "of the republished targets.yaml ($name record; $diagnostic)"
+            )
+            if (-not [string]::IsNullOrEmpty($nextStep)) {
+                return & $result $false "$nextStep ($incomplete)" -1
+            }
+            return & $result $false "$incomplete; $retry" -1
         }
     }
     if ($targetCount -lt 0 -or $targetCount -gt 384) {

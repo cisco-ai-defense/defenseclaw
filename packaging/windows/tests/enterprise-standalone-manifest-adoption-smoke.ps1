@@ -135,7 +135,7 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @()) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -170,6 +170,9 @@ try {
                 }
                 if (-not $NoAuthorization) {
                     $report['authorization'] = (& $record $stamp)
+                }
+                if ($RemovedAccountFailures -gt 0) {
+                    $report['removed_account_failures'] = $RemovedAccountFailures
                 }
                 $script:TestGuardianReport = [pscustomobject]$report
             }
@@ -248,7 +251,20 @@ try {
                 error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable'
             }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
-            Assert-TestSyncRefuses 'signed-out account' 'Windows session: alice (S-1-5-21-1-2-3-1018); have each account sign in'
+            Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018).'
+            # A deleted account whose profile folder was removed fails every
+            # reconcile until the enumerator's next pass drops its rows; the
+            # guardian status counts exactly those failures, and the adoption
+            # accepts them, as verify and status do.
+            Set-TestGuardian $true $republishedSHA256 2 1 -RemovedAccountFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a deleted account's failing rows refused the adoption: $($adoption.reason)")
+            }
             Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
             Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'
             Set-TestGuardian $true $republishedSHA256 2 -NoAuthorization
