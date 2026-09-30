@@ -71,6 +71,18 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Windows MDM detection no longer fails while the hook guardian writes
+  its records.** On the enterprise standalone profile, verify (and so
+  `detect.ps1` and `Remediate-Detect.ps1`) failed about one run in eight
+  with `... being used by another process` on the guardian's state files,
+  or with records from two guardian passes, while status stayed ok. Status
+  and verify now re-read those records for up to two seconds until they
+  describe one pass, and verify waits up to 30 seconds for the guardian to
+  activate a `targets.yaml` the enumerator has just republished.
+- **A failing Windows `verify --json` no longer reads as uninstalled.** It
+  reported `installed: false`, no services and 0 targets for a running
+  deployment, as a refused repair did before; it now carries the state a
+  status probe reads.
 - **A Linux gateway whose file was replaced while it ran can be stopped.**
   After `~/.local/bin/defenseclaw-gateway` was renamed or replaced under a
   running gateway, `defenseclaw-gateway stop` said "Gateway sidecar is not

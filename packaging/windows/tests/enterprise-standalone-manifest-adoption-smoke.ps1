@@ -58,11 +58,16 @@ try {
         }
         $script:TestGuardianReport = $null
         $script:TestGuardianProbes = 0
+        $script:TestGuardianCatchUp = $null
         function Get-DefenseClawGuardianStatusReport {
             param($Layout, $GatewayServiceName)
             $script:TestGuardianProbes++
+            if ($null -ne $script:TestGuardianCatchUp -and $script:TestGuardianProbes -ge 2) {
+                return $script:TestGuardianCatchUp
+            }
             return $script:TestGuardianReport
         }
+        $script:ManifestCatchUpPollMilliseconds = 0
 
         $originalProfile = Get-DefenseClawEnterpriseProfile
         $failures = [Collections.Generic.List[string]]::new()
@@ -238,8 +243,25 @@ try {
                 $failures.Add("a stale but exact guardian activation was refused: $($adoption.reason)")
             }
 
+            # Verify came in between the enumerator's republication and the
+            # guardian's activation of it, seconds later: it waits for that.
+            Set-TestGuardian $true $republishedSHA256 2
+            $script:TestGuardianCatchUp = $script:TestGuardianReport
+            Set-TestGuardian $true $activatedSHA256 1
+            $script:TestGuardianProbes = 0
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or $script:TestGuardianProbes -ne 2) {
+                $failures.Add("verify did not wait for the guardian to activate a fresh republication: $($adoption.reason)")
+            }
+            $script:TestGuardianCatchUp = $null
+
             # The guardian has not activated the republished manifest yet, or
             # its records do not describe one failure-free reconcile of it.
+            [IO.File]::SetLastWriteTimeUtc($layout.ManifestPath, [DateTime]::UtcNow.AddMinutes(-10))
             Set-TestGuardian $true $activatedSHA256 1
             Assert-TestSyncRefuses 'guardian still on the old manifest' 'guardian'
             Set-TestGuardian $false $republishedSHA256 2 1

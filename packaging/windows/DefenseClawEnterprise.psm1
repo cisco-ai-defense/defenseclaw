@@ -128,6 +128,12 @@ $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-18532926
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
 $script:ServiceFailureRestartQuiescenceSeconds = 65
+# Standalone: how long verify gives the hook guardian to activate a
+# targets.yaml the enumerator republished (it does within seconds), and how
+# recent the file must be for that wait (the gateway's catch-up window).
+$script:ManifestCatchUpWaitSeconds = 30
+$script:ManifestCatchUpPollMilliseconds = 3000
+$script:ManifestCatchUpWindowSeconds = 120
 $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
@@ -16487,9 +16493,30 @@ function Get-DefenseClawStandaloneManifestAdoption {
             'prove the republished manifest'
         ) -1
     }
-    $report = Get-DefenseClawGuardianStatusReport `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName
+    # The guardian activates a targets.yaml the enumerator republished within
+    # seconds. A verify (an MDM detection run) that came in between failed on
+    # that moment; while the file is that recent, give the guardian the time.
+    $manifestChangedAt = (Microsoft.PowerShell.Management\Get-Item -LiteralPath $Layout.ManifestPath).LastWriteTimeUtc
+    $catchUpDeadline = [DateTime]::UtcNow.AddSeconds($script:ManifestCatchUpWaitSeconds)
+    while ($true) {
+        $report = Get-DefenseClawGuardianStatusReport `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+        $activatedSHA256 = ''
+        if ($null -ne $report -and
+            $null -ne $report.PSObject.Properties['activation'] -and
+            $null -ne $report.activation -and
+            $null -ne $report.activation.PSObject.Properties['manifest_sha256']) {
+            $activatedSHA256 = [string]$report.activation.manifest_sha256
+        }
+        $now = [DateTime]::UtcNow
+        if ($activatedSHA256 -ceq $InstalledManifestSHA256 -or
+            $now -ge $catchUpDeadline -or
+            ($now - $manifestChangedAt).TotalSeconds -ge $script:ManifestCatchUpWindowSeconds) {
+            break
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:ManifestCatchUpPollMilliseconds
+    }
     $retry = 'wait for the guardian''s next pass (about a minute) and retry'
     $diagnostic = 'guardian status reported no records'
     if ($null -ne $report -and
