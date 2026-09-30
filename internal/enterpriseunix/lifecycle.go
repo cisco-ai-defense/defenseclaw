@@ -252,6 +252,14 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeChange, err.Error())
 			return 0
 		}
+		if record == nil && l.opts.PayloadDir == "" && !l.opts.FromPackage {
+			// Staged before the first install (a credential the config
+			// references): the install applies it.
+			r.Noop = true
+			r.NoopReason = "not_installed"
+			r.AddWarning(codeNotInstalled, "DefenseClaw enterprise is not installed yet; the change is stored and the first install applies it")
+			return 0
+		}
 	}
 
 	switch l.opts.Action {
@@ -900,6 +908,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	createdDirs, err := l.applyDirs(p)
 	if err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	if err := env.settleSecretModes(ctx, account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
 	changed, err := l.applyFiles(p)

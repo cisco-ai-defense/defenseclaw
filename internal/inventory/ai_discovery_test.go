@@ -1121,6 +1121,44 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	}
 }
 
+// A pass over many homes can outlast a record's lifetime. While the
+// guardian's pass is running (or as long as its last pass took), a record it
+// has not reached again stays current (#1036).
+func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
+	spool := t.TempDir()
+	now := time.Now().UTC()
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
+	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	report.Summary.FilesScanned = 7
+	data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: 1001, User: "alice", UpdatedAt: now.Add(-40 * time.Minute), Report: report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(spool, "1001.json"), string(data))
+	previousTrust := userScanFileTrustCheck
+	userScanFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { userScanFileTrustCheck = previousTrust })
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{UserScanDir: spool, ScanInterval: 5 * time.Minute}}
+	current := func() bool {
+		t.Helper()
+		_, files, errs := svc.detectUserScans(now)
+		if len(errs) > 0 {
+			t.Fatalf("errors = %v", errs)
+		}
+		return files == 7
+	}
+	if current() {
+		t.Fatal("a 40-minute-old record is current with no pass record")
+	}
+	pass, _ := json.Marshal(UserScanPass{Version: UserScanRecordVersion, StartedAt: now.Add(-45 * time.Minute), Running: true})
+	mustWrite(t, filepath.Join(spool, UserScanPassName), string(pass))
+	if !current() {
+		t.Fatal("a record expired while the pass that will refresh it is still running")
+	}
+}
+
 // Linux ps prints a user name longer than eight characters truncated
 // ("longname+"). A per-user scan still keeps its account's own processes.
 func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {

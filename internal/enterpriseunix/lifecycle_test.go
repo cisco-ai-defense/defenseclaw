@@ -365,6 +365,16 @@ func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
 	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 		t.Fatal("binaries installed despite an unresolved credential reference")
 	}
+	// The credential can be stored before the first install (#1036): it is
+	// kept root-only until the install gives the gateway its access.
+	staged := h.run(Options{Action: ActionEnsure, Reason: "secret", Mutate: func(ctx context.Context) error {
+		return h.env.WriteSecret(ctx, "galileo-api-key", []byte("key"))
+	}})
+	requireOK(t, staged)
+	info, err := os.Stat(h.env.P(filepath.Join(h.env.Layout.SecretsDir, "galileo-api-key")))
+	if !staged.Noop || staged.NoopReason != "not_installed" || err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("staging before the install = %+v (stat %v), want a stored root-only credential", staged, err)
+	}
 
 	// While the installed config references it, the credential is not
 	// removed: the gateway could not start without it.
