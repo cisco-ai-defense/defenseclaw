@@ -260,7 +260,7 @@ its own format: PascalCase event names (`PreToolUse`, `UserPromptSubmit`,
 [Enterprise policies](https://code.visualstudio.com/docs/enterprise/policies).
 
 **Local harness dialect.** A hook command bound with
-`defenseclaw hook --connector copilot --event PreToolUse --hook-surface vscode-local`
+`defenseclaw-hook hook --connector copilot --event PreToolUse --hook-surface vscode-local`
 speaks the Local format. The gateway rejects a body whose `hook_event_name`
 differs from the bound event. It maps the Local tool names DefenseClaw has
 reviewed (`run_in_terminal`, `read_file`, `list_dir`, `create_file`,
