@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -117,6 +118,9 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 		ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
 		FlushSandboxes:  func(context.Context) error { f.flushes++; return f.flush },
 		Now:             func() time.Time { return time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC) },
+		// The tests' preflight answers to the bare name, whatever this
+		// machine's PATH holds.
+		LookPath: func(string) (string, error) { return "", exec.ErrNotFound },
 	}
 	return f
 }
@@ -652,6 +656,44 @@ func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.dir, "gateway.env")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("created gateway.env not removed: %v", err)
+	}
+}
+
+// TestGatewayConfigPreflightsWithTheGatewayNextToTheCLI: an OpenShell run by
+// hand from a prefix that is not on PATH has no openshell-gateway there, and
+// Write's preflight failed to run the bare name. The gateway next to the
+// OpenShell CLI preflights instead, and the one on PATH still comes first.
+func TestGatewayConfigPreflightsWithTheGatewayNextToTheCLI(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "prefix", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gateway := filepath.Join(bin, "openshell-gateway")
+	for _, name := range []string{"openshell", "openshell-gateway"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newGatewayFixture(t)
+	f.cfg.CLI = "openshell"
+	f.cfg.LookPath = func(name string) (string, error) {
+		if name == "openshell" {
+			return filepath.Join(bin, "openshell"), nil
+		}
+		return "", exec.ErrNotFound
+	}
+	f.runner.On(gateway+" config preflight", "", nil)
+	f.write(t, "gateway.toml", operatorTOML)
+	plan := f.plan(t, bindMounts)
+	if _, err := f.apply(plan); err != nil || !f.runner.Called(gateway+" config preflight") {
+		t.Fatalf("apply = %v; calls %v", err, f.runner.Calls())
+	}
+
+	onPath := newGatewayFixture(t)
+	onPath.cfg.LookPath = func(name string) (string, error) { return filepath.Join(bin, name), nil }
+	onPath.write(t, "gateway.toml", operatorTOML)
+	if _, err := onPath.apply(onPath.plan(t, bindMounts)); err != nil || onPath.runner.Called(gateway+" config preflight") {
+		t.Fatalf("with the gateway on PATH: %v; calls %v", err, onPath.runner.Calls())
 	}
 }
 

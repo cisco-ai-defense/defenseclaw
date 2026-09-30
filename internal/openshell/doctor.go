@@ -391,11 +391,11 @@ func (d *Doctor) defaults() {
 	if d.Dial == nil {
 		d.Dial = func(reg *Registration) (Client, error) { return Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second}) }
 	}
-	if d.Gateway == nil {
-		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover}
-	}
 	if d.CLI == "" {
 		d.CLI = DefaultBinary
+	}
+	if d.Gateway == nil {
+		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath}
 	}
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI

@@ -160,8 +160,15 @@ type GatewayConfigurator struct {
 	// GOOS selects the service manager (default runtime.GOOS).
 	GOOS   string
 	Runner Runner
-	// Gateway is the openshell-gateway binary (default GatewayBinary).
+	// Gateway is the openshell-gateway binary that preflights gateway.toml
+	// (default gatewayExecutable: the one on PATH, else the one next to the
+	// OpenShell CLI).
 	Gateway string
+	// CLI is the OpenShell CLI (default DefaultBinary), whose directory
+	// holds the gateway of an OpenShell whose prefix is not on PATH.
+	CLI string
+	// LookPath finds executables on PATH (default exec.LookPath).
+	LookPath func(string) (string, error)
 	// Discover selects the registration that must be usable before bind
 	// mounts are enabled and that VerifyGateway checks. Its ConfigDir
 	// defaults to Dir.
@@ -196,6 +203,23 @@ type GatewayConfigurator struct {
 	FlushSandboxes func(context.Context) error
 }
 
+// gatewayExecutable is the openshell-gateway that preflights gateway.toml:
+// the one on PATH (its bare name, as an install puts it there), else the
+// one next to the OpenShell CLI cli, the only one to find for an OpenShell
+// run by hand from a prefix that is not on PATH.
+func gatewayExecutable(lookPath func(string) (string, error), cli string) string {
+	if _, err := lookPath(GatewayBinary); err == nil {
+		return GatewayBinary
+	}
+	if path, err := lookPath(cli); err == nil {
+		next := filepath.Join(filepath.Dir(path), GatewayBinary)
+		if info, err := os.Stat(next); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return next
+		}
+	}
+	return GatewayBinary
+}
+
 func (g *GatewayConfigurator) defaults() error {
 	dir := g.Dir
 	if dir == "" {
@@ -218,8 +242,14 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.Runner == nil {
 		g.Runner = ExecRunner{}
 	}
+	if g.CLI == "" {
+		g.CLI = DefaultBinary
+	}
+	if g.LookPath == nil {
+		g.LookPath = exec.LookPath
+	}
 	if g.Gateway == "" {
-		g.Gateway = GatewayBinary
+		g.Gateway = gatewayExecutable(g.LookPath, g.CLI)
 	}
 	if g.RestartWait <= 0 {
 		g.RestartWait = 90 * time.Second

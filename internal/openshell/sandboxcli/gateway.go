@@ -56,10 +56,12 @@ type gatewayService struct {
 func (g *gatewayService) configurator() *openshell.GatewayConfigurator {
 	if g.cfg == nil {
 		d := openshell.DiscoverOptions{}
+		cli := ""
 		if g.app.Cfg != nil {
 			d.Gateway = g.app.Cfg.OpenShell.Gateway.Name
+			cli = g.app.Cfg.OpenShell.EffectiveBinary()
 		}
-		g.cfg = &openshell.GatewayConfigurator{Discover: d}
+		g.cfg = &openshell.GatewayConfigurator{Discover: d, CLI: cli}
 	}
 	return g.cfg
 }
