@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,9 @@ class HookEventProcessor:
 // traceback), a UI that is still running still gets the event, and every
 // other hook's events, and their errors, are unchanged.
 func TestOpenHandsSessionEndShim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox shims run in the Linux sandbox image, not on native Windows")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required")
@@ -224,6 +228,9 @@ class HookExecutionEvent:
 // title (the rendering's first 70 characters) shows the rule; other blocks
 // and allowed calls render as OpenHands renders them.
 func TestOpenHandsShimLeadsWithADefenseClawBlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox shims run in the Linux sandbox image, not on native Windows")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required")

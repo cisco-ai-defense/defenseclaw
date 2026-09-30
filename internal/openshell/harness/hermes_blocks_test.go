@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -57,6 +58,9 @@ def _cprint(text):
 // terminal, and never otherwise; what the call returns (the tool error the
 // model gets) is unchanged, and the patched module keeps its own loader.
 func TestHermesBlockNoticeShim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox shims run in the Linux sandbox image, not on native Windows")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required")
