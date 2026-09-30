@@ -106,6 +106,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// standalone result was built from. The marker publishes it rather than
 	// trustMode, which defaults to authenticode when no flag is given.
 	deploymentTrustMode string
+	// diagnostics holds the enumerator's per-profile lines from a JSON
+	// ensure. They go to the lifecycle log, not next to the JSON result an
+	// MDM parses.
+	diagnostics []string
 }
 
 type windowsEnterpriseACLHeader struct {

@@ -946,6 +946,16 @@ func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []st
 		if row.OK || row.Pending {
 			continue
 		}
+		if account := enterpriseHookSignedOutAccount(row); account != "" {
+			// The same next step the refused repair gives: nothing an
+			// administrator runs helps until the account signs in.
+			issues = append(issues, fmt.Sprintf(
+				"the guardian cannot repair %s for %s while that account is signed out: have the account sign in, "+
+					"or remove it with its profile, then run repair again. The guardian repairs DefenseClaw hooks "+
+					"only in the account's own Windows session",
+				strings.TrimSpace(row.Connector), account))
+			continue
+		}
 		detail := strings.TrimSpace(row.Error)
 		if detail == "" {
 			detail = "no target error was recorded"
