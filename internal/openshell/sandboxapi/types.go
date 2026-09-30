@@ -867,6 +867,11 @@ type ActivityEvent struct {
 	Unblockable bool   `json:"unblockable,omitempty"`
 	BytesUp     int64  `json:"bytes_up,omitempty"`
 	BytesDown   int64  `json:"bytes_down,omitempty"`
+	// Threshold is the large-upload threshold an egress.large_upload
+	// report crossed. The proxy reports the upload as it crosses, before
+	// it ends: BytesUp is what had been sent then, and the upload sent
+	// more than Threshold.
+	Threshold int64 `json:"threshold,omitempty"`
 	// Approval and hook fields.
 	ApprovalID string `json:"approval_id,omitempty"`
 	Tool       string `json:"tool,omitempty"`

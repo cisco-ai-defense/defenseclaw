@@ -719,16 +719,25 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 				" is exempt from it (an unblock, an allow entry or your organization's allowed list names it), so the upload was only reported; " +
 				"remove that entry if the destination is not expected."
 		}
+		// The proxy reports the upload as it crosses the threshold, before
+		// it ends: it sent more than the threshold, and BytesUp is only
+		// what had gone up then.
+		size := fmt.Sprintf("%d bytes", e.BytesUp)
+		if e.Threshold > 0 {
+			size = "more than " + egress.FormatThreshold(e.Threshold)
+		}
 		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "MEDIUM",
-			Title:       "Large upload to a first-seen destination",
-			Description: fmt.Sprintf("%s sent %d bytes to %s, which it had not contacted before.", e.SandboxName, e.BytesUp, e.Host),
-			Evidence:    truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation,
+			Title: "Large upload to a first-seen destination",
+			Description: fmt.Sprintf("%s sent %s to %s, which it had not contacted before (%d bytes as it crossed the threshold).",
+				e.SandboxName, size, e.Host, e.BytesUp),
+			Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation,
 			Timestamp: e.Time,
 		})
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: e.SandboxName,
-			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Severity: "MEDIUM",
-			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%d bytes)", e.Host, e.BytesUp)})
+			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Threshold: e.Threshold, Severity: "MEDIUM",
+			Reason:  truncate(e.Reason, 300),
+			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%s)", e.Host, size)})
 	}
 }
 

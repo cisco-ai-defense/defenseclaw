@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -107,7 +108,13 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			b.WriteString(a.dim("  → unblock: " + CommandName + " unblock " + ev.Host + scope))
 		}
 	case sandboxapi.ActivityEgressLargeUpload:
-		b.WriteString(a.style("⚠", ansiYellow) + " large upload to " + hostPort(ev) + " (" + humanBytes(ev.BytesUp) + ")")
+		// Reported as it crossed the threshold, before it ended: what had
+		// gone up then (the report's bytes) is not what it sent (RT U4).
+		size := humanBytes(ev.BytesUp)
+		if ev.Threshold > 0 {
+			size = "more than " + egress.FormatThreshold(ev.Threshold)
+		}
+		b.WriteString(a.style("⚠", ansiYellow) + " large upload to " + hostPort(ev) + " (" + size + ")")
 	case sandboxapi.ActivityApprovalRequested:
 		// The destination always shows: nobody should approve one they
 		// cannot see. The daemon's message says why it is an ask.

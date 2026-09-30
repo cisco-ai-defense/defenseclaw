@@ -756,7 +756,10 @@ deleted.
   Unblocked hosts and those on an allow list the user or the administrator
   wrote are only reported; an unblock lifts the block. With a threshold of 0
   there is nothing to cut, so the block is off, and `sandbox policy explain`
-  says so. `sandbox policy
+  says so. The ⚠ report without the block, made as the upload crosses the
+  threshold, now says `more than` it (`⚠ large upload to files.example.net
+  (more than 25 MiB)`, with `threshold` on the event) instead of the bytes
+  sent by then, which read `(1.0 MiB)` for a 1.9 MiB upload. `sandbox policy
   explain` shows `egress.block_large_uploads` and where it came from, and
   `policy show` the threshold. In the Python config, the v8 schema, and the
   TUI and macOS app config editors, which show the key read-only under the

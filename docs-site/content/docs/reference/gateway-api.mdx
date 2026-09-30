@@ -768,13 +768,13 @@ A `: keepalive` comment follows the replay and repeats every 15 seconds.
 Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 `sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
 (`dc-egress-proxy` or `openshell`), `category`, `rule`, `unblockable`,
-`bytes_up`, `bytes_down`, `approval_id`, `tool`, `event`, `phase`,
-`severity`, `reason`, and `message`.
+`bytes_up`, `bytes_down`, `threshold`, `approval_id`, `tool`, `event`,
+`phase`, `severity`, `reason`, and `message`.
 
 | `kind` | Meaning |
 | --- | --- |
 | `egress.allowed`, `egress.blocked` | A destination the egress proxy or OpenShell allowed or blocked. An upload the large-upload block cut, and later refused uploads to that host, are `egress.blocked` with `category: "large_upload"`. |
-| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before, which only the report saw (the block was off, or the host is exempt). |
+| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before, which only the report saw (the block was off, or the host is exempt). It is reported as it crosses the sandbox's `threshold`, before it ends: `bytes_up` is what had gone up then, and `message` says `more than` the threshold (``⚠ large upload to first-seen files.example.net (more than 25 MiB)``). |
 | `egress.unblocked` | An unblock was applied. |
 | `approval.requested`, `approval.resolved` | An ask was raised or answered. |
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |

@@ -997,7 +997,10 @@ address total, "… to destinations under example.net it had not contacted
 before."); the run's live notice of such a refusal says "✗ DefenseClaw
 blocked HOST (…)", not "a large upload to", which only a cut, whose event
 counts `bytes_up`, says. Without the block, a large upload stays
-a MEDIUM finding and a ⚠ `egress.large_upload` feed event.
+a MEDIUM finding and a ⚠ `egress.large_upload` feed event. The proxy reports
+it as the upload crosses the threshold, before it ends, so the event carries
+the `threshold` and says `more than` it; `bytes_up` is only what had gone up
+then (a 1.9 MiB upload over a 1 MiB threshold read `(1.0 MiB)`).
 
 The counts live in the daemon, so each destination is first-seen to a
 sandbox until the sandbox first contacts it in this daemon's lifetime. With
