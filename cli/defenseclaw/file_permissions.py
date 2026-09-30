@@ -1656,7 +1656,17 @@ def _protect_private_directory(path: str) -> None:
         raise OSError(f"refusing to protect foreign-owned directory: {path}")
     problem = windows_acl_write_error(path)
     if problem is not None or not _windows_acl_has_required_access(path):
-        _set_windows_owner_only_acl(path)
+        try:
+            _set_windows_owner_only_acl(path)
+        except PermissionError as exc:
+            # A managed install's DACL (read-only OWNER RIGHTS) denies the
+            # owner WRITE_DAC; name the folder and the way out.
+            raise PermissionError(
+                exc.errno,
+                f"cannot protect private directory {path}: its access control list does not let this "
+                "account change it (a managed DefenseClaw install can leave it that way); remove the "
+                "folder, or have an administrator reset its access, then run the command again",
+            ) from exc
         problem = windows_acl_write_error(path)
         if problem is not None:
             raise OSError(f"cannot protect private directory {path}: {problem}")
