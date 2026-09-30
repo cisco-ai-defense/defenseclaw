@@ -1561,7 +1561,15 @@ func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
 	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "files.example.net", Source: "user"},
 		sandboxapi.Setting{Key: "egress.allow_only", Value: "(none)", Source: "admin"})
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
-	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts you allowed or unblocked (the large-upload block)\n")
+	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts on the allow list (egress.allow) or that you unblock (the large-upload block)\n")
+
+	// With the allow list empty (openshell.admin.allow_unblock: false drops
+	// the user's entries), it is not named.
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "(none)", Source: "user"})
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), cut+"hosts you unblock (the large-upload block)\n")
 
 	ta = newTestApp(t, "")
 	noChanges(ta)
@@ -1572,7 +1580,10 @@ func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
 		policy("admin", sandboxapi.Setting{Key: "egress.allow_only", Value: "files.example.net, *.corp.example", Source: "admin"})(req, ex)
 	}
 	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "box"}))
-	has(t, ta.output(), cut+"hosts you or your organization allowed, or you unblocked (your organization's large-upload block)\n")
+	// With the organization's allowed list, every host the sandbox reaches
+	// is on it and exempt: nothing is cut.
+	has(t, ta.output(), "Uploads   an upload of more than 1 MiB is reported, not cut: every host this sandbox may reach is on your "+
+		"organization's allowed list, which your organization's large-upload block exempts\n")
 	if !slices.Equal(asked, []string{"box"}) {
 		t.Fatalf("explained %q, want the connected sandbox's policy", asked)
 	}

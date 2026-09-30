@@ -1761,8 +1761,11 @@ func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
 // proxy only reports an upload to a host that is exempt from the block
 // (egress.exemptFromUploadBlock): one the user unblocked, one on an allow
 // list (openshell.egress.allow, a custom or required pack's egress.allow),
-// or one on the organization's allowed list (egress.allow_only), which the
-// line names when it lists hosts.
+// or one on the organization's allowed list (egress.allow_only). With that
+// list set, every host the sandbox may reach is on it, so the block cuts
+// nothing and the line says uploads are only reported. The allow list the
+// line names is the effective one (egress.allow), which
+// openshell.admin.allow_unblock: false empties of the user's entries.
 func uploadBlockText(policy []sandboxapi.Setting) string {
 	block, ok := settingOf(policy, "egress.block_large_uploads")
 	if !ok || block.Value != "true" {
@@ -1772,15 +1775,25 @@ func uploadBlockText(policy []sandboxapi.Setting) string {
 	if mb, err := strconv.Atoi(settingValue(policy, "egress.large_upload_mb")); err == nil && mb > 0 {
 		size = "an upload of more than " + egress.FormatThreshold(int64(mb)<<20)
 	}
-	except := "hosts you allowed or unblocked"
-	if only := settingValue(policy, "egress.allow_only"); only != "" && only != "(none)" {
-		except = "hosts you or your organization allowed, or you unblocked"
-	}
 	whose := "the large-upload block"
 	if block.Source == string(packs.SourceAdmin) {
 		whose = "your organization's large-upload block"
 	}
+	if listed(settingValue(policy, "egress.allow_only")) {
+		return size + " is reported, not cut: every host this sandbox may reach is on your organization's allowed list, which " +
+			whose + " exempts"
+	}
+	except := "hosts you unblock"
+	if listed(settingValue(policy, "egress.allow")) {
+		except = "hosts on the allow list (egress.allow) or that you unblock"
+	}
 	return size + " to a host the sandbox has not contacted before is cut, except to " + except + " (" + whose + ")"
+}
+
+// listed reports a list setting of explain that names something.
+func listed(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && v != "(none)"
 }
 
 func networkLabel(sb *sandboxapi.Sandbox) string {
