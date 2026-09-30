@@ -29,7 +29,8 @@ rows `W-01`…
 - Security boundary: a supported Windows endpoint on a local fixed NTFS volume
 
 Rows `W-01`…`W-42` describe controls shared by both profiles unless a row
-names one. Rows `W-43` and later cover the standalone profile.
+names one. Rows `W-43`…`W-61` cover the standalone profile. Row `W-62` is
+shared by both profiles.
 
 ## Security objectives
 
@@ -522,6 +523,7 @@ authority.
 | W-59 | An agent session runs inside the user's WSL 2 distribution (Claude Desktop WSL sessions, the Codex app or VS Code extension in WSL), outside Windows machine policy and endpoint sensors | Not in this release; `AllowWSL=0` device policy closes it ([R27](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914)) | Tracked in #914 |
 | W-60 | Devin Desktop (Devin Local under `devin acp`, or Cascade in builds before 3.9.19) runs without DefenseClaw hooks for a user without the `devin` CLI | Not in this release ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | W-61 | The Kiro IDE, or a Kiro that starts hook commands through `powershell -Command`, proceeds past a DefenseClaw block. The guardian does not enroll Kiro on Windows; per-user Kiro hooks return a block as exit 2 through `cmd.exe` or a direct launch, and PowerShell reports it as 1 | The encoded PowerShell hook command (`internal/gateway/connector/kiro.go`); the Kiro IDE and the hook shell are tracked ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)) | `TestKiroWindowsHookCommandsBlockThroughTheShell`; live check of Kiro's hook shell |
+| W-62 | A standard user, or a compromised gateway, uses the LocalSystem sensor helper as a confused deputy (asks it to read a chosen path, process or filter), impersonates or replaces its socket, or points the gateway at a socket someone else serves | Fixed request shape: a request carries only a protocol version and one of the fixed operations (`processes`, `connections`, `events`, `dns`, `health`), with no path, pid, filter or command, and an unknown operation, foreign version or oversized frame is refused; `DefenseClawSensorHelper` runs as LocalSystem with only `SeChangeNotifyPrivilege`; `sensor-helper.sock` is bound only under the installer-owned managed IPC directory, and its protected DACL admits only LocalSystem, Administrators and the exact gateway service SID (no Authenticated Users entry); managed mode ignores `DEFENSECLAW_SENSOR_HELPER_SOCKET`; the gateway service depends on the helper, and a missing or unreachable helper reports degraded AI Discovery coverage instead of falling back to a privileged gateway | `internal/sensor/acquire` tests (`TestHelperRefusesAnUnknownOperation`, `TestHelperRefusesAForeignProtocolVersion`, `TestFrameReaderRefusesAnOversizedDeclaredLength`, `TestBrokeredPlaneIgnoresCallerSuppliedPaths`, `TestHelperReportsUnreachabilityRatherThanPretending`); `internal/ipc` `TestGatewayOnlyIPCACEsShape`; lifecycle `verify` of the helper service, image and socket DACL; certification read of the helper's live process token |
 
 ## Security invariants
 
