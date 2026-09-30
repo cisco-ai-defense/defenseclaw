@@ -1398,6 +1398,30 @@ func TestRunAsksAboutTheFirstBootOfItsOwnRunFiles(t *testing.T) {
 			t.Fatalf("%s: %d explain calls", name, n)
 		}
 	}
+
+	// A base URL that carries a credential (a user name and password, a
+	// query or a fragment value) goes by name only, as the daemon's check
+	// of what would be baked into a run image (manager.CredentialURL) sees
+	// it; one without such parts goes as it is.
+	for _, base := range []string{"https://user:url-test-value@gw.example/v1", "https://gw.example/v1?key=url-test-value",
+		"https://gw.example/v1#url-test-value"} {
+		ta := setup(t, "vm")
+		o := run
+		o.Env = []string{"ANTHROPIC_BASE_URL=" + base, "ANTHROPIC_MODEL=claude-test"}
+		ta.ok(t, ta.Run(bg, o))
+		calls := explains(ta)
+		if len(calls) != 2 || strings.Contains(calls[1].Query, "url-test-value") {
+			t.Fatalf("%s: explain calls = %+v", base, calls)
+		}
+		q, err := url.ParseQuery(calls[1].Query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sandboxapi.ParseExplainQuery(q).Run; got == nil || !slices.Equal(got.EnvWithheld, []string{"ANTHROPIC_BASE_URL"}) ||
+			!maps.Equal(got.Env, map[string]string{"ANTHROPIC_MODEL": "claude-test"}) {
+			t.Fatalf("%s: explain of the run's files = %+v", base, got)
+		}
+	}
 }
 
 // An upload that openshell reported done but the sandbox does not have

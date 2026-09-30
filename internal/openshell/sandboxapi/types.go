@@ -688,12 +688,14 @@ type ExplainRequest struct {
 type ExplainRun struct {
 	// Env holds the variables of CreateRequest.Env that the harness's run
 	// files read (connector.SandboxRunEnvReader), except those whose name
-	// looks like a secret's.
+	// looks like a secret's and those whose value is a URL carrying a
+	// credential.
 	Env map[string]string `json:"env,omitempty"`
 	// EnvWithheld names the variables of CreateRequest.Env that the run
 	// files read but whose values Env leaves out, because the name looks
-	// like a secret's. The daemon cannot render the files without them, so
-	// it takes the sandbox to boot a new run image.
+	// like a secret's or the value is a URL carrying a credential. The
+	// daemon cannot render the files without them, so it takes the sandbox
+	// to boot a new run image.
 	EnvWithheld []string `json:"env_withheld,omitempty"`
 	// Credentials names the variables the sandbox gets as credential
 	// placeholders: those of CreateRequest.LLM.Credentials and of

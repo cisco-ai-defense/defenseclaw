@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"path"
 	"regexp"
@@ -301,7 +302,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r)))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
-			m.markWork(b, at, ofHarness, harnessModelCall(r, ofHarness))
+			m.markWork(b, at, ofHarness, m.harnessModelCall(b, r, host, ofHarness))
 		} else if ofHarness {
 			m.markActive(b, at)
 		}
@@ -531,11 +532,15 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// A connection to the egress proxy is the harness's activity when
 		// its own binary made it (the proxy cannot tell); it is no model
 		// call, which goes around the proxy.
-		m.markWork(b, at, harnessActivity(harnessName, r.Binary), false)
+		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
 	case 0:
 	default:
 		ofHarness := harnessActivity(harnessName, r.Binary)
-		m.markWork(b, at, ofHarness, ofHarness && r.Allowed())
+		req := noModelCall
+		if r.Allowed() {
+			req = m.harnessRequest(b, r, openshellHostAlias, ofHarness)
+		}
+		m.markWork(b, at, ofHarness, req)
 		if r.Denied() {
 			m.hostPortDenied(ctx, b, r, at)
 		}
@@ -593,18 +598,25 @@ func policyReloadCut(r ocsf.Record) bool {
 // markWork records network activity of the sandbox's workload: when the
 // harness's own binary made it (harnessActivity) it keeps the hooks'
 // silence check going, and when it is a model call of the harness
-// (harnessModelCall) it starts the session's reachability window. Other
-// traffic (the harness's start-up and onboarding requests, tools, `sandbox
-// exec` commands) is no sign that hooks are overdue.
-func (m *Manager) markWork(b *box, at time.Time, ofHarness, modelCall bool) {
+// (harnessModelCall) it starts the session's reachability window. A call
+// the request's path shows (modelTurn) starts it at once; a connection to
+// the model endpoint, which shows no path (modelConnection), only after
+// harnessStartupGrace; a request for the model list (modelListing) never.
+// Other traffic (the harness's start-up and onboarding requests, tools,
+// `sandbox exec` commands) is no sign that hooks are overdue, and neither
+// is a record from before the session (replayed after a watch resumed).
+func (m *Manager) markWork(b *box, at time.Time, ofHarness bool, req modelRequest) {
 	if ofHarness {
 		m.markActive(b, at)
 	}
-	if !modelCall {
+	if req != modelTurn && req != modelConnection {
 		return
 	}
 	m.mu.Lock()
-	if !at.Before(b.started.Add(harnessStartupGrace)) {
+	switch {
+	case req == modelTurn && !at.Before(b.started):
+		m.noteWorkLocked(b)
+	case req == modelConnection && !at.Before(b.started.Add(harnessStartupGrace)):
 		m.noteWorkLocked(b)
 	}
 	m.mu.Unlock()
@@ -615,15 +627,110 @@ func (m *Manager) markWork(b *box, at time.Time, ofHarness, modelCall bool) {
 // credentials: the harness's model provider and --credential bindings.
 const providerRulePrefix = "_provider_"
 
-// harnessModelCall reports an OCSF record of a model call of the sandbox's
-// harness: a connection OpenShell allowed under a provider rule that the
-// harness's own binary made (ofHarness). A harness reaches its model only
-// after a prompt, which fires its hooks; the requests it makes on its own
-// before one (update checks, telemetry, onboarding) go elsewhere. Layer-7
-// records name no binary and do not count: the connection before them
-// does.
-func harnessModelCall(r ocsf.Record, ofHarness bool) bool {
-	return ofHarness && r.Allowed() && strings.HasPrefix(r.Policy, providerRulePrefix)
+// modelRequest is what an OCSF record tells of a request of the sandbox's
+// harness to its model.
+type modelRequest int
+
+const (
+	// noModelCall: no request of the harness to its model.
+	noModelCall modelRequest = iota
+	// modelConnection: a connection to the model endpoint (a NET record,
+	// which carries no path), or a request whose path names neither a
+	// model call nor the model list. Within harnessStartupGrace of the
+	// session's start it is taken for the harness's start-up.
+	modelConnection
+	// modelListing: a request for the model list or one model's metadata
+	// (GET /v1/models), which a harness makes on its own: the Codex TUI
+	// asks for the list as it opens, before any prompt.
+	modelListing
+	// modelTurn: a model call (POST /v1/messages, /v1/chat/completions,
+	// /v1/responses, Bedrock's invoke and converse), which a harness makes
+	// only for a prompt, also within harnessStartupGrace.
+	modelTurn
+)
+
+// harnessModelCall reports what an OCSF record of a connection or request
+// to host says of a model call of the sandbox's harness: one OpenShell
+// allowed under a provider rule, which the harness made (harnessRequest).
+// A harness reaches its model only after a prompt, which fires its hooks;
+// the requests it makes on its own before one (update checks, telemetry,
+// onboarding) go elsewhere, except for the model list, which the request's
+// path tells apart (modelRequestOf).
+func (m *Manager) harnessModelCall(b *box, r ocsf.Record, host string, ofHarness bool) modelRequest {
+	if !r.Allowed() || !strings.HasPrefix(r.Policy, providerRulePrefix) {
+		return noModelCall
+	}
+	return m.harnessRequest(b, r, host, ofHarness)
+}
+
+// harnessRequest reports what an allowed record of a connection or request
+// to host is when the harness made it (modelRequestOf), and noModelCall
+// when it did not. A record that names a binary is the harness's when its
+// own binary made it (ofHarness). Layer-7 records name none: one is the
+// harness's when the last connection OpenShell allowed to the same host
+// and port was, the connection it rides on (a harness keeps its
+// connection to its model open from the model list to the prompts after
+// it). Callers run on b's watch, which gets its records in order.
+func (m *Manager) harnessRequest(b *box, r ocsf.Record, host string, ofHarness bool) modelRequest {
+	dest := net.JoinHostPort(host, strconv.Itoa(r.Port))
+	m.mu.Lock()
+	if r.Binary != "" {
+		if b.reach.modelConns == nil {
+			b.reach.modelConns = map[string]bool{}
+		}
+		b.reach.modelConns[dest] = ofHarness
+	} else {
+		ofHarness = b.reach.modelConns[dest]
+	}
+	m.mu.Unlock()
+	if !ofHarness {
+		return noModelCall
+	}
+	return modelRequestOf(r)
+}
+
+// modelTurnPaths end the paths of model calls: Anthropic's Messages,
+// OpenAI's Chat Completions, Completions and Responses, Bedrock's
+// InvokeModel and Converse, streaming or not, and Gemini's
+// generateContent.
+var modelTurnPaths = []string{"/messages", "/completions", "/responses", "/invoke", "/invoke-with-response-stream",
+	"/converse", "/converse-stream", ":generateContent", ":streamGenerateContent"}
+
+// modelListSegments name the collections a model list or one model's
+// metadata is read from: /v1/models and /v1/models/{id} (Anthropic,
+// OpenAI and the servers compatible with them, Gemini), and Bedrock's
+// foundation models and inference profiles.
+var modelListSegments = []string{"models", "foundation-models", "inference-profiles"}
+
+// modelRequestOf is the kind of request a record of the harness to its
+// model shows: a POST to a model call's path (modelTurnPaths) is a turn,
+// a GET or HEAD of the model list or of one model (modelListSegments, or
+// Ollama's /api/tags) a listing, and a record without a path, or with one
+// that names neither, a connection. A GET of a model call's path is no
+// turn: the Responses API's WebSocket opens with one, which a harness may
+// open before any prompt.
+func modelRequestOf(r ocsf.Record) modelRequest {
+	p, _, _ := strings.Cut(r.Path, "?")
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return modelConnection
+	}
+	switch strings.ToUpper(r.Method) {
+	case "POST":
+		for _, suffix := range modelTurnPaths {
+			if strings.HasSuffix(p, suffix) {
+				return modelTurn
+			}
+		}
+	case "GET", "HEAD":
+		segments := strings.Split(p, "/")
+		n := len(segments)
+		if p == "/api/tags" || slices.Contains(modelListSegments, segments[n-1]) ||
+			n > 1 && slices.Contains(modelListSegments, segments[n-2]) {
+			return modelListing
+		}
+	}
+	return modelConnection
 }
 
 // harnessActivity reports an OCSF event of the harness itself: its binary
