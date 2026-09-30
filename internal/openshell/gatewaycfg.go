@@ -1332,16 +1332,26 @@ const sandboxFlushWait = 20 * time.Second
 // not answer runs nothing a flush could reach; one that answers but whose
 // sandboxes could not be listed or flushed fails with ErrUnflushed,
 // naming them.
+//
+// A gateway whose driver is not known, because GetGatewayInfo failed, is
+// flushed like one on the vm driver: one failed call (a timeout on a busy
+// host, a gateway that answers Health before GetGatewayInfo) does not
+// mean that nothing runs on it. It is taken to be down only when the
+// list of its sandboxes is refused too (Unavailable). A list that times
+// out is a gateway that took the call and was slow, a busy host whose
+// MicroVMs still run, so it refuses the restart like any other failure.
 func FlushSandboxes(ctx context.Context, c Client) error {
-	info, err := c.GatewayInfo(ctx)
-	if err != nil {
-		return nil
-	}
-	if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
-		return nil
+	info, infoErr := c.GatewayInfo(ctx)
+	if infoErr == nil {
+		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
+			return nil
+		}
 	}
 	list, err := c.ListSandboxes(ctx, nil)
 	if err != nil {
+		if infoErr != nil && ctx.Err() == nil && IsUnavailable(err) {
+			return nil
+		}
 		return fmt.Errorf("%w (they could not be listed: %v)", ErrUnflushed, err)
 	}
 	var failed []string

@@ -28,6 +28,8 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 )
@@ -351,7 +353,8 @@ func TestGatewayConfigSeedsASharedHomebrewPrefix(t *testing.T) {
 // it wrote since its last one (OpenShell 0.1.1). On the vm driver every
 // ready sandbox runs sync(1) first, of every owner, and one that cannot
 // be flushed refuses the restart; the docker driver's stop keeps what a
-// container wrote.
+// container wrote. A gateway whose driver could not be read is flushed
+// too, and only one that answers neither call is taken to be down.
 func TestFlushSandboxesBeforeARestart(t *testing.T) {
 	gateway := func(t *testing.T, d openshell.ComputeDriver, phases map[string]openshell.SandboxPhase) *openshelltest.Fake {
 		t.Helper()
@@ -404,11 +407,53 @@ func TestFlushSandboxesBeforeARestart(t *testing.T) {
 		t.Fatalf("flush with a stuck sandbox = %v", err)
 	}
 
-	// A gateway that does not answer has nothing a flush could reach.
+	// A gateway whose driver could not be read is flushed all the same:
+	// one failed GetGatewayInfo does not mean nothing runs on it.
+	for _, infoErr := range []error{
+		&v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"},
+		&v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"},
+		&v1.StatusError{Code: v1.ErrorUnimplemented, Message: "unknown method GetGatewayInfo"},
+	} {
+		busy := gateway(t, openshell.DriverVM, phases)
+		busy.FailNext(openshelltest.MethodGatewayInfo, infoErr)
+		if err := openshell.FlushSandboxes(context.Background(), busy.Client(openshell.ClientOptions{})); err != nil {
+			t.Fatalf("GatewayInfo failed with %v: %v", infoErr, err)
+		}
+		if got := flushed(busy); !slices.Equal(got, []string{"dc-a", "theirs"}) {
+			t.Fatalf("GatewayInfo failed with %v: flushed %v, want the ready ones", infoErr, got)
+		}
+	}
+
+	// A gateway that refuses both calls has nothing a flush could reach.
 	down := gateway(t, openshell.DriverVM, phases)
-	down.FailNext(openshelltest.MethodGatewayInfo, errors.New("connection refused"))
+	down.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
+	down.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
 	if err := openshell.FlushSandboxes(context.Background(), down.Client(openshell.ClientOptions{})); err != nil || len(flushed(down)) != 0 {
 		t.Fatalf("gateway down: %v, flushed %v", err, flushed(down))
+	}
+
+	// One that answers the list with an error, or times out on it (a
+	// busy host), is not down: the restart waits until its sandboxes can
+	// be flushed.
+	for _, listErr := range []error{
+		&v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"},
+		&v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"},
+	} {
+		unlisted := gateway(t, openshell.DriverVM, phases)
+		unlisted.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
+		unlisted.FailNext(openshelltest.MethodListSandboxes, listErr)
+		if err := openshell.FlushSandboxes(context.Background(), unlisted.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), listErr.(*v1.StatusError).Message) {
+			t.Fatalf("GatewayInfo and the list (%v) failed: %v, want ErrUnflushed", listErr, err)
+		}
+	}
+	// Nor is one whose context ended.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ended := gateway(t, openshell.DriverVM, phases)
+	ended.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
+	ended.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
+	if err := openshell.FlushSandboxes(ctx, ended.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) {
+		t.Fatalf("flush on an ended context: %v, want ErrUnflushed", err)
 	}
 }
 
