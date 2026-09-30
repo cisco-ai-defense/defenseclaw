@@ -255,8 +255,10 @@ func TestWindowsEnterpriseEnsureUpgradesAfterARecoveryDeferredActivation(t *test
 			}
 			continue
 		}
-		if err == nil || strings.Join(actions, ",") != "Status,Repair" || result.OK {
-			t.Fatalf("plain repair failure: err=%v actions=%v ok=%v", err, actions, result.OK)
+		// A refused repair reports the deployment state a status probe reads,
+		// not "not installed".
+		if err == nil || strings.Join(actions, ",") != "Status,Repair,Status" || result.OK || !result.Installed {
+			t.Fatalf("plain repair failure: err=%v actions=%v ok=%v installed=%v", err, actions, result.OK, result.Installed)
 		}
 	}
 }
