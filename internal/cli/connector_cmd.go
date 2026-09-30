@@ -878,6 +878,10 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
+	if name == "opencode" {
+		// The empty folders the gateway's install watcher created go too.
+		connector.RemoveOpenCodeWatcherCreatedDirs(opts.DataDir)
+	}
 
 	if connectorFlagJSON {
 		payload := map[string]any{

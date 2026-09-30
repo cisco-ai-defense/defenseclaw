@@ -51,6 +51,16 @@ func RecordWatcherCreatedDirs(dataDir string, dirs []string) error {
 	return writeWatcherCreatedDirs(path, record.Dirs)
 }
 
+// RemoveOpenCodeWatcherCreatedDirs removes the folders the install watcher
+// created below the OpenCode config folder that are still empty. Only the
+// explicit `connector teardown` calls it, which uninstall runs after stopping
+// the gateway. A teardown inside a running gateway (guardrail disabled, or a
+// failed setup's rollback) leaves them: that gateway's watcher still watches
+// them and would miss what is installed there next.
+func RemoveOpenCodeWatcherCreatedDirs(dataDir string) {
+	removeWatcherCreatedDirs(dataDir, filepath.Dir(filepath.Dir(opencodePluginPath(SetupOpts{}))))
+}
+
 // removeWatcherCreatedDirs removes, deepest first, each listed folder below
 // root that is still an empty folder reached through real folders from root.
 // Anything else stays on disk: a folder that now has content, one replaced by

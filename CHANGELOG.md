@@ -75,8 +75,8 @@ rest also reach per-user installs.
   gateway's install watcher creates missing `plugin`, `skill` and `skills`
   folders under `~/.config/opencode`, and a per-user uninstall left them
   behind, empty. The watcher now lists the OpenCode folders it creates in
-  the DefenseClaw data directory, and the OpenCode teardown removes each one
-  that is still empty. Folders with content, folders outside the OpenCode
+  the DefenseClaw data directory, and the uninstall's OpenCode teardown
+  removes each one that is still empty. Folders with content, folders outside the OpenCode
   config folder and folders DefenseClaw did not create stay.
 - **A Windows uninstall drops a deleted account's runtime selector entry.**
   On the enterprise standalone profile, an account deleted together with its

@@ -1878,13 +1878,7 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 		}
 	}
 	if c.pluginArtifact {
-		err := c.teardownPluginArtifact(opts)
-		if err == nil && c.name == "opencode" {
-			// The gateway's install watcher creates missing skill and plugin
-			// folders below the OpenCode config folder; those still empty go.
-			removeWatcherCreatedDirs(opts.DataDir, filepath.Dir(filepath.Dir(c.configPath(opts))))
-		}
-		return err
+		return c.teardownPluginArtifact(opts)
 	}
 	if err := c.migrateManagedBackup(opts); err != nil {
 		return fmt.Errorf("%s managed backup migration: %w", c.name, err)

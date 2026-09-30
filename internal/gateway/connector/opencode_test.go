@@ -145,33 +145,12 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	if err != nil || !current {
 		t.Fatalf("OpenCode registration publication = %v, %v; want plugin plus custody receipt", current, err)
 	}
-	// Folders the gateway's install watcher created below the OpenCode config
-	// folder go with the teardown while empty; one with content stays.
-	configRoot := filepath.Dir(filepath.Dir(pluginPath))
-	emptyDir, usedDir := filepath.Join(configRoot, "skills"), filepath.Join(configRoot, "skill")
-	for _, created := range []string{emptyDir, usedDir} {
-		if err := os.MkdirAll(created, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(usedDir, "SKILL.md"), []byte("skill"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := RecordWatcherCreatedDirs(opts.DataDir, []string{emptyDir, usedDir}); err != nil {
-		t.Fatalf("record watcher-created folders: %v", err)
-	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Fatalf("plugin still present after teardown (err=%v)", err)
-	}
-	if _, err := os.Lstat(emptyDir); !os.IsNotExist(err) {
-		t.Fatalf("empty watcher-created folder survived teardown (err=%v)", err)
-	}
-	if _, err := os.Lstat(usedDir); err != nil {
-		t.Fatalf("watcher-created folder with content was removed: %v", err)
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Errorf("VerifyClean after teardown: %v", err)
