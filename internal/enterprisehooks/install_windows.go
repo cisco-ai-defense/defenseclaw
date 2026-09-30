@@ -1678,6 +1678,19 @@ func teardownWindowsGenericManagedTarget(
 		if remaining, err = connector.OwnedHookConfigReferences(target.conn, target.setup); err != nil {
 			return fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
 		}
+		// Antigravity entries are DefenseClaw's by their outer key, also when
+		// they run a command this release no longer renders.
+		if name == "antigravity" && len(remaining) == 0 {
+			for _, path := range configPaths {
+				owned, err := connector.AntigravityHooksHoldOwnedEntries(path)
+				if err != nil {
+					return fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
+				}
+				if owned {
+					remaining = append(remaining, path)
+				}
+			}
+		}
 	}
 	if len(remaining) != 0 {
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))

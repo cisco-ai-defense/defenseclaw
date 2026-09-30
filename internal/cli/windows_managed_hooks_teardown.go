@@ -132,10 +132,14 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
-	report.UserStateRemaining = windowsManagedHooksStandaloneUserState(
-		manifest,
-		os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1",
-	)
+	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
+	report.UserStateRemaining = windowsManagedHooksStandaloneUserState(manifest, purge)
+	if purge {
+		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
+			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		}
+	}
 }
 
 // windowsManagedHooksPurgeUserStateEnv is set to 1 by the lifecycle for an

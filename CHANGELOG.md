@@ -99,6 +99,14 @@ rest also reach per-user installs.
   it, before it removes the folder, and then removes that machine policy. A
   file changed after the install wrote it stays as it is, and so do the
   files of an account that is not signed in.
+- **`/uninstall PURGE=1` removes what an earlier rolled-back install left.**
+  An Amp plugin or Antigravity `hooks.json` that such a rollback left was
+  captured as the user's own file by the next install and put back by the
+  uninstall; the uninstall now removes DefenseClaw's own plugin and hook
+  entries from the file it restores, and names an Antigravity file that
+  still has them. With purge, it also removes a Claude Code version floor
+  drop-in that holds exactly DefenseClaw's floor but that DefenseClaw no
+  longer records writing.
 - **A rolled-back first Windows install leaves no event log or empty
   folder.** Its failure event registered the DefenseClaw event log and
   `C:\Program Files\Cisco` stayed empty; the event now goes to the

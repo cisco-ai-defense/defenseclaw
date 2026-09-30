@@ -1931,6 +1931,15 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
 		}
 	}
+	if c.name == "antigravity" && opts.ManagedEnterprise {
+		// DefenseClaw's Antigravity entries are its own by their outer key,
+		// also in a hooks.json the restore just put back that was captured
+		// after an earlier DefenseClaw setup (one a rolled-back install left),
+		// and when they run a command this release does not render.
+		if err := removeAntigravityOwnedHookEntries(path); err != nil {
+			errs = append(errs, fmt.Sprintf("remove DefenseClaw hook entries: %v", err))
+		}
+	}
 	if c.name == "hermes" {
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
 		if err := teardownHermesAllowlist(opts, hermesConfigPath, command); err != nil {
@@ -2010,6 +2019,12 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
+	if opts.ManagedEnterprise {
+		// A plugin captured after an earlier DefenseClaw setup (one a
+		// rolled-back install left) is DefenseClaw's own, so putting it back
+		// would leave the registration in place; it goes too.
+		return c.removeOwnedPluginWithoutBackup(path)
+	}
 	return nil
 }
 
@@ -4895,6 +4910,48 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 			handlers = []interface{}{handler}
 		}
 		cfg[key] = map[string]interface{}{event: handlers}
+	}
+	return writeJSONObject(path, cfg)
+}
+
+// antigravityOwnedHookKeyPrefix begins each outer key DefenseClaw owns in
+// Antigravity's hooks.json (patchAntigravityHooks).
+const antigravityOwnedHookKeyPrefix = "defenseclaw-antigravity-"
+
+// AntigravityHooksHoldOwnedEntries reports whether the Antigravity hooks file
+// at path still has one of DefenseClaw's own outer keys, whatever command
+// the entry runs.
+func AntigravityHooksHoldOwnedEntries(path string) (bool, error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	for key := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// removeAntigravityOwnedHookEntries drops DefenseClaw's own outer keys from
+// the Antigravity hooks file at path and keeps every other key.
+func removeAntigravityOwnedHookEntries(path string) error {
+	owned, err := AntigravityHooksHoldOwnedEntries(path)
+	if err != nil || !owned {
+		return err
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	for key := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			delete(cfg, key)
+		}
 	}
 	return writeJSONObject(path, cfg)
 }

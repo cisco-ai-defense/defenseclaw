@@ -91,6 +91,24 @@ func TestPluginTeardownWithoutBackupRemovesOnlyTheOwnedPlugin(t *testing.T) {
 				t.Fatalf("older DefenseClaw plugin remains after teardown: %v", err)
 			}
 
+			// A managed teardown whose backup holds DefenseClaw's own plugin
+			// (one a rolled-back install left before setup captured it)
+			// removes it instead of putting it back.
+			if err := os.WriteFile(pluginPath, older, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := captureManagedFileBackup(opts.DataDir, test.name, "config", pluginPath); err != nil {
+				t.Fatal(err)
+			}
+			managedOpts := opts
+			managedOpts.ManagedEnterprise = true
+			if err := conn.Teardown(context.Background(), managedOpts); err != nil {
+				t.Fatalf("managed Teardown of a restored DefenseClaw plugin: %v", err)
+			}
+			if _, err := os.Lstat(pluginPath); !os.IsNotExist(err) {
+				t.Fatalf("restored DefenseClaw plugin remains after a managed teardown: %v", err)
+			}
+
 			// A file without the marker is not DefenseClaw's.
 			foreign := []byte("// operator plugin\n// defenseclaw-managed-plugin v1\nexport default function mine() {}\n")
 			if err := os.WriteFile(pluginPath, foreign, 0o600); err != nil {
