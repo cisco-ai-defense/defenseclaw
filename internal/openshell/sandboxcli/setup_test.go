@@ -601,9 +601,15 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
 			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
 		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway " + start + "\n"},
-		// Something else answers: the service's own fix.
-		{"service stopped, a gateway answers", stopped, "Gateway service",
-			"✗ Gateway service: openshell-gateway is inactive\n", "→ start the gateway and enable it at login " + start + "\n"},
+		// Something else answers: the service's own fix, which the doctor
+		// gives as the operator's (it does not start the unit over it).
+		{"service stopped, a gateway answers", func(r *openshell.DoctorReport) {
+			stopped(r)
+			r.Get(openshell.CheckIDGatewayService).Fix = &openshell.Fix{Summary: "the openshell-gateway user service is stopped, but a gateway answers at " +
+				"https://127.0.0.1:17670: something else runs it, and the service's gateway would not get its port. Stop that gateway, then start the service",
+				Command: start}
+		}, "Gateway service", "✗ Gateway service: openshell-gateway is inactive\n",
+			"→ the openshell-gateway user service is stopped, but a gateway answers at https://127.0.0.1:17670: something else runs it"},
 		{"CLI newer than supported", func(r *openshell.DoctorReport) {
 			r.CLIVersion = "0.2.0"
 			c := r.Get(openshell.CheckIDCLI)

@@ -494,7 +494,10 @@ func TestDoctorChecks(t *testing.T) {
 
 		{name: "linger off", setup: func(f *doctorFixture) { f.runner.On("loginctl show-user dev", "no\n", nil) },
 			want: []checkWant{{"linger", warn, "stop when you log out"}}, fix: &fixWant{command: "sudo loginctl enable-linger dev", sudo: true}},
-		{name: "service failed", setup: service("LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\n", nil),
+		{name: "service failed", setup: func(f *doctorFixture) {
+			service("LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\n", nil)(f)
+			health(errors.New("connection refused"))(f)
+		},
 			want: []checkWant{{"gateway-service", fail, "failed (failed)"}}, fix: &fixWant{auto: true},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
 				applyFixes(t, r, openshell.CheckIDGatewayService)
@@ -502,6 +505,13 @@ func TestDoctorChecks(t *testing.T) {
 					t.Fatalf("fix did not start and verify the gateway (verified %d)", f.verified)
 				}
 			}},
+		// Something else runs the gateway that answers: starting the unit
+		// would not get its port, and the start's wait took that gateway
+		// for the unit's and said "fixed".
+		{name: "service stopped, another gateway answers", setup: unit("inactive", "enabled"),
+			want: []checkWant{{"gateway-service", fail, "inactive"}, {"gateway-version", pass, "0.1.1 healthy"}},
+			fix: &fixWant{command: start, manual: true, text: "the openshell-gateway user service is stopped, but a gateway answers at https://127.0.0.1:17670: " +
+				"something else runs it, and the service's gateway would not get its port. Stop that gateway, then start the service"}},
 		{name: "service not installed", setup: func(f *doctorFixture) {
 			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
 			f.found["openshell"] = false
@@ -1291,7 +1301,9 @@ func TestDoctorPendingRestart(t *testing.T) {
 func TestDoctorApplyFixesConsent(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.writeTOML(disabledTOML, f.started.Add(-time.Minute))
-	f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
+	// Running but not enabled at login: a stopped unit whose gateway
+	// answers is another's, which the doctor does not start the unit over.
+	f.runner.On("systemctl --user show openshell-gateway", f.unit("active", "linked"), nil)
 	f.runner.On("systemctl --user enable --now openshell-gateway", "Job failed", errors.New("exit status 1"))
 	r := f.run()
 	var asked []string

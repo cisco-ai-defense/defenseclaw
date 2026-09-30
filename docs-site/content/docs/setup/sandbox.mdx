@@ -1392,8 +1392,11 @@ From then on the check's fix is to remove that other OpenShell, then run
 `defenseclaw sandbox setup --install-openshell`, and the doctor does not
 restart the gateway again for the same releases (it records the restart
 in `.defenseclaw-release-restart` in the gateway's configuration
-directory). With the service stopped, something else runs that gateway:
-stop it, then start the service.
+directory). With the service stopped while a gateway answers, of any
+release, something else runs that gateway, whose port the service's
+would not get: the **Gateway service** fix is then to stop it, then start
+the service, which `--fix` leaves to you (its start would see the other
+gateway answer and report it fixed).
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway

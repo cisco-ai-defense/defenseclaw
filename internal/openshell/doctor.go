@@ -551,6 +551,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkGateway(ctx)
 	r.macChecks(ctx)
 	r.unmanagedService(ctx)
+	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
 	r.report.Driver = r.driver()
@@ -1029,6 +1030,23 @@ func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
 			Command: r.startCommand().String()}
 	}
 	return &Fix{Summary: answers + ": stop that gateway, then start the OpenShell " + r.cli.String() + " gateway"}
+}
+
+// stoppedServiceAnswers gives the Gateway service check of an installed
+// service that is stopped while a healthy gateway answers anyway its way
+// on: something else runs that gateway, whose port the service's would
+// not get, and the start's wait would take the other gateway for the
+// started one and call the fix done. It runs after checkGateway, which
+// asks the gateway.
+func (r *doctorRun) stoppedServiceAnswers() {
+	c := r.report.Get(CheckIDGatewayService)
+	if c == nil || c.Status != StatusFail || r.service == nil || !r.service.Installed || r.service.Active ||
+		r.gateway == nil || !r.gateway.Healthy || r.reg == nil {
+		return
+	}
+	c.Fix = &Fix{Summary: r.serviceName() + " is stopped, but a gateway answers at " + r.reg.Endpoint +
+		": something else runs it, and the service's gateway would not get its port. Stop that gateway, then start the service",
+		Command: r.startCommand().String()}
 }
 
 // serviceName names the gateway service DefenseClaw starts and restarts
