@@ -1634,12 +1634,17 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
 - The harness calls its model for `HookReachWindow` (30 seconds) without one
   hook request reaching DefenseClaw. Only the harness's own model calls
   count: a connection its binary makes under a provider rule
-  (`_provider_*`), or to a host port. Its start-up and onboarding traffic
+  (`_provider_*`), or to a host port, and the requests OpenShell inspects on
+  such a connection. Its start-up and onboarding traffic
   (update checks, telemetry, downloads, through the egress proxy or around
   it) comes before the first prompt fires a hook, so it starts no window,
-  and neither does a model call in the session's first 20 seconds (the Codex
-  TUI asks its model endpoint for the model list as it opens) or anything in
-  a sandbox with no harness session. OTLP is no
+  and neither does a request for the model list (`GET /v1/models`: the
+  Codex TUI asks for it as it opens), a connection to the model endpoint
+  whose requests OpenShell does not show in the session's first 20
+  seconds, or anything in a sandbox with no harness session. A model call
+  OpenShell shows (`POST /v1/messages`, `/v1/chat/completions`,
+  `/v1/responses`, Bedrock's invoke and converse) starts the window at
+  once, also in those first 20 seconds. OTLP is no
   sign of work either: the Codex TUI exports it from its start and posts its
   first hooks only with the first prompt. Since no hook was seen failing,
   the warning then reads "No hook has reached DefenseClaw yet" (hook

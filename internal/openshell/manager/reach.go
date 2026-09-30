@@ -77,10 +77,13 @@ const (
 	// running sandbox: a sandbox's --credential profile imported, or
 	// deleted with its sandbox, by any DefenseClaw daemon on the gateway.
 	reloadMappingWindow = 45 * time.Second
-	// harnessStartupGrace is how long after a session starts a model call is
-	// still taken for the harness's start-up: the Codex TUI asks its model
-	// endpoint for the model list as it opens, before any prompt, so that
-	// call starts no window. A prompt's turn makes later calls, which do.
+	// harnessStartupGrace is how long after a session starts a connection
+	// to the model endpoint is still taken for the harness's start-up: the
+	// Codex TUI asks its model endpoint for the model list as it opens,
+	// before any prompt, so that call starts no window. A prompt's turn
+	// makes later calls, which do. A request whose path shows what it is
+	// needs no grace: a model call starts the window at once, the model
+	// list never (modelRequestOf).
 	harnessStartupGrace = 20 * time.Second
 	// hookReachInterval paces the reachability check.
 	hookReachInterval = 5 * time.Second
@@ -94,6 +97,11 @@ type hookReach struct {
 	// firstAttempt the first hook connection OpenShell reported.
 	firstWork    time.Time
 	firstAttempt time.Time
+	// modelConns says, for each host:port the session connected to under
+	// a provider rule or on the host alias, whether the harness made the
+	// last connection OpenShell allowed there: the layer-7 records on it,
+	// which name no binary, are then the harness's (harnessRequest).
+	modelConns map[string]bool
 	// mappingDenied is when OpenShell denied an ingress connection's
 	// transparent mapping with no connection through or authenticated
 	// request since: a refusal once hookAttemptGrace passes
