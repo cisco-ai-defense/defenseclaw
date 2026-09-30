@@ -673,8 +673,10 @@ func withNextStep(err error, step string) error {
 // before the harness runs) on a gateway that runs the docker driver: there
 // sandboxes run on the kernel of Docker Desktop's Linux VM, which has none
 // today, and OpenShell's MicroVM driver, which boots each sandbox with a
-// kernel of its own, is the way on. driver is the gateway's compute
-// driver, asked for only when the failure is one of those.
+// kernel of its own, is the way on. The hint follows OpenShell's own
+// output (its Landlock probe error, box drawing and all) on a line of its
+// own. driver is the gateway's compute driver, asked for only when the
+// failure is one of those.
 func (a *App) landlockHint(err error, driver func() openshell.Driver) error {
 	if err == nil || a.GOOS != "darwin" {
 		return err
@@ -685,8 +687,8 @@ func (a *App) landlockHint(err error, driver func() openshell.Driver) error {
 	if driver().Name != openshell.DriverDocker {
 		return err
 	}
-	return fmt.Errorf("%w; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: "+
-		"switch the gateway to MicroVMs with `%s setup` (or `%s doctor --fix`; see %s)", err, CommandName, CommandName, setupTroubleshootingURL)
+	return withNextStep(err, "this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: "+
+		"switch the gateway to MicroVMs with `"+CommandName+" setup` (or `"+CommandName+" doctor --fix`; see "+setupTroubleshootingURL+")")
 }
 
 // gatewayDriver is the compute driver of the daemon's gateway, from its

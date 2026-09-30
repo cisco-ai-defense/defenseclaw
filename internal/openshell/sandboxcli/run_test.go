@@ -386,13 +386,15 @@ func TestRunRefusals(t *testing.T) {
 // supervisor's Landlock probe) only in the gateway log (manual test M13).
 // The daemon now passes the reason on, and on macOS a run or a start that
 // failed on Landlock on the docker driver (Docker Desktop's VM kernel) says
-// what that means there and how to switch to MicroVMs; on the MicroVM
-// driver, whose sandboxes boot kernels of their own, it says nothing more.
+// what that means there and how to switch to MicroVMs, on a line of its own
+// after OpenShell's output (it ended one long line, the #1019 retest); on
+// the MicroVM driver, whose sandboxes boot kernels of their own, it says
+// nothing more.
 func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 	const detail = `openshell: wait for sandbox "myapp-d395": Internal: sandbox "myapp-d395" is in error state; ` +
 		`OpenShell says: SupervisorFailed: Landlock allow/deny probe failed`
 	failure := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox myapp-d395 failed", Detail: detail}
-	hint := "; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: " +
+	hint := "\n  → this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: " +
 		"switch the gateway to MicroVMs with `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`; see " + setupTroubleshootingURL + ")"
 	for _, c := range []struct{ goos, driver, want string }{
 		{"linux", "", failure.Error()},
