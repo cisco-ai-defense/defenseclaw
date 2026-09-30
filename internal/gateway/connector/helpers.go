@@ -223,9 +223,9 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// Kiro honors only exit 2 as a block. Release launchers use the GUI
 	// subsystem, which PowerShell's call operator does not await (the hook's
 	// status is lost and Kiro proceeds), and cmd.exe rejects the call operator
-	// outright. Use Kiro's encoded system PowerShell command, which awaits the
-	// launcher and returns its exit status to cmd.exe and to any launcher that
-	// runs the command line directly (windowsKiroHookCommandForBinary).
+	// outright. Use Kiro's cmd.exe and encoded system PowerShell command, which
+	// awaits the launcher and returns its exit status through a PowerShell
+	// host, cmd.exe or a direct start (windowsKiroHookCommandForBinary).
 	if connector == "kiro" {
 		return windowsKiroHookCommandForBinary(defenseclawHookBinary(), "")
 	}
@@ -815,6 +815,12 @@ func windowsSystemPowerShellExe() string {
 	// SystemRoot/WINDIR values inherited from the project launching an agent.
 	// Build this as a Windows path even in OS-parameterized tests.
 	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
+}
+
+// windowsSystemCmdExe is cmd.exe in the trusted system directory, built as a
+// Windows path like windowsSystemPowerShellExe.
+func windowsSystemCmdExe() string {
+	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\cmd.exe`
 }
 
 func powershellEncodedCommand(script string) string {
