@@ -414,8 +414,14 @@ func TestWindowsEnterpriseStandaloneActionReportsSchemaTwo(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 			t.Fatalf("decode %q: %v", stdout.String(), err)
 		}
+		// Verify also reports this computer's own findings (an Amp machine
+		// folder, for one), so look for the refusal among the errors.
+		refused := false
+		for _, message := range result.Errors {
+			refused = refused || strings.Contains(message.Message, refusal)
+		}
 		if result.OK || !result.Installed || result.InstalledVersion != "1.4.0" || len(result.Services) != 4 ||
-			!result.Readiness.Guardian || len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, refusal) {
+			!result.Readiness.Guardian || !refused {
 			t.Fatalf("refused %s result %+v", action, result)
 		}
 	}
