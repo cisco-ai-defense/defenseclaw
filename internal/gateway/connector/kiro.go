@@ -444,8 +444,13 @@ func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
 // GUI-subsystem child gets no standard handles otherwise); the script copies
 // the launcher's stderr, where the block reason is, to its own unchanged.
 // Constrained Language mode (WDAC or AppLocker script enforcement) refuses
-// the .NET calls, which would exit 1 on every call, so there the script keeps
-// Start-Process -Wait, which works in that mode.
+// the .NET calls, which would exit 1 on every call, and Start-Process -Wait
+// loses a fast launcher's status there too. In that mode the script runs the
+// launcher with the call operator and pipes its stdout (empty) to Out-Host:
+// a piped GUI-subsystem launcher is awaited on the handle Process.Start
+// returned, and $LASTEXITCODE is its status. The launcher keeps the agent's
+// stdin and stderr. Continue keeps a host that turns native stderr into
+// error records from ending the script with 1.
 // The arguments are fixed tokens without spaces or quotes. Kiro is not part
 // of any enterprise profile on Windows, so only per-user setup writes this.
 func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
@@ -460,8 +465,8 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " +
-			powershellQuoteLiteral(hookBinary) + " -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode }",
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," + powershellQuoteLiteral(arguments) + ")",
 		"$hookStart.UseShellExecute=$false",
 		"$hookStart.RedirectStandardError=$true",

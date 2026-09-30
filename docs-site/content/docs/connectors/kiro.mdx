@@ -79,7 +79,9 @@ on stderr for a block. Commands written by earlier builds used `Start-Process
 -Wait`, which could report a hook that exited at once as 1; run `defenseclaw
 setup kiro` again to replace them. Constrained Language mode (WDAC or
 AppLocker script enforcement) does not allow the `Process.Start` calls, so in
-that mode the script still uses `Start-Process -Wait`.
+that mode the script runs the binary with the call operator (`&`) and pipes its
+output to `Out-Host`, which makes PowerShell wait for it and keep its exit
+status.
 
 Kiro proceeds past any exit status other than 0 and 2, so a block has to reach
 Kiro as exit 2:

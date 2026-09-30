@@ -140,9 +140,10 @@ rest also reach per-user installs.
   exited came back as exit 1 ("the process has exited") instead of the block
   code 2, and Kiro went ahead. The command now starts the hook with .NET
   `Process.Start`, which keeps that handle. In Constrained Language mode,
-  which does not allow those calls, it still uses `Start-Process -Wait`. Run
-  `defenseclaw setup kiro` again to replace the older command. Other
-  connectors are unchanged.
+  which does not allow those calls, it runs the hook with the call operator
+  and pipes its output, so PowerShell waits on the handle it started the
+  hook with. Run `defenseclaw setup kiro` again to replace the older
+  command. Other connectors are unchanged.
 - **Uninstall removes the empty OpenCode folders DefenseClaw created.** The
   gateway's install watcher creates missing `plugin`, `skill` and `skills`
   folders under `~/.config/opencode`, and a per-user uninstall left them
