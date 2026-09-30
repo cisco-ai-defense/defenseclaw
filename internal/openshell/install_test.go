@@ -433,6 +433,88 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 	}
 }
 
+// xcodeApp makes an Xcode.app of version (none when empty) and returns its
+// path.
+func xcodeApp(t *testing.T, version string) string {
+	t.Helper()
+	app := filepath.Join(t.TempDir(), "Xcode.app")
+	if err := os.MkdirAll(filepath.Join(app, "Contents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if version != "" {
+		plist := "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>BuildVersion</key>\n\t<string>2</string>\n" +
+			"\t<key>CFBundleShortVersionString</key>\n\t<string>" + version + "</string>\n\t<key>CFBundleVersion</key>\n\t<string>24553</string>\n</dict>\n</plist>\n"
+		if err := os.WriteFile(filepath.Join(app, "Contents", "version.plist"), []byte(plist), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return app
+}
+
+// TestHomebrewFailureReportsTheDeveloperTools: Homebrew refused NVIDIA's
+// formula on a Mac with "Your Xcode (26.2) at /Applications/Xcode.app is too
+// outdated. Please update to Xcode 27.0 (or delete it).", while
+// xcode-select selected the Command Line Tools 27.0, which were current.
+// The failure carries what Homebrew checked, from sw_vers, xcode-select,
+// pkgutil and Xcode.app's version.plist, so setup can say that the fix is
+// that Xcode.app, not the Command Line Tools.
+func TestHomebrewFailureReportsTheDeveloperTools(t *testing.T) {
+	const clt = "/Library/Developer/CommandLineTools"
+	for _, tc := range []struct {
+		name, selected, cltVersion, xcode string
+		noXcode, outdated                 bool
+	}{
+		{name: "current tools, old Xcode.app", selected: clt, cltVersion: "27.0.0.0.1.1788430756", xcode: "26.2", outdated: true},
+		{name: "Xcode.app current", selected: clt, cltVersion: "27.0.0.0.1.1788430756", xcode: "27.0"},
+		{name: "tools old too", selected: clt, cltVersion: "26.2.0.0.1.1764812424", xcode: "26.2"},
+		{name: "Xcode.app selected", selected: "/Applications/Xcode.app/Contents/Developer", cltVersion: "27.0.0.0.1.1788430756", xcode: "26.2"},
+		{name: "no Xcode.app", selected: clt, cltVersion: "27.0.0.0.1.1788430756", noXcode: true},
+		{name: "Xcode.app version unknown", selected: clt, cltVersion: "27.0.0.0.1.1788430756"},
+		{name: "no tools", xcode: "26.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f.inst.GOOS = "darwin"
+			f.inst.XcodeApp = xcodeApp(t, tc.xcode)
+			if tc.noXcode {
+				f.inst.XcodeApp = filepath.Join(t.TempDir(), "Xcode.app")
+			}
+			f.runner.On("/bin/sh", "", errors.New("exit status 1"))
+			f.runner.On("sw_vers -productVersion", "27.0\n", nil)
+			if tc.selected != "" {
+				f.runner.On("xcode-select -p", tc.selected+"\n", nil)
+			} else {
+				f.runner.On("xcode-select -p", "xcode-select: error: unable to get active developer directory\n", errors.New("exit status 2"))
+			}
+			if tc.cltVersion != "" {
+				f.runner.On("pkgutil --pkg-info=com.apple.pkg.CLTools_Executables",
+					"package-id: com.apple.pkg.CLTools_Executables\nversion: "+tc.cltVersion+"\nvolume: /\nlocation: /\ninstall-time: 1790090818\n", nil)
+			}
+			_, err := f.inst.Install(context.Background())
+			var hb *openshell.HomebrewInstallError
+			if !errors.Is(err, openshell.ErrHomebrewInstall) || !errors.As(err, &hb) || hb.Tools == nil ||
+				err.Error() != "openshell: Homebrew could not install the nvidia/openshell formula (exit status 1)" {
+				t.Fatalf("Install = %v", err)
+			}
+			d := hb.Tools
+			if d.MacOS != "27.0" || d.Selected != tc.selected || d.CLT != tc.cltVersion || d.Xcode != tc.xcode || (d.XcodeApp == "") != tc.noXcode {
+				t.Fatalf("developer tools = %+v", d)
+			}
+			if d.OutdatedXcodeApp() != tc.outdated {
+				t.Fatalf("OutdatedXcodeApp = %t for %+v", !tc.outdated, d)
+			}
+			for _, c := range f.runner.Calls() {
+				if c.Name == "brew" || (c.Name == "xcode-select" && len(c.Args) != 1) {
+					t.Fatalf("ran %v", c)
+				}
+			}
+		})
+	}
+	if v := openshell.ShortVersion("27.0.0.0.1.1788430756"); v != "27.0" {
+		t.Fatalf("ShortVersion = %q", v)
+	}
+}
+
 // TestInstallPlanOnMacOSSaysWhatItChanges: on a Mac NVIDIA's script
 // updated Homebrew itself (Homebrew's auto-update: 7.0.7-12 to 7.0.7-38,
 // with homebrew/core and homebrew/cask), wrote the release's openshell.rb

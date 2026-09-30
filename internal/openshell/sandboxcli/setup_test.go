@@ -332,6 +332,42 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	has(t, ta.output(), "✗ install OpenShell: Homebrew could not install the nvidia/openshell formula\n",
 		"Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants",
 		"then run `defenseclaw sandbox setup` again", "docs/setup/sandbox/#troubleshooting")
+
+	// "Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please
+	// update to Xcode 27.0 (or delete it).", with the Command Line Tools
+	// 27.0 selected: the hint named "Xcode or the Command Line Tools", and
+	// a user could have updated the current ones. It names that Xcode.app.
+	tools := func(clt, xcode string) *openshell.DeveloperTools {
+		return &openshell.DeveloperTools{MacOS: "27.0", Selected: "/Library/Developer/CommandLineTools", CLT: clt, XcodeApp: "/Applications/Xcode.app", Xcode: xcode}
+	}
+	for _, tc := range []struct {
+		tools *openshell.DeveloperTools
+		hint  string
+	}{
+		{tools("27.0.0.0.1.1788430756", "26.2"), "→ Homebrew says why above. The Command Line Tools 27.0, which xcode-select selects, are current for macOS 27.0, " +
+			"but Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so: update that Xcode (from the App Store) or delete it, as Homebrew says; " +
+			"updating the Command Line Tools does not help. Then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
+		{tools("26.2.0.0.1.1764812424", "26.2"), "→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
+			"Update them as it says, then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
+	} {
+		ta := setupApp(t, "", "", false)
+		ta.GOOS = "darwin"
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+			r.CLIVersion = ""
+			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+		})
+		inst := &fakeInstaller{err: &openshell.HomebrewInstallError{Err: errors.New("/bin/sh: exit status 1"), Tools: tc.tools}}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+		var silent *Silent
+		if !errors.As(err, &silent) || !errors.Is(err, openshell.ErrHomebrewInstall) {
+			t.Fatalf("Setup = %v, want the Homebrew failure, already printed", err)
+		}
+		has(t, ta.output(), tc.hint)
+	}
 }
 
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo

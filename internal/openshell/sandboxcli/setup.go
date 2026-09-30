@@ -227,8 +227,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		res, err := inst.Install(ctx)
 		if errors.Is(err, openshell.ErrHomebrewInstall) {
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
-			a.note("→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
-				"Update them as it says, then run `" + CommandName + " setup` again (see " + setupTroubleshootingURL + ")")
+			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 		}
 		if err != nil {
@@ -515,6 +514,24 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
+}
+
+// homebrewInstallHint says what to update when Homebrew did not install
+// the nvidia/openshell formula. With current Command Line Tools selected,
+// what it refuses is an older /Applications/Xcode.app, which it checks
+// even so ("Your Xcode (26.2) at /Applications/Xcode.app is too outdated.
+// Please update to Xcode 27.0 (or delete it)."): updating the Command Line
+// Tools would not help.
+func homebrewInstallHint(err error) string {
+	again := "run `" + CommandName + " setup` again (see " + setupTroubleshootingURL + ")"
+	var hb *openshell.HomebrewInstallError
+	if !errors.As(err, &hb) || !hb.Tools.OutdatedXcodeApp() {
+		return "Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. Update them as it says, then " + again
+	}
+	t := hb.Tools
+	return fmt.Sprintf("Homebrew says why above. The Command Line Tools %s, which xcode-select selects, are current for macOS %s, "+
+		"but Homebrew checks Xcode %s at %s even so: update that Xcode (from the App Store) or delete it, as Homebrew says; "+
+		"updating the Command Line Tools does not help. Then %s", openshell.ShortVersion(t.CLT), t.MacOS, t.Xcode, t.XcodeApp, again)
 }
 
 // consentGatewayRestart decides whether setup restarts the OpenShell

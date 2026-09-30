@@ -214,6 +214,9 @@ type Installer struct {
 	// it knows): the plan says setup installs it next only when it is not
 	// there.
 	E2fsprogsDirs []string
+	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
+	// version a failed install on a Mac reports (HomebrewInstallError).
+	XcodeApp string
 }
 
 func (i *Installer) defaults() {
@@ -222,6 +225,9 @@ func (i *Installer) defaults() {
 	}
 	if i.E2fsprogsDirs == nil {
 		i.E2fsprogsDirs = e2fsprogsDirs
+	}
+	if i.XcodeApp == "" {
+		i.XcodeApp = XcodeApp
 	}
 	if i.HTTPClient == nil {
 		i.HTTPClient = netguard.SafeHTTPClient(2 * time.Minute)
@@ -368,8 +374,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an
-			// Xcode or Command Line Tools older than the newest release.
-			return nil, fmt.Errorf("%w (%w)", ErrHomebrewInstall, err)
+			// Xcode or Command Line Tools older than the newest release:
+			// the error says which are here.
+			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp)}
 		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}
