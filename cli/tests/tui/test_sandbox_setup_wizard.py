@@ -196,6 +196,23 @@ def test_either_action_clears_the_running_badge() -> None:
         assert model.wizard_status[SetupWizard.SANDBOX] == "done", args
 
 
+def test_a_cancelled_run_is_not_a_failure() -> None:
+    """A cancelled preview or run puts back the row's status, not "failed"."""
+    from defenseclaw.tui.panels.setup_center import status_cell, task_statuses
+
+    model = SetupPanelModel({}, os_name="linux")
+    model.wizard_status[SetupWizard.SANDBOX] = "running..."
+    model.mark_wizard_complete(("sandbox", "setup", "--non-interactive"), success=False, cancelled=True)
+    assert SetupWizard.SANDBOX not in model.wizard_status
+    assert status_cell(model, SetupWizard.SANDBOX, task_statuses(model)[SetupWizard.SANDBOX]) != "! last run failed"
+    _run_doctor(model)
+    before = model.wizard_status[SetupWizard.SANDBOX]
+    model.wizard_status[SetupWizard.SANDBOX] = "running..."
+    model._status_before_check[SetupWizard.SANDBOX] = before
+    model.mark_wizard_complete(("sandbox", "doctor"), success=False, cancelled=True)
+    assert model.wizard_status[SetupWizard.SANDBOX] == before
+
+
 def _run_doctor(model: SetupPanelModel, *, success: bool = True):
     model.open_goal_menu(SetupWizard.SANDBOX)
     model.form_fields = _set(model.form_fields, "Action", "doctor")

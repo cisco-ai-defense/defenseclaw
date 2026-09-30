@@ -1489,7 +1489,7 @@ class SandboxesPanelModel:
         if state == "unreachable":
             return f"The DefenseClaw daemon is not answering: {self.error}"
         if state == "off":
-            return "Sandboxes are off. Run the Sandbox wizard (0 Setup, slot 13) or: defenseclaw sandbox setup"
+            return "Sandboxes are off. Set them up in Setup (0) → Sandboxes (OpenShell), or run: defenseclaw sandbox setup"
         if state == "unavailable":
             reason = self.status.reason or "the daemon is not connected to OpenShell"
             return f"Sandboxes are unavailable: {reason}. Check: defenseclaw sandbox doctor"

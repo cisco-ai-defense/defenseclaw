@@ -1443,8 +1443,11 @@ class SetupPanelModel:
         masked = mask_wizard_secret_values(self.form_fields, args)
         return "defenseclaw " + display_argv(masked) if masked else "defenseclaw"
 
-    def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
+    def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True, cancelled: bool = False) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
+
+        ``cancelled`` (the preview or the run was cancelled) puts back the
+        status the row had before, rather than "failed".
 
         Maps the executed argv back to the matching wizard so the Setup
         panel reflects the real state instead of a permanently-spinning
@@ -1498,6 +1501,14 @@ class SetupPanelModel:
         if len(running) == 1 and running[0][1] > best_len:
             best = running[0][0]
         if best is None:
+            return
+        if cancelled:
+            before = self._status_before_check.pop(best, "")
+            if before and before != "running...":
+                self.wizard_status[best] = before
+            else:
+                self.wizard_status.pop(best, None)
+            self._wizard_run_started.pop(best, None)
             return
         if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
             # Only a check: the wizard's setup status stays what it was.

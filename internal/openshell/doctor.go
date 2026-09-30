@@ -1606,6 +1606,10 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 	envOnly := *st
 	envOnly.TOMLModTime = time.Time{}
 	switch {
+	case r.GOOS == "darwin" && r.report.GatewayUnmanaged():
+		// No Homebrew service: whoever starts the gateway gives it its
+		// environment.
+		tele.Status, tele.Detail = StatusSkip, "DefenseClaw changes it on Linux only; the gateway reads "+EnvTelemetryEnabled+" from the environment it was started with"
 	case r.GOOS == "darwin":
 		// The Homebrew service's wrapper sources gateway.env before it
 		// starts the gateway, but launchd cannot be asked which one, so

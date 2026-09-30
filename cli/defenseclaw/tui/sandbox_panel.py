@@ -1176,7 +1176,7 @@ class SandboxPanelMixin:
         setup_model = getattr(self, "setup_model", None)
         if not confirmed:
             if setup_model is not None:
-                setup_model.mark_wizard_complete(args, success=False)
+                setup_model.mark_wizard_complete(args, success=False, cancelled=True)
             self._set_status("Command cancelled.")  # type: ignore[attr-defined]
             self._render_chrome()  # type: ignore[attr-defined]
             return
