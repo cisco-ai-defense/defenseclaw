@@ -215,11 +215,18 @@ What setup does, in order:
    runs. An early 0.0.x runtime cannot be upgraded in place, so setup first
    asks whether you backed it up and cleaned it up (see
    [legacy cleanup](#legacy-sandbox-cleanup)). On a Mac it installs the
-   `nvidia/openshell` Homebrew formula, then, with the same consent (asked,
-   or `--install-openshell` or `--yes`; `--non-interactive` alone installs
-   nothing), `e2fsprogs` when it is missing, and it re-runs the formula's
-   post-install step (`brew postinstall nvidia/openshell/openshell`) when
-   the MicroVM driver is not signed for Apple's Hypervisor.
+   `nvidia/openshell` Homebrew formula, without `sudo`; the plan also lists
+   what else NVIDIA's script changes: Homebrew may update itself and its
+   taps first (its auto-update, which `HOMEBREW_NO_AUTO_UPDATE=1` skips),
+   the release's `openshell.rb` replaces `Formula/openshell.rb` in the
+   `nvidia/openshell` tap, and the gateway is registered as `openshell` in
+   `~/.config/openshell`, replacing a registration of that name (the plan
+   notes `e2fsprogs` only when it is missing). Then, with the same consent
+   (asked, or `--install-openshell` or `--yes`; `--non-interactive` alone
+   installs nothing), it installs `e2fsprogs` when it is missing, and it
+   re-runs the formula's post-install step
+   (`brew postinstall nvidia/openshell/openshell`) when the MicroVM driver
+   is not signed for Apple's Hypervisor.
 3. **Enables project-folder mounts** on your local OpenShell gateway, on
    Linux. This edits `gateway.toml` with a timestamped backup and restarts
    the gateway. It lets whoever can call your local gateway (only you, over

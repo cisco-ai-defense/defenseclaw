@@ -114,6 +114,10 @@ type InstallPlan struct {
 	Notes           []string
 	// GOOS is the platform the plan was made for.
 	GOOS string
+	// ConfigDir is the OpenShell configuration directory the script
+	// registers the gateway in, as the plan shows it (~ for the home
+	// directory).
+	ConfigDir string
 }
 
 // String renders the plan for the operator.
@@ -127,8 +131,14 @@ func (p *InstallPlan) String() string {
 	fmt.Fprintf(tw, "  Saved at\t%s\n", p.ScriptPath)
 	fmt.Fprintf(tw, "  Command\t%s\n", strings.Join(append(append([]string{}, p.Env...), p.Command...), " "))
 	if p.GOOS == "darwin" {
-		fmt.Fprintf(tw, "  Privileges\tthe script installs the nvidia/openshell Homebrew formula and starts\n")
-		fmt.Fprintf(tw, "  \tthe gateway with brew services\n")
+		// What NVIDIA's script changes besides the formula: Homebrew's own
+		// auto-update runs before its install, the script writes the
+		// release's formula into the tap, and it registers the gateway.
+		fmt.Fprintf(tw, "  Privileges\tnone: the script runs Homebrew as you, without sudo\n")
+		fmt.Fprintf(tw, "  Changes\tHomebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)\n")
+		fmt.Fprintf(tw, "  \tthe release's openshell.rb replaces Formula/openshell.rb in the nvidia/openshell tap (created if missing)\n")
+		fmt.Fprintf(tw, "  \tthe script installs the nvidia/openshell/openshell formula and starts the gateway with brew services\n")
+		fmt.Fprintf(tw, "  \tit registers that gateway as %q in %s, replacing a registration of that name\n", DefaultGatewayName, p.ConfigDir)
 	} else {
 		fmt.Fprintf(tw, "  Privileges\tthe script uses sudo to install the openshell package, then enables and\n")
 		fmt.Fprintf(tw, "  \tstarts the openshell-gateway user service (systemd --user)\n")
@@ -277,7 +287,7 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		return nil, fmt.Errorf("openshell: installer URL must be https, got %q", i.URL)
 	}
 	existing := i.findExisting(ctx)
-	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS}
+	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS, ConfigDir: i.configDir()}
 	if existing != nil && existing.Version != (Version{}) {
 		v := existing.Version
 		if err := CheckSupported(v); err == nil {
@@ -390,6 +400,25 @@ func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 func (i *Installer) ResignVMDriver(ctx context.Context) error {
 	i.defaults()
 	return brew(ctx, i.Runner, "postinstall", GatewayFormula)
+}
+
+// configDir is the OpenShell configuration directory the gateway is
+// registered in (Discover.ConfigDir, else UserConfigDir), with the home
+// directory as ~.
+func (i *Installer) configDir() string {
+	dir := i.Discover.ConfigDir
+	if dir == "" {
+		var err error
+		if dir, err = UserConfigDir(); err != nil {
+			return "~/.config/openshell"
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		if rel, err := filepath.Rel(home, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.Join("~", rel)
+		}
+	}
+	return dir
 }
 
 func existingVersion(e *ExistingInstall) string {

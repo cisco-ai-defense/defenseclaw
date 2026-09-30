@@ -433,6 +433,46 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 	}
 }
 
+// TestInstallPlanOnMacOSSaysWhatItChanges: on a Mac NVIDIA's script
+// updated Homebrew itself (Homebrew's auto-update: 7.0.7-12 to 7.0.7-38,
+// with homebrew/core and homebrew/cask), wrote the release's openshell.rb
+// over the tap's Formula/openshell.rb, and registered the "openshell"
+// gateway in ~/.config/openshell, none of which the plan said. It says so
+// now, and that no sudo is used.
+func TestInstallPlanOnMacOSSaysWhatItChanges(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS = "darwin"
+	res, err := f.inst.Install(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := f.out.String()
+	for _, want := range []string{
+		"  Privileges  none: the script runs Homebrew as you, without sudo\n",
+		"  Changes     Homebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)\n",
+		"              the release's openshell.rb replaces Formula/openshell.rb in the nvidia/openshell tap (created if missing)\n",
+		"              the script installs the nvidia/openshell/openshell formula and starts the gateway with brew services\n",
+		"              it registers that gateway as \"openshell\" in ~/.config/openshell, replacing a registration of that name\n",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("plan lacks %q:\n%s", want, plan)
+		}
+	}
+	if res.Plan.ConfigDir != filepath.Join("~", ".config", "openshell") {
+		t.Fatalf("plan config dir = %q", res.Plan.ConfigDir)
+	}
+	// Linux's plan is the package's.
+	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	if _, err := f.inst.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if plan := f.out.String(); strings.Contains(plan, "Homebrew") || !strings.Contains(plan, "the script uses sudo to install the openshell package") {
+		t.Fatalf("linux plan:\n%s", plan)
+	}
+}
+
 // TestInstallerPreparesTheMicroVMDriver: on a Mac the MicroVM driver needs
 // e2fsprogs and a Hypervisor signature, which the installer gets from
 // Homebrew once the user agreed; a failure says what Homebrew said.
