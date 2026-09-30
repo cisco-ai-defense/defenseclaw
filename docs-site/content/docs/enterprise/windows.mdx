@@ -330,7 +330,10 @@ can read it. Each run that writes an event registers the log and resets its
 access. A
 successful uninstall unregisters it, so the uninstall event (110) goes only
 to the Application log; forward the `DefenseClaw` log to your SIEM if you
-need its entries after uninstall.
+need its entries after uninstall. Unregistering does not delete the entries:
+Windows keeps `%WINDIR%\System32\winevt\Logs\DefenseClaw.evtx` (the Event
+Log service holds it open until it restarts), and a later install that
+registers the log again shows the old entries with the new ones.
 
 Any account can write Application-log entries under any source name,
 including `DefenseClaw Enterprise`, so the Application-log copies are

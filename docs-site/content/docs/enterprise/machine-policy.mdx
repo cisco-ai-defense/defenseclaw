@@ -145,10 +145,12 @@ it. OpenCode itself can still start without it: see
   (Windows) restores it.
 - On Windows, OpenCode's runtime opens every module with the
   write-attributes right, so the plugin grants that right to Users. With it a
-  standard account can mark the plugin read-only or set a reparse point on
-  it, which stops every account's OpenCode from loading it. The guardian
-  watches the plugin's folder and restores the plugin within about a second
-  of such a change, and logs it as a tamper in `hook-guardian.log`. After
+  standard account can set a reparse point on the plugin, which stops every
+  account's OpenCode from loading it. The guardian watches the plugin's
+  folder and restores the plugin within about a second of such a change, and
+  logs it as a tamper in `hook-guardian.log`. The same right lets a standard
+  account set the read-only or hidden attribute; OpenCode still loads the
+  plugin then, so the guardian leaves those attributes as they are. After
   12 restores in a minute it slows to one restore every 5 seconds, so
   repeated changes cannot keep the plugin unreadable until the next pass.
   The right is removed once OpenCode no longer needs it to load a plugin.
