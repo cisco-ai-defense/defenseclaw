@@ -1,0 +1,292 @@
+---
+title: Sandboxes on Linux
+description: Set up NVIDIA OpenShell sandboxes on Linux with Docker Engine, Landlock and the openshell-gateway systemd user service, check the machine with sandbox doctor, and run your first agent on a live project folder.
+keywords:
+  - DefenseClaw sandbox Linux
+  - OpenShell Linux
+  - openshell-gateway systemd
+  - Landlock
+  - Docker Engine sandbox
+  - sandbox doctor
+  - sandbox undo
+---
+
+On Linux, each sandbox is a container that OpenShell's Docker driver runs.
+Your project folder is mounted into it live, so you see the agent's edits in
+your editor as they happen, and a snapshot taken at the start of each session
+lets `defenseclaw sandbox undo` put the folder back.
+
+## How it fits together
+
+<Flow direction="TB" compact caption="A sandbox on Linux. The workload has no network of its own: hooks reach DefenseClaw's ingress and web traffic leaves through its egress proxy, both at host.openshell.internal. Model calls go straight out through OpenShell, which swaps the credential placeholder for the real key. The main API is never reachable from a sandbox.">
+  <Zone id="host" label="Your machine (your user)" tone="trusted">
+    <Node id="api" kind="gateway">{`DefenseClaw API\n:18970, not exposed`}</Node>
+    <Node id="ingress" kind="gateway">{`Hook ingress\n:18971`}</Node>
+    <Node id="egress" kind="gateway">{`Egress proxy\n:18972`}</Node>
+    <Node id="gw" kind="connector">{`OpenShell gateway\nsystemd user service`}</Node>
+    <Node id="proj" kind="datastore">{`~/code/myapp\nsnapshot for undo`}</Node>
+  </Zone>
+  <Zone id="box" label="Sandbox container (your uid)" tone="untrusted">
+    <Node id="sup" kind="policy">{`OpenShell supervisor\nLandlock · seccomp`}</Node>
+    <Node id="agent" kind="agent">{`Claude Code · Codex\nskip-permissions on`}</Node>
+  </Zone>
+  <Zone id="net" label="Internet" tone="external">
+    <Node id="llm" kind="generic">{`Model provider\napi.anthropic.com`}</Node>
+    <Node id="web" kind="generic">{`Allowed sites\nregistries, docs`}</Node>
+  </Zone>
+  <Edge from="api" to="gw" label="mTLS" />
+  <Edge from="gw" to="sup" label="creates, sets policy" />
+  <Edge from="proj" to="agent" label="bind mount /work/myapp" variant="bidirectional" />
+  <Edge from="agent" to="sup" label="every connection" />
+  <Edge from="sup" to="ingress" label="hooks" />
+  <Edge from="sup" to="egress" label="web" />
+  <Edge from="egress" to="web" label="allowed" />
+  <Edge from="sup" to="llm" label="real key added" />
+</Flow>
+
+What is mounted, and how:
+
+- **Your folder** appears at `/work/<folder>`, read-write. Secret files such
+  as `.env`, keys and certificates appear empty inside (`--unmask PATH`
+  shares one).
+- **Git internals** `.git/hooks`, `.git/config` and `.git/config.worktree`
+  are read-only, so the agent cannot plant a hook or setting that runs the
+  next time you use git. A new `.git` the agent creates inside the folder is
+  renamed out of the way while the sandbox runs.
+- **Nothing else** from your machine is in the sandbox.
+
+For an untrusted repository, `defenseclaw sandbox run claude --copy` works
+on a copy instead, as every run on a Mac does. See
+[work on a copy](/docs/setup/sandbox#work-on-a-copy).
+
+## Before you start
+
+| You need | Details |
+| --- | --- |
+| DefenseClaw | Installed and initialized (see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user, not root. |
+| Linux | amd64 or arm64. WSL2 is not supported. |
+| Kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. OpenShell refuses to start a sandbox without it. |
+| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. |
+| systemd | A user session with a systemd user manager. The OpenShell gateway runs as the `openshell-gateway` user service. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
+
+You don't need OpenShell installed first: setup offers to install it.
+
+Check the kernel yourself if you are not sure:
+
+```bash
+uname -r
+cat /sys/kernel/security/lsm
+```
+
+The second command should list `landlock`.
+
+So that the OpenShell gateway keeps running after you log out, turn on
+linger for your user. The doctor warns when it is off:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+## Set up
+
+<Steps>
+
+<Step>
+
+### Run setup
+
+```bash
+defenseclaw sandbox setup
+```
+
+Setup checks the machine, then asks before each change. A first run looks
+like this (the install plan and build lines are shortened):
+
+```text
+DefenseClaw sandbox setup
+  Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
+Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
+OpenShell install plan
+  Release     v0.1.1 (NVIDIA OpenShell upstream installer)
+  SHA-256     … (verified)
+  Privileges  the script uses sudo to install the openshell package, then enables and
+              starts the openshell-gateway user service (systemd --user)
+Run this plan? [y/N] y
+  ✓ OpenShell 0.1.1 installed, gateway running
+Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder) [Y/n]
+Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
+  OpenShell gateway configuration changes
+    edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)
+  …
+  ✓ gateway configured and restarted
+  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
+    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
+    Codex (codex)         model credential ~/.codex/auth.json ✓
+  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
+Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
+Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
+  Building the Claude Code image (the first build downloads about 3 GB)…
+  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-…-u1000, hooks verified (built in 6m10s)
+  …
+  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
+
+  ✓ Done →  cd <project> && defenseclaw sandbox run claude
+```
+
+</Step>
+
+<Step>
+
+### Understand what it changed
+
+- **OpenShell 0.1.1** is installed with NVIDIA's installer, whose script is
+  checked against a pinned SHA-256 before it runs. It uses `sudo` for the
+  package, then enables and starts the `openshell-gateway` user service.
+  DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2.
+- **The gateway** listens on `localhost:17670` with mTLS, so only you can
+  call it. Setup turns on project-folder mounts in
+  `~/.config/openshell/gateway.toml`, and turns OpenShell's anonymous usage
+  telemetry off in `gateway.env`, each with a timestamped backup, then
+  restarts the gateway once. Say no to mounts, or pass `--no-mounts`, and
+  every run works on a copy.
+- **DefenseClaw's config** gets `openshell.enabled: true` and the harnesses
+  you set up in `openshell.harnesses`.
+- **The harness images** are built in Docker, and each is checked to prove
+  that its hooks fire and block before it is used.
+
+Setup is safe to run again. When sandboxes are running, it asks before it
+restarts the shared gateway. `defenseclaw sandbox teardown` undoes it (see
+[tear down](/docs/setup/sandbox#tear-down-and-uninstall)).
+
+</Step>
+
+<Step>
+
+### Check the machine
+
+```bash
+defenseclaw sandbox doctor
+```
+
+{/* SCREENSHOT: terminal-doctor-linux.png — `defenseclaw sandbox doctor` on a Linux host after setup, ending with "✓ ready for sandboxes" */}
+
+```text
+  ✓ Platform                   linux/arm64
+  ✓ User                       alice (uid 1000)
+  ✓ Landlock                   ABI 6
+  ✓ Docker                     Docker 29.4.0 (Ubuntu 24.04 LTS)
+  ✓ Docker BuildKit            docker build uses BuildKit (buildx v0.30.1)
+  ✓ Docker host networking     Docker Engine shares the host network
+  - Docker file sharing        bind mounts come straight from the host filesystem
+  ✓ Disk space                 40.0 GiB free under /var/lib/docker
+  ✓ systemd linger             enabled for alice
+  ✓ Gateway service            openshell-gateway active (running)
+  ✓ OpenShell CLI              0.1.1 at /usr/bin/openshell
+  ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
+  ✓ Gateway registration       openshell at https://127.0.0.1:17670 (mtls)
+  ✓ Gateway mTLS files         private key is owner-only
+  ✓ Gateway                    0.1.1 healthy at https://127.0.0.1:17670
+  ✓ Gateway compute driver     docker
+  ✓ Global policy              none; sandbox policies apply
+  ✓ Project bind mounts        enabled for the docker driver
+  ✓ OpenShell telemetry        OpenShell usage telemetry is off
+  ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
+  ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.1 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ Sandbox hooks              no sandbox is running
+  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)
+  ✓ Organization policy        no openshell.admin constraints
+
+  ✓ ready for sandboxes
+```
+
+`✓` passed, `⚠` is a warning, `✗` failed and `-` was skipped, with the
+reason. Every warning and failure names its fix on the next line (`→ …`).
+`defenseclaw sandbox doctor --fix` applies the fixes that need only your
+user, such as starting the gateway or turning bind mounts on, after asking.
+The command exits 1 when a check fails.
+
+</Step>
+
+<Step>
+
+### Run your first agent
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+The banner shows what the sandbox can see before the harness takes over your
+terminal:
+
+```text
+Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
+  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
+  Protected .git/hooks .git/config .git/config.worktree (read-only)
+            Not visible: everything else on this machine
+  Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+```
+
+Continue with [your first session](/docs/sandboxes/first-session).
+
+</Step>
+
+</Steps>
+
+You can run the same setup from the TUI (`defenseclaw tui`, press `0` for
+Setup, then choose **Sandboxes (OpenShell)**). See
+[TUI and macOS app](/docs/sandboxes/apps#set-up-from-the-tui).
+
+## Keep or undo
+
+When a session on a mounted folder ends, DefenseClaw summarizes it, flags
+the changed files that can run code on your machine, and asks:
+
+```text
+Keep changes? [Y] keep  [u] undo everything  [d] show diff
+```
+
+Keeping makes the changes the base of the next session. Undo, now or later,
+restores the snapshot:
+
+```bash
+defenseclaw sandbox undo myapp-7f3a
+```
+
+In a git project undo puts back the working tree, HEAD, the branch, the
+staging area and the git files the agent could write. It first saves every
+tip the session created or moved, so an undo can be undone too. Files git
+ignores, such as `node_modules/` and `.venv/`, are not in the snapshot:
+undo names each one it cannot restore. See
+[undo the session](/docs/setup/sandbox#undo-the-session).
+
+## Only one live mount per folder
+
+`undo` and the review cover the whole folder, so only one sandbox at a time
+can mount a folder live. To run agents in parallel on the same project, give
+each its own copy:
+
+```bash
+defenseclaw sandbox run claude --copy --name fix-tests
+defenseclaw sandbox run codex --copy --name docs
+```
+
+## Common problems
+
+| You see | Do this |
+| --- | --- |
+| The **Landlock** check fails | Boot a kernel 6.2 or newer with `landlock` in its `lsm=` list. |
+| The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). |
+| The **Docker BuildKit** check fails | Install the `docker-buildx-plugin` package from Docker's repository. |
+| **systemd linger** warns | `sudo loginctl enable-linger $USER`, so the gateway keeps running after you log out. |
+| **Gateway service** fails with `openshell-gateway is inactive` | `defenseclaw sandbox doctor --fix` starts it. |
+| **Gateway service** says `openshell-gateway is not installed`, yet a gateway answers | OpenShell was installed another way than NVIDIA's installer. Setup uses that gateway as it runs, but DefenseClaw cannot restart it: after a gateway change, restart it yourself, the way you started it. The fix line names how to switch to the `openshell-gateway` user service. |
+| `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
+| `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
+
+The [troubleshooting table](/docs/setup/sandbox/troubleshooting) in the full
+guide covers the rest.
