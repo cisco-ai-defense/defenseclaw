@@ -31,7 +31,7 @@ entries under `observability.destinations`, so adding one never replaces another
 
 ## Local mode (`--logs`)
 
-The fastest path to a working Splunk demo. One command brings up Splunk Free 9.x in Docker, installs the bundled `defenseclaw_local_mode` app (with five dashboards), and points the gateway's HEC destination at it.
+The fastest path to a working Splunk demo. One command brings up Splunk in Docker under the Free license, installs the bundled `defenseclaw_local_mode` app, and points the gateway's HEC destination at it.
 
 ```bash
 defenseclaw setup splunk --logs --accept-splunk-license
@@ -53,7 +53,7 @@ What happens:
     **Destination wiring.** Writes a logs-capable `kind: splunk_hec` v8 destination pointing at `http://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`. The reviewed private-network opt-in applies only to this local destination.
   </Step>
   <Step>
-    **App install.** Copies `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode` into the container — five dashboards plus shared SPL macros.
+    **App install.** Copies `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode` into the container — its dashboards plus shared SPL macros.
   </Step>
 </Steps>
 
@@ -61,9 +61,22 @@ Open Splunk at [http://localhost:8000](http://localhost:8000). The bundled app
 shows up as **DefenseClaw (local mode)**. Generated HEC and bootstrap values are
 sensitive; do not reveal them in routine diagnostics or support output.
 
+| Flag | Purpose |
+| --- | --- |
+| `--index`, `--source`, `--sourcetype` | HEC index, source, and sourcetype. Local defaults are `defenseclaw_local`, `defenseclaw`, and `defenseclaw:json`. |
+| `--refresh-bundle` / `--no-refresh-bundle` | Refresh `~/.defenseclaw/splunk-bridge/` from the installed bundle before starting, keeping your secrets. On by default; a running stack is restarted. |
+| `--s3-export` | Also start the optional S3 exporter sidecar. Set the bucket with `--s3-bucket` (or `S3_BUCKET`), and optionally `--s3-prefix` and `--aws-region` (default `us-west-2`). |
+| `--show-credentials` | Print the generated HEC token and bootstrap secret. Use it only in a private terminal. |
+
 ### Bundled dashboards
 
-Five dashboards land under **Demo Dashboards** in the app navigation. They're the same ones you'd build by hand against a real production deployment, just pointed at the local index for a self-contained demo.
+The app opens on a home page and groups its views into four collections:
+
+- **Investigate:** audit and security, runs and sessions, queue and runtime health.
+- **Observe:** gateway health, gateway logs, model usage and cost.
+- **Demo Dashboards:** seven views, including the five shown below plus
+  **Agent Tokenomics Overview** and **AI Discovery Runtime Planes**.
+- **Operate:** alerts and saved searches, search and drill-down.
 
 #### Executive Agent Watch Overview
 
@@ -100,15 +113,12 @@ on connector events with a native ask surface.
 ![Splunk · Findings and HITL](/images/splunk/findings-and-hitl.png)
 
 <Callout type="info">
-The screenshots are captured from a live local Splunk seeded by
-the bundled HEC pipeline. They're committed in PR
-[#233](https://github.com/cisco-ai-defense/defenseclaw/pull/233)
-and PR [#236](https://github.com/cisco-ai-defense/defenseclaw/pull/236).
+The screenshots are from a local Splunk seeded by the bundled HEC pipeline.
 </Callout>
 
 ### What the dashboards query
 
-All five views read from a shared set of SPL macros under `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf`, scoped to `index=defenseclaw_local`. The macros normalize the gateway's JSON envelope so the dashboards don't have to repeat field extractions.
+The dashboards read from a shared set of SPL macros under `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf`, scoped to `index=defenseclaw_local`. The macros normalize the gateway's JSON envelope so the dashboards don't have to repeat field extractions.
 
 The v8 Splunk adapter wraps the already-selected, already-redacted canonical log
 projection and derives compatibility aliases only from those immutable bytes. A
@@ -155,7 +165,7 @@ defenseclaw setup splunk --enterprise \
 | `--hec-token` | HEC token. Reads `DEFENSECLAW_SPLUNK_HEC_TOKEN` if omitted. |
 | `--index` | Defaults to `defenseclaw`. Create it ahead of time. |
 | `--sourcetype` | Defaults to `_json`. Use `defenseclaw:json` if you've imported the bundled macros. |
-| `--app-name` | Pretty name shown in the gateway TUI as the destination label. |
+| `--source` | HEC source. Defaults to `defenseclaw`. |
 | `--skip-test` | Skip the live HEC probe (useful in air-gapped CI). |
 
 The CLI runs a one-shot probe by default — it sends a test event and confirms HEC returns 200 before persisting the config. If your HEC is behind a VPN, pass `--skip-test`.
@@ -177,7 +187,7 @@ LOOKUP-decision = decision_lookup decision
 EXTRACT-trace = trace_id="(?<trace_id>[0-9a-f]+)"
 ```
 
-We don't ship a transforms-only TA today; the local-mode app stays Splunk-Free-friendly so you can copy fields out as needed.
+DefenseClaw does not ship a separate Splunk add-on (TA). Copy the field settings you need from the local-mode app.
 
 ## Splunk Observability Cloud (`--o11y`)
 
@@ -187,14 +197,14 @@ For organizations standardised on Splunk O11y instead of Splunk Enterprise, the 
 defenseclaw setup splunk --o11y \
   --realm us1 \
   --access-token "$SPLUNK_ACCESS_TOKEN" \
-  --traces --metrics --logs
+  --traces --metrics --logs-export
 ```
 
 This writes an OTLP entry under `observability.destinations` (same pipeline as
 `setup local-observability`, pointed at `https://ingest.us1.signalfx.com`). With
 no explicit `send`/`routes`, general OTLP selects all logs, traces, metrics, and
 buckets, unredacted. Toggle individual signals with `--no-traces` /
-`--no-metrics` / `--no-logs` if your entitlement or data policy is narrower, and
+`--no-metrics` / `--no-logs-export` if your entitlement or data policy is narrower, and
 set a redaction profile when the realm must not receive full content.
 
 ## Disable
@@ -236,7 +246,7 @@ of the Splunk projection.
     Make sure your sourcetype is `_json` (auto-extract) or that you've installed the bundled macros / props.conf snippet above for `defenseclaw:json`.
   </Accordion>
   <Accordion title="O11y traces but no logs">
-    Splunk O11y log ingest is a separate entitlement. The exporter sends to the same OTLP endpoint but the realm may not accept logs — check with `--logs` toggled off if you only have traces/metrics.
+    Splunk O11y log ingest is a separate entitlement. The exporter sends to the same OTLP endpoint but the realm may not accept logs — rerun with `--no-logs-export` if you only have traces/metrics.
   </Accordion>
 </Accordions>
 

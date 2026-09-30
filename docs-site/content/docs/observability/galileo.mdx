@@ -226,11 +226,9 @@ defenseclaw setup observability add galileo \
 The inventory prints every v8 destination's kind, preset, enabled signal set,
 bucket coverage, and effective redaction profile.
 
-`test` uses an internal Go helper to resolve the gateway bearer and authenticate
-only to the loopback gateway API. The bearer is never placed in subprocess argv,
-helper stdout, or rendered output. The helper asks the running gateway to emit
-canonical agent/chat spans, flushes the real destination processor, and prints
-the trace ID only after the Galileo exporter records an OTLP acknowledgement.
+`test` asks the running gateway, over its loopback API, to emit a diagnostic
+trace through the real destination. It prints the trace ID only after Galileo
+acknowledges the export, and never prints the gateway token.
 This is an external write: each invocation creates one content-free, two-span
 diagnostic trace in the selected Galileo project and Log stream.
 
@@ -381,15 +379,6 @@ immediately during long-running turns. Correlation caches and content are
 bounded, duplicate completions are suppressed, and restart gaps use explicit
 unavailable-input placeholders.
 
-The one authoring source is `schemas/telemetry/v8/registry.yaml`. It generates
-the v8 telemetry schema/catalog, builders, fixtures, and the logical
-`galileo-rich-v2.json` compatibility profile. Git stores the reproducible
-runtime JSON as deterministic gzip under `schemas/telemetry/runtime/`; release
-staging restores the exact raw JSON resource names. Runtime contract tests
-compare real exports to those generated artifacts, including
-name, kind, attributes, events, links, scope, topology, and dropped-structure
-accounting.
-
 ### Read the routing and delivery funnel
 
 `defenseclaw.telemetry.destination.spans` counts every destination-profile
@@ -398,6 +387,15 @@ decision with `destination`, `outcome`, and `reason` attributes. For Galileo:
 ```text
 observed → eligible → attempted → delivered | rejected | failed
 ```
+
+| Outcome | Meaning |
+| --- | --- |
+| `observed` | The span reached the Galileo destination profile. |
+| `eligible` | The span matched an operation-specific schema. This is not remote success. |
+| `attempted` | The span was sent in an export request. |
+| `delivered` | The export batch was accepted. Counted per batch from OTLP responses, not per span. |
+| `rejected` | Galileo reported a partial-success rejection. |
+| `failed` | Authentication, transport, TLS, timeout, or another exporter error. |
 
 `eligible` means the operation-specific schema matched; it is not remote
 success. `collector_accepted` (and the compatibility `delivered` counter) is a
@@ -415,21 +413,8 @@ as a successful delivery or hidden as a policy drop.
 
 ## Upgrade from v7
 
-Run the ordinary upgrade command:
+Run `defenseclaw upgrade --yes`; it converts the v7 Galileo settings and keeps
+your project and Log stream. The v8 Galileo preset uses a 1-second batch delay
+unless your v7 config set one explicitly. See
+[Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
 
-```bash
-defenseclaw upgrade --yes
-```
-
-The required migration converts legacy `otel` and `audit_sinks` settings into
-the v8 `observability` graph, preserves Galileo project/logstream headers,
-endpoint, explicit batching, routing, signal selection, and effective
-redaction posture, and keeps every other destination. The v8 Galileo preset
-uses a deliberate 1-second batch delay; an explicit v7 value is preserved, and
-the upgrade summary discloses when the old inherited 5-second default becomes
-the preset value.
-
-No separate apply command is required. The v8 gateway is strict and does not
-rewrite v7 configuration on startup or operate both formats in parallel. A
-failed required conversion restores the backed-up source and does not start the
-v8 gateway against a v7 file.

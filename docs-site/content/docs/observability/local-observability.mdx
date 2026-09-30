@@ -9,7 +9,7 @@ keywords:
   - openclaw-observability-bridge
 ---
 
-`defenseclaw setup local-observability` brings up a full local OpenTelemetry stack and wires the gateway to it in one shot. It's what the project itself uses for development, demos, and rule-pack tuning.
+`defenseclaw setup local-observability` brings up a full local OpenTelemetry stack and wires the gateway to it in one shot.
 
 <Callout type="warning" title="Native Windows has a narrower optional-stack contract">
 Core DefenseClaw does not require Docker. The certified Windows local-stack
@@ -111,18 +111,23 @@ defenseclaw setup local-observability up \
 | `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
 | `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
 | `--password` / `--no-password` | Require the managed Grafana admin credential, or explicitly allow anonymous Admin access on the managed loopback bind. New stacks default to password; previously used anonymous stacks are grandfathered until you pass `--password`. |
-| `--refresh-config` / `--no-refresh-config` | Refresh bundled Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config by default; opt out to preserve local edits. |
+| `--refresh-bundle` / `--no-refresh-bundle` | Before starting, refresh `~/.defenseclaw/observability-stack/` from the installed bundle. On by default. |
+| `--refresh-config` / `--no-refresh-config` | When refreshing the bundle, refresh bundled Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config by default; opt out to preserve local edits. |
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
 | `--timeout` | Seconds to wait for healthchecks. Default 180. |
 
 The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. To use `http/protobuf`, configure that protocol on the named `local-observability` destination.
 
-<Callout title="V7 compatibility flag">
+<Accordions>
+
+<Accordion title="Upgrading from v7: --with-audit-sink">
 Older releases exposed `--with-audit-sink/--no-audit-sink` because logs and OTel
 signals used separate `audit_sinks` and `otel` blocks. Config v8 has one
 destination capable of logs, traces, and metrics, so new configuration does not
 need or write a second audit sink.
-</Callout>
+</Accordion>
+
+</Accordions>
 
 <Callout title="No-password mode is local trust, not authentication">
 `--no-password` gives every process on the workstation anonymous Grafana Admin
@@ -163,7 +168,7 @@ webhooks are left untouched.
 
 ## Bundled Grafana dashboards
 
-The bundle ships a full board set in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
+The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
 
 <Files>
   <Folder name="grafana/dashboards" defaultOpen>
@@ -181,6 +186,8 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
     <File name="defenseclaw-agent-identity.json" />
     <File name="defenseclaw-agent-360.json" />
     <File name="defenseclaw-ai-discovery.json" />
+    <File name="defenseclaw-ai-runtime.json" />
+    <File name="defenseclaw-blocked-events.json" />
   </Folder>
 </Files>
 
@@ -200,6 +207,8 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
 | **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
 | **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, initial and grouped follow-up prompts, descendants, per-agent model/tool-family summaries, updates, approvals, outcomes, inputs/outputs, reported tokens/cost, security decisions, and Tempo waterfall. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
+| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What actually ran, next to the AI Discovery inventory, with sensor coverage in the first row. See [runtime planes](/docs/ai-discovery/runtime-planes). |
+| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Blocked hook decisions in enforce and observe mode: verdicts, rule IDs, tool context, repeated signatures, and affected agents. |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
 for the owner and purpose of every board, the drill-down map, backend usage,
@@ -228,39 +237,9 @@ Agent360 correlates the same stable fields across all three backends:
 | `trace_id` | Direct pivot from a log/operation that actually reports W3C trace identity into the Tempo waterfall. Aggregate metrics do not fabricate trace IDs. |
 
 Use **Scope = This agent** for a single agent, or **Agent tree** to include
-all descendants. Prometheus supplies directory, state, throughput, latency,
-token, reported-cost totals, and directed phase aggregates. Loki supplies the
-prompt-to-outcome lifecycle DAG plus compact lifecycle/model/tool/network/security
-summaries with the full event available in log details. Session and durable
-lineage anchors may be recovered from the prior 24 hours so selected-range
-boundaries remain renderable; a recovered relationship edge is kept only when its
-child has graph-eligible activity in the selected range. Active typed `parent_of`
-and inverse `delegated_by` relationship records establish agent parentage; raw
-parent fields and trace topology do not. Repeated model work is
-grouped per owning agent, provider, and model. Repeated tools are grouped per
-owning agent as Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual,
-or Task control; an unrecognized tool keeps its reported name. Exact
-`collaboration.send_message` requests are excluded from generic Collaboration
-summaries so they appear only as message groups; other collaboration tools remain.
-Summary nodes show total requests and link to every exact raw canonical OTEL record,
-including their terminal counterparts. Stable agent nodes use agent/root/parent
-identity, name, type, depth, and connector; optional session fields stay in
-lifecycle/session/ordered/raw detail rather than splitting one agent's total. One
-per-root **Prompt inputs** node counts distinct depth-zero
-`model.request` facts, with replay-safe turn/model-request/request/operation/occurrence identity;
-**Session start** remains a separate lifecycle anchor. The ordered/raw views retain
-the individual initial and follow-up request records.
-For each sender, real collaboration updates to `/root` or `/root/*` collapse
-into one **Messages to root** node that resolves the exported root agent ID. Exact
-root task paths and calls remain in ordered/raw drill-downs; non-root targets
-remain exact groups without an invented target-agent mapping. Tempo
-supplies request-bounded waterfalls; it does not pretend an asynchronous lifetime
-is one trace. Select a row in **Operation
-and enforcement traces** to populate the waterfall. Token and cost panels only
-display values explicitly reported by the connector. Input tokens include the
-prompt/context usage reported by the provider and may be much larger than
-output for long-context agents. Missing values remain **Not reported** and are
-never estimated.
+all descendants. Select a row in **Operation and enforcement traces** to open
+its Tempo waterfall. Token and cost panels show only values the connector
+reports; missing values stay **Not reported** and are never estimated.
 
 The local stack performs no additional redaction, masking, or field hiding.
 DefenseClaw applies the selected v8 profile centrally before canonical OTEL export.
@@ -315,7 +294,9 @@ restore authoritative inspection before considering the incident resolved.
 defenseclaw setup local-observability down
 ```
 
-Stops all five containers and removes the Compose project. Dashboards and Grafana state live in named Docker volumes so they survive `down`/`up` cycles.
+Stops all five containers and removes the Compose project. Add
+`--disable-config` to also disable the `local-observability` destination in
+`config.yaml`. Dashboards and Grafana state live in named Docker volumes so they survive `down`/`up` cycles.
 
 To wipe everything including the volumes:
 
