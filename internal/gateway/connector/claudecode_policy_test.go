@@ -120,6 +120,14 @@ func TestClaudeManagedContractUsesWinningManagedSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render managed policy: %v", err)
 	}
+	// The shared drop-in must never turn WSL inheritance or Desktop session
+	// switches on: WSL sessions would load a Windows hook command that
+	// cannot start in Linux (#914).
+	for _, key := range []string{"wslInheritsWindowsSettings", "disableDesktopLocalSessions"} {
+		if strings.Contains(string(body), key) {
+			t.Fatalf("managed hook policy must not set %s:\n%s", key, body)
+		}
+	}
 	policyPath := filepath.Join(managedRoot, "managed-settings.d", "90-defenseclaw.json")
 	if err := os.MkdirAll(filepath.Dir(policyPath), 0o700); err != nil {
 		t.Fatal(err)

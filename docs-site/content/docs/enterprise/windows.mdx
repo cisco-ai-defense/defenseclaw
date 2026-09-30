@@ -705,15 +705,19 @@ makes Desktop ignore `HKCU\SOFTWARE\Policies\Claude` entirely, and a managed
 key other than Desktop's app-behavior keys makes Desktop ignore local
 third-party configuration in `%LOCALAPPDATA%\Claude-3p\configLibrary`. So by
 default DefenseClaw only joins machine policy that is already there. With an
-empty key it reports the gap and offers the value through
-`enterprise policy export --connector wsl` (`reg`, `json` or `intune`), so you
-can add it to the Claude Desktop policy you already deploy. With
-`claude_desktop_key: create` it writes the value to an empty key, but still
-not while a signed-in account has HKCU Claude Desktop policy or any account
-has local third-party configuration. It never writes the gate when the key
-grants write access to anyone other than Administrators, SYSTEM and
-TrustedInstaller. Uninstall removes only the values DefenseClaw wrote that
-are still unchanged.
+empty key, Claude Desktop's own default applies: it keeps WSL sessions off on
+devices it treats as organization-managed. The `wsl` row stays covered and
+shows a `pending` line with the step that makes the gate explicit: add the
+output of `enterprise policy export --connector wsl` (`reg`, `json` or
+`intune`) to the Claude Desktop policy you already deploy, or set
+`claude_desktop_key: create`. With `create` DefenseClaw writes the value to an
+empty key, but still not while a signed-in account has HKCU Claude Desktop
+policy or any account has local third-party configuration; then `verify`
+fails, because the requested gate is missing. It never writes the gate when
+the key grants write access to anyone other than Administrators, SYSTEM and
+TrustedInstaller, and `verify` fails, because a standard account could turn
+WSL sessions on. Uninstall removes only the values DefenseClaw wrote that are
+still unchanged.
 
 Limits:
 
@@ -725,8 +729,9 @@ Limits:
 - A Claude Desktop WSL session that is already running continues. Desktop
   checks the value at each WSL session start.
 - A user can turn the Codex extension setting back on. The window lasts until
-  the next guardian pass. Workspace settings (`.vscode/settings.json`) and
-  VS Code Remote - WSL windows are not checked.
+  the next guardian pass. The setting is window-scoped, so a trusted
+  workspace's `.vscode/settings.json` or `.code-workspace` file can also turn
+  it on; workspace settings and VS Code Remote - WSL windows are not checked.
 - Agent CLIs that a user runs inside the distribution, and editor or SSH
   sessions into it, are not covered. Only `platform: disable` (`AllowWSL=0`)
   closes WSL as a whole.
