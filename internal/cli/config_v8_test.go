@@ -209,6 +209,50 @@ func TestConfigV8ValidateEmitsValueSafeStructuredFailure(t *testing.T) {
 	}
 }
 
+// A value the schema refuses is reported at its field, with what the field
+// takes, before the runtime loader's own check of it (which reached the wire
+// only as "configuration could not be compiled safely" at "$", the #1019
+// retest), and still without the rejected value.
+func TestConfigV8ValidateNamesTheFieldAndWhatItTakes(t *testing.T) {
+	for _, c := range []struct {
+		source, value, path, want string
+	}{
+		{"openshell:\n  workdir: {undo_ignored: {enabled: true, max_mb: 2000000}}\n", "2000000",
+			"$.openshell.workdir.undo_ignored.max_mb", "expected a number between 0 and 1048576"},
+		{"openshell:\n  workdir: {undo_ignored: {max_mb: -5}}\n", "-5",
+			"$.openshell.workdir.undo_ignored.max_mb", "expected a number between 0 and 1048576"},
+		{"openshell:\n  llm: bogus\n", "bogus",
+			"$.openshell.llm", `expected one of ["auto","none","anthropic","claude-oauth","openai","bedrock","gemini"]`},
+	} {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "config.yaml")
+		if err := os.WriteFile(path, []byte("config_version: 8\ndata_dir: "+directory+"\n"+c.source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+		previousOutput := configV8ValidateCmd.OutOrStdout()
+		configV8ConfigPath, configV8DataDir = path, directory
+		output := &strings.Builder{}
+		configV8ValidateCmd.SetOut(output)
+		err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+		configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+		configV8ValidateCmd.SetOut(previousOutput)
+		if err == nil {
+			t.Fatalf("%s: config-v8 validate accepted it", c.path)
+		}
+		var failure configV8WireFailure
+		if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+			t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+		}
+		if failure.Path != c.path || !strings.Contains(failure.Reason, "config_schema_invalid") || !strings.Contains(failure.Reason, c.want) {
+			t.Fatalf("structured validation failure = %+v\nwant %s: %s", failure, c.path, c.want)
+		}
+		if strings.Contains(failure.Reason, c.value) {
+			t.Fatalf("the failure names the rejected value %s: %+v", c.value, failure)
+		}
+	}
+}
+
 func TestCompileConfigV8FileLoadsInstallationDotEnvForValidationOnly(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")

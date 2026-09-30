@@ -330,6 +330,24 @@ class TestOpenShellValidation(unittest.TestCase):
         )
         self.assertIsNone(openshell_error({"openshell": {"enabled": False, "ingress_port": 18972}}))
 
+    def test_schema_refusals_name_what_the_field_takes(self):
+        # The #1019 retest: max_mb 2000000 and llm "bogus" were refused
+        # without the range or the values, which Go's loader names. The
+        # message names the schema's own values, never the rejected one.
+        for source, path, want, value in (
+            ({"workdir": {"undo_ignored": {"enabled": True, "max_mb": 2000000}}},
+             "$.openshell.workdir.undo_ignored.max_mb", "use a number between 0 and 1048576", "2000000"),
+            ({"workdir": {"undo_ignored": {"max_mb": -5}}},
+             "$.openshell.workdir.undo_ignored.max_mb", "use a number between 0 and 1048576", "-5"),
+            ({"llm": "bogus"},
+             "$.openshell.llm", "use one of auto, none, anthropic, claude-oauth, openai, bedrock, gemini", "bogus"),
+        ):
+            with self.assertRaises(V8ConfigError) as caught:
+                load_validate_v8({"config_version": 8, "openshell": source})
+            self.assertEqual(caught.exception.path, path)
+            self.assertEqual(caught.exception.corrective_action, want)
+            self.assertNotIn(value, str(caught.exception))
+
 
 class TestPolicyConnectors(unittest.TestCase):
     def test_union_with_sandbox_harnesses(self):

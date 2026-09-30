@@ -631,6 +631,15 @@ deleted.
   Linux mount mode only: copy mode, every sandbox on a Mac included, has no
   undo point. In the Python config, the v8 schema, and the TUI and macOS app
   config editors; the TUI's undo preview names what it restores.
+- `defenseclaw config validate` names the field and what it takes for a
+  value the v8 schema refuses, such as `openshell.workdir.undo_ignored.max_mb`
+  (`expected a number between 0 and 1048576`) or `openshell.llm` (`expected
+  one of [...]`), as the Go loader does: the canonical validator ran its
+  runtime loader before the schema pass, so it only said "configuration
+  could not be compiled safely" at `$`. A refusal only that loader makes
+  (`openshell.binary`, an `openshell.egress` pattern) is placed by the
+  Python mirror of those checks. Messages still never contain the rejected
+  value.
 
 ### Legacy OpenShell standalone sandbox removed
 
