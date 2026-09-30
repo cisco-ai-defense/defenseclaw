@@ -194,6 +194,20 @@ def test_sandbox_rows_carry_what_the_panel_shows() -> None:
     assert decode_sandbox({"phase": "ready"}) is None
 
 
+def test_the_detail_says_kept_changes_get_a_new_undo_point() -> None:
+    """The daemon's accept (the user kept the last session's changes) is on the
+    snapshot: the next start takes a new undo point, whoever starts it."""
+    model = SandboxesPanelModel()
+    kept = {**STOPPED, "snapshot": {"kind": "git", "accepted_at": "2026-09-30T10:00:00Z"}}
+    model.set_snapshot(STATUS, [kept], [])
+    row = model.selected_sandbox()
+    assert row is not None and row.undo_available and row.undo_accepted
+    assert dict(model.detail_pairs()[1])["Undo"] == (
+        "available (U); the last session's changes were kept, so the next start takes a new undo point"
+    )
+    assert decode_sandbox(RUNNING).undo_accepted is False
+
+
 def test_snapshot_sorts_running_first_and_keeps_only_pending_asks() -> None:
     model = _model()
     assert [row.name for row in model.rows] == ["fix-tests", "myapp-claude-7f3a", "docs"]
@@ -1041,8 +1055,8 @@ async def test_undo_of_a_stopped_sandbox_previews_then_restores(fetch, monkeypat
 
 @pytest.mark.asyncio
 async def test_undo_of_a_running_sandbox_runs_the_command_line(fetch, monkeypatch) -> None:
-    """Undo stops the sandbox first; the command line checks for a detached
-    run (asks, keeps its log for `sandbox logs`) before it stops it."""
+    """Undo stops the sandbox first; the command line says what the stop ends
+    (a detached run too) and asks, and the daemon's stop keeps the run's log."""
     app = DefenseClawTUI(config=_config())
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)
@@ -1823,8 +1837,8 @@ def test_review_puts_warnings_and_findings_before_the_files() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_asks_first_then_runs_the_command_line(fetch, monkeypatch) -> None:
-    """The command line checks for a detached run the stop would end (asks,
-    marks it interrupted, keeps its log for `sandbox logs`)."""
+    """The command line asks while a detached run the stop would end is going;
+    the daemon's stop marks it interrupted and keeps its log for `sandbox logs`."""
     app = DefenseClawTUI(config=_config())
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)

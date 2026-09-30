@@ -453,6 +453,14 @@ struct SandboxModelTests {
         expect(copy.pullCommand == "defenseclaw sandbox pull docs", "pull command: \(copy.pullCommand)")
         expect(copy.pullToBranchArguments == ["sandbox", "pull", "docs", "--branch"], "pull to branch argv")
         let mounted = SandboxDecoding.sandbox(running)!
-        expect(!mounted.copyMode && mounted.undoOffered && mounted.undoLabel == "available", "a mounted row")
+        expect(!mounted.copyMode && mounted.undoOffered && mounted.undoLabel == "available" && !mounted.undoAccepted, "a mounted row")
+        // The user kept the last session's changes (the daemon's accept).
+        var keptRaw = running
+        var snapshot = keptRaw["snapshot"] as? [String: Any] ?? [:]
+        snapshot["accepted_at"] = "2026-09-30T10:00:00Z"
+        keptRaw["snapshot"] = snapshot
+        let kept = SandboxDecoding.sandbox(keptRaw)!
+        expect(kept.undoAccepted && kept.undoLabel.hasPrefix("available; the last session's changes were kept"),
+               "a row whose changes were kept: \(kept.undoLabel)")
     }
 }
