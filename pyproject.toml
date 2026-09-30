@@ -18,12 +18,12 @@ dependencies = [
     "cryptography>=50.0.0,<51",
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.31",
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
     "idna>=3.15",
     "pydantic-settings>=2.14.2",
     # CVE-2026-59881 and CVE-2026-69243/69244 are fixed by 3.14.3.
     "aiohttp>=3.14.3,<4",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.15.0",
     "starlette>=1.3.1,<1.4",
     "fastapi>=0.137.1,<0.138",
     # The scanner/TUI runtime is one dependency set. DefenseClaw uses the
@@ -217,7 +217,7 @@ override-dependencies = [
     "jsonschema>=4.26.0",
     # CVE-2026-40347/42561 fixed by 0.0.27; CVE-2026-53537..53540 fixed by 0.0.31.
     "python-multipart>=0.0.31",
-    "urllib3>=2.7.0",           # CVE-2026-44431, CVE-2026-44432 fixed in 2.7.0
+    "urllib3>=2.8.0",           # CVE-2026-44431/44432 fixed in 2.7.0; CVE-2026-97687..97689 in 2.8.0
     "idna>=3.15",               # CVE-2026-45409 fixed in 3.15
     "pydantic-settings>=2.14.2", # GHSA-4xgf-cpjx-pc3j fixed in 2.14.2
     # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
@@ -228,9 +228,10 @@ override-dependencies = [
     # LiteLLM's transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.14.3,<4",
     # pyjwt 2.13.0 fixes PYSEC-2026-175, PYSEC-2026-177, PYSEC-2026-178 and
-    # PYSEC-2026-179. Pulled in transitively; pin it forward so the audit
-    # stays clean.
-    "pyjwt>=2.13.0",
+    # PYSEC-2026-179; 2.14.0 fixes CVE-2026-101917 and CVE-2026-102265..102274;
+    # 2.15.0 fixes CVE-2026-101918. Pulled in transitively; pin it forward so
+    # the audit stays clean.
+    "pyjwt>=2.15.0",
     # PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr): Host-header validation
     # fixed in starlette 1.0.1. fastapi pins starlette<0.51 until
     # 0.130.0, so we also force fastapi forward to a release whose
