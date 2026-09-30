@@ -1171,6 +1171,11 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := validateOpenCodeWindowsSetupAdmission(opts); err != nil {
 			return err
 		}
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.patchOpenCodeProvider(opts); err != nil {
+				return fmt.Errorf("opencode provider config: %w", err)
+			}
+		}
 	}
 	if c.name == "hermes" {
 		configPath := c.configPath(opts)
@@ -2278,6 +2283,82 @@ func validateHermesWindowsConfigPath(configPath string) error {
 	if strings.TrimSpace(home) == "" || home == "." || !filepath.IsAbs(home) {
 		return errors.New("Hermes config home is not an absolute Windows path; no changes made")
 	}
+	return nil
+}
+
+// patchOpenCodeProvider writes the defenseclaw provider to opencode.json
+// and the gateway token to auth.json, enabling OpenCode to route LLM
+// traffic through the DefenseClaw proxy (same model_providers pattern
+// as the Codex connector and OpenRouter).
+func (c *hookOnlyConnector) patchOpenCodeProvider(opts SetupOpts) error {
+	configDir := homePath(".config", "opencode")
+	if envDir := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG_DIR")); envDir != "" {
+		if abs, err := filepath.Abs(envDir); err == nil {
+			configDir = abs
+		}
+	}
+	configPath := filepath.Join(configDir, "opencode.json")
+
+	cfg := map[string]interface{}{}
+	if raw, err := os.ReadFile(configPath); err == nil {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+
+	provider, _ := cfg["provider"].(map[string]interface{})
+	if provider == nil {
+		provider = map[string]interface{}{}
+	}
+	provider["defenseclaw"] = map[string]interface{}{
+		"api_url": "http://" + opts.ProxyAddr + "/c/opencode/v1",
+		"models": map[string]interface{}{
+			"default": map[string]interface{}{},
+		},
+	}
+	cfg["provider"] = provider
+	cfg["model"] = "defenseclaw/default"
+	cfg["$schema"] = "https://opencode.ai/config.json"
+
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return fmt.Errorf("create opencode config dir: %w", err)
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal opencode config: %w", err)
+	}
+	if err := os.WriteFile(configPath, append(out, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write opencode config: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[opencode] patched %s with defenseclaw provider\n", configPath)
+
+	gwToken := c.gatewayToken
+	if gwToken == "" {
+		return nil
+	}
+	dataDir := homePath(".local", "share", "opencode")
+	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
+		dataDir = filepath.Join(xdg, "opencode")
+	}
+	authPath := filepath.Join(dataDir, "auth.json")
+
+	auth := map[string]interface{}{}
+	if raw, err := os.ReadFile(authPath); err == nil {
+		_ = json.Unmarshal(raw, &auth)
+	}
+	auth["defenseclaw"] = map[string]interface{}{
+		"type": "api",
+		"key":  gwToken,
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("create opencode data dir: %w", err)
+	}
+	authOut, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal opencode auth: %w", err)
+	}
+	if err := os.WriteFile(authPath, append(authOut, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write opencode auth: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[opencode] wrote gateway token to %s\n", authPath)
 	return nil
 }
 
