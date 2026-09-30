@@ -67,6 +67,11 @@ type Status struct {
 	Running          int       `json:"running"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	// StartedAt is when the daemon's sandbox subsystem started. Nothing
+	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
+	// restart: they count from then, so a session that began earlier knows
+	// its counts cover only the time since.
+	StartedAt time.Time `json:"started_at,omitzero"`
 	// DaemonUID is the uid the daemon runs as (unset where there is none):
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.

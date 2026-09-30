@@ -80,6 +80,11 @@ type session struct {
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
 	before *sandboxapi.Sandbox
+	// daemonStarted is when the daemon the session ends with started
+	// (sandboxapi.Status.StartedAt; zero when it does not say): after the
+	// session's start, the daemon restarted during it, and its counters
+	// cover only the time since.
+	daemonStarted time.Time
 
 	// shell marks a `connect --shell` session: no harness, so no hooks to
 	// expect.
@@ -671,6 +676,9 @@ func (s *session) end(ctx context.Context) error {
 		return apiError(err)
 	}
 	a.println()
+	if st, err := s.api.Status(ctx); err == nil {
+		s.daemonStarted = st.StartedAt
+	}
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
@@ -1065,28 +1073,40 @@ const (
 // session announced blocked (its ✗ lines, which the summary repeats), or
 // the daemon's count of newly blocked ones when that is higher (a late
 // denial, or a flood the feed paced). A daemon restart during the session
-// starts its counters from zero: the session's then count from zero too.
+// starts its counters from zero (nothing keeps them): the session's then
+// count from zero too, and the line says they cover only the time since
+// the restart.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
 		before = &sandboxapi.Sandbox{}
 	}
 	hooksBefore, egressBefore := before.Hooks, before.Egress
-	restarted := false
-	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
-		hooksBefore, restarted = sandboxapi.HookCoverage{}, true
-	}
-	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
-		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
-		egressBefore = sandboxapi.EgressStats{}
+	// since qualifies the counts a daemon restart started again; sitesReset
+	// marks the egress counts among them.
+	since, sitesReset := "", false
+	switch {
+	case s.restartedDuring():
+		hooksBefore, egressBefore = sandboxapi.HookCoverage{}, sandboxapi.EgressStats{}
+		since, sitesReset = "since the daemon restarted at "+s.app.clock(s.daemonStarted), true
+	default:
+		// A daemon that does not say when it started: counters below the
+		// session's start mean it restarted.
+		if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
+			hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted"
+		}
+		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+			after.Egress.BlockedRequests < egressBefore.BlockedRequests {
+			egressBefore, sitesReset = sandboxapi.EgressStats{}, since != ""
+		}
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
 	s.hadTurn = calls > 0
 	parts := []string{"Session ended"}
 	tools := plural(max(calls, 0), "tool call", "tool calls")
-	if restarted {
-		tools += " since the daemon restarted"
+	if since != "" {
+		tools += " " + since
 	}
 	if blocked > 0 {
 		tools += fmt.Sprintf(" (%d blocked", blocked)
@@ -1102,7 +1122,11 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		parts = append(parts, plural(failed, "hook call", "hook calls")+" failed (blocked)")
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
-	parts = append(parts, plural(int64(max(sites, 0)), "new site contacted", "new sites contacted"))
+	contacted := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
+	if sitesReset {
+		contacted += " since then"
+	}
+	parts = append(parts, contacted)
 	s.noticeMu.Lock()
 	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
 	s.noticeMu.Unlock()
@@ -1121,6 +1145,15 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// restartedDuring reports that the daemon the session ended with started
+// after the session did: it restarted during the session, and nothing kept
+// its counters, so they cover only the time since (PR 1022 live retest N1:
+// "0 tool calls · 0 new sites contacted" after 7 tool calls and two
+// restarts, which left no counter below the session's start).
+func (s *session) restartedDuring() bool {
+	return !s.daemonStarted.IsZero() && !s.startedAt.IsZero() && s.daemonStarted.After(s.startedAt)
 }
 
 // blockedReason is a blocked tool call's reason as the summary names it:

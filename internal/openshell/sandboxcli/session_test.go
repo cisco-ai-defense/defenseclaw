@@ -555,7 +555,22 @@ func TestSessionSummary(t *testing.T) {
 					sb.Egress = sandboxapi.EgressStats{Destinations: 2}
 				})
 			}
-		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted"}, not: []string{"hooks are not reaching"}},
+		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
+		// PR 1022 live retest N1: the daemon restarted twice during the
+		// session, which left its counters at zero rather than below the
+		// session's start, and the summary read "0 tool calls · 0 new sites
+		// contacted" after 7 tool calls. Its start time says it restarted.
+		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls since the daemon restarted at " + time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04") +
+			" · 0 new sites contacted since then"}},
+		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
 		{name: "the harness failed before its hooks", opts: claude, exit: 1, setup: func(ta *testApp) {
 			noChanges(ta)
 			ta.term.hooks, ta.term.code = nil, 1

@@ -89,6 +89,11 @@ func TestStatusNamesTheDriver(t *testing.T) {
 		if err != nil || st.Gateway == nil || st.Gateway.Driver != string(driver) {
 			t.Fatalf("%s: status = %+v, %v", driver, st, err)
 		}
+		// When the counters started: a session that began before it knows
+		// its counts cover only the time since (PR 1022 live retest N1).
+		if st.StartedAt.IsZero() || !st.StartedAt.Equal(e.m.startedAt) {
+			t.Fatalf("%s: status started_at = %v, want the manager's start %v", driver, st.StartedAt, e.m.startedAt)
+		}
 		data, _ := json.Marshal(st)
 		if !strings.Contains(string(data), `"driver":"`+string(driver)+`"`) {
 			t.Fatalf("%s: status JSON = %s", driver, data)
