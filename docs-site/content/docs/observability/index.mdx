@@ -350,6 +350,18 @@ controlled separately by `guardrail.retain_judge_bodies`; the OPA
 `audit.retention_days` input is a distinct policy and does not configure this
 SQLite reaper.
 
+The same window also bounds AI discovery scan history in
+`<data_dir>/inventory.db`. When continuous discovery is enabled, the gateway
+prunes scans older than `retention_days` shortly after startup and then about
+once an hour, always keeping the most recent scan so the last-known inventory
+survives a long shutdown. A large backlog is removed in small batches over
+several passes. Unlike `audit.db`, `inventory.db` returns freed space to the
+filesystem: new files use incremental auto-vacuum, and a file created by an
+earlier release is compacted once after its backlog is pruned when enough free
+disk space is available. `retention_days: 0` keeps inventory history
+indefinitely as well. `defenseclaw doctor` warns
+(`doctor.state.inventory-storage-size`) when `inventory.db` reaches 1 GiB.
+
 ## Choose an operator view
 
 <Cards>

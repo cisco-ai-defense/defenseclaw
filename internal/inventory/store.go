@@ -51,6 +51,9 @@ import (
 //   - ai_components_v      view: dedup'd components rolled up across scans
 type InventoryStore struct {
 	db *sql.DB
+	// path is the database file; retention compaction checks the free
+	// space of its volume before rewriting the file.
+	path string
 	// closeOnce makes the documented idempotent Close contract explicit. A
 	// discovery service normally closes the store when Run exits, while a
 	// sidecar reload that rejects a prepared (never-run) service closes it from
@@ -96,7 +99,14 @@ func (s *InventoryStore) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 // per-setting rationale; the inventory DB benefits from the same
 // WAL + busy_timeout + synchronous=NORMAL + mmap configuration
 // because its writers (RecordScan transactions) can be lengthy.
-const inventoryPragmas = "?_pragma=journal_mode(WAL)" +
+//
+// auto_vacuum(INCREMENTAL) comes first: SQLite only honours it before
+// the first table exists, so a new database is created able to return
+// pages freed by retention pruning to the filesystem (see
+// CompactScanHistory). On an existing auto_vacuum=NONE database it is
+// a no-op until the one-time VACUUM that converts the file.
+const inventoryPragmas = "?_pragma=auto_vacuum(INCREMENTAL)" +
+	"&_pragma=journal_mode(WAL)" +
 	"&_pragma=busy_timeout(5000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=cache_size(-20000)" +
@@ -127,7 +137,7 @@ func NewInventoryStore(dbPath string) (*InventoryStore, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-	st := &InventoryStore{db: db}
+	st := &InventoryStore{db: db, path: dbPath}
 	if err := st.init(); err != nil {
 		st.Close() //nolint:errcheck
 		return nil, err
@@ -824,22 +834,6 @@ func (s *InventoryStore) ComponentHistory(ctx context.Context, ecosystem, name s
 		out = append(out, r)
 	}
 	return out, rows.Err()
-}
-
-// PruneScansBefore deletes ai_scans rows (and cascades to signals +
-// snapshots) older than `cutoff`. Returns the number of scans
-// removed. Caller should run on a periodic ticker; the discovery
-// service does this from `runRetentionSweepIfPossible`.
-func (s *InventoryStore) PruneScansBefore(ctx context.Context, cutoff time.Time) (int, error) {
-	if s == nil || s.db == nil {
-		return 0, nil
-	}
-	res, err := s.execDB(ctx, "inventory_prune", `DELETE FROM ai_scans WHERE scanned_at < ?`, cutoff.UTC())
-	if err != nil {
-		return 0, fmt.Errorf("inventory store: prune scans: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }
 
 // nullStringFromBytes converts a possibly-empty []byte into a
