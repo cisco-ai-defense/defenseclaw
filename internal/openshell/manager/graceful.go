@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -89,26 +90,7 @@ const flushTrap = "trap '/bin/sync && echo synced' EXIT\n"
 // nothing without a run. The run directory is the workload's: only
 // regular files are read, and only their first bytes.
 const endHarnessScript = `root=$1; ticks=$2; runs=$3; self=$$; pids=
-if [ -n "$runs" ] && { [ -e "$runs/latest.pid" ] || [ -e "$runs/latest.log" ]; }; then
-  run=interrupted; pid=; started=
-  [ -f "$runs/latest.pid" ] && pid=$(head -c 32 "$runs/latest.pid" 2>/dev/null | tr -d '\n')
-  case "$pid" in
-    ''|*[!0-9]*) ;;
-    *) if kill -0 "$pid" 2>/dev/null && { [ ! -r "/proc/$pid/cmdline" ] || tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q latest.exit; }; then
-         run=running
-       fi ;;
-  esac
-  if [ -f "$runs/latest.exit" ] && [ -s "$runs/latest.exit" ]; then
-    s=$(head -c 32 "$runs/latest.exit" 2>/dev/null | tr -dc 'A-Za-z0-9_.-')
-    [ "$s" = interrupted ] || { run=exited; echo "run_exit=$s"; }
-  elif [ -e "$runs/latest.pid" ]; then
-    { printf 'interrupted\n' > "$runs/latest.exit"; } 2>/dev/null
-  fi
-  [ -f "$runs/latest.started" ] && started=$(head -c 32 "$runs/latest.started" 2>/dev/null | tr -dc 0-9)
-  echo "run=$run"
-  echo "run_started=$started"
-fi
-for d in /proc/[0-9]*; do
+` + runScanScript + `for d in /proc/[0-9]*; do
   p=${d#/proc/}
   [ "$p" = "$self" ] && continue
   exe=$(readlink "$d/exe" 2>/dev/null) || exe=
@@ -130,6 +112,37 @@ while [ "$i" -lt "$ticks" ]; do
   i=$((i+1))
 done
 echo running`
+
+// runScanScript is endHarnessScript's look at the latest detached run in
+// the run directory $runs.
+const runScanScript = `if [ -n "$runs" ] && { [ -e "$runs/latest.pid" ] || [ -e "$runs/latest.log" ]; }; then
+  run=interrupted; pid=; started=
+  [ -f "$runs/latest.pid" ] && pid=$(head -c 32 "$runs/latest.pid" 2>/dev/null | tr -d '\n')
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) if kill -0 "$pid" 2>/dev/null && { [ ! -r "/proc/$pid/cmdline" ] || tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q latest.exit; }; then
+         run=running
+       fi ;;
+  esac
+  if [ -f "$runs/latest.exit" ] && [ -s "$runs/latest.exit" ]; then
+    s=$(head -c 32 "$runs/latest.exit" 2>/dev/null | tr -dc 'A-Za-z0-9_.-')
+    [ "$s" = interrupted ] || { run=exited; echo "run_exit=$s"; }
+  elif [ -e "$runs/latest.pid" ]; then
+    { printf 'interrupted\n' > "$runs/latest.exit"; } 2>/dev/null
+  fi
+  [ -f "$runs/latest.started" ] && started=$(head -c 32 "$runs/latest.started" 2>/dev/null | tr -dc 0-9)
+  echo "run=$run"
+  echo "run_started=$started"
+fi
+`
+
+// runProbeScript is runScanScript on its own, run directory $1: a stop
+// whose endHarnessScript exec failed before it said how the run stood asks
+// again, so the run is still marked and its log kept.
+const runProbeScript = "runs=$1\n" + runScanScript
+
+// runProbeWait bounds runProbeScript.
+const runProbeWait = 10 * time.Second
 
 // harnessEnd is what endHarnessScript printed: how the harness ended
 // (none, exited or running), whether the flush trap ran, and the latest
@@ -170,8 +183,10 @@ func parseHarnessEnd(out []byte) harnessEnd {
 // stopped, so its end-of-session hook reaches DefenseClaw, and flushes the
 // sandbox's disk when the driver's stop would not. It returns the latest
 // detached run as it found it (State runNone: there is none, or the
-// sandbox did not answer), whose log the stop keeps next. Failures are
-// logged: the stop goes ahead either way.
+// sandbox did not answer), whose log the stop keeps next: from what the
+// script printed before an exec that failed (a slow flush cut short), or
+// else from a look at the run of its own (probeRun). Failures are logged:
+// the stop goes ahead either way.
 func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) detachedRun {
 	none := detachedRun{State: runNone}
 	m.mu.Lock()
@@ -196,16 +211,27 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) detachedR
 	execCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	ticks := int(harnessExitWait / (100 * time.Millisecond))
+	// What the script printed before a failure still counts: a flush that
+	// the exec's timeout cut short comes after the run's lines.
+	streamed := &headBuffer{limit: harnessEndOutput}
 	res, err := gw.Client.Exec(execCtx, name, []string{"/bin/sh", "-c", script, "defenseclaw-end-harness", spec.InstallRoot(),
-		strconv.Itoa(ticks), harness.RunDir}, openshell.ExecOptions{Timeout: timeout, Attempts: 1, MaxOutputBytes: 256})
+		strconv.Itoa(ticks), harness.RunDir}, openshell.ExecOptions{Timeout: timeout, Attempts: 1, MaxOutputBytes: harnessEndOutput, Stdout: streamed})
 	if err != nil {
 		m.logf("sandbox %s: ask the harness to exit before the stop: %v", name, err)
-		if flush {
+		end := parseHarnessEnd(streamed.Bytes())
+		run := end.Run
+		if end.Harness == "" && run.State == runNone {
+			// The script did not get as far as saying whether there is a
+			// run: ask on its own, so a run the stop ends is still marked
+			// and its log kept.
+			run = m.probeRun(ctx, gw, name)
+		}
+		if flush && !end.Synced {
 			// The flush matters more than the harness's goodbye: once more,
 			// on its own.
 			m.flushSandbox(ctx, gw, name)
 		}
-		return none
+		return run
 	}
 	end := parseHarnessEnd(res.Stdout)
 	if end.Harness == "running" {
@@ -216,6 +242,39 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) detachedR
 	}
 	return end.Run
 }
+
+// harnessEndOutput bounds what the exec of endHarnessScript keeps of its
+// output, a few short lines.
+const harnessEndOutput = 256
+
+// probeRun looks at a ready sandbox's latest detached run on its own
+// (runProbeScript), for a stop whose endHarnessScript exec failed first.
+func (m *Manager) probeRun(ctx context.Context, gw *Gateway, name string) detachedRun {
+	ctx, cancel := context.WithTimeout(ctx, runProbeWait+5*time.Second)
+	defer cancel()
+	res, err := gw.Client.Exec(ctx, name, []string{"/bin/sh", "-c", runProbeScript, "defenseclaw-run-probe", harness.RunDir},
+		openshell.ExecOptions{Timeout: runProbeWait, Attempts: 1, MaxOutputBytes: harnessEndOutput})
+	if err != nil {
+		m.logf("sandbox %s: look at its detached run before the stop: %v", name, err)
+		return detachedRun{State: runNone}
+	}
+	return parseHarnessEnd(res.Stdout).Run
+}
+
+// headBuffer keeps the first limit bytes written to it.
+type headBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *headBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); room > 0 {
+		b.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (b *headBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 // flushSandbox runs sync(1) in a ready sandbox before a stop its driver
 // does not flush, and reports a failure.

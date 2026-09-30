@@ -41,25 +41,31 @@ import (
 func runDirSandbox(t *testing.T, e *harnessEnv, runs string) {
 	t.Helper()
 	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		argv := slices.Clone(call.Command)
-		if len(argv) < 4 || argv[0] != "/bin/sh" || argv[1] != "-c" {
-			return openshelltest.ExecResponse{}
-		}
-		for i, a := range argv {
-			if a == harness.RunDir {
-				argv[i] = runs
-			}
-		}
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		out, err := cmd.Output()
-		code := 0
-		if exit, ok := err.(*exec.ExitError); ok {
-			code = exit.ExitCode()
-		} else if err != nil {
-			return openshelltest.ExecResponse{Err: err}
-		}
-		return openshelltest.ExecResponse{Stdout: out, ExitCode: code}
+		return runOnHost(ctx, call, runs)
 	})
+}
+
+// runOnHost runs one of the stop's in-sandbox scripts on this machine, as
+// runDirSandbox does.
+func runOnHost(ctx context.Context, call openshelltest.ExecCall, runs string) openshelltest.ExecResponse {
+	argv := slices.Clone(call.Command)
+	if len(argv) < 4 || argv[0] != "/bin/sh" || argv[1] != "-c" {
+		return openshelltest.ExecResponse{}
+	}
+	for i, a := range argv {
+		if a == harness.RunDir {
+			argv[i] = runs
+		}
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	out, err := cmd.Output()
+	code := 0
+	if exit, ok := err.(*exec.ExitError); ok {
+		code = exit.ExitCode()
+	} else if err != nil {
+		return openshelltest.ExecResponse{Err: err}
+	}
+	return openshelltest.ExecResponse{Stdout: out, ExitCode: code}
 }
 
 // detachedRunDir writes a detached run's files as `sandbox run --detach`
@@ -215,6 +221,49 @@ func TestStopSaysWhenARunsLogWasNotKept(t *testing.T) {
 	}
 	if _, err := e.m.RunLog(t.Context(), "lostbox", 0); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		t.Fatalf("run log = %v", err)
+	}
+}
+
+// A stop whose harness-end exec fails still keeps the log of the detached
+// run it ends: what the script printed before the failure (a slow flush the
+// exec's timeout cut short) counts, and without any of it a look at the run
+// of its own finds it.
+func TestStopKeepsTheRunLogWhenTheHarnessEndFails(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		printed bool
+	}{{"after the run's lines", true}, {"before any output", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			e := liveEnv(t, "slowbox", nil)
+			going := detachedRunDir(t, "working\n", "")
+			liveRunner(t, going)
+			e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+				if !slices.Contains(call.Command, "defenseclaw-end-harness") {
+					return runOnHost(ctx, call, going)
+				}
+				failed := openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
+				if c.printed {
+					failed.Stdout = runOnHost(ctx, call, going).Stdout
+				}
+				return failed
+			})
+			e.stopBox("slowbox")
+			if data, err := os.ReadFile(filepath.Join(going, "latest.exit")); err != nil || string(data) != "interrupted\n" {
+				t.Fatalf("latest.exit = %q, %v; want the run marked interrupted", data, err)
+			}
+			if log, err := e.m.RunLog(t.Context(), "slowbox", 0); err != nil || log.State != sandboxapi.RunInterrupted || log.Log != "working\n" {
+				t.Fatalf("run log = %+v, %v", log, err)
+			}
+			if n := len(e.events("slowbox", sandboxapi.ActivityLifecycle, "run_interrupted")); n != 1 {
+				t.Fatalf("%d run_interrupted events, want 1", n)
+			}
+			probes := slices.ContainsFunc(e.fake.ExecCalls(), func(call openshelltest.ExecCall) bool {
+				return slices.Contains(call.Command, "defenseclaw-run-probe")
+			})
+			if probes == c.printed {
+				t.Fatalf("probed the run on its own: %v", probes)
+			}
+		})
 	}
 }
 
