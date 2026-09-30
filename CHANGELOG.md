@@ -517,7 +517,10 @@ deleted.
   sandbox, `delete` of the stopped one no longer warns that it "may hold work
   … it was not checked". A later pull of a state that went to a branch or
   patch file counts as brought back too. Every driver, Linux `--copy`
-  included.
+  included. Its question no longer names an undo point a copy does not
+  have: `Delete sandbox fix-tests (its providers and credentials)?`, where
+  a mount-mode sandbox's still adds `unless --keep-snapshot, its undo
+  point`.
 - `sandbox pull --branch`, `--branch-name` and `--patch-out FILE` are checked
   before the sandbox is started: a branch that holds other work, a patch
   file that exists and a branch for a folder without git are refused before

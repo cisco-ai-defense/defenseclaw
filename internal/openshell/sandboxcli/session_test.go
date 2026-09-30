@@ -1518,8 +1518,10 @@ func TestDeleteKnowsTheSessionChangedNothing(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
 	has(t, ta.output(), "the sandbox changed nothing")
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}}))
-	has(t, ta.output(), "Delete sandbox copybox (its providers, credentials and, unless --keep-snapshot, its undo point)?")
-	lacks(t, ta.output(), "may hold work")
+	// A copy has no undo point to keep or delete (RT U8: the question
+	// named one, "unless --keep-snapshot, its undo point").
+	has(t, ta.output(), "Delete sandbox copybox (its providers and credentials)? ")
+	lacks(t, ta.output(), "may hold work", "undo point")
 	// Once it ran again, it is not known to be clean.
 	ta = newTestApp(t, "n\n")
 	sb := copySandbox("copybox")

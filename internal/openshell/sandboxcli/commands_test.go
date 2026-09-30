@@ -449,6 +449,8 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta.copy.pending = map[string]workspace.CopyWork{"live": workspace.CopyWorkUnpulled}
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"live"}}))
 	lacks(t, ta.output(), "never pulled")
+	// Its undo point goes with it unless kept; a copy has none to name.
+	has(t, ta.output(), "Delete sandbox live (its providers, credentials and, unless --keep-snapshot, its undo point)? [y/N]")
 	// Teardown lists it in its plan (a dry run changes nothing).
 	ta = newTestApp(t, "", copySandbox("fix-tests"))
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
