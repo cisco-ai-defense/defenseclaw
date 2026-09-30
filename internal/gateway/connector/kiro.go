@@ -707,12 +707,15 @@ func kiroBackupLogicalName(path string) string {
 //
 // Both surfaces must be registered for Kiro to be guarded: the v3 config that
 // Kiro IDE and `kiro-cli --v3` read, and the CLI 2.x agent config that bare
-// `kiro-cli` reads. Ownership uses kiroCommandOwned, the same argument-aware
-// predicate setup and teardown use, so the three agree by construction.
+// `kiro-cli` reads. The v3 file must hold every entry as Setup renders it
+// (kiroV3HooksCurrent), so the guardian repairs one that was turned off,
+// removed or pointed elsewhere; the CLI 2.x agent is checked the same way
+// (kiroV2AgentReferencesHook).
 func (c *KiroConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	command := c.hookCommand(opts)
+	v3Command := c.hookCommandForV3Surface(opts)
 	for _, path := range c.hookConfigPaths(opts) {
-		present, err := kiroV3FileReferencesHook(path, command)
+		present, err := kiroV3HooksCurrent(path, v3Command)
 		if err != nil {
 			return false, err
 		}

@@ -42,6 +42,10 @@ const (
 	// UnprotectedCodeAgentUnprotected: any other reason the agent could not
 	// be enrolled.
 	UnprotectedCodeAgentUnprotected = "agent_unprotected"
+	// UnprotectedCodeKiroIDEBelowGlobalHooksFloor: the user's Kiro IDE is
+	// older than KiroIDEGlobalHooksFloor and does not read the global hook
+	// file the guardian writes.
+	UnprotectedCodeKiroIDEBelowGlobalHooksFloor = "kiro_ide_below_global_hooks_floor"
 )
 
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
@@ -143,7 +147,8 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 		if strings.TrimSpace(agent.Connector) == "" || (strings.TrimSpace(agent.User) == "" && strings.TrimSpace(agent.SID) == "") {
 			continue
 		}
-		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified {
+		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified &&
+			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
 		if agent.Refusal != RefusalEnforced && agent.Refusal != RefusalMissing {

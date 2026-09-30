@@ -785,6 +785,33 @@ func TestKiroSetupProducesEffectiveHookRegistration(t *testing.T) {
 		t.Fatalf("after the timeout repair: present=%v err=%v", present, err)
 	}
 	assertKiroV2AgentHooks(t, agentPath, conn.hookCommand(opts))
+
+	// Kiro skips a hook with "enabled": false, and the Agent Hooks panel or
+	// the user can set it. A global file whose DefenseClaw entry is turned
+	// off fails the check, so the guardian repairs it.
+	hooksPath := conn.hookConfigPaths(opts)[0]
+	var hooksFile map[string]interface{}
+	if data, err := os.ReadFile(hooksPath); err != nil || json.Unmarshal(data, &hooksFile) != nil {
+		t.Fatalf("read hooks %s: %v", hooksPath, err)
+	}
+	for _, item := range hooksFile["hooks"].([]interface{}) {
+		if entry := item.(map[string]interface{}); entry["trigger"] == "PreToolUse" {
+			entry["enabled"] = false
+		}
+	}
+	disabled, _ := json.Marshal(hooksFile)
+	if err := os.WriteFile(hooksPath, disabled, 0o600); err != nil {
+		t.Fatalf("write disabled hooks: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("hooks with PreToolUse turned off: present=%v err=%v, want not present", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after the enabled repair: present=%v err=%v", present, err)
+	}
 }
 
 // containsHookScript is shared by every connector that stores hooks under
