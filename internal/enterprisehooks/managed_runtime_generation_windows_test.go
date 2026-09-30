@@ -243,6 +243,33 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if _, err := os.Lstat(first.BundlePath()); !os.IsNotExist(err) {
 		t.Fatalf("finalized prior bundle still exists: %v", err)
 	}
+	// A rollback restores the selector it captured even when that selector's
+	// bundle has since disappeared (a deleted account's profile): the entry
+	// stays unusable and resolution fails closed, and the restore does not
+	// leave the transaction pending.
+	thirdSelector, err := CaptureWindowsManagedRuntimeSelector("codex")
+	if err != nil || !thirdSelector.Existed {
+		t.Fatalf("capture outer complete selector: existed=%v err=%v", thirdSelector.Existed, err)
+	}
+	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+		WindowsManagedRuntimeSelectorFullRestoreOptions{
+			Snapshot:        oldSelector,
+			ExpectedCurrent: thirdSelector.CAS,
+		},
+	); err != nil {
+		t.Fatalf("restore selector whose bundle was removed: %v", err)
+	}
+	if _, err := ResolveWindowsManagedRuntimeGeneration(resolve); err == nil {
+		t.Fatal("selector with a removed bundle resolved instead of failing closed")
+	}
+	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+		WindowsManagedRuntimeSelectorFullRestoreOptions{
+			Snapshot:        thirdSelector,
+			ExpectedCurrent: oldSelector.CAS,
+		},
+	); err != nil {
+		t.Fatalf("restore outer complete selector: %v", err)
+	}
 
 	orphanDesired := thirdDesired
 	orphanDesired.GatewayAddr = "127.0.0.1:18973"
