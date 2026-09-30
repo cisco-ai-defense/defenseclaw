@@ -19,6 +19,8 @@ package sandboxapi
 import (
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -788,7 +790,8 @@ func LargeUploadReason(reason string) string {
 	if reason == "" {
 		return ""
 	}
-	return strings.ToLower(reason[:1]) + reason[1:]
+	r, n := utf8.DecodeRuneInString(reason)
+	return string(unicode.ToLower(r)) + reason[n:]
 }
 
 // ReasonNestedRepo is the Reason of the finding events the nested-repository

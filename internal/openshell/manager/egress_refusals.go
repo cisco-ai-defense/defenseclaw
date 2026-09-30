@@ -291,7 +291,10 @@ func refusalRemedy(h refusedHost, sandbox string, honored bool) string {
 		h.source == egress.SourceFeed || h.source == egress.SourceDefault ||
 			h.category == egress.CategoryLargeUpload || h.category == egress.CategoryIPLiteral:
 		// Unblockable in principle, but the organization turned unblocking
-		// off (openshell.admin.allow_unblock: false).
+		// off (openshell.admin.allow_unblock: false): the proxy marks these
+		// blocks not unblockable (Decision.Unblockable) only then, and
+		// honored is false then too, so either way the first case missed
+		// for that reason.
 		return "only the user's administrator can allow it"
 	}
 	return "only a DefenseClaw configuration change allows it"

@@ -50,3 +50,17 @@ func TestDisplayTexts(t *testing.T) {
 		t.Fatalf("DisplayTexts = %q (input %q)", got, in)
 	}
 }
+
+// The proxy's sentence becomes a clause by its first character, which may
+// be more than one byte.
+func TestLargeUploadReason(t *testing.T) {
+	for in, want := range map[string]string{
+		"This sandbox tried to send more than 25 MiB to a destination it had not contacted before.": "this sandbox tried to send more than 25 MiB to a destination it had not contacted before",
+		"Ésta sandbox intentó enviar más de 25 MiB.":                                                "ésta sandbox intentó enviar más de 25 MiB",
+		"  ": "",
+	} {
+		if got := LargeUploadReason(in); got != want {
+			t.Errorf("LargeUploadReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

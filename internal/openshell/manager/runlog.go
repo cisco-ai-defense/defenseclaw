@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -275,6 +276,13 @@ func (m *Manager) RunLog(_ context.Context, name string, lines int) (*sandboxapi
 	log, err := safefile.ReadRegularFileBounded(filepath.Join(dir, runLogFile), sandboxapi.MaxRunLogBytes+1)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "read the kept run log of %s: %v", name, err)
+	}
+	// A stop may have kept another run's log between the two reads
+	// (saveRunLog drops the metadata, writes the log, then the metadata):
+	// the metadata read again must be the same, or the log is not this
+	// run's.
+	if again, err := safefile.ReadRegularFileBounded(filepath.Join(dir, runLogMetaFile), 64<<10); err != nil || !bytes.Equal(again, data) {
+		return nil, notKept
 	}
 	if lines > 0 {
 		log = harness.LastLines(log, lines)
