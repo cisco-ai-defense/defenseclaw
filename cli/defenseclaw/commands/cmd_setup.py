@@ -155,6 +155,9 @@ _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 _SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS = 300.0
+# How long Setup waits for a running OpenCode to report that it loaded the
+# managed plugin before it accepts the plugin as current but not yet loaded.
+_OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -12777,7 +12780,7 @@ def _restart_services(
             if value
         )
         if readiness and getattr(readiness, "invariant", "") == "pending-reload":
-            connector_runtime_pending_reload = True
+            connector_runtime_pending_reload = getattr(readiness, "connector", "") or True
             click.echo(f" !{f' ({diagnostic})' if diagnostic else ''}")
         elif readiness:
             click.echo(" ✓")
@@ -12802,6 +12805,13 @@ def _restart_services(
                 "on the sidecar API port; OmniGent loaded policy generation "
                 "remains unverified pending reload/restart. No proxy listener — each talks directly "
                 "to its native upstream."
+            )
+        elif connector_runtime_pending_reload == "opencode":
+            ux.subhead(
+                f"{len(hook_multi)} hook connectors ({names}): protected registrations are current "
+                "on the sidecar API port; OpenCode loads the managed plugin when it starts, so restart "
+                "any OpenCode session that is open now. No proxy listener — each talks "
+                "directly to its native upstream."
             )
         elif connector_runtime_pending_reload:
             ux.subhead(
@@ -12843,6 +12853,12 @@ def _restart_services(
                 f"omnigent connector: {registration_state} on the sidecar API port; loaded policy "
                 "generation remains unverified pending OmniGent reload/restart. "
                 "No proxy listener — omnigent talks directly to its native upstream."
+            )
+        elif connector == "opencode" and connector_runtime_pending_reload:
+            ux.subhead(
+                "opencode connector: the managed plugin is current on the sidecar API port; OpenCode "
+                "loads it when it starts, so restart any OpenCode session that is open now. "
+                "No proxy listener — opencode talks directly to its native upstream."
             )
         elif connector == "hermes" and connector_runtime_pending_reload:
             ux.subhead(
@@ -13298,6 +13314,26 @@ def _partition_unconvergeable_peers(
         )
     return keep, frozenset(skipped)
 
+def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
+    """OpenCode's plugin is current, but no OpenCode has loaded it since the restart.
+
+    The managed plugin reports its load when OpenCode starts. A closed OpenCode
+    cannot report, and an open one does not report again after Setup restarts
+    the gateway, so waiting for the report made `setup opencode` fail every
+    time on Linux although the plugin was written and enforced.
+    """
+    detail = readiness.detail.casefold()
+    return (
+        readiness.connector == "opencode"
+        and readiness.invariant == "live-runtime"
+        and "digest current" in detail
+        and (
+            "no authenticated load heartbeat" in detail
+            or "load heartbeat predates the current gateway generation" in detail
+        )
+    )
+
+
 def _wait_for_connector_runtime(
     data_dir: str,
     connectors: list[str],
@@ -13399,7 +13435,7 @@ def _wait_for_connector_runtime(
             )
         return True, gateway_generation, _ConnectorRuntimeReadiness(True)
 
-    def validate_transaction(deadline: float) -> _ConnectorRuntimeReadiness:
+    def validate_transaction(deadline: float, *, accept_opencode_pending: bool = False) -> _ConnectorRuntimeReadiness:
         from defenseclaw.commands.cmd_doctor import connector_setup_readiness
 
         results: queue.Queue[_ConnectorRuntimeReadiness] = queue.Queue(maxsize=1)
@@ -13449,6 +13485,14 @@ def _wait_for_connector_runtime(
                                 failure.detail,
                             )
                             continue
+                        if accept_opencode_pending and _opencode_awaiting_restart(failure):
+                            pending_reload = pending_reload or _ConnectorRuntimeReadiness(
+                                True,
+                                "opencode",
+                                "pending-reload",
+                                failure.detail,
+                            )
+                            continue
                         if must_converge and failure.connector not in must_converge:
                             # A peer's own registration problem is not this
                             # connector's failure. Report it and keep going so
@@ -13488,6 +13532,7 @@ def _wait_for_connector_runtime(
                 "connector validation exceeded the readiness deadline",
             )
 
+    opencode_pending_since: float | None = None
     while True:
         now = time.monotonic()
         if now >= no_progress_deadline or now >= absolute_deadline:
@@ -13543,7 +13588,11 @@ def _wait_for_connector_runtime(
                     if health_failure.invariant == "gateway-state":
                         return health_failure
                 else:
-                    validation = validate_transaction(deadline)
+                    validation = validate_transaction(
+                        deadline,
+                        accept_opencode_pending=opencode_pending_since is not None
+                        and time.monotonic() - opencode_pending_since >= _OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS,
+                    )
                     if validation:
                         if time.monotonic() >= deadline:
                             return _ConnectorRuntimeReadiness(
@@ -13571,6 +13620,8 @@ def _wait_for_connector_runtime(
                         )
                     else:
                         last_failure = validation
+                        if opencode_pending_since is None and _opencode_awaiting_restart(validation):
+                            opencode_pending_since = time.monotonic()
                         if validation.invariant not in {
                             "deadline",
                             "gateway-health",

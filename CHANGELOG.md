@@ -71,6 +71,13 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **`defenseclaw setup opencode` finishes when OpenCode is closed.** Setup
+  waited for OpenCode to report that it loaded the managed plugin after the
+  gateway restart. A closed OpenCode cannot report and an open one does not
+  report again, so on Linux every run failed after about two minutes with
+  `connector setup did not converge` and rolled back, which also undid the
+  requested mode. Setup now waits 10 seconds for the report, then finishes
+  with the plugin current and tells you to restart open OpenCode sessions.
 - **Config and rule-pack checks no longer run a gateway binary another
   account can replace.** Doctor, `config validate` and the observability
   and redaction commands run `defenseclaw-gateway config-v8` and
