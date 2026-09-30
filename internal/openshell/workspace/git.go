@@ -98,7 +98,9 @@ func (e *GitError) Error() string {
 
 func (e *GitError) Unwrap() error { return e.Err }
 
-func (c gitCmd) command(ctx context.Context, args []string) (*exec.Cmd, error) {
+// command builds the hardened git command; cleanup removes its private
+// HOME (gitsafe.Command) and runs once the command has finished.
+func (c gitCmd) command(ctx context.Context, args []string) (cmd *exec.Cmd, cleanup func(), err error) {
 	full := make([]string, 0, len(args)+2*len(gitHardening)+8)
 	for _, kv := range gitHardening {
 		full = append(full, "-c", kv)
@@ -120,9 +122,9 @@ func (c gitCmd) command(ctx context.Context, args []string) (*exec.Cmd, error) {
 	if dir == "" {
 		dir = c.gitDir
 	}
-	cmd, err := gitsafe.Command(ctx, dir, full...)
+	cmd, cleanup, err = gitsafe.Command(ctx, dir, full...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if c.index != "" {
 		// gitsafe strips every inherited GIT_* variable; this is the one
@@ -132,7 +134,7 @@ func (c gitCmd) command(ctx context.Context, args []string) (*exec.Cmd, error) {
 	if c.stdin != nil {
 		cmd.Stdin = c.stdin
 	}
-	return cmd, nil
+	return cmd, cleanup, nil
 }
 
 // output runs git and returns stdout. A non-zero exit is a *GitError.
@@ -145,10 +147,11 @@ func (c gitCmd) output(ctx context.Context, args ...string) ([]byte, error) {
 // that way (merge-base --is-ancestor, diff --quiet, merge-tree, rev-parse
 // -q --verify); any other failure is a *GitError carrying stderr.
 func (c gitCmd) outputCode(ctx context.Context, args ...string) ([]byte, int, error) {
-	cmd, err := c.command(ctx, args)
+	cmd, cleanup, err := c.command(ctx, args)
 	if err != nil {
 		return nil, -1, err
 	}
+	defer cleanup()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -178,10 +181,11 @@ func (c gitCmd) run(ctx context.Context, args ...string) error {
 
 // strict runs git and treats every non-zero exit as a *GitError with stderr.
 func (c gitCmd) strict(ctx context.Context, args ...string) ([]byte, error) {
-	cmd, err := c.command(ctx, args)
+	cmd, cleanup, err := c.command(ctx, args)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

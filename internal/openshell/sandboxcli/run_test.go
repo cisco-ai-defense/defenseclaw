@@ -23,17 +23,21 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -43,6 +47,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	ta.env["TZ"] = ":America/New_York"
 	notice := "MCP: blocked the repository's servers repo-tool (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)"
 	ta.daemon.createMCP = &sandboxapi.MCPSummary{Imported: []string{"github", "linear"}, ProjectServers: "block", Project: []string{"repo-tool"}}
 	ta.daemon.createWarnings = []string{notice}
@@ -59,7 +64,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	if req.Harness != "claudecode" || req.Project != ta.project || req.Copy || req.LLM == nil ||
 		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-test-not-a-secret" ||
 		len(req.Credentials) != 1 || req.Credentials[0].Host != "api.stripe.com" || req.Credentials[0].Value != "stripe-test-value" ||
-		req.Env["FOO"] != "bar" {
+		req.Env["FOO"] != "bar" || req.TimeZone != "America/New_York" {
 		t.Fatalf("create request = %+v", req)
 	}
 	has(t, ta.output(),
@@ -71,7 +76,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
-		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted (1 request blocked) · 2 files changed (+10 −3)",
+		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted · 1 site blocked · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b")
 	if strings.Contains(ta.output(), "sk-test-not-a-secret") || strings.Contains(ta.output(), "stripe-test-value") {
@@ -307,7 +312,12 @@ func TestRunRefusals(t *testing.T) {
 			want: []string{"daemon is not running"}},
 		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
 		{name: "wsl2", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.WSL = func() bool { return true } }, want: []string{"Windows and WSL2 are not supported"}},
-		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } }, want: []string{"not root"}},
+		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } },
+			want: []string{"not root: the OpenShell gateway is a per-user service"}},
+		// OpenShell's MicroVM driver, which a Mac runs sandboxes with, needs
+		// Apple silicon.
+		{name: "an Intel Mac", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS, ta.GOARCH = "darwin", "amd64" },
+			want: []string{"OpenShell sandboxes are not supported here", "Apple silicon"}},
 		{name: "bad credential", opts: RunOptions{Harness: "claude", Credentials: []string{"NOPE=api.x.com"}}, want: []string{"is not set in this shell"}},
 		{name: "--github-write without a token", opts: RunOptions{Harness: "claude", GitHubWrite: true}, want: []string{"GH_TOKEN"}},
 		// The OmniGent sandbox agent names no model, and a profile without a
@@ -375,26 +385,38 @@ func TestRunRefusals(t *testing.T) {
 // "wait for sandbox … failed: … is in error state", OpenShell's reason (its
 // supervisor's Landlock probe) only in the gateway log (manual test M13).
 // The daemon now passes the reason on, and on macOS a run or a start that
-// failed on Landlock says what that means there.
+// failed on Landlock on the docker driver (Docker Desktop's VM kernel) says
+// what that means there and how to switch to MicroVMs; on the MicroVM
+// driver, whose sandboxes boot kernels of their own, it says nothing more.
 func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 	const detail = `openshell: wait for sandbox "myapp-d395": Internal: sandbox "myapp-d395" is in error state; ` +
 		`OpenShell says: SupervisorFailed: Landlock allow/deny probe failed`
 	failure := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox myapp-d395 failed", Detail: detail}
-	hint := "; macOS sandboxes cannot run on Docker Desktop today: its Linux VM has no Landlock, which OpenShell sandboxes need " +
-		"(`defenseclaw sandbox doctor` checks it; see " + setupTroubleshootingURL + ")"
-	for goos, want := range map[string]string{"linux": failure.Error(), "darwin": failure.Error() + hint} {
+	hint := "; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: " +
+		"switch the gateway to MicroVMs with `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`; see " + setupTroubleshootingURL + ")"
+	for _, c := range []struct{ goos, driver, want string }{
+		{"linux", "", failure.Error()},
+		{"linux", "docker", failure.Error()},
+		{"darwin", "", failure.Error() + hint},
+		{"darwin", "docker", failure.Error() + hint},
+		{"darwin", "vm", failure.Error()},
+	} {
 		ta := newTestApp(t, "")
-		ta.GOOS = goos
+		ta.GOOS = c.goos
+		ta.daemon.status.Gateway.Driver = c.driver
 		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = failure
-		if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != want {
-			t.Fatalf("%s: Run = %v\nwant %s", goos, err, want)
+		if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != c.want {
+			t.Fatalf("%s/%s: Run = %v\nwant %s", c.goos, c.driver, err, c.want)
 		}
 		old := sampleSandbox("myapp-d395")
 		old.Phase, old.Project = "stopped", ta.project
+		if c.driver == "vm" {
+			old.WorkdirMode = "copy"
+		}
 		ta.daemon.add(old)
 		ta.daemon.errors["POST /api/v1/sandbox/sandboxes/myapp-d395/start"] = failure
-		if err := ta.Connect(bg, ConnectOptions{Name: "myapp-d395"}); err == nil || err.Error() != want {
-			t.Fatalf("%s: Connect = %v\nwant %s", goos, err, want)
+		if err := ta.Connect(bg, ConnectOptions{Name: "myapp-d395"}); err == nil || err.Error() != c.want {
+			t.Fatalf("%s/%s: Connect = %v\nwant %s", c.goos, c.driver, err, c.want)
 		}
 	}
 	// A configuration OpenShell refused for a Landlock path is not that.
@@ -562,7 +584,7 @@ func TestRunFailedLaunchDeletesTheSandbox(t *testing.T) {
 
 type failingUpload struct{ *fakeCopy }
 
-func (f *failingUpload) Upload(context.Context, string, string, workspace.Uploader) (*workspace.CopyRecord, error) {
+func (f *failingUpload) Upload(context.Context, string, string, workspace.Uploader, workspace.Execer) (*workspace.CopyRecord, error) {
 	return nil, errors.New("openshell upload failed (exit 1)")
 }
 
@@ -596,7 +618,12 @@ func TestRunCopySession(t *testing.T) {
 			if r := ta.bodies("POST", "copybox/workspace"); len(r) != 2 || !strings.Contains(r[0], `"operation":"upload"`) || !strings.Contains(r[1], `"pull_mode":"apply"`) {
 				t.Fatalf("workspace reports = %q", r)
 			}
-			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)")
+			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)",
+				"⚠ nested repository vendor/lib is not copied")
+			// The held-back secrets are named once (cert copilot:F5).
+			if out := ta.output(); strings.Count(out, ".env") != 1 || !strings.Contains(out, "⚠ 1 secret file held back from the copy: .env") {
+				t.Fatalf("held-back lines:\n%s", out)
+			}
 		})
 	}
 }
@@ -701,6 +728,22 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 	has(t, ta.output(), "⚠ ~/proj can't be mounted live (its git directory lives at ~/main/.git/worktrees/proj, outside the folder "+
 		"(a git worktree or submodule checkout)), so it runs on a copy: `defenseclaw sandbox pull wt` brings the changes back")
 	lacks(t, ta.output(), "with --copy")
+
+	// The daemon's needs-copy answer on a driver without host mounts, to a
+	// run whose status did not name the driver (a daemon that reconnected
+	// to a MicroVM gateway since): the same one sentence, with the driver's
+	// reason.
+	ta = newTestApp(t, "a\n")
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		if req.Copy {
+			return nil
+		}
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy",
+			Detail: ta.project + " cannot be mounted live: the OpenShell MicroVM (vm) driver mounts no host folders"}
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "vmbox"}))
+	has(t, ta.output(), "⚠ ~/proj can't be mounted live (the OpenShell MicroVM (vm) driver mounts no host folders), so it runs on a copy: "+
+		"`defenseclaw sandbox pull vmbox` brings the changes back")
 }
 
 func TestSummaryLine(t *testing.T) {
@@ -714,18 +757,35 @@ func TestSummaryLine(t *testing.T) {
 		want          string
 	}{
 		{egress(1), egress(1), "Session ended · 0 tool calls · 0 new sites contacted"},
-		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted (1 request blocked)"},
-		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted (2 requests blocked)"},
+		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted · 1 site blocked"},
+		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted · 2 sites blocked"},
 		// Hook calls DefenseClaw answered with an error were blocked (the
 		// hooks fail closed).
 		{&sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}, &failed,
-			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted (1 request blocked)"},
+			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted · 1 site blocked"},
 		{&failed, &failed, "Session ended · 0 tool calls · 0 new sites contacted"},
 	} {
 		s := &session{app: newTestApp(t, "").App, before: c.before}
 		if got := s.summaryLine(c.after, nil); got != c.want {
 			t.Errorf("summaryLine(%+v) = %q, want %q", c.after.Egress, got, c.want)
 		}
+	}
+	// The blocked sites are the ✗ lines the session announced, one per
+	// destination however often it was tried, also when the daemon had
+	// blocked one of them before the session (cert copilot:F8, kiro:KR-F7,
+	// hermes:HERMES-8, openhands:MAC-OSH-OH-5: an invalid destination and
+	// webhook.site read "1 request blocked" over two ✗ lines).
+	box := sampleSandbox("f-box")
+	s := &session{app: newTestApp(t, "").App, sb: &box, before: egress(1)}
+	for _, ev := range []sandboxapi.ActivityEvent{
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site", Port: 443, Category: "webhook_catcher"},
+	} {
+		s.blockNotice(ev)
+	}
+	if got, want := s.summaryLine(egress(2), nil), "Session ended · 0 tool calls · 1 new site contacted · 2 sites blocked"; got != want {
+		t.Errorf("summaryLine after two blocked destinations = %q, want %q", got, want)
 	}
 	// Manual R2-17: a blocked call is named by its rule's title and ID, not
 	// the cut-off start of the reason.
@@ -772,6 +832,20 @@ func TestBanner(t *testing.T) {
 			[]string{"skip-permissions OFF (harness prompts kept)"}, nil},
 		{"omnigent", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.Harness, sb.HarnessName = "omnigent", "OmniGent" }, nil,
 			[]string{"OmniGent · approvals from OmniGent's policies, DefenseClaw's included"}, []string{"skip-permissions"}},
+		// A user tier says what the image protects for that harness: Kiro's
+		// and Hermes' hooks are root-owned (cert kiro:KR-F3,
+		// hermes:HERMES-3).
+		{"kiro's tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit"},
+			[]string{"could edit its own hook settings"}},
+		{"hermes' tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "hermes", "Hermes Agent", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
+			nil},
+		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -786,6 +860,50 @@ func TestBanner(t *testing.T) {
 		if got := withArticle(name); got != want {
 			t.Errorf("withArticle(%s) = %q", name, got)
 		}
+	}
+}
+
+// An interactive Copilot session is told before it starts that every hook
+// waits out Copilot's 30-second timeout in a sandbox (#966), whatever its
+// credential; a one-prompt run, which is not slowed, is not. The provider's
+// own caveat still follows the harness's.
+func TestBannerCaveats(t *testing.T) {
+	copilot := harness.Copilot.InteractiveCaveat()
+	if !strings.Contains(copilot, "30-second timeout") || !strings.Contains(copilot, "--prompt") {
+		t.Fatalf("Copilot's interactive caveat = %q, want the 30-second hook wait and the --prompt way around it", copilot)
+	}
+	mantle, err := harness.Codex.CredentialProfile(profiles.CodexBedrockMantleID, "")
+	if err != nil || mantle.Caveat == "" {
+		t.Fatalf("Codex Bedrock Mantle profile = %+v, %v; want its caveat", mantle, err)
+	}
+	asCopilot := func(profile string) func(*sandboxapi.Sandbox) {
+		return func(sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.Launch.CredentialProfile = "copilot", "GitHub Copilot CLI", profile
+		}
+	}
+	for _, c := range []struct {
+		name      string
+		edit      func(*sandboxapi.Sandbox)
+		o         RunOptions
+		want, not []string
+	}{
+		{"interactive copilot", asCopilot(profiles.CopilotAnthropicID), RunOptions{}, []string{"⚠ " + copilot}, nil},
+		{"copilot without a credential", asCopilot(""), RunOptions{}, []string{"⚠ " + copilot}, nil},
+		{"copilot with --prompt", asCopilot(profiles.CopilotAnthropicID), RunOptions{Prompt: "hi"}, nil, []string{"⚠ "}},
+		{"copilot in its own prompt mode", asCopilot(profiles.CopilotAnthropicID), RunOptions{Args: []string{"-p", "hi"}}, nil, []string{"⚠ "}},
+		{"codex on Bedrock Mantle", func(sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.Launch.CredentialProfile = "codex", "Codex", profiles.CodexBedrockMantleID
+		}, RunOptions{}, []string{"⚠ " + mantle.Caveat}, []string{copilot}},
+		{"claude code", func(*sandboxapi.Sandbox) {}, RunOptions{}, nil, []string{"⚠ "}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			sb := sampleSandbox("box")
+			c.edit(&sb)
+			ta.banner(&sb, bannerInfo{o: c.o})
+			has(t, ta.output(), c.want...)
+			lacks(t, ta.output(), c.not...)
+		})
 	}
 }
 
@@ -960,5 +1078,345 @@ func TestDiskFullIsNamed(t *testing.T) {
 	}
 	if hint := ta.diskFullHint(errors.New("connection reset")); hint != "" {
 		t.Errorf("an unrelated failure got %q", hint)
+	}
+}
+
+// TestRunOnTheMicroVMDriver: on a gateway whose compute driver mounts no
+// host folders (OpenShell's MicroVM driver, which a Mac runs sandboxes
+// with) every run works on a copy, said in one line before the copy is
+// made, whether the daemon clamped the mode itself or not. A flag the
+// driver cannot honour is refused (--context) or named (--no-snapshot,
+// --cpu, --memory) before anything is copied or created, and the first
+// boot of an image says it takes a while. The docker driver's runs are
+// unchanged.
+func TestRunOnTheMicroVMDriver(t *testing.T) {
+	// Certification OG-U9: the note said the folder got its changes only
+	// through `sandbox pull`, while the session's end offers to bring them
+	// back itself.
+	const note = "copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, " +
+		"and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull`"
+	driver := func(name string, more ...func(*testApp)) func(*testApp) {
+		return func(ta *testApp) {
+			ta.daemon.status.Gateway.Driver = name
+			for _, f := range more {
+				f(ta)
+			}
+		}
+	}
+	// copied checks the run asked for a copy and said so once, before the
+	// copy was made.
+	copied := func(said string) func(*testing.T, *testApp) {
+		return func(t *testing.T, ta *testApp) {
+			t.Helper()
+			req := createRequest(t, ta.daemon)
+			if !req.Copy {
+				t.Fatalf("create request = %+v, want a copy", req)
+			}
+			out := ta.output()
+			if strings.Count(out, said) != 1 || strings.Index(out, said) > strings.Index(out, "Copying") {
+				t.Fatalf("%q is not said once, before the copy:\n%s", said, out)
+			}
+			if got := ta.copy.steps; len(got) < 2 || got[0] != "stage "+req.Name || got[1] != "upload "+req.Name {
+				t.Fatalf("copy steps = %v", got)
+			}
+		}
+	}
+	// The daemon's own clamp of a mount the user configured, as the
+	// resolver gives it: its source is the gateway, not the organization.
+	clamped := func(ta *testApp) {
+		ta.daemon.explain.Settings[0] = sandboxapi.Setting{Key: "workdir.mode", Value: "copy", Source: string(packs.SourceGateway),
+			Origin: packs.ConstraintComputeDriver, Requested: "mount"}
+		clamp := sandboxapi.Violation{Key: "workdir.mode", Source: "user", Attempted: "mount", Enforced: "copy", Constraint: packs.ConstraintComputeDriver,
+			Message: "the project cannot be mounted live on this gateway; the agent works on a copy", Detail: "the OpenShell MicroVM (vm) driver mounts no host folders"}
+		ta.daemon.explain.Violations = []sandboxapi.Violation{clamp}
+		ta.daemon.createViolations = []sandboxapi.Violation{clamp}
+	}
+	// An organization's cap on --cpu, which a MicroVM does not take.
+	capped := func(ta *testApp) {
+		ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
+			sandboxapi.Setting{Key: "resources.cpu", Value: "1", Source: "admin", Origin: "openshell.admin.max_resources"})
+		ta.daemon.createWarnings = []string{limitsIgnoredText}
+	}
+	firstBoot := func(ta *testApp) { ta.daemon.explain.VMFirstBoot = true }
+	missing := func(ta *testApp) { ta.images.missing = map[string]bool{"claudecode": true} }
+	refused := func(o RunOptions, want string) func(*testApp) error {
+		return func(ta *testApp) error {
+			err := ta.Run(bg, o)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				return fmt.Errorf("Run = %v, want %q", err, want)
+			}
+			if ta.creates() != 0 || len(ta.copy.steps) != 0 {
+				return fmt.Errorf("a refused run created %d sandboxes and staged %v", ta.creates(), ta.copy.steps)
+			}
+			return nil
+		}
+	}
+	run := RunOptions{Harness: "claude"}
+	runCases(t, []runCase{
+		{name: "every run works on a copy", input: "a\n", setup: driver("vm"), opts: run, check: copied(note),
+			want: []string{"Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj"}},
+		{name: "--copy needs no note", input: "a\n", setup: driver("vm"), opts: RunOptions{Harness: "claude", Copy: true}, not: []string{note}},
+		// The clamp is the gateway's, not the organization's.
+		{name: "the daemon's own clamp", input: "a\n", setup: driver("vm", clamped), opts: run, check: copied(note),
+			not: []string{"organization", "Run with its setting?"}},
+		{name: "a driver DefenseClaw does not know mounts nothing", input: "a\n", setup: driver("podman"), opts: run,
+			check: copied("copy mode: this gateway's compute driver mounts no host folders")},
+		{name: "--context is refused before anything is copied", setup: driver("vm"),
+			do: refused(RunOptions{Harness: "claude", Context: []string{"/srv/lib"}}, "--context mounts a folder into the sandbox read-only, and "+
+				"the OpenShell MicroVM (vm) driver mounts no host folders; run without --context")},
+		{name: "--no-snapshot, --cpu and --memory are named", input: "a\n", setup: driver("vm", capped),
+			opts: RunOptions{Harness: "claude", CPU: "4", Memory: "8Gi", NoSnapshot: true}, check: copied(limitsIgnoredText),
+			want: []string{"--no-snapshot does not apply: the OpenShell MicroVM (vm) driver mounts no host folders, so the run works on a copy, which takes no snapshot"},
+			not:  []string{"limited by your organization", "Run with its setting?"}},
+		{name: "the first boot of an image", input: "a\n", setup: driver("vm", firstBoot), opts: run,
+			want: []string{"Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)"}},
+		{name: "a new image and its first boot", input: "a\n", setup: driver("vm", firstBoot, missing), opts: run,
+			want: []string{"(building its image first, which can take a few minutes; then the first start prepares its MicroVM disk: about a minute)"}},
+		// The disk a first boot prepares needs about the image's size and
+		// headroom where the driver keeps it: short of the floor the run is
+		// refused before anything is copied or created, and short of the
+		// recommended space it is warned about (OC-F1).
+		{name: "a first boot on a full disk", setup: driver("vm", firstBoot, func(ta *testApp) {
+			ta.diskFree, ta.images.sizes = 2<<30, map[string]uint64{"claudecode": 7 << 30}
+		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about 7.0 GiB from its image in "+
+			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 8.0 GiB is needed; free space on that volume first "+
+			"(`defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)")},
+		{name: "a first boot of an image to build on a full disk", setup: driver("vm", firstBoot, missing, func(ta *testApp) { ta.diskFree = 5 << 30 }),
+			do: refused(run, "a disk of about 5.0 GiB from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 6.0 GiB is needed")},
+		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }), opts: run,
+			want: []string{"only 10.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start prepares a MicroVM disk of about 5.0 GiB there " +
+				"(12.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
+			check: func(t *testing.T, ta *testApp) {
+				if ta.creates() != 1 || !strings.HasPrefix(ta.diskProbed, ta.home) {
+					t.Fatalf("creates %d, disk probed at %q", ta.creates(), ta.diskProbed)
+				}
+			}},
+		// A disk prepared already needs no room, and docker prepares none.
+		{name: "no first boot on a full disk", input: "a\n", setup: driver("vm", func(ta *testApp) { ta.diskFree = 1 << 30 }), opts: run,
+			not: []string{"free disk space", "is free in"}},
+		{name: "docker on a full disk", input: "y\n", setup: driver("docker", firstBoot, func(ta *testApp) { ta.diskFree = 1 << 30 }), opts: run,
+			not: []string{"free disk space", "is free in"}},
+		// On docker the mount, --context and the limits go to the daemon.
+		{name: "the docker driver mounts", input: "y\n", setup: driver("docker"),
+			opts: RunOptions{Harness: "claude", Context: []string{"/srv/lib"}, CPU: "2", NoSnapshot: true}, check: func(t *testing.T, ta *testApp) {
+				if req := createRequest(t, ta.daemon); req.Copy || !slices.Equal(req.Context, []string{"/srv/lib"}) || req.CPU != "2" || !req.NoSnapshot {
+					t.Fatalf("create request = %+v", req)
+				}
+			}, not: []string{"copy mode:", limitsIgnoredText, "does not apply", "Copying"}},
+	})
+}
+
+// FIN-A-2: on MicroVMs the run image a run boots, and so whether its first
+// start prepares a disk, depends on its --env and credentials, which the
+// preflight took from the newest sandbox. The daemon is asked again with
+// this run's: the values of the variables the run files read, a value that
+// could be a secret by name only, and the credentials by name, never a
+// secret. Its answer decides the note. A harness without run files, or a
+// docker gateway, is not asked again.
+func TestRunAsksAboutTheFirstBootOfItsOwnRunFiles(t *testing.T) {
+	const endpoint = "http://host.openshell.internal:39942"
+	run := RunOptions{Harness: "claude", Credentials: []string{"STRIPE_API_KEY=api.stripe.com"},
+		Env: []string{"ANTHROPIC_BASE_URL=" + endpoint, "ANTHROPIC_CUSTOM_HEADERS=Authorization: Bearer hdr-test-value", "FOO=bar"}}
+	setup := func(t *testing.T, driver string) *testApp {
+		ta := newTestApp(t, "a\n")
+		ta.daemon.status.Gateway.Driver = driver
+		ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
+		ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+		// The newest sandbox's disk is prepared; this run's is not.
+		ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+			ex.VMFirstBoot = req.Run != nil && req.Run.Env["ANTHROPIC_BASE_URL"] == endpoint
+		}
+		return ta
+	}
+	explains := func(ta *testApp) []call { return ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain) }
+
+	ta := setup(t, "vm")
+	ta.ok(t, ta.Run(bg, run))
+	has(t, ta.output(), "Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)")
+	calls := explains(ta)
+	if len(calls) != 2 || strings.Contains(calls[0].Query, "run=") {
+		t.Fatalf("explain calls = %+v", calls)
+	}
+	for _, secret := range []string{"sk-test-not-a-secret", "stripe-test-value", "hdr-test-value", "FOO"} {
+		if strings.Contains(calls[1].Query, secret) {
+			t.Fatalf("the explain of the run's files sent %q: %s", secret, calls[1].Query)
+		}
+	}
+	q, err := url.ParseQuery(calls[1].Query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &sandboxapi.ExplainRun{Env: map[string]string{"ANTHROPIC_BASE_URL": endpoint}, EnvWithheld: []string{"ANTHROPIC_CUSTOM_HEADERS"},
+		Credentials: []string{"ANTHROPIC_API_KEY", "STRIPE_API_KEY"}, LLMProfile: profiles.AnthropicID}
+	if got := sandboxapi.ParseExplainQuery(q); got.Harness != "claudecode" || !reflect.DeepEqual(got.Run, want) {
+		t.Fatalf("explain of the run's files = %+v, run %+v; want run %+v", got, got.Run, want)
+	}
+
+	// The same inputs as a prepared disk's: no note.
+	ta = setup(t, "vm")
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) { ex.VMFirstBoot = req.Run == nil }
+	ta.ok(t, ta.Run(bg, run))
+	lacks(t, ta.output(), "prepares its MicroVM disk")
+
+	// Hooks-only OpenCode has no run files; docker prepares no disk.
+	for name, tc := range map[string]struct{ driver, harness string }{"no run files": {"vm", "opencode"}, "docker": {"docker", "claude"}} {
+		ta := setup(t, tc.driver)
+		o := run
+		o.Harness = tc.harness
+		ta.ok(t, ta.Run(bg, o))
+		if n := len(explains(ta)); n != 1 {
+			t.Fatalf("%s: %d explain calls", name, n)
+		}
+	}
+
+	// A base URL that carries a credential (a user name and password, a
+	// query or a fragment value) goes by name only, as the daemon's check
+	// of what would be baked into a run image (manager.CredentialURL) sees
+	// it; one without such parts goes as it is.
+	for _, base := range []string{"https://user:url-test-value@gw.example/v1", "https://gw.example/v1?key=url-test-value",
+		"https://gw.example/v1#url-test-value"} {
+		ta := setup(t, "vm")
+		o := run
+		o.Env = []string{"ANTHROPIC_BASE_URL=" + base, "ANTHROPIC_MODEL=claude-test"}
+		ta.ok(t, ta.Run(bg, o))
+		calls := explains(ta)
+		if len(calls) != 2 || strings.Contains(calls[1].Query, "url-test-value") {
+			t.Fatalf("%s: explain calls = %+v", base, calls)
+		}
+		q, err := url.ParseQuery(calls[1].Query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sandboxapi.ParseExplainQuery(q).Run; got == nil || !slices.Equal(got.EnvWithheld, []string{"ANTHROPIC_BASE_URL"}) ||
+			!maps.Equal(got.Env, map[string]string{"ANTHROPIC_MODEL": "claude-test"}) {
+			t.Fatalf("%s: explain of the run's files = %+v", base, got)
+		}
+	}
+}
+
+// An upload that openshell reported done but the sandbox does not have
+// fails the run, naming the doctor check for the ssh connection sharing
+// that can carry it into another sandbox.
+func TestCopyUploadThatDidNotArrive(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, uploadErr: &workspace.UploadNotArrivedError{Sandbox: "strayed", Dir: "/sandbox/work/proj", Missing: true}}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Name: "strayed"}),
+		"upload the project copy: the upload to strayed did not arrive: openshell reported it done, but in strayed /sandbox/work/proj is not there; ",
+		"; `defenseclaw sandbox doctor` checks the ssh connection sharing that can carry an upload into another sandbox")
+}
+
+// failingCopy is a fakeCopy whose stage or upload fails with the error set.
+type failingCopy struct {
+	*fakeCopy
+	stageErr, uploadErr error
+}
+
+func (f *failingCopy) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
+	if f.stageErr != nil {
+		f.step("stage " + o.Name)
+		return nil, f.stageErr
+	}
+	return f.fakeCopy.Stage(ctx, o)
+}
+
+func (f *failingCopy) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader, ex workspace.Execer) (*workspace.CopyRecord, error) {
+	if f.uploadErr != nil {
+		return nil, f.uploadErr
+	}
+	return f.fakeCopy.Upload(ctx, dataDir, name, up, ex)
+}
+
+// A copy too large to stage names the setting that raises the cap; on the
+// MicroVM driver the refusal also says that a copy is the only way the
+// project runs there, and what must hold it (a folder too large to copy
+// could be mounted live on Linux). A disk full inside a MicroVM is its
+// overlay disk, not this machine's.
+func TestCopyLimitsOnTheMicroVMDriver(t *testing.T) {
+	large := &workspace.TooLargeError{What: "the copy (files and history)", Size: 612 << 20, Limit: 500 << 20}
+	onlyWay := "the OpenShell MicroVM (vm) driver mounts no host folders, so a copy is the only way this project runs on this gateway, " +
+		"and the sandbox's own disk must hold it with its git history (overlay_disk_mib under [openshell.drivers.vm]"
+	for _, driver := range []string{"docker", "vm"} {
+		ta := newTestApp(t, "")
+		ta.daemon.status.Gateway.Driver = driver
+		ta.Workspace = &failingCopy{fakeCopy: ta.copy, stageErr: large}
+		err := ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "bigbox"})
+		wantErr(t, err, "stage the project copy: the copy (files and history) is", "above the",
+			"; raise openshell.workdir.max_upload_mb (in MB, 500 by default) in "+ta.tildePath(ta.ConfigPath)+" to copy a larger project")
+		if strings.Contains(err.Error(), onlyWay) != (driver == "vm") {
+			t.Errorf("%s: %v", driver, err)
+		}
+		if ta.creates() != 0 {
+			t.Fatalf("%s: a copy that could not be staged created a sandbox", driver)
+		}
+	}
+	// Too many files is not the size cap.
+	ta := newTestApp(t, "")
+	if hint := ta.stageHint(&workspace.TooLargeError{What: "the folder", Size: 200001, Limit: 200000, Entries: true}, openshell.Driver{}); hint != "" {
+		t.Errorf("an entry limit got %q", hint)
+	}
+
+	full := errors.New("openshell sandbox upload failed: tar: ./node_modules/x: Cannot write: No space left on device")
+	overlay := "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by overlay_disk_mib under " +
+		"[openshell.drivers.vm] in the OpenShell gateway's gateway.toml; free some space in the sandbox, or raise that size for new sandboxes " +
+		"(`defenseclaw sandbox doctor` shows it)"
+	ta = newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
+	if hint := ta.sandboxDiskHint(bg, ta.API, full); hint != overlay {
+		t.Errorf("a full MicroVM: %q", hint)
+	}
+	// This machine's own full disk is still its own.
+	has(t, ta.sandboxDiskHint(bg, ta.API, fmt.Errorf("write: %w", syscall.ENOSPC)), "the disk holding")
+	if hint := ta.sandboxDiskHint(bg, ta.API, errors.New("connection reset")); hint != "" {
+		t.Errorf("an unrelated failure got %q", hint)
+	}
+	// The upload says it.
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, uploadErr: full}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Name: "fullbox"}), "upload the project copy: ", overlay)
+	// On docker a full disk is named as before.
+	ta = newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "docker"
+	has(t, ta.sandboxDiskHint(bg, ta.API, full), "the disk holding")
+}
+
+// Cert opencode:OC-2: OpenCode quits on Ctrl-C, also in the middle of a
+// turn, which ends the session; an interactive OpenCode session's banner
+// names Esc as the key that interrupts a turn. A one-prompt run, a session
+// without a terminal and another harness get no such line.
+func TestBannerNamesOpenCodesInterruptKey(t *testing.T) {
+	const keys = "Keys      Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session"
+	for _, c := range []struct {
+		name    string
+		harness string
+		tty     bool
+		prompt  string
+		want    bool
+	}{
+		{"interactive OpenCode", "opencode", true, "", true},
+		{"one prompt", "opencode", true, "fix the tests", false},
+		{"no terminal", "opencode", false, "", false},
+		{"Claude Code", "claudecode", true, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.IO.TTY = c.tty
+			sb := sampleSandbox("box")
+			sb.Harness = c.harness
+			ta.banner(&sb, bannerInfo{o: RunOptions{Prompt: c.prompt}})
+			if got := strings.Contains(ta.output(), keys); got != c.want {
+				t.Fatalf("Keys line shown = %v, want %v:\n%s", got, c.want, ta.output())
+			}
+		})
+	}
+}
+
+// Cert opencode:OC-10: the OpenCode launcher's refusal of a file in the
+// sandbox names this CLI's own commands for removing it from the host.
+func TestOpenCodeLauncherRefusalNamesTheSandboxCommands(t *testing.T) {
+	script := string(harness.OpenCode.Launcher().Data)
+	for _, verb := range []string{"start", "exec", "connect"} {
+		if !strings.Contains(script, CommandName+" "+verb+" $dc_sandbox") {
+			t.Errorf("the OpenCode launcher's refusal does not name `%s %s`", CommandName, verb)
+		}
 	}
 }

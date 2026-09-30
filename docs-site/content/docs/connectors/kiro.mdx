@@ -181,8 +181,9 @@ direct-launch bypass boundary.
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run kiro` runs Kiro CLI in an NVIDIA OpenShell sandbox on
-Linux (not yet on macOS): the agent sees only your project folder, and
-DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/setup/sandbox) covers setup,
+Linux, or on a Mac with Apple silicon in a MicroVM of its own that works on a
+copy of your folder ([macOS](/docs/setup/sandbox#macos)): the agent sees only
+your project folder, and DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/setup/sandbox) covers setup,
 the session and every flag. The first run builds the Kiro CLI image;
 `defenseclaw sandbox image build kiro` builds it ahead of time.
 `defenseclaw sandbox setup` builds the images of the harnesses in
@@ -199,7 +200,9 @@ replaces that list, so name every harness you want:
   shell, and refuses `--agent`, `--v3`, `--agent-engine`, `--cloud` and
   `--repo`: DefenseClaw runs Kiro's local V2 agent engine, whose hooks it
   verified. Kiro has no system settings tier and still loads user and project
-  settings and MCP servers, so the tier is user. Kiro vetoes a tool only on
+  settings and MCP servers, and an interactive session runs the TUI runtime
+  Kiro unpacks into the sandbox home (`~/.local/share/kiro-cli`), which the
+  agent can change for the next session, so the tier is user. Kiro vetoes a tool only on
   exit code 2 from `preToolUse`, so the sandbox hook exits 2 on every failure.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs): Kiro
   starts with `--trust-all-tools`. `--safe`, or the `strict` pack, keeps its
@@ -218,8 +221,30 @@ replaces that list, so name every harness you want:
   sign-in was tested live: no Kiro account was available.
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
   and Codex sandboxes only.
+- **Kiro's own behaviour in a sandbox.**
+  - Ctrl-C during a shell tool call shows `● Cancelled …`, but the command
+    keeps running to its end: Kiro stops a cancelled command by signalling
+    its process group, which the OpenShell sandbox refuses, as it refuses
+    every harness's Ctrl-Z. DefenseClaw judged the command before it
+    started. To stop one that keeps running, open a shell with
+    `defenseclaw sandbox connect <name> --shell` and end it by name, for
+    example `pkill -f 'sleep 40'`.
+  - `● failed to retrieve governance settings — MCP and web tools disabled`
+    at the start is Kiro's account check, not a DefenseClaw policy: without
+    a working Kiro key or login Kiro cannot fetch its governance settings
+    and turns MCP servers and web tools off for the session. Kiro asks its
+    management service in four regions, including the us-gov ones, at every
+    start.
+  - With telemetry off (the image's settings), Kiro still sends its
+    CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`; no Kiro
+    setting stops them.
 - **Image and verification.** The image installs Kiro CLI 2.24.1 from its
   release archive, checked against the SHA-256 in Kiro's release manifest.
+  It also unpacks the embedding model Kiro would otherwise download at a new
+  sandbox's first start (79 MiB, each file checked against the SHA-256 the
+  pinned Kiro carries), and the launcher keeps Kiro on the root-owned binary
+  instead of the copy it makes in its data directory
+  (`KIRO_SKIP_BINARY_PINNING=1`).
   Verified end to end with Kiro's own scripted-response mode instead of a
   model: every required hook reached DefenseClaw, a blocked shell call did not
   run and an allowed one did, also with hookless agents planted in the home

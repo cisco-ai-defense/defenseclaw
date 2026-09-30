@@ -551,20 +551,36 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassProcess, Binary: "/usr/bin/git"}, now())
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: "example.org", Port: 443}, now())
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/opt/defenseclaw-harness-evil/bin/claude", Host: "example.org", Port: 443}, now())
+	// Certification AG-MAC-F4: a `sandbox exec` curl through the egress
+	// proxy, with no harness running, raised the alarm. Neither the
+	// proxy's own events nor OpenShell's record of curl's connection to
+	// the proxy are the harness's.
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: openshellHostAlias, Port: testEgressPort,
+		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now(), FirstSeen: true}, 0)
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventClosed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now()}, 0)
 	if n := silence(); n != 0 {
 		t.Fatalf("commands outside the harness raised %d hook_silence finding(s)", n)
 	}
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+	// The harness's own connection to the proxy is its activity.
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
+		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
 	silence()
 	if silence() != 1 || !e.get("quietbox").Hooks.Silent {
 		t.Fatal("the harness active without hooks raised no single hook_silence finding")
+	}
+	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
+	advance(15 * time.Minute)
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+	if silence() != 2 || !e.get("quietbox").Hooks.Silent {
+		t.Fatal("the harness active long after its last hook raised no second hook_silence finding")
 	}
 	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
 	if e.get("quietbox").Hooks.Silent {
 		t.Fatal("a hook did not clear the silence")
 	}
 	advance(time.Hour)
-	if silence() != 1 {
+	if silence() != 2 {
 		t.Fatal("an idle harness raised a finding")
 	}
 }
@@ -683,7 +699,7 @@ func TestHookReachRefusedConnections(t *testing.T) {
 // A hook connection cut by a policy reload (a HIGH alarm live) is no refusal
 // but an attempt: like an answered one, it is flagged only when no request
 // authenticates within the grace period. So is a mapping denial of the
-// ingress (OpenShell republishing the host alias), then as a refusal.
+// ingress no settings reload explains, then as a refusal of its own.
 func TestHookReachUnansweredConnections(t *testing.T) {
 	ingress := strconv.Itoa(testIngressPort)
 	for _, tc := range []struct {
@@ -695,7 +711,7 @@ func TestHookReachUnansweredConnections(t *testing.T) {
 			"not one request authenticated", 0},
 		{"allowed", ingressLine("ALLOWED"), "not one request authenticated", 0},
 		{"mapping denial", "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> host.openshell.internal:" + ingress + " [reason:transparent_tcp_mapping_denied]",
-			"OpenShell refused", 1},
+			"does not cover the port", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReachEnv(t)
@@ -724,6 +740,217 @@ func TestHookReachUnansweredConnections(t *testing.T) {
 	if r.hooks().Unreachable || r.hooks().IngressRefused != 0 {
 		t.Fatalf("a mapping denial the next request answered = %+v", r.hooks())
 	}
+	// A connection that gets through answers it too: the mapping covers the
+	// port, and it is that connection's request that did not authenticate.
+	r = newReachEnv(t)
+	r.line("NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> host.openshell.internal:" + ingress + " [reason:transparent_tcp_mapping_denied]")
+	r.advance(time.Second)
+	r.line(ingressLine("ALLOWED"))
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || h.IngressRefused != 0 || !strings.Contains(h.UnreachableReason, "not one request authenticated") {
+		t.Fatalf("a mapping denial a connection answered = %+v", h)
+	}
+}
+
+// OpenShell reloads a running sandbox's settings whenever a gateway-global
+// provider profile changes (a sandbox's --credential profile imported or
+// deleted, by either daemon on the gateway) and maps the host alias again
+// on the next lookup: a client connecting to the address it looked up
+// before the reload (OpenCode's runtime keeps a lookup for 30 s) is denied
+// its mapping. Seen live on an idle OpenCode's first plugin event and on a
+// hook just before the harness quit, neither followed by a hook within the
+// grace period: that is no refusal and no attempt. Past the reload's
+// window, or once the mapping OpenShell reports leaves the port out (as
+// when another daemon replaced the ingress profile), it is a refusal again.
+func TestHookReachReloadMappingDenial(t *testing.T) {
+	ingress := strconv.Itoa(testIngressPort)
+	mapped := func(ports ...int) string {
+		list := make([]string, len(ports))
+		for i, p := range ports {
+			list[i] = strconv.Itoa(p)
+		}
+		return "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=" +
+			strings.Join(list, ",") + " mapping_id=m1"
+	}
+	const reload = "CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:7 new_revision:7 policy_changed:false provider_env_changed:true]"
+	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> 198.18.0.2:" + ingress + " [reason:transparent_tcp_mapping_denied]"
+	idle := func(r *reachEnv) {
+		for range 12 {
+			r.advance(hookReachInterval)
+			r.check()
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		lines   []string
+		gap     time.Duration // between the last line and the denial
+		flagged bool
+	}{
+		{"after a provider reload", []string{mapped(testEgressPort, testIngressPort), reload}, 10 * time.Second, false},
+		{"after a policy reload", []string{mapped(testIngressPort), strings.Replace(reload, "policy_changed:false", "policy_changed:true", 1)}, 0, false},
+		{"long after a reload", []string{mapped(testEgressPort, testIngressPort), reload}, reloadMappingWindow + time.Second, true},
+		{"no reload", []string{mapped(testEgressPort, testIngressPort)}, time.Second, true},
+		{"a reload that changed nothing", []string{mapped(testIngressPort), strings.Replace(reload, "provider_env_changed:true", "provider_env_changed:false", 1)}, 0, true},
+		{"the mapping leaves the port out", []string{reload, mapped(38971, 38972)}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReachEnv(t)
+			for _, l := range tc.lines {
+				r.line(l)
+				r.advance(time.Second)
+			}
+			r.advance(tc.gap)
+			r.line(denied)
+			idle(r)
+			h := r.hooks()
+			if !tc.flagged {
+				if h.Unreachable || h.IngressRefused != 0 || len(r.feed(sandboxapi.ReasonHooksUnreachable)) != 0 || len(r.findings()) != 0 {
+					t.Fatalf("a mapping denial after a reload was flagged: %+v", h)
+				}
+				return
+			}
+			warn := r.feed(sandboxapi.ReasonHooksUnreachable)
+			if !h.Unreachable || h.IngressRefused != 1 || !strings.Contains(h.UnreachableReason, "does not cover the port") ||
+				strings.Contains(h.UnreachableReason, "network policy does not allow") || len(warn) != 1 ||
+				!strings.HasPrefix(warn[0].Message, "⚠ "+sandboxapi.HooksUnreachableWarning) {
+				t.Fatalf("hooks = %+v, feed = %+v", h, warn)
+			}
+		})
+	}
+	// A hook through after the reload does not stretch its window.
+	r := newReachEnv(t)
+	r.line(mapped(testIngressPort))
+	r.line(reload)
+	r.line(denied)
+	r.advance(time.Second)
+	r.m.ObserveIngress(r.binding, sandboxauth.RouteHook)
+	r.advance(reloadMappingWindow)
+	r.line(denied)
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || h.IngressRefused != 1 {
+		t.Fatalf("a mapping denial past the reload after a hook = %+v", h)
+	}
+}
+
+// The Codex TUI asks its model endpoint for the model list as it opens,
+// before any prompt: that start-up call starts no window, so an idle session
+// is not flagged (seen live in a MicroVM). A later call without a hook is.
+func TestHookReachIgnoresStartupModelCall(t *testing.T) {
+	r := newReachEnv(t)
+	r.advance(3 * time.Second)
+	r.line(modelCall)
+	r.advance(time.Minute)
+	r.check()
+	if h := r.hooks(); h.Unreachable || h.NoHookYet {
+		t.Fatalf("an idle session was flagged for its start-up model call: %+v", h)
+	}
+	r.line(modelCall)
+	r.advance(DefaultHookReachWindow + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || !h.NoHookYet {
+		t.Fatalf("a model call after start-up without a hook was not flagged: %+v", h)
+	}
+}
+
+// The layer-7 records on the harness's connection to its model show what
+// each request is. The model list, in the start-up grace or after it,
+// starts no window; a prompt's model call does at once, also within the
+// grace, where the connection alone (no path) would not. Layer-7 records
+// name no binary: they are the harness's when the connection they ride on
+// is, and a tool's connection to the same endpoint lends them nothing.
+func TestHookReachTellsTheModelListFromAModelCall(t *testing.T) {
+	const (
+		list   = "HTTP:GET [INFO] ALLOWED GET http://api.anthropic.com:443/v1/models?limit=100 [policy:_provider_anthropic engine:l7]"
+		prompt = "HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages?beta=true [policy:_provider_anthropic engine:l7]"
+	)
+	idle := func(r *reachEnv) {
+		t.Helper()
+		for range 6 {
+			r.advance(DefaultHookReachWindow)
+			r.check()
+		}
+		if h := r.hooks(); h.Unreachable || h.NoHookYet {
+			t.Fatalf("an idle session was flagged: %+v", h)
+		}
+	}
+
+	// A first prompt within the grace, on the connection the model list
+	// opened, starts the window.
+	r := newReachEnv(t)
+	r.advance(2 * time.Second)
+	r.line(modelCall)
+	r.line(list)
+	r.advance(3 * time.Second)
+	r.line(prompt)
+	r.advance(DefaultHookReachWindow - time.Second)
+	r.check()
+	if r.hooks().Unreachable {
+		t.Fatalf("flagged within the window: %+v", r.hooks())
+	}
+	r.advance(2 * time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || !h.NoHookYet || !strings.Contains(h.UnreachableReason, "the harness has been calling its model") {
+		t.Fatalf("a prompt in the start-up grace without a hook was not flagged: %+v", h)
+	}
+
+	// The model list alone, again after the grace, starts none.
+	r = newReachEnv(t)
+	r.advance(2 * time.Second)
+	r.line(modelCall)
+	r.line(list)
+	r.advance(harnessStartupGrace)
+	r.line(list)
+	r.line(strings.Replace(list, "/v1/models?limit=100", "/v1/models/claude-sonnet-4-5", 1))
+	idle(r)
+
+	// A model call on a tool's connection to the harness's model endpoint
+	// is not the harness's, nor is one replayed from before the session.
+	r = newReachEnv(t)
+	r.line("NET:OPEN [INFO] ALLOWED /usr/bin/curl(3) -> api.anthropic.com:443 [policy:_provider_anthropic engine:opa]")
+	r.line(prompt)
+	r.ocsf(r.name, prompt, r.m.now().Add(-time.Hour))
+	idle(r)
+	r = newReachEnv(t)
+	r.line(modelCall)
+	r.ocsf(r.name, prompt, r.m.now().Add(-time.Hour))
+	idle(r)
+}
+
+// What the path of a request of the harness to its model shows.
+func TestModelRequestOf(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         modelRequest
+	}{
+		{"", "", modelConnection},
+		{"POST", "/v1/messages", modelTurn},
+		{"POST", "/v1/messages?beta=true", modelTurn},
+		{"POST", "/v1/chat/completions", modelTurn},
+		{"POST", "/chat/completions", modelTurn},
+		{"POST", "/v1/responses", modelTurn},
+		{"POST", "/model/anthropic.claude-sonnet-4-5-v1%3A0/invoke-with-response-stream", modelTurn},
+		{"POST", "/model/anthropic.claude-sonnet-4-5-v1%3A0/converse", modelTurn},
+		{"POST", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", modelTurn},
+		{"GET", "/v1/models", modelListing},
+		{"GET", "/v1/models/", modelListing},
+		{"GET", "/v1/models/claude-sonnet-4-5", modelListing},
+		{"GET", "/foundation-models", modelListing},
+		{"GET", "/inference-profiles", modelListing},
+		{"GET", "/api/tags", modelListing},
+		{"HEAD", "/v1/models", modelListing},
+		// A GET of a model call's path opens the Responses API's
+		// WebSocket, which a harness may do before any prompt.
+		{"GET", "/v1/responses", modelConnection},
+		{"POST", "/v1/messages/count_tokens", modelConnection},
+		{"POST", "/api/event_logging/batch", modelConnection},
+		{"POST", "/v1/models", modelConnection},
+	} {
+		if got := modelRequestOf(ocsf.Record{Method: tc.method, Path: tc.path}); got != tc.want {
+			t.Errorf("%s %s: %d, want %d", tc.method, tc.path, got, tc.want)
+		}
+	}
 }
 
 // A harness calling its model without a hook is flagged after the window as
@@ -735,6 +962,7 @@ func TestHookReachSilentWork(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newReachEnv(t)
+			r.advance(harnessStartupGrace)
 			r.line(line)
 			r.advance(DefaultHookReachWindow - time.Second)
 			r.check()

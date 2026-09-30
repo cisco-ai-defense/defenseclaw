@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
@@ -141,6 +142,10 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	// The gateway's compute driver decides what a new sandbox can have: on
+	// one that mounts no host folders (OpenShell's MicroVM driver, which a
+	// Mac runs sandboxes with) every run works on a copy.
+	drv := gatewayDriver(st)
 	gateway := ""
 	if st.Gateway != nil {
 		gateway = st.Gateway.Name
@@ -164,13 +169,20 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		}
 	}
 	// The flags replace the configured limits a clamp of which the
-	// preflight reported.
-	for _, c := range resourceClamps(o, ex) {
-		ex.Violations = slices.DeleteFunc(ex.Violations, func(v sandboxapi.Violation) bool { return v.Key == c.Key })
-		ex.Violations = append(ex.Violations, c)
+	// preflight reported. A driver without per-sandbox limits takes neither
+	// (driverFlagNotes says so).
+	if drv.SandboxLimits {
+		for _, c := range resourceClamps(o, ex) {
+			ex.Violations = slices.DeleteFunc(ex.Violations, func(v sandboxapi.Violation) bool { return v.Key == c.Key })
+			ex.Violations = append(ex.Violations, c)
+		}
 	}
-	// The organization's refusals come first; then what the run needs from
-	// this terminal.
+	// The organization's refusals come first; then what this gateway
+	// cannot do, and what the run needs from this terminal.
+	if len(o.Context) > 0 && !drv.HostMounts {
+		return fmt.Errorf("--context mounts a folder into the sandbox read-only, and %s; run without --context (the agent works on a copy of this folder only)",
+			mountRefusal(drv))
+	}
 	if !o.Detach && !headless && !a.IO.TTY {
 		return fmt.Errorf("`sandbox run` attaches %s to your terminal, and there is none; pass --prompt TEXT (with --detach to run in the background)", spec.DisplayName)
 	}
@@ -183,8 +195,11 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy
-	if note := copyPolicyNote(ex, o); note != "" {
+	// The daemon decides the mode, the driver's clamp included; a driver
+	// without host mounts is known here already, which spares a create it
+	// would refuse.
+	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy || !drv.HostMounts
+	if note := copyPolicyNote(ex, o, drv); note != "" {
 		a.note(note)
 	}
 
@@ -225,6 +240,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		}
 	}
 
+	a.driverFlagNotes(o, drv, shown)
 	a.warnSecretEnv(env)
 	env = a.withGitIdentity(ctx, project, env)
 	req, llm, err := a.createRequest(spec, project, o, copyMode, env)
@@ -243,6 +259,31 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if _, err := spec.LaunchArgv(pre); err != nil {
 		return err
 	}
+	// On MicroVMs a harness's run files are baked into a run image, whose
+	// first start prepares a disk: which run image this run boots depends
+	// on its --env and credentials, which the preflight took from the
+	// newest sandbox of the harness. The daemon is asked again with this
+	// run's (an older daemon, or none, leaves the preflight's answer).
+	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles && drv.ImageCache != "" {
+		if again, err := api.Explain(ctx, sandboxapi.ExplainRequest{
+			Harness: spec.Name, Pack: o.Pack, Profile: o.Profile, Project: project, Copy: req.Copy, Safe: o.Safe, Unmask: o.Unmask,
+			Run: explainRun(spec, req),
+		}); err == nil {
+			ex.VMFirstBoot = again.VMFirstBoot
+		}
+	}
+	// A first start on MicroVMs prepares a disk of about the image's size:
+	// on a volume without the room it is refused before anything is
+	// copied or created.
+	if ex.VMFirstBoot {
+		warning, err := a.vmDiskShortage(ctx, drv, spec, "", "this sandbox's first start")
+		if err != nil {
+			return err
+		}
+		if warning != "" {
+			a.warn(warning)
+		}
+	}
 	var copyRec *workspace.CopyRecord
 	if copyMode {
 		// Stage first: a project that cannot be copied (too large, a
@@ -252,13 +293,13 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 				return err
 			}
 		}
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
 			return err
 		}
 	}
 
 	a.println()
-	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o))
+	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o, drv, ex.VMFirstBoot))
 	sb, err := api.Create(ctx, req)
 	if err != nil && !copyMode && sandboxapi.IsCode(err, sandboxapi.CodeNeedsCopy) {
 		// A linked worktree, a git directory outside the folder and the
@@ -272,7 +313,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			}
 		}
 		a.warn(a.needsCopyText(project, refusal, req.Name))
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
 			return err
 		}
 		sb, err = api.Create(ctx, req)
@@ -286,7 +327,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		if taken {
 			return nameTakenError(req.Name, headless)
 		}
-		return a.landlockHint(apiError(err))
+		return a.landlockHint(apiError(err), func() openshell.Driver { return drv })
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
@@ -444,7 +485,7 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	if args[0] == "--help" || args[0] == "-h" {
 		a.println(spec.Command + " is not installed on this machine; DefenseClaw runs " + spec.DisplayName + " in a sandbox.")
-		a.println("  " + CommandName + " run " + spec.Command + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
+		a.println("  " + CommandName + " run " + HarnessArg(spec) + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
 		return nil
 	}
 	var latest image.Record
@@ -457,7 +498,7 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	if latest.HarnessVersion == "" {
 		return fmt.Errorf("%s is not installed on this machine, and no %s sandbox image is built yet (`%s image build %s`)",
-			spec.Command, spec.DisplayName, CommandName, spec.Command)
+			spec.Command, spec.DisplayName, CommandName, HarnessArg(spec))
 	}
 	a.println(latest.HarnessVersion + " (" + spec.DisplayName + ", in the DefenseClaw sandbox image)")
 	return nil
@@ -575,18 +616,103 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 
 // landlockHint completes, on macOS, a sandbox that ended in the error
 // phase for a reason naming Landlock (OpenShell's supervisor probes it
-// before the harness runs): there sandboxes run on the kernel of Docker
-// Desktop's Linux VM, which has none today.
-func (a *App) landlockHint(err error) error {
+// before the harness runs) on a gateway that runs the docker driver: there
+// sandboxes run on the kernel of Docker Desktop's Linux VM, which has none
+// today, and OpenShell's MicroVM driver, which boots each sandbox with a
+// kernel of its own, is the way on. driver is the gateway's compute
+// driver, asked for only when the failure is one of those.
+func (a *App) landlockHint(err error, driver func() openshell.Driver) error {
 	if err == nil || a.GOOS != "darwin" {
 		return err
 	}
 	if msg := strings.ToLower(err.Error()); !strings.Contains(msg, "error state") || !strings.Contains(msg, "landlock") {
 		return err
 	}
-	return fmt.Errorf("%w; macOS sandboxes cannot run on Docker Desktop today: its Linux VM has no Landlock, which OpenShell sandboxes need "+
-		"(`%s doctor` checks it; see %s)", err, CommandName, setupTroubleshootingURL)
+	if driver().Name != openshell.DriverDocker {
+		return err
+	}
+	return fmt.Errorf("%w; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: "+
+		"switch the gateway to MicroVMs with `%s setup` (or `%s doctor --fix`; see %s)", err, CommandName, CommandName, setupTroubleshootingURL)
 }
+
+// gatewayDriver is the compute driver of the daemon's gateway, from its
+// status: docker from a daemon too old to say (it drove no other), and the
+// zero Driver, which mounts nothing, for one DefenseClaw does not know.
+func gatewayDriver(st *sandboxapi.Status) openshell.Driver {
+	name := ""
+	if st != nil && st.Gateway != nil {
+		name = st.Gateway.Driver
+	}
+	d, _ := openshell.LookupDriver(name)
+	return d
+}
+
+// statusDriver is the compute driver of the daemon's gateway, read now:
+// docker when the daemon does not answer (what it drove before it could
+// say).
+func statusDriver(ctx context.Context, api API) openshell.Driver {
+	st, err := api.Status(ctx)
+	if err != nil {
+		st = nil
+	}
+	return gatewayDriver(st)
+}
+
+// mountRefusal says why the driver mounts no host folders.
+func mountRefusal(d openshell.Driver) string {
+	return firstNonEmpty(d.MountRefusal, "this gateway's compute driver mounts no host folders")
+}
+
+// sandboxDisk names the gateway setting that sizes a sandbox's own disk,
+// where the driver gives it one: a MicroVM writes to an overlay disk of
+// [openshell.drivers.vm] overlay_disk_mib (4096 by default); a docker
+// sandbox writes to the Docker host's storage (""). Like landlockHint's
+// Docker Desktop wording, it names a setting of one driver, which the
+// driver table does not hold.
+func sandboxDisk(d openshell.Driver) string {
+	if d.Name == openshell.DriverVM {
+		return "overlay_disk_mib under [openshell.drivers.vm] in the OpenShell gateway's gateway.toml"
+	}
+	return ""
+}
+
+// limitsIgnoredText is the warning of a --cpu or --memory the gateway's
+// compute driver does not enforce per sandbox (the daemon warns the same
+// at create; the banner does not repeat it).
+const limitsIgnoredText = "cpu/memory limits have no effect on the OpenShell vm driver: every MicroVM gets [openshell.drivers.vm] vcpus and mem_mib"
+
+// driverFlagNotes says, before anything is copied or created, which of a
+// new sandbox's flags the gateway's compute driver does not honour: without
+// host mounts the run works on a copy, which takes no snapshot, and
+// without per-sandbox limits every sandbox gets the gateway's own. What it
+// warns about is recorded in shown.
+func (a *App) driverFlagNotes(o RunOptions, d openshell.Driver, shown map[string]bool) {
+	if o.NoSnapshot && !d.HostMounts {
+		a.note("--no-snapshot does not apply: " + mountRefusal(d) + ", so the run works on a copy, which takes no snapshot")
+	}
+	if !d.SandboxLimits && (strings.TrimSpace(o.CPU) != "" || strings.TrimSpace(o.Memory) != "") {
+		a.warn(limitsIgnoredText)
+		shown[warningKey(limitsIgnoredText)] = true
+	}
+}
+
+// driverClamp reports the daemon's clamp of a mount to copy mode because
+// the gateway's compute driver mounts no host folders: the copy note says
+// it (copyPolicyNote), not an organization's refusal.
+func driverClamp(v sandboxapi.Violation) bool {
+	return v.Key == "workdir.mode" && v.Constraint == packs.ConstraintComputeDriver
+}
+
+// driverCopyNote is the copy note of a run on a driver without host mounts.
+func driverCopyNote(d openshell.Driver) string {
+	return "copy mode: " + mountRefusal(d) + "; " + copyBackText
+}
+
+// copyBackText ends a copy note with how the copy's work reaches the
+// folder: the session's end offers to bring it back (endCopy), and a run
+// that does not ask (a headless run, --yes, a skip) leaves it for pull.
+const copyBackText = "the agent works on a copy, and your folder changes only when you bring its work back: " +
+	"at the end of the session, or later with `" + CommandName + " pull`"
 
 func nameTakenError(name string, headless bool) error {
 	resume := "`" + CommandName + " connect " + name + "`"
@@ -623,18 +749,26 @@ func (a *App) freeName(ctx context.Context, api API, project string) (string, er
 	return "", errors.New("could not pick a free sandbox name; pass --name")
 }
 
-// buildNote says, when the harness image is missing, that the run builds
-// it first.
-func (a *App) buildNote(spec *harness.Spec, o RunOptions) string {
-	if o.NoBuild {
+// buildNote says, when the harness image for the gateway's compute driver
+// d is missing, that the run builds it first, and when the gateway's
+// MicroVM driver has not prepared the image the sandbox boots (firstBoot,
+// the daemon's Explain.VMFirstBoot), that its first start prepares it.
+func (a *App) buildNote(spec *harness.Spec, o RunOptions, d openshell.Driver, firstBoot bool) string {
+	var parts []string
+	if !o.NoBuild {
+		if ok, err := a.Images.Current(spec, image.MicroVMTarget(d)); err == nil && !ok {
+			// Sizes and times differ by harness and by what the build cache
+			// already holds.
+			parts = append(parts, "building its image first, which can take a few minutes")
+		}
+	}
+	if firstBoot {
+		parts = append(parts, "the first start prepares its MicroVM disk: about a minute")
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	if ok, err := a.Images.Current(spec); err != nil || ok {
-		return ""
-	}
-	// Sizes and times differ by harness and by what the build cache
-	// already holds.
-	return " (building its image first, which can take a few minutes)"
+	return " (" + strings.Join(parts, "; then ") + ")"
 }
 
 // checkHostPorts refuses a --host-port DefenseClaw does not open, the way
@@ -710,6 +844,11 @@ func (a *App) preflightViolations(list []sandboxapi.Violation) (map[string]bool,
 		if v.Fatal {
 			continue
 		}
+		if driverClamp(v) {
+			// The gateway's, not the organization's: the copy note says it.
+			shown[violationKey(v)] = true
+			continue
+		}
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 		shown[violationKey(v)] = true
 		overridden = overridden || (v.Admin && v.Source == string(packs.SourceFlag))
@@ -773,19 +912,28 @@ func resourceClamps(o RunOptions, ex *sandboxapi.Explain) []sandboxapi.Violation
 }
 
 // copyPolicyNote says why a run the user did not ask to copy works on a
-// copy: the organization requires it for this folder, or its required pack
-// works on copies. A clamp of a flag was said already (preflight).
-func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions) string {
+// copy: the gateway's compute driver mounts no host folders, the
+// organization requires it for this folder, or its required pack works on
+// copies. An organization's clamp of a flag was said already (preflight).
+func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) string {
 	if o.Copy {
 		return ""
 	}
 	for _, v := range ex.Violations {
-		if v.Key == "workdir.mode" {
+		if v.Key == "workdir.mode" && !driverClamp(v) {
 			return ""
 		}
 	}
 	for _, s := range ex.Settings {
-		if s.Key != "workdir.mode" || s.Value != config.OpenShellWorkdirCopy || s.Source != string(packs.SourceAdmin) {
+		if s.Key != "workdir.mode" || s.Value != config.OpenShellWorkdirCopy {
+			continue
+		}
+		if s.Origin == packs.ConstraintComputeDriver {
+			// The gateway's clamp: its source is the gateway, not the
+			// organization.
+			return driverCopyNote(d)
+		}
+		if s.Source != string(packs.SourceAdmin) {
 			continue
 		}
 		why := "your organization's policy runs it on a copy"
@@ -797,14 +945,23 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions) string {
 		case "openshell.admin.allow_mount":
 			why = "your organization does not allow live mounts"
 		}
-		return "copy mode: " + why + " (" + s.Origin + "); the agent works on a copy, and your folder gets its changes only through `" +
-			CommandName + " pull`"
+		return "copy mode: " + why + " (" + s.Origin + "); " + copyBackText
+	}
+	if !d.HostMounts && settingValue(ex.Settings, "workdir.mode") != config.OpenShellWorkdirCopy {
+		// A daemon whose policy does not clamp for the driver itself.
+		return driverCopyNote(d)
 	}
 	return ""
 }
 
 func violationKey(v sandboxapi.Violation) string {
 	return v.Key + "\x00" + v.Constraint + "\x00" + v.Attempted
+}
+
+// warningKey is the key of a warning the run printed before the create, so
+// the banner does not repeat the daemon's own copy of it.
+func warningKey(text string) string {
+	return "warning\x00" + text
 }
 
 // liveMountHolder returns the sandbox that mounts project (or a folder
@@ -862,7 +1019,7 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 		}
 		return true, false, nil
 	default:
-		a.note("nothing started; `" + CommandName + " run " + spec.Command + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
+		a.note("nothing started; `" + CommandName + " run " + HarnessArg(spec) + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
 			"` resumes " + holder.Name + ", `" + CommandName + " delete " + holder.Name + "` frees the folder")
 		return false, false, nil
 	}
@@ -1056,6 +1213,8 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
+		// The sandbox's clock reads like this machine's.
+		TimeZone: openshell.HostTimeZone(a.Getenv),
 	}
 	reserved := map[string]bool{}
 	for _, c := range o.Credentials {
@@ -1086,9 +1245,47 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 	return req, llm, nil
 }
 
+// explainRun is what of the create request req the run files of its
+// sandbox depend on (sandboxapi.ExplainRun), without a secret: the values of
+// the --env variables spec's run files read (a variable whose name looks
+// like a secret's, that holds HTTP headers, or whose value is a URL
+// carrying a credential, which the daemon refuses to bake into a run
+// image, only by name), and the names of its credentials, never their
+// values. It goes in a GET's query, which a log of request URLs keeps.
+func explainRun(spec *harness.Spec, req sandboxapi.CreateRequest) *sandboxapi.ExplainRun {
+	run := &sandboxapi.ExplainRun{}
+	if reader, ok := spec.Provider.(connector.SandboxRunEnvReader); ok {
+		for _, k := range reader.SandboxRunEnv() {
+			v, set := req.Env[k]
+			switch {
+			case !set:
+			case secretLooking(k) || strings.Contains(strings.ToUpper(k), "HEADERS") || manager.CredentialURL(v):
+				run.EnvWithheld = append(run.EnvWithheld, k)
+			default:
+				if run.Env == nil {
+					run.Env = map[string]string{}
+				}
+				run.Env[k] = v
+			}
+		}
+	}
+	for _, c := range req.Credentials {
+		run.Credentials = append(run.Credentials, c.Name)
+	}
+	if req.LLM != nil {
+		run.LLMProfile, run.BedrockRegion = req.LLM.Profile, req.LLM.BedrockRegion
+		for name := range req.LLM.Credentials {
+			run.Credentials = append(run.Credentials, name)
+		}
+	}
+	sort.Strings(run.Credentials)
+	sort.Strings(run.EnvWithheld)
+	return run
+}
+
 // stageCopy stages the copy-mode project with the effective workspace
 // policy.
-func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions) (*workspace.CopyRecord, error) {
+func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions, d openshell.Driver) (*workspace.CopyRecord, error) {
 	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe, Unmask: o.Unmask}, name)
 	if err != nil {
 		return nil, err
@@ -1096,9 +1293,29 @@ func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name s
 	a.note("Copying " + a.tildePath(project) + " (secrets are held back)…")
 	rec, err := a.Workspace.Stage(ctx, opts)
 	if err != nil {
-		return nil, workspaceFailure("stage the project copy", err, a.diskFullHint(err))
+		return nil, workspaceFailure("stage the project copy", err, a.stageHint(err, d))
 	}
 	return rec, nil
+}
+
+// stageHint is the way on after a copy could not be staged. A copy above
+// the size cap names the setting that raises it; on a gateway that mounts
+// no host folders it also says that a copy is the only way the project runs
+// there (on Linux it could be mounted live instead), and that the
+// sandbox's own disk must then hold the copy with its git history.
+func (a *App) stageHint(err error, d openshell.Driver) string {
+	var large *workspace.TooLargeError
+	if !errors.As(err, &large) || large.Entries {
+		return a.diskFullHint(err)
+	}
+	hint := "raise openshell.workdir.max_upload_mb (in MB, 500 by default) in " + a.tildePath(a.ConfigPath) + " to copy a larger project"
+	if !d.HostMounts {
+		hint += "; " + mountRefusal(d) + ", so a copy is the only way this project runs on this gateway, and the sandbox's own disk must hold it with its git history"
+		if disk := sandboxDisk(d); disk != "" {
+			hint += " (" + disk + ")"
+		}
+	}
+	return hint
 }
 
 // discardStagedCopy removes the copy staged for a sandbox the daemon did
@@ -1137,7 +1354,8 @@ type bannerInfo struct {
 	// keptSnapshot marks an undo point an earlier session left (a resume
 	// that did not take a new one).
 	keptSnapshot bool
-	// shown are the violations the preflight printed already.
+	// shown are the violations the preflight printed already (violationKey),
+	// and the warnings (warningKey).
 	shown map[string]bool
 }
 
@@ -1156,18 +1374,26 @@ func launchModel(sb *sandboxapi.Sandbox, args []string) string {
 	return model
 }
 
-// launchCaveat is the provider limit an interactive session of sb should
-// know about (harness.CredentialProfile.Caveat); a one-prompt run has none.
-func launchCaveat(sb *sandboxapi.Sandbox, o RunOptions) string {
+// launchCaveats are the limits an interactive session of sb should know
+// about: the harness's own (harness.Spec.InteractiveCaveat), then its
+// provider's (harness.CredentialProfile.Caveat). A one-prompt run has none.
+func launchCaveats(sb *sandboxapi.Sandbox, o RunOptions) []string {
 	spec, ok := harness.Get(sb.Harness)
-	if !ok || sb.Launch.CredentialProfile == "" || o.Prompt != "" || printMode(spec, o.Args) {
-		return ""
+	if !ok || o.Prompt != "" || printMode(spec, o.Args) {
+		return nil
+	}
+	var out []string
+	if caveat := spec.InteractiveCaveat(); caveat != "" {
+		out = append(out, caveat)
+	}
+	if sb.Launch.CredentialProfile == "" {
+		return out
 	}
 	cp, err := spec.CredentialProfile(sb.Launch.CredentialProfile, sb.Launch.BedrockRegion)
-	if err != nil {
-		return ""
+	if err == nil && cp.Caveat != "" {
+		out = append(out, cp.Caveat)
 	}
-	return cp.Caveat
+	return out
 }
 
 func joinNonEmpty(sep string, parts ...string) string {
@@ -1212,7 +1438,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	case model != "":
 		row("Model", model)
 	}
-	if caveat := launchCaveat(sb, b.o); caveat != "" {
+	for _, caveat := range launchCaveats(sb, b.o) {
 		row("", "⚠ "+caveat)
 	}
 	for _, c := range bannerCredentials(sb, b.o) {
@@ -1234,13 +1460,16 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		where = "announced in this terminal's title as they come"
 	}
 	row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
+	if keys := sessionKeys[sb.Harness]; keys != "" && a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
+		row("Keys", keys)
+	}
 	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
 		// Servers left behind and a repository's blocked servers arrive as
 		// warnings below, one line each.
 		row("MCP", strings.Join(sb.MCP.Imported, " ✓ · ")+" ✓")
 	}
-	if sb.TamperTier != "" && sb.TamperTier != "managed" {
-		row("Hooks", sb.TamperTier+" tier: the agent could edit its own hook settings (hook silence is detected)")
+	if text := hooksTierText(sb); text != "" {
+		row("Hooks", text)
 	}
 	for _, v := range sb.Violations {
 		if !b.shown[violationKey(v)] {
@@ -1248,9 +1477,26 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		}
 	}
 	for _, w := range sb.Warnings {
-		a.warn(w)
+		if !b.shown[warningKey(w)] {
+			a.warn(w)
+		}
 	}
 	a.println()
+}
+
+// hooksTierText is the banner's Hooks line for a sandbox whose hooks are
+// not in the managed tier: what of them the image protects and what the
+// agent can still change, for its harness (harness.Spec.TamperNote), or
+// the tier's general meaning for a harness DefenseClaw does not know.
+func hooksTierText(sb *sandboxapi.Sandbox) string {
+	if sb.TamperTier == "" || sb.TamperTier == "managed" {
+		return ""
+	}
+	note := "the agent or a project can change what runs the hooks"
+	if spec, ok := harness.Get(sb.Harness); ok && spec.TamperNote != "" {
+		note = spec.TamperNote
+	}
+	return sb.TamperTier + " tier: " + note + " (hook silence is detected)"
 }
 
 // bannerHostPorts are the host ports the sandbox may ask to reach, as the
@@ -1285,6 +1531,14 @@ func specOf(sb *sandboxapi.Sandbox) *harness.Spec {
 	}
 	spec, _ := harness.Get("claudecode")
 	return spec
+}
+
+// sessionKeys is the banner's Keys line of an interactive session whose
+// harness quits on the Ctrl-C a user presses to stop a turn, which ends
+// the whole session: OpenCode 1.18 binds Ctrl-C to app_exit (with an empty
+// prompt, also while a tool runs) and Esc to session_interrupt.
+var sessionKeys = map[string]string{
+	"opencode": "Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session",
 }
 
 // ownApprovals are the harnesses without a skip-permissions switch: their

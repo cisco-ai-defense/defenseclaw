@@ -26,6 +26,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -79,14 +80,21 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st := &sandboxapi.Status{
 		Enabled: cfg.OpenShell.Enabled, IngressAddr: m.opts.IngressAddr, EgressAddr: m.opts.EgressAddr,
 	}
-	if gw, err := m.gateway(ctx); err != nil {
+	gw, err := m.gateway(ctx)
+	if err == nil && m.now().Sub(time.Unix(0, m.gwCheckedAt.Load())) >= driverRecheck {
+		// The CLI and the TUI decide on the driver said here; a restart
+		// since the last check may have changed it.
+		gw, err = m.recheckDriver(ctx, gw)
+	}
+	if err != nil {
 		st.Reason = sandboxapi.AsError(err).Error()
 	} else {
 		st.Available = true
-		st.Gateway = &sandboxapi.Gateway{Name: gw.Name, Endpoint: gw.Endpoint, Workspace: gw.Client.Workspace(), Version: gw.Version, Healthy: true}
+		st.Gateway = &sandboxapi.Gateway{Name: gw.Name, Endpoint: gw.Endpoint, Workspace: gw.Client.Workspace(), Version: gw.Version, Healthy: true,
+			Driver: string(gw.Driver.Name)}
 	}
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		st.Available, st.Reason = false, openshell.ErrUnsupportedPlatform.Error()
+	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
+		st.Available, st.Reason = false, err.Error()
 	}
 	if eff, err := m.baseEffective(cfg); err == nil {
 		st.Profile = eff.Profile
@@ -135,17 +143,22 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	m.mu.Lock()
 	out := make([]sandboxapi.Sandbox, 0, len(m.boxes))
 	bindings := make([]string, 0, len(m.boxes))
+	shared := make([]openshell.ComputeDriver, 0, len(m.boxes))
+	blocked := make([][]string, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
 			out = append(out, m.view(b))
 			bindings = append(bindings, b.rec.BindingID)
+			shared = append(shared, sharedLimitsOf(b))
+			blocked = append(blocked, b.blockedHostList())
 		}
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
 	for i := range out {
-		m.decorate(&out[i], proxy, bindings[i])
+		m.decorate(&out[i], proxy, bindings[i], blocked[i])
 	}
+	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
@@ -323,7 +336,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := m.listenersReady(); err != nil {
 		return err
 	}
-	gw, err := m.gateway(ctx)
+	// The record is judged against the driver the gateway runs now.
+	gw, err := m.driverGateway(ctx)
 	if err != nil {
 		return err
 	}
@@ -335,6 +349,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.mu.Unlock()
 	if orphaned {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s has no DefenseClaw binding; delete it and run a new one", rec.Name)
+	}
+	// Before the gateway is asked about it: a gateway that runs another
+	// driver may not know the sandbox at all.
+	if err := driverStartRefusal(gw, rec); err != nil {
+		return err
 	}
 	// Only a stopped sandbox starts a new session: everything below (the
 	// token rotation, the pre-session snapshot, the tool-call ledger and
@@ -354,7 +373,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err != nil {
 		return err
 	}
-	if err := m.checkStart(ctx, rec, eff, violations); err != nil {
+	if err := m.checkStart(ctx, gw, rec, eff, violations); err != nil {
 		return err
 	}
 	binding, err := m.opts.Bindings.Get(rec.BindingID)
@@ -368,13 +387,16 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// The harness run files follow the re-resolved policy (safe mode, MCP
 	// servers) before the sandbox runs again.
-	mcp, runConfig, err := m.refreshRunConfig(ctx, rec, eff, sb.Spec.Environment)
+	mcp, runConfig, verify, err := m.refreshRunConfig(ctx, rec, eff, sb.Spec.Environment)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
-	b.rec.MCP, b.rec.RunConfig = mcp, runConfig
+	b.rec.MCP, b.rec.RunConfig, b.rec.Verify = mcp, runConfig, verify
 	m.mu.Unlock()
+	// The workload check after the start compares with what was just
+	// written, not with the files the last session had.
+	rec.Verify = verify
 	// With token_delivery: provider the token is rotated, so a credential
 	// from an earlier session is useless, and the provider carries the new
 	// one into the sandbox. With token_delivery: env the token is a plain
@@ -460,6 +482,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return err
+	}
+	if !gw.Driver.SkipWorkloadCheck {
+		if err := m.verifyStarted(ctx, gw, b, rec); err != nil {
+			return err
+		}
 	}
 	m.mu.Lock()
 	b.sb = sb
@@ -581,7 +608,10 @@ func maskedRels(binding sandboxauth.Binding, workdir string) []string {
 // Delete deletes a sandbox and everything DefenseClaw created for it: the
 // providers, the binding (its token stops working at once), the egress
 // credential and unblocks, the mount pins and mask files, and by default
-// the snapshot.
+// the snapshot. A run image (vm) stays, even one no other sandbox uses:
+// the next sandbox of its posture boots it, where a rebuilt one would get
+// a new image ID and a new prepared disk from the driver (image prune
+// removes it with its overlay image; see image.Builder.pruneRunImages).
 func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -605,18 +635,41 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	// A sandbox OpenShell no longer has (deleted outside DefenseClaw), or
 	// whose name another sandbox took, is only released here: the other
-	// sandbox is left alone.
+	// sandbox is left alone. One created on another compute driver than
+	// the gateway runs now is released whatever the gateway answers: this
+	// gateway cannot remove it, and what the other driver made is named.
+	m.mu.Lock()
+	created := recordDriver(b.rec)
+	m.mu.Unlock()
+	otherDriver := created != gw.Driver.Name
 	sb, err := gw.Client.GetSandbox(ctx, name)
 	gone := openshell.IsNotFound(err)
 	switch {
-	case err != nil && !gone:
+	case err != nil && !gone && !otherDriver:
 		m.dropGateway(gw, err)
 		return nil, upstream("look up sandbox "+name, err)
+	case err != nil && !gone:
+		m.dropGateway(gw, err)
+		gone = true
 	case err == nil && !m.sameSandbox(b, sb):
 		gone = true
 	}
 	var warnings []string
-	if gone {
+	switch {
+	case otherDriver:
+		// The gateway's own record of it, if it still has one, is asked to
+		// go; the rest is the other driver's.
+		if !gone {
+			if _, err := gw.Client.DeleteSandbox(ctx, name); err == nil {
+				waitCtx, cancel := context.WithTimeout(ctx, otherDriverDeleteWait)
+				_ = gw.Client.WaitDeleted(waitCtx, name)
+				cancel()
+			} else {
+				m.dropGateway(gw, err)
+			}
+		}
+		warnings = append(warnings, otherDriverLeftovers(name, created, gw.Driver.Name))
+	case gone:
 		m.mu.Lock()
 		where := gatewayMismatch(b.rec, gw)
 		m.mu.Unlock()
@@ -626,7 +679,7 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 		} else {
 			warnings = append(warnings, "OpenShell no longer had sandbox "+name+" (or another sandbox took its name); DefenseClaw released what it held for it")
 		}
-	} else {
+	default:
 		// The watcher keeps running until the sandbox is gone: a delete that
 		// fails leaves it running, still watched and triaged.
 		m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
@@ -657,6 +710,24 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	m.forget(b)
 	return resp, nil
+}
+
+// otherDriverDeleteWait bounds the wait for a gateway to drop its record
+// of a sandbox made on another compute driver, which it may never manage.
+const otherDriverDeleteWait = 30 * time.Second
+
+// otherDriverLeftovers is the warning of a delete of a sandbox created on
+// another compute driver than the gateway runs now: DefenseClaw's side is
+// released, and what that driver made may be left for the user.
+func otherDriverLeftovers(name string, created, now openshell.ComputeDriver) string {
+	msg := "sandbox " + name + " was created on the " + string(created) + " compute driver, and the gateway runs " + string(now) +
+		" now: DefenseClaw released what it held for it (its binding, providers, snapshot and staged copy), but not what the " +
+		string(created) + " driver made"
+	if created == openshell.DriverDocker {
+		return msg + ": its container may be left (still running on a Docker VM such as Colima, or in the Error phase on Docker Desktop); " +
+			"`docker ps -a` lists it and `docker rm -f` removes it"
+	}
+	return msg
 }
 
 // deleteRetained drops what is left of a deleted sandbox whose snapshot was

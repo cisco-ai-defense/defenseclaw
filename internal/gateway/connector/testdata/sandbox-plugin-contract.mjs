@@ -196,10 +196,12 @@ for (const scenario of scenarios) {
   if (scenario.denied) assert.match(run.message, /DefenseClaw|fixture/, `${kind}: ${scenario.name}: message`);
   if (kind === "opencode") {
     // OpenCode's TUI shows a refused tool as its bare command line, so every
-    // denial is also a toast carrying the reason the model gets.
+    // denial is also a toast carrying the reason the model gets, and where
+    // the TUI keeps it (the line, clicked).
     assert.equal(run.toasts.length, scenario.denied ? 1 : 0, `${kind}: ${scenario.name}: toasts`);
     if (scenario.denied) {
-      assert.equal(run.toasts[0].body.message, run.message, `${kind}: ${scenario.name}: toast message`);
+      assert.equal(run.toasts[0].body.message, run.message + "\n\nClick the tool's red line in the conversation to show this again.",
+        `${kind}: ${scenario.name}: toast message`);
       assert.equal(run.toasts[0].body.variant, "error", `${kind}: ${scenario.name}: toast variant`);
     }
   }

@@ -147,12 +147,22 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 	},
 	preseedRefresh: []string{
 		"pin COPILOT_PKG_CACHE_HOME to the root-owned pre-extracted package and COPILOT_AUTO_UPDATE=false, and drop COPILOT_CLI_DIST_DIR and COPILOT_CLI_VERSION, so only the pinned CLI runs",
+		"set NODE_OPTIONS to --disable-warning=UNDICI-EHPA alone, so Node's experimental-EnvHttpProxyAgent warning does not print above the TUI at every start",
 		"trust the exact working directory under /work or /sandbox in ~/.copilot/config.json (folder trust skips the interactive prompt)",
 	},
 	env: map[string]string{
 		"COPILOT_AUTO_UPDATE":    "false",
 		"COPILOT_PKG_CACHE_HOME": CopilotPackageCache,
 	},
+	// #966, measured on the Docker driver and in the macOS MicroVM: the
+	// sandbox's seccomp filter makes pidfd_open fail with ENOSYS, so the
+	// pinned CLI's native runtime watches SIGCHLD for its hook processes,
+	// and in the TUI its Node.js side resets SIGCHLD to the default. Each
+	// finished hook stays a zombie until Copilot's 30-second hook timeout.
+	// Headless runs keep the handler. Copilot's HTTP hooks would start no
+	// process but let the tool call run when the request fails, so the
+	// sandbox keeps the fail-closed command hooks.
+	interactiveCaveat: "each Copilot CLI hook waits out its 30-second timeout in a sandbox, so a tool call takes about a minute and a half; --prompt runs are not affected",
 })
 
 // CopilotLauncherPath is the in-image Copilot launcher.
@@ -189,4 +199,9 @@ case "$dir" in
     fi
     ;;
 esac
-` + launcherExec(`/usr/local/bin/copilot "$@"`)
+
+# Copilot builds on Node's EnvHttpProxyAgent, which warns at every start
+# that it is experimental, above the TUI. This fixed NODE_OPTIONS silences
+# only that warning (Copilot's tool commands inherit it); the caller's
+# NODE_OPTIONS is dropped with the other start-up variables.
+` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)

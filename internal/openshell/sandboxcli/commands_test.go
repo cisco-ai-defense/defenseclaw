@@ -65,7 +65,8 @@ func TestListAndStatus(t *testing.T) {
 	ta.ok(t, ta.Status(bg, "", OutputText))
 	has(t, ta.output(), "Sandboxes       on", "openshell 0.1.1", "Organization    openshell.admin is advisory: you own config.yaml")
 	ta.ok(t, ta.fresh().Status(bg, "a-box", OutputText))
-	has(t, ta.output(), "skip-permissions on", "managed tier", "9 requests, 4 tool calls, 1 blocked", "2.0 KiB up, 1.0 MiB down")
+	has(t, ta.output(), "skip-permissions on", "managed tier", "9 requests, 4 tool calls, 1 blocked",
+		"3 destinations contacted, 1 blocked, 2.0 KiB up, 1.0 MiB down")
 	ta.ok(t, ta.fresh().Status(bg, "a-box", OutputJSON))
 	var sb sandboxapi.Sandbox
 	if err := json.Unmarshal(ta.out.Bytes(), &sb); err != nil || sb.Name != "a-box" {
@@ -317,6 +318,41 @@ func TestReviewAndDelete(t *testing.T) {
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}, Yes: true, KeepSnapshot: true}))
 	if b := ta.bodies("DELETE", "box"); len(b) != 1 || !strings.Contains(b[0], `"keep_snapshot":true`) {
 		t.Fatalf("delete calls = %q", b)
+	}
+}
+
+// `review` of a copy-mode sandbox (every sandbox on the MicroVM driver)
+// previews what `pull` would bring back and applies nothing, naming the
+// pull that does; the daemon's review, of mounted projects only, is not
+// asked. With -o json stdout holds the pull's result.
+func TestReviewPreviewsACopysPull(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true}))
+	has(t, ta.output(), "starting copybox to read its work", "copybox: 1 file changed (+4 −1)", "  M main.go",
+		"--diff: the changes of a copy come back as a patch; `defenseclaw sandbox pull copybox --patch-out FILE` writes one",
+		"nothing was applied; bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch or --patch-out FILE)", "stopped copybox again")
+	if !slices.Equal(ta.copy.steps, []string{"pull copybox"}) || ta.calls("POST", "copybox/review") != 0 {
+		t.Fatalf("copy steps %v, daemon reviews %d; want a pull and nothing applied", ta.copy.steps, ta.calls("POST", "copybox/review"))
+	}
+	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 0 {
+		t.Fatalf("a preview reported %q", r)
+	}
+	// A plain folder has no branch.
+	ta = newTestApp(t, "", copySandbox("plainbox"))
+	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain,
+		Changes: []workspace.TreeChange{{Path: "notes.md", Status: "M", Added: 1}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 1}}
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
+	has(t, ta.output(), "bring it back with `defenseclaw sandbox pull plainbox --apply` (or --patch-out FILE)")
+	lacks(t, ta.output(), "--branch", "--diff")
+	// -o json: one document, the pull's.
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true, Output: OutputJSON}))
+	var res workspace.PullResult
+	if err := json.Unmarshal(ta.out.Bytes(), &res); err != nil || res.Name != "copybox" || len(res.Changes) != 1 {
+		t.Fatalf("stdout is not the pull's result (%v):\n%s", err, ta.out.String())
+	}
+	if len(ta.copy.apply) != 0 {
+		t.Fatalf("a review applied %+v", ta.copy.apply)
 	}
 }
 
@@ -708,6 +744,26 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	lacks(t, ta.output(), "applied 0 changes")
 }
 
+// An apply that had fewer paths to write than the pull changed says the
+// rest already matched the folder (retest RT-B-2: "3 files changed", then
+// "applied 2 changes" with nothing about the third, which an undo had left
+// on the host).
+func TestPullApplySaysWhatAlreadyMatched(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Changes: []workspace.TreeChange{
+		{Path: "README.md", Status: "M"}, {Path: "alpha.txt", Status: "A"}, {Path: "beta.txt", Status: "A"}}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyMerge, Applied: true,
+		Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}, {Path: "beta.txt", Status: "A"}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "applied 2 changes to ", "; 1 already matched your folder")
+	// Every path written: nothing more is said.
+	ta.out.Reset()
+	ta.copy.applied.Changes = append(ta.copy.applied.Changes, workspace.TreeChange{Path: "alpha.txt", Status: "A"})
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "applied 3 changes to ")
+	lacks(t, ta.output(), "already matched")
+}
+
 // A conflicted `pull --apply` exits 4 and says how to merge (manual test
 // L2: status 0 and no hint).
 func TestPullApplyConflictExitsWithItsOwnStatus(t *testing.T) {
@@ -797,16 +853,25 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 		mode    workspace.ApplyMode
 		applied bool
 		stderr  []string
+		// since is a pull that starts from an earlier apply.
+		since bool
 	}{
-		{"review", PullOptions{}, false, true, "", false, []string{"starting copybox", "Pulling copybox's work"}},
+		{"review", PullOptions{}, false, true, "", false, []string{"starting copybox", "Pulling copybox's work"}, false},
 		{"branch", PullOptions{Branch: true}, false, false, workspace.ApplyBranch, true,
-			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}},
-		{"nothing to bring back", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}},
+			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}, false},
+		{"nothing to bring back", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}, false},
+		// What the operator took back of that apply is not in the folder:
+		// only what is known is said.
+		{"nothing new since the last apply", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false,
+			[]string{"nothing new since the last apply to "}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "", copySandbox("copybox"))
 			if c.empty {
 				ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+				if c.since {
+					ta.copy.pull.Since = strings.Repeat("d", 40)
+				}
 			}
 			o := c.opts
 			o.Name, o.Output = "copybox", OutputJSON
@@ -821,9 +886,38 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 				t.Fatalf("stdout is not one result (%v):\n%s", err, ta.output())
 			}
 			has(t, ta.err.String(), c.stderr...)
+			lacks(t, ta.err.String(), "has the sandbox's changes")
 			if ta.IO.Out != io.Writer(ta.out) {
 				t.Fatal("stdout was not restored after the command")
 			}
+		})
+	}
+}
+
+// A pull with no mode that finds nothing to bring back says so, as --apply
+// does, instead of how to bring it back (retest RT-B-1: "bring it back with
+// --apply, --branch or --patch-out FILE" after "0 files changed … since the
+// last apply"). So does `review` of a copy-mode sandbox.
+func TestPullWithNothingToBringBackSaysSo(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		since   bool
+		preview bool
+		want    string
+	}{
+		{"since the last apply", true, false, "nothing new since the last apply to "},
+		{"nothing changed", false, false, "nothing to bring back"},
+		{"review since the last apply", true, true, "nothing new since the last apply to "},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "", copySandbox("copybox"))
+			ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+			if c.since {
+				ta.copy.pull.Since = strings.Repeat("d", 40)
+			}
+			ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", preview: c.preview}))
+			has(t, ta.output(), "copybox: 0 files changed", c.want)
+			lacks(t, ta.output(), "bring it back with", "nothing was applied")
 		})
 	}
 }
@@ -1108,6 +1202,18 @@ func TestResolveHarness(t *testing.T) {
 		}
 	}
 	wantErr(t, errOf(ResolveHarness("vim")), "claude (Claude Code)")
+	// Certification AG-MAC-F8: Antigravity is named as image build, image
+	// list and openshell.harnesses name it, and its command agy works too;
+	// Kiro by its connector name, not the kiro-cli-chat nobody types.
+	for _, in := range []string{"antigravity", "agy", "Antigravity"} {
+		if spec, err := ResolveHarness(in); err != nil || spec.Name != "antigravity" {
+			t.Errorf("ResolveHarness(%q) = %v, %v; want antigravity", in, spec, err)
+		}
+	}
+	if got := HarnessArg(harnessSpec(t, "antigravity")); got != "antigravity" {
+		t.Errorf("HarnessArg(antigravity) = %q", got)
+	}
+	wantErr(t, errOf(ResolveHarness("vim")), "antigravity (Antigravity)", "kiro (Kiro CLI)")
 	// Every harness's name, as setup and the hints give it, resolves back.
 	for _, h := range harness.Names() {
 		spec, _ := harness.Get(h)

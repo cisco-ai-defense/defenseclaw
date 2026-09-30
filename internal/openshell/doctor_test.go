@@ -74,6 +74,14 @@ type doctorFixture struct {
 	vmKernel string
 	vmErr    error
 	vmProbes int
+	// brew is the Homebrew prefix of a Mac, e2fsprogs the directory the
+	// MicroVM driver would find e2fsprogs in (empty until installed).
+	brew, e2fsprogs string
+	// restartedOn is the compute driver the gateway runs once a change
+	// restarts it (empty: docker).
+	restartedOn openshell.ComputeDriver
+	// env is the environment docker runs in (Doctor.Getenv).
+	env map[string]string
 }
 
 // unit renders the service as systemd reports it, started at f.started
@@ -109,10 +117,12 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		vmABI:    6,
 		vmKernel: "6.12.65-linuxkit",
 	}
+	f.brew, f.e2fsprogs = filepath.Join(f.home, "homebrew"), filepath.Join(f.home, "homebrew", "opt", "e2fsprogs", "sbin")
 	f.regDir = f.addRegistration("openshell", nil)
 	f.writeTOML(enabledTOML, f.started.Add(-time.Minute))
 
 	f.runner.On("docker info", dockerInfoJSON("29.4.0", "Ubuntu 24.04.4 LTS", nil), nil)
+	f.runner.On("docker buildx version", "github.com/docker/buildx v0.30.1 c6f062d0eef6a18ae703d0433e2c8a4dd34d4513\n", nil)
 	f.runner.On("loginctl show-user dev", "yes\n", nil)
 	f.runner.OnFunc("systemctl --user show openshell-gateway", func(context.Context, openshell.Command) ([]byte, error) {
 		return []byte(f.unit("active", "enabled")), nil
@@ -122,6 +132,8 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	f.runner.On("systemctl --user restart openshell-gateway", "", nil)
 	f.runner.On("systemctl --user enable --now openshell-gateway", "", nil)
 	f.runner.On("openshell-gateway config preflight", "", nil)
+	f.runner.On("/usr/bin/ssh -G sandbox", sshConfigSharing("false", ""), nil)
+	f.runner.On(fakeShim.Path+" -G sandbox", sshConfigSharing("false", ""), nil)
 
 	f.doctor = &openshell.Doctor{
 		GOOS:     "linux",
@@ -137,22 +149,47 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Dial: func(*openshell.Registration) (openshell.Client, error) {
 			return f.fake.Client(openshell.ClientOptions{}), nil
 		},
-		Gateway: &openshell.GatewayConfigurator{Dir: f.dir, GOOS: "linux", Runner: f.runner,
+		Gateway: &openshell.GatewayConfigurator{Dir: f.dir, GOOS: "linux", Runner: f.runner, BrewPrefix: f.brew,
 			VerifyGateway:        func(context.Context) error { f.verified++; return nil },
 			ProbeClientAuth:      func(context.Context, *openshell.Registration) error { f.probes++; return f.probe },
-			BrewFormulaInstalled: func() bool { return true }},
-		Ports:         []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
-		LandlockABI:   func() (int, error) { return 6, nil },
-		VMLandlockABI: func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
-		DiskFree:      func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
-		Listen:        f.listen,
-		Geteuid:       func() int { return 1000 },
-		Username:      func() (string, error) { return "dev", nil },
-		HomeDir:       func() (string, error) { return f.home, nil },
-		DockerDesktop: func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
-		DockerGroup:   func() (bool, bool, error) { return true, true, nil },
+			BrewFormulaInstalled: func() bool { return true },
+			RunningDriver: func(context.Context) (openshell.Driver, error) {
+				d, _ := openshell.LookupDriver(string(f.restartedOn))
+				return d, nil
+			},
+			FlushSandboxes: func(ctx context.Context) error {
+				return openshell.FlushSandboxes(ctx, f.fake.Client(openshell.ClientOptions{}))
+			}},
+		Ports:               []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
+		LandlockABI:         func() (int, error) { return 6, nil },
+		DockerVMLandlockABI: func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
+		E2fsprogsDirs:       []string{f.e2fsprogs},
+		HostMemory:          func() uint64 { return 32 << 30 },
+		DiskFree:            func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
+		Listen:              f.listen,
+		Geteuid:             func() int { return 1000 },
+		Getegid:             func() int { return 1000 },
+		Username:            func() (string, error) { return "dev", nil },
+		HomeDir:             func() (string, error) { return f.home, nil },
+		DockerDesktop:       func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
+		DockerGroup:         func() (bool, bool, error) { return true, true, nil },
+		SSHShim:             func() (*openshell.SSHShim, error) { return fakeShim, nil },
+		Getenv:              func(k string) string { return f.env[k] },
 	}
 	return f
+}
+
+// fakeShim stands for the ssh shim in doctor tests; Remove leaves it be.
+var fakeShim = &openshell.SSHShim{Dir: "/shim", Path: "/shim/ssh", Real: "/usr/bin/ssh"}
+
+// sshConfigSharing is `ssh -G sandbox` output with the given
+// controlmaster and controlpath (none when empty).
+func sshConfigSharing(master, path string) string {
+	out := "user dev\nhostname sandbox\nport 22\ncontrolmaster " + master + "\n"
+	if path != "" {
+		out += "controlpath " + path + "\n"
+	}
+	return out + "controlpersist no\nproxycommand none\n"
 }
 
 // addRegistration writes a registration with the credential modes doctor
@@ -239,13 +276,16 @@ func TestDoctorHealthyHost(t *testing.T) {
 			t.Errorf("%s = %s: %s", c.ID, c.Status, c.Detail)
 		}
 	}
-	want := []string{"platform", "user", "landlock", "docker", "docker-host-network", "docker-file-sharing", "disk", "linger",
-		"gateway-service", "openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-driver",
+	want := []string{"platform", "user", "landlock", "docker", "docker-buildkit", "docker-host-network", "docker-file-sharing", "disk", "linger",
+		"gateway-service", "openshell-cli", "ssh-connection-sharing", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-driver",
 		"global-policy", "bind-mounts", "telemetry", "port-ingress", "port-egress"}
 	if !r.OK() || strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("checks = %v\nwant     %v\n%s", got, want, r)
 	}
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
+	expectCheck(t, r, openshell.CheckIDSSHSharing, openshell.StatusPass,
+		"off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either")
+	expectCheck(t, r, openshell.CheckIDDockerBuildKit, openshell.StatusPass, "docker build uses BuildKit (buildx v0.30.1)")
 	if f.vmProbes != 0 {
 		t.Fatalf("a Linux host asked a Docker VM for Landlock %d times", f.vmProbes)
 	}
@@ -388,8 +428,22 @@ func TestDoctorChecks(t *testing.T) {
 			want: []checkWant{{"landlock", fail, "no Landlock support"}}, fix: &fixWant{sudo: true, manual: true}},
 
 		{name: "docker not installed", setup: func(f *doctorFixture) { f.found["docker"] = false },
-			want: []checkWant{{"docker", fail, "not installed"}, {"docker-host-network", skip, ""}, {"docker-file-sharing", skip, ""}, {"disk", skip, ""}},
-			fix:  &fixWant{text: "install Docker Engine 28"}},
+			want: []checkWant{{"docker", fail, "not installed"}, {"docker-buildkit", skip, "not available"}, {"docker-host-network", skip, ""},
+				{"docker-file-sharing", skip, ""}, {"disk", skip, ""}},
+			fix: &fixWant{text: "install Docker Engine 28"}},
+		// Without its buildx plugin (another HOME or DOCKER_CONFIG hides
+		// it), or with DOCKER_BUILDKIT off, docker build uses the legacy
+		// builder, which cannot build the images (COPY --chmod).
+		{name: "docker without buildx", setup: func(f *doctorFixture) {
+			f.runner.On("docker buildx version", "docker: unknown command: docker buildx\n\nRun 'docker --help' for more information\n", errors.New("docker: exit status 1"))
+		}, want: []checkWant{{"docker-buildkit", fail, "docker's buildx plugin is not available (`docker buildx version`: docker: unknown command: docker buildx), " +
+			"so docker build would fall back to the legacy builder"}, {"docker", pass, ""}},
+			fix: &fixWant{manual: true, text: "install Docker's buildx plugin (the docker-buildx-plugin package from Docker's repository, or Docker Desktop), " +
+				"and make sure DOCKER_CONFIG, or ~/.docker when it is unset, is the Docker config whose cli-plugins directory has docker-buildx"}},
+		{name: "DOCKER_BUILDKIT off", setup: func(f *doctorFixture) { f.env = map[string]string{"DOCKER_BUILDKIT": "0"} },
+			want: []checkWant{{"docker-buildkit", fail, "DOCKER_BUILDKIT=0 turns BuildKit off"}}, fix: &fixWant{manual: true, text: "unset DOCKER_BUILDKIT"}},
+		{name: "DOCKER_BUILDKIT on", setup: func(f *doctorFixture) { f.env = map[string]string{"DOCKER_BUILDKIT": "1"} },
+			want: []checkWant{{"docker-buildkit", pass, "docker build uses BuildKit (buildx v0.30.1)"}}},
 		{name: "docker permission denied, not in the group", setup: func(f *doctorFixture) {
 			docker("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock", errors.New("exit status 1"))(f)
 			f.doctor.DockerGroup = func() (bool, bool, error) { return false, false, nil }
@@ -451,9 +505,12 @@ func TestDoctorChecks(t *testing.T) {
 				{"gateway-service", pass, "nvidia/openshell/openshell"},
 				// The Homebrew service's wrapper sources gateway.env too (M8).
 				{"telemetry", skip, "DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from /"}}},
+		// No formula and no gateway answering (one that answers is
+		// TestDoctorOnReleaseBinaries').
 		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {
 			f.onBrew()
 			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		}, want: []checkWant{{"gateway-service", fail, "nvidia/openshell/openshell is not installed"}}, fix: &fixWant{command: install}},
 
 		{name: "cli missing", setup: func(f *doctorFixture) { f.found["openshell"] = false }, want: []checkWant{{"openshell-cli", fail, "not on PATH"}}},
@@ -490,7 +547,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "wrong compute driver", setup: func(f *doctorFixture) {
 			f.fake = openshelltest.New(openshelltest.WithGatewayInfo(types.GatewayInfo{Version: "0.1.1",
 				ComputeDrivers: []types.ComputeDriverInfo{{Name: "podman", DriverName: "podman"}}}))
-		}, want: []checkWant{{"gateway-driver", fail, "runs podman"}}},
+		}, want: []checkWant{{"gateway-driver", fail, `this gateway runs "podman"`}}},
 		{name: "global policy", setup: func(f *doctorFixture) { f.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
 			want: []checkWant{{"global-policy", warn, "approvals are disabled"}}},
 
@@ -665,7 +722,7 @@ func TestDoctorChecksLandlockInTheDockerVM(t *testing.T) {
 	const (
 		pass, warn, fail, skip = openshell.StatusPass, openshell.StatusWarn, openshell.StatusFail, openshell.StatusSkip
 		vm                     = "Docker Desktop's Linux VM (kernel 6.12.65-linuxkit)"
-		today                  = "macOS sandboxes cannot run on Docker Desktop today"
+		today                  = "macOS sandboxes cannot run on Docker Desktop's kernel: run them in OpenShell MicroVMs"
 	)
 	for _, tc := range []struct {
 		name   string
@@ -764,7 +821,7 @@ func TestDoctorAsksTheDockerVMKernel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDoctorFixture(t)
 			f.onBrew()
-			f.doctor.VMLandlockABI = nil
+			f.doctor.DockerVMLandlockABI = nil
 			f.doctor.ProbeImages = []string{"", overlay}
 			f.runner.On("docker image inspect --format {{.Id}} "+overlay, "sha256:1a2b\n", nil)
 			f.runner.On(run, tc.out, tc.err)
@@ -777,7 +834,7 @@ func TestDoctorAsksTheDockerVMKernel(t *testing.T) {
 	t.Run("no local image", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		f.onBrew()
-		f.doctor.VMLandlockABI = nil
+		f.doctor.DockerVMLandlockABI = nil
 		f.doctor.ProbeImages = []string{overlay}
 		expectCheck(t, f.run(), openshell.CheckIDLandlock, openshell.StatusWarn, "not checked")
 		if f.runner.Called("docker run") || f.runner.Called("docker pull") {
@@ -880,5 +937,128 @@ func TestDoctorApplyFixesConsent(t *testing.T) {
 	stop := errors.New("stop")
 	if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return false, stop }); !errors.Is(err, stop) {
 		t.Fatalf("consent error = %v", err)
+	}
+}
+
+// The ssh check proves, with `ssh -G sandbox` through the shim, that the
+// OpenShell sessions DefenseClaw runs share no ssh connections, and warns
+// when the user's own ssh configuration would share them for `openshell`
+// commands run outside DefenseClaw.
+func TestDoctorSSHConnectionSharing(t *testing.T) {
+	const pass, warn, fail = openshell.StatusPass, openshell.StatusWarn, openshell.StatusFail
+	shimErr := errors.New(`ssh shim: DefenseClaw found no directory for an ssh with connection sharing off that the OpenShell CLI would run (/tmp/x is writable by other users (mode 0777): ` +
+		`another user could replace the ssh DefenseClaw gives the OpenShell CLI there); set TMPDIR to a directory only you can write, on a filesystem not mounted noexec`)
+	for _, tc := range []struct {
+		name   string
+		setup  func(f *doctorFixture)
+		status openshell.CheckStatus
+		detail string
+		fix    string
+	}{
+		{name: "the user's config shares connections for every host", setup: func(f *doctorFixture) {
+			f.runner.On("/usr/bin/ssh -G sandbox", sshConfigSharing("auto", "/home/dev/.ssh/cm-eed2ca1b"), nil)
+		}, status: warn, detail: `your ssh configuration shares connections for host "sandbox", the name OpenShell gives every sandbox (ControlMaster auto, ControlPath /home/dev/.ssh/cm-eed2ca1b). ` +
+			"DefenseClaw turns that off for the OpenShell sessions it runs. An `openshell sandbox connect`, `upload`, `download` or `forward` that you run yourself " +
+			"can still reach another sandbox than the one you name, through the connection an earlier one left open",
+			fix: "above any `Host *`: `Host sandbox` with `ControlMaster no` and `ControlPath none`"},
+		{name: "a control path alone rides a master someone else opened", setup: func(f *doctorFixture) {
+			f.runner.On("/usr/bin/ssh -G sandbox", sshConfigSharing("false", "/home/dev/.ssh/cm-eed2ca1b"), nil)
+		}, status: warn, detail: "(ControlMaster false, ControlPath /home/dev/.ssh/cm-eed2ca1b)"},
+		{name: "the user's config cannot be read", setup: func(f *doctorFixture) {
+			f.runner.On("/usr/bin/ssh -G sandbox", "", errors.New("exit status 255"))
+		}, status: pass, detail: "off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); could not read your own ssh configuration: ssh -G sandbox: exit status 255"},
+		{name: "no shim can be made safely", setup: func(f *doctorFixture) {
+			f.doctor.SSHShim = func() (*openshell.SSHShim, error) { return nil, shimErr }
+		}, status: fail, detail: "DefenseClaw cannot give the OpenShell CLI an ssh with connection sharing off, so it refuses to start sandbox sessions: " + shimErr.Error(),
+			fix: "set TMPDIR to a directory only you can write"},
+		{name: "the shim is under the data directory", setup: func(f *doctorFixture) {
+			shim := &openshell.SSHShim{Dir: "/home/dev/.defenseclaw/openshell-ssh/defenseclaw-ssh-1", Path: "/home/dev/.defenseclaw/openshell-ssh/defenseclaw-ssh-1/ssh", Real: fakeShim.Real,
+				Fallback: "/tmp is on a filesystem mounted noexec"}
+			f.doctor.SSHShim = func() (*openshell.SSHShim, error) { return shim, nil }
+			f.runner.On(shim.Path+" -G sandbox", sshConfigSharing("false", ""), nil)
+		}, status: pass, detail: "(ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); " +
+			"its ssh is under /home/dev/.defenseclaw/openshell-ssh, not the temporary directory: /tmp is on a filesystem mounted noexec; your ssh configuration"},
+		{name: "no ssh on PATH", setup: func(f *doctorFixture) {
+			f.doctor.SSHShim = func() (*openshell.SSHShim, error) { return nil, nil }
+		}, status: warn, detail: "no ssh on PATH: the OpenShell CLI needs one for sandbox connect, file transfers and port forwards", fix: "install the OpenSSH client"},
+		{name: "the shim's ssh still shares", setup: func(f *doctorFixture) {
+			f.runner.On(fakeShim.Path+" -G sandbox", sshConfigSharing("auto", "/home/dev/.ssh/cm-eed2ca1b"), nil)
+		}, status: fail, detail: "/usr/bin/ssh, the first ssh on PATH, does not keep connection sharing off when run with -o ControlMaster=no -o ControlPath=none -o ControlPersist=no first " +
+			"(`ssh -G sandbox` through DefenseClaw's shim reports ControlMaster auto, ControlPath /home/dev/.ssh/cm-eed2ca1b), so one sandbox's session could reach another sandbox",
+			fix: "make /usr/bin/ssh pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own"},
+		{name: "the shim's ssh opens a master", setup: func(f *doctorFixture) {
+			f.runner.On(fakeShim.Path+" -G sandbox", sshConfigSharing("true", ""), nil)
+		}, status: fail, detail: "reports ControlMaster true, ControlPath none)"},
+		{name: "the shim's ssh cannot be asked", setup: func(f *doctorFixture) {
+			f.runner.On(fakeShim.Path+" -G sandbox", "/home/dev/.ssh/config line 3: Bad configuration option: controlmastr\n", errors.New("exit status 255"))
+		}, status: warn, detail: "could not confirm that the ssh DefenseClaw runs the OpenShell CLI with shares no connections: ssh -G sandbox: exit status 255: /home/dev/.ssh/config line 3: Bad configuration option: controlmastr"},
+		{name: "the shim's ssh prints no setting", setup: func(f *doctorFixture) {
+			f.runner.On(fakeShim.Path+" -G sandbox", "Pseudo-terminal will not be allocated because stdin is not a terminal.\n", nil)
+		}, status: warn, detail: "/shim/ssh -G sandbox printed no controlmaster setting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			tc.setup(f)
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDSSHSharing, tc.status, tc.detail)
+			if tc.fix != "" && (c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || !strings.Contains(c.Fix.Summary, tc.fix)) {
+				t.Fatalf("fix = %+v, want a manual one containing %q", c.Fix, tc.fix)
+			}
+			if r.OK() != (tc.status != fail) {
+				t.Fatalf("OK = %v with the ssh check %s", r.OK(), tc.status)
+			}
+		})
+	}
+}
+
+// An ssh wrapper first on PATH that turns connection sharing back on fails
+// the check, naming the wrapper and the ssh to put first, since DefenseClaw
+// refuses sandbox sessions through it; it used to only warn.
+func TestDoctorFailsWhenAnSSHWrapperShares(t *testing.T) {
+	skipOnWindows(t)
+	root := t.TempDir()
+	realDir, wrapperDir := filepath.Join(root, "usr-bin"), filepath.Join(root, "home-bin")
+	realSSH := recordingSSH(t, realDir)
+	wrapper := sharingWrapper(t, wrapperDir, realSSH, "-o ControlMaster=auto -o "+shq("ControlPath="+filepath.Join(root, "cm-%C")))
+	openshell.SetSSHShimBase(t, realTempDir(t))
+	f := newDoctorFixture(t)
+	f.doctor.SSHShim = func() (*openshell.SSHShim, error) {
+		return openshell.NewSSHShim(wrapperDir + string(os.PathListSeparator) + realDir)
+	}
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDSSHSharing, openshell.StatusFail,
+		"DefenseClaw refuses to start sandbox sessions: "+wrapper+", the first ssh on PATH, does not keep connection sharing off when run with "+
+			"-o ControlMaster=no -o ControlPath=none -o ControlPersist=no first (`ssh -G sandbox` through DefenseClaw's shim reports ControlMaster auto, ControlPath "+
+			filepath.Join(root, "cm-%C")+")")
+	if want := "make " + wrapper + " pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own, " +
+		"or put " + realDir + " before " + wrapperDir + " on PATH, so the OpenShell CLI runs " + realSSH; c.Fix == nil || c.Fix.Summary != want {
+		t.Fatalf("fix = %+v, want %q", c.Fix, want)
+	}
+	if r.OK() {
+		t.Fatal("the report is OK with an ssh that shares connections")
+	}
+}
+
+// A shim a PATH search would pass over (here one the system will not run,
+// as on a filesystem mounted noexec) fails the check, since DefenseClaw
+// refuses sandbox sessions without one; it used to pass NewSSHShim and
+// only warn when `ssh -G` through it was refused.
+func TestDoctorFailsWhenTheSSHShimCannotRun(t *testing.T) {
+	skipOnWindows(t)
+	bin := filepath.Join(t.TempDir(), "bin")
+	recordingSSH(t, bin)
+	openshell.SetSSHShimBase(t, realTempDir(t))
+	openshell.SetSSHShimMode(t, 0o600)
+	f := newDoctorFixture(t)
+	f.doctor.SSHShim = func() (*openshell.SSHShim, error) { return openshell.NewSSHShim(bin) }
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDSSHSharing, openshell.StatusFail,
+		"DefenseClaw cannot give the OpenShell CLI an ssh with connection sharing off, so it refuses to start sandbox sessions: ssh shim: ")
+	if !strings.Contains(c.Detail, ", which it cannot execute, and finds "+filepath.Join(bin, "ssh")) ||
+		c.Fix == nil || !strings.Contains(c.Fix.Summary, "on a filesystem not mounted noexec") {
+		t.Fatalf("check = %+v, fix %+v", c, c.Fix)
+	}
+	if r.OK() {
+		t.Fatal("the report is OK without an ssh shim that runs")
 	}
 }

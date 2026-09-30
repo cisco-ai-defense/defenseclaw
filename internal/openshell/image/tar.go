@@ -37,7 +37,12 @@ var contextEpoch = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 // or group names (the writer picks USTAR, or PAX for large ids). The same
 // context always produces the same bytes.
 func (c *Context) WriteTar(w io.Writer) error {
-	files := append([]ContextFile(nil), c.Files...)
+	return writeContextTar(w, c.Files)
+}
+
+// writeContextTar streams context entries as WriteTar describes.
+func writeContextTar(w io.Writer, entryFiles []ContextFile) error {
+	files := append([]ContextFile(nil), entryFiles...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	dirs := map[string]bool{}
 	for _, f := range files {

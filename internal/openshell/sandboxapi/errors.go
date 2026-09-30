@@ -35,8 +35,8 @@ const (
 	// CodeConflict: the sandbox exists already or is in the wrong phase.
 	CodeConflict = "conflict"
 	// CodeNeedsCopy: the project cannot be mounted live (a linked worktree,
-	// a git directory outside the folder, and the like; Detail says why);
-	// it can run in copy mode.
+	// a git directory outside the folder, a compute driver that mounts no
+	// host folders, and the like; Detail says why); it can run in copy mode.
 	CodeNeedsCopy = "needs_copy"
 	// CodeAdminViolation: openshell.admin refused the request ("blocked by
 	// your organization's DefenseClaw policy").
@@ -48,7 +48,9 @@ const (
 	// CodeImageUnavailable: no hook-verified overlay image exists (and
 	// building one was refused or failed).
 	CodeImageUnavailable = "image_unavailable"
-	// CodePolicyRejected: OpenShell rejected the sandbox configuration.
+	// CodePolicyRejected: OpenShell rejected the sandbox configuration, or
+	// the sandbox it made does not run as DefenseClaw prepared it (the
+	// workload check after ready).
 	CodePolicyRejected = "policy_rejected"
 	// CodeUpstream: an OpenShell call failed.
 	CodeUpstream = "upstream_error"

@@ -203,6 +203,42 @@ def test_snapshot_sorts_running_first_and_keeps_only_pending_asks() -> None:
     assert "OpenShell 0.1.1 gateway openshell" in model.headline()
 
 
+@pytest.mark.parametrize(
+    ("gateway", "text", "note"),
+    [
+        ({"driver": "vm"}, "OpenShell 0.1.1 gateway openshell (MicroVM)", "MicroVM sandboxes work on a copy"),
+        ({"driver": "vm", "healthy": False}, "gateway openshell (MicroVM, unhealthy)", "MicroVM sandboxes"),
+        ({"driver": "docker"}, "OpenShell 0.1.1 gateway openshell (docker)", ""),
+        # A daemon older than gateway.driver drove docker only.
+        ({}, "OpenShell 0.1.1 gateway openshell", ""),
+    ],
+)
+def test_the_status_names_the_gateways_compute_driver(gateway: dict[str, Any], text: str, note: str) -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot({**STATUS, "gateway": {**STATUS["gateway"], **gateway}}, [], [])
+    assert model.status.gateway.endswith(text) and text in model.headline()
+    assert model.status.driver == gateway.get("driver", "")
+    if note:
+        assert model.status.copy_only_note.startswith(note) and "pull (P)" in model.status.copy_only_note
+        # At 80 columns the gateway's name gives way, but not that it runs MicroVMs.
+        assert model.headline(max_width=52) == "2 running · 3 total · MicroVM gateway"
+    else:
+        assert model.status.copy_only_note == ""
+        assert model.headline(max_width=52) == "2 running · 3 total"
+
+
+def test_a_run_image_is_in_the_details() -> None:
+    image = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
+    row = decode_sandbox({**COPY, "run_image": image})
+    assert row is not None and row.run_image == image and row.copy_mode
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**COPY, "run_image": image}], [])
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Run image"] == image
+    assert pairs["Undo"] == "reverts the last pull --apply (U)" and pairs["Pull"].startswith("P brings the work back")
+    assert "Run image" not in dict(_model().detail_pairs()[1])
+
+
 def test_a_failed_refresh_keeps_the_last_good_snapshot() -> None:
     model = _model()
     model.fetched_at = datetime.now(timezone.utc) - timedelta(seconds=90)
@@ -604,8 +640,12 @@ def test_no_asks_text_holds_for_every_pack() -> None:
         (1, "s", "stop", ""),
         (1, "d", "delete", ""),
         (1, "c", "connect", ""),
-        (0, "U", "hint", "defenseclaw sandbox pull fix-tests"),
-        (0, "R", "hint", "defenseclaw sandbox pull fix-tests"),
+        (1, "P", "hint", "works on your folder directly; R reviews its changes and U undoes them"),
+        # A copy: P pulls its work back, and U reverts the last pull --apply
+        # (it needs no snapshot).
+        (0, "P", "pull", ""),
+        (0, "U", "undo", ""),
+        (0, "R", "hint", "P brings its work back after showing it (defenseclaw sandbox pull fix-tests)"),
         (2, "U", "hint", "no snapshot to undo"),
         (2, "s", "hint", "is not running"),
         (2, "c", "connect", ""),
@@ -625,6 +665,17 @@ def test_sandbox_keys_from_the_asks_view_use_the_asks_sandbox() -> None:
     model = _model()
     model.view = "asks"
     assert model.handle_key("R") == SandboxPanelAction("review", sandbox="myapp-claude-7f3a")
+
+
+def test_a_copy_row_offers_pull_instead_of_review() -> None:
+    model = _model()
+    model.cursor = 0  # fix-tests works on a copy
+    line = model.keys_line()
+    assert "P pull" in line and "R review" not in line and "U undo" in line and len(line) <= 78
+    model.cursor = 1  # myapp mounts its folder
+    assert "R review" in model.keys_line() and "P pull" not in model.keys_line()
+    # Lowercase p is not the panel's: it still opens Policies.
+    assert model.handle_key("p").handled is False
 
 
 def test_new_run_wrappers_and_detail() -> None:
@@ -1002,6 +1053,106 @@ async def test_undo_of_a_running_sandbox_runs_the_command_line(fetch, monkeypatc
         await app._sandbox_undo("myapp-claude-7f3a")  # noqa: SLF001
     assert calls.calls == []
     assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "undo", "myapp-claude-7f3a"], os.getcwd())]
+
+
+@pytest.mark.asyncio
+async def test_undo_of_a_copy_runs_the_command_line(fetch, monkeypatch) -> None:
+    """A copy's undo reverts its last `pull --apply` with git on this machine;
+    the command line previews it and asks (or says there is none)."""
+    fetch.sandboxes = [RUNNING, STOPPED, {**COPY, "phase": "stopped"}]
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls()
+    ran = _fake_terminal(monkeypatch, app)
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", lambda _screen: pytest.fail("the TUI asked instead of the CLI"))
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_undo("fix-tests")  # noqa: SLF001
+    assert calls.calls == []
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "undo", "fix-tests"], os.getcwd())]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("choice", "flags"),
+    [("review", []), ("apply", ["--apply"]), ("branch", ["--branch"]), ("cancel", None), (None, None)],
+)
+async def test_pull_shows_applies_or_branches_through_the_command_line(fetch, monkeypatch, choice, flags) -> None:
+    fetch.sandboxes = [RUNNING, {**COPY, "project": "/home/dev/code/tests"}]
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls()
+    ran = _fake_terminal(monkeypatch, app)
+    menus: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        menus.append(screen)
+        return choice
+
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001
+    assert calls.calls == []
+    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "cancel"]
+    assert "a copy of /home/dev/code/tests" in menus[0].subtitle
+    argv = ["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", *(flags or [])]
+    assert ran == ([] if flags is None else [(argv, os.getcwd())])
+
+
+@pytest.mark.asyncio
+async def test_shift_p_pulls_a_copy_and_p_still_opens_policies(fetch, monkeypatch) -> None:
+    fetch.sandboxes = [RUNNING, COPY]
+    app = DefenseClawTUI(config=_config())
+    seen: list[SandboxPanelAction] = []
+    async with app.run_test(size=(160, 44)) as pilot:
+        await pilot.press("7")
+        await app._refresh_sandbox_snapshot(render=True)  # noqa: SLF001
+        await pilot.pause()
+        app.query_one("#command-input").blur()
+        app.sandbox_model.cursor = 0  # fix-tests
+        app._sync_sandbox_controls()  # noqa: SLF001
+        # A copy: Pull and Undo, no Review.
+        assert not app.query_one("#sandboxes-pull").has_class("hidden")
+        assert not app.query_one("#sandboxes-undo").has_class("hidden")
+        assert app.query_one("#sandboxes-review").has_class("hidden")
+        assert app._sandbox_detail_keys()[0] == ("c", "s", "d", "U", "P", "u")  # noqa: SLF001
+        apply = app._apply_sandbox_action  # noqa: SLF001
+
+        def record(action: SandboxPanelAction) -> bool:
+            if action.kind == "pull":
+                seen.append(action)
+                return True
+            return apply(action)
+
+        monkeypatch.setattr(app, "_apply_sandbox_action", record)
+        await pilot.press("P")
+        await pilot.pause()
+        assert seen == [SandboxPanelAction("pull", sandbox="fix-tests")]
+        await pilot.press("p")
+        await pilot.pause()
+        assert app.active_panel == "policies"
+
+
+@pytest.mark.asyncio
+async def test_a_new_run_on_a_microvm_gateway_locks_the_copy_box(fetch, monkeypatch) -> None:
+    fetch.status = {**STATUS, "gateway": {**STATUS["gateway"], "driver": "vm"}}
+    app = DefenseClawTUI(config=_config())
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return None
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_new_run()  # noqa: SLF001
+        fetch.status = STATUS
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_new_run()  # noqa: SLF001
+    assert screens[0].copy_only == "MicroVM sandboxes work on a copy; pull (P) brings the changes back."
+    assert screens[1].copy_only == ""
 
 
 @pytest.mark.asyncio
@@ -1734,6 +1885,42 @@ async def test_the_launch_dialog_fits_80_columns_and_shows_why_it_refuses(tmp_pa
         status = screen.query_one("#sandbox-launch-status", Static)
         assert str(status.render()) == "Choose a project folder."
         assert status.region.height >= 1 and status.region.bottom <= 24
+
+
+@pytest.mark.asyncio
+async def test_on_a_microvm_gateway_the_copy_box_is_ticked_and_locked(tmp_path: Path) -> None:
+    from defenseclaw.tui.screens.sandbox_launch import SandboxLaunchScreen
+    from textual.app import App
+    from textual.containers import VerticalScroll
+    from textual.widgets import Checkbox, Input, Static
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    note = "MicroVM sandboxes work on a copy; pull (P) brings the changes back."
+    results: list[Any] = []
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(SandboxLaunchScreen((("Codex", "codex"),), folder="", copy_only=note), results.append)
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        box = screen.query_one("#sandbox-launch-copy", Checkbox)
+        assert box.value is True and box.disabled is True
+        shown = screen.query_one("#sandbox-launch-copy-note", Static)
+        assert str(shown.render()) == note
+        screen.query_one("#sandbox-launch-dialog", VerticalScroll).scroll_to_widget(shown, animate=False)
+        await pilot.pause()
+        assert shown.region.right <= 80 and 0 < shown.region.bottom <= 24
+        screen.query_one("#sandbox-launch-folder", Input).value = str(project)
+        box.value = False  # the box is locked: a run there always works on a copy
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+    assert results == [
+        SandboxLaunch(("sandbox", "run", "codex", "--copy"), str(project), f"sandbox run codex in {project}")
+    ]
 
 
 def test_the_launch_dialog_starts_in_a_sandbox_project(tmp_path: Path, monkeypatch) -> None:

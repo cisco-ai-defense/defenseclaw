@@ -36,8 +36,10 @@ import (
 )
 
 // TestOmnigentSandboxArtifacts: the root-owned configuration loads only the
-// DefenseClaw policy module and pins the TUI theme (without one the TUI's
-// first-launch picker crashes writing it to the root-owned file, R2-79).
+// DefenseClaw policy module, switches OmniGent's usage telemetry off (it
+// called config.omnigent-telemetry.io and api.omnigent-telemetry.io at every
+// start, OG-U3) and pins the TUI theme (without one the TUI's first-launch
+// picker crashes writing it to the root-owned file, R2-79).
 func TestOmnigentSandboxArtifacts(t *testing.T) {
 	var cfg map[string]interface{}
 	artifacts := sandboxArtifactsFor(t, NewOmnigentConnector(), "0.13.0")
@@ -54,10 +56,44 @@ func TestOmnigentSandboxArtifacts(t *testing.T) {
 	if tui, _ := cfg["tui"].(map[string]interface{}); tui["theme"] != "dark" {
 		t.Fatalf("tui = %v, want a pinned theme", cfg["tui"])
 	}
+	// /theme fails with a raw errno naming this file (OG-U6); the file says
+	// why.
+	if !strings.Contains(string(config), "# OmniGent's /theme cannot change the TUI theme in a sandbox") {
+		t.Fatalf("the configuration does not explain /theme:\n%s", config)
+	}
+	if cfg["telemetry"] != false {
+		t.Fatalf("telemetry = %v, want false", cfg["telemetry"])
+	}
+	// OmniGent reads the switch with a line match on the raw text, not
+	// through its YAML loader (telemetry/client.py _config_telemetry_disabled).
+	if !regexp.MustCompile(`(?im)^\s*telemetry\s*:\s*false\s*$`).Match(config) {
+		t.Fatalf("OmniGent would not see telemetry switched off in:\n%s", config)
+	}
 	if err := verifyOmnigentSandboxConfig(config); err != nil {
 		t.Fatalf("rendered config rejected: %v", err)
 	}
-	for _, bad := range []string{"policy_modules: []\n", "policy_modules: [x]\npolicies: {}\n", "{"} {
+	// OmniGent's TUI hides tool results, the only place a deny reason
+	// shows, so the sandbox agent tells the model to pass it on (OG-U1).
+	var agent struct {
+		Name   string `yaml:"name"`
+		Prompt string `yaml:"prompt"`
+	}
+	if err := yaml.Unmarshal(sandboxFile(t, artifacts, filepath.Join(OmnigentSandboxAgentPath, "config.yaml")).Data, &agent); err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Join(strings.Fields(agent.Prompt), " ")
+	for _, want := range []string{"denied by policy", "tell the user that DefenseClaw blocked it", "word for word"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("sandbox agent prompt lacks %q:\n%s", want, agent.Prompt)
+		}
+	}
+	telemetryOn := omnigentSandboxConfig()
+	telemetryOn["telemetry"] = true
+	telemetryOnYAML, err := yaml.Marshal(telemetryOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"policy_modules: []\n", "policy_modules: [x]\npolicies: {}\n", "{", string(telemetryOnYAML)} {
 		if err := verifyOmnigentSandboxConfig([]byte(bad)); err == nil {
 			t.Fatalf("verify accepted %q", bad)
 		}

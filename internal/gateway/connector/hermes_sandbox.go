@@ -43,7 +43,11 @@ import (
 // running it on every command (DefenseClaw judges the commands);
 // security.allow_lazy_installs pinned false stops runtime pip installs of
 // optional backends, which download from PyPI outside the pin (and fail in
-// the root-owned install anyway).
+// the root-owned install anyway); and model_catalog.enabled pinned false
+// stops the start-up fetch of Hermes' curated OpenRouter and Nous Portal
+// model lists (hermes-agent.nousresearch.com, which redirects to
+// nousresearch.github.io; Hermes falls back to the lists it ships), which
+// no DefenseClaw provider uses.
 //
 // Hermes also applies /etc/hermes/.env last, over the user's ~/.hermes/.env
 // and the process environment, per variable. The image pins there the
@@ -196,6 +200,7 @@ func renderHermesSandboxManagedConfig(rt resolvedSandboxTarget) ([]byte, error) 
 		"terminal":          map[string]interface{}{"backend": "local"},
 		"agent":             map[string]interface{}{"disabled_toolsets": []interface{}{"code_execution"}},
 		"security":          map[string]interface{}{"tirith_enabled": false, "allow_lazy_installs": false},
+		"model_catalog":     map[string]interface{}{"enabled": false},
 	}
 	body, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -233,6 +238,10 @@ func verifyHermesSandboxManagedConfig(data []byte, rt resolvedSandboxTarget) err
 	security, _ := cfg["security"].(map[string]interface{})
 	if security["tirith_enabled"] != false || security["allow_lazy_installs"] != false {
 		return fmt.Errorf("verify Hermes sandbox managed config: security.tirith_enabled and allow_lazy_installs are not pinned false")
+	}
+	catalog, _ := cfg["model_catalog"].(map[string]interface{})
+	if catalog["enabled"] != false {
+		return fmt.Errorf("verify Hermes sandbox managed config: model_catalog.enabled is not pinned false")
 	}
 	providers, _ := cfg["providers"].(map[string]interface{})
 	if !reflect.DeepEqual(providers, map[string]interface{}{HermesSandboxProviderName: hermesSandboxProvider()}) {

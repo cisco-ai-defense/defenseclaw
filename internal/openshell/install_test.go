@@ -432,3 +432,28 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallerPreparesTheMicroVMDriver: on a Mac the MicroVM driver needs
+// e2fsprogs and a Hypervisor signature, which the installer gets from
+// Homebrew once the user agreed; a failure says what Homebrew said.
+func TestInstallerPreparesTheMicroVMDriver(t *testing.T) {
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.runner.On("brew install e2fsprogs", "", nil)
+	f.runner.On("brew postinstall nvidia/openshell/openshell", "Error: nvidia/openshell/openshell is not installed", errors.New("exit status 1"))
+	if err := f.inst.InstallE2fsprogs(context.Background()); err != nil || !f.runner.Called("brew install e2fsprogs") {
+		t.Fatalf("InstallE2fsprogs = %v; calls %v", err, f.runner.Calls())
+	}
+	err := f.inst.ResignVMDriver(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "brew postinstall nvidia/openshell/openshell: exit status 1: Error: nvidia/openshell/openshell is not installed") {
+		t.Fatalf("ResignVMDriver = %v", err)
+	}
+	// The macOS install plan says the driver needs e2fsprogs too.
+	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS = "darwin"
+	if _, err := f.inst.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.out.String(), "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs") {
+		t.Fatalf("plan:\n%s", f.out.String())
+	}
+}

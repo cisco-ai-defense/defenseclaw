@@ -107,6 +107,22 @@ def test_macos_has_no_telemetry_question() -> None:
     assert "Disable OpenShell Telemetry" in {field.label for field in sandbox_wizard_fields(os_name="linux")}
 
 
+def test_macos_has_no_mounts_question_and_says_every_run_works_on_a_copy() -> None:
+    # Setup on macOS runs sandboxes in OpenShell MicroVMs, which mount no host folders.
+    fields = list(sandbox_wizard_fields(os_name="darwin"))
+    labels = [field.label for field in fields]
+    assert "Mount Project Folder" not in labels
+    microvm = next(field for field in fields if field.label == "MicroVMs")
+    assert microvm.kind == "section" and microvm.value == "every run works on a copy"
+    assert 'compute_driver = "vm"' in microvm.hint and "defenseclaw sandbox pull" in microvm.hint
+    args = build_wizard_args(SetupWizard.SANDBOX, fields)
+    assert "--no-mounts" not in args
+    harnesses = ("--harness", "claudecode", "--harness", "codex")
+    assert args == ("sandbox", "setup", "--non-interactive", *harnesses, "--no-wrappers")
+    linux = [field.label for field in sandbox_wizard_fields(os_name="linux")]
+    assert "Mount Project Folder" in linux and "MicroVMs" not in linux
+
+
 def test_doctor_action_only_checks_the_machine() -> None:
     fields = _set(list(wizard_form_defs(SetupWizard.SANDBOX)), "Action", "doctor")
     assert build_wizard_args(SetupWizard.SANDBOX, fields) == ("sandbox", "doctor")
@@ -335,6 +351,34 @@ def test_the_install_hint_says_how_openshell_is_installed(os_name: str, says: st
         assert says in hint and never not in hint, hint
 
 
+@pytest.mark.parametrize("service_status", ["warn", "fail"])
+def test_an_openshell_outside_the_homebrew_formula_is_refused_as_setup_refuses_it(service_status: str) -> None:
+    # sandboxcli/setup.go refuses it before it reads --install-openshell.
+    service = {"id": "gateway-service", "status": service_status, "detail": "runs under launchd (com.example.gw)"}
+    report = {
+        **READY,
+        "checks": [*READY["checks"][:3], service],
+        "service": {"manager": "brew", "unit": "nvidia/openshell/openshell", "installed": False},
+    }
+    check = sandbox_machine_check(report)
+    assert check.openshell_refused and not check.openshell_needed
+    assert "✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula" in check.summary.split("\n")
+    install = next(
+        f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "Install OpenShell"
+    )
+    assert install.value == "no" and "stop its gateway and remove it" in install.hint, install.hint
+    # The formula's own service, stopped, is still an install.
+    formula = {**report, "service": {"manager": "brew", "installed": True}}
+    assert sandbox_machine_check(formula).openshell_refused is False
+
+
+def test_a_warning_gateway_service_is_shown() -> None:
+    service = {"id": "gateway-service", "status": "warn", "detail": "runs but does not start at login"}
+    check = sandbox_machine_check({**READY, "checks": [*READY["checks"][:3], service]})
+    assert "⚠ OpenShell 0.1.1: runs but does not start at login" in check.summary.split("\n")
+    assert not check.openshell_needed and not check.openshell_refused
+
+
 def test_a_stopped_gateway_or_a_failed_doctor() -> None:
     service = {"id": "gateway-service", "status": "fail", "detail": "inactive"}
     stopped = {**READY, "checks": [*READY["checks"][:3], service]}
@@ -397,37 +441,150 @@ async def test_opening_the_wizard_checks_the_machine_once(monkeypatch) -> None:
     assert probes == [1]
 
 
-# The doctor on a Mac whose Docker Desktop VM kernel has no Landlock, with a
-# bind-mount check that needs a long reason.
+# The doctor on a Mac whose gateway runs the docker driver on Docker
+# Desktop, whose VM kernel has no Landlock, as the Go doctor reports it: it
+# names the driver, and checks what a switch to MicroVMs needs (here
+# e2fsprogs is missing, a reason too long for one line at 80 columns).
 MAC_DOCKER_DESKTOP = {
     "ok": False,
     "docker_version": "29.1.5",
     "cli_version": "0.1.1",
+    "driver": "docker",
+    "configured_driver": "docker",
     "checks": [
-        {"id": "platform", "title": "Platform", "status": "warn", "detail": "darwin/arm64"},
+        {"id": "platform", "title": "Platform", "status": "warn", "detail": "darwin/arm64: macOS sandboxes run in OpenShell MicroVMs"},
         {"id": "docker", "title": "Docker", "status": "pass", "detail": "Docker 29.1.5 (Docker Desktop)"},
         {"id": "landlock", "title": "Landlock", "status": "fail", "detail": "the Docker Desktop VM kernel has no Landlock"},
+        {
+            "id": "vm-driver",
+            "title": "MicroVM driver",
+            "status": "fail",
+            "detail": "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg "
+            "(opt/e2fsprogs under /opt/homebrew or /usr/local): the driver formats every MicroVM's disks with its mke2fs and debugfs",
+        },
         {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": "0.1.1 at /opt/homebrew/bin/openshell"},
         {"id": "gateway-service", "title": "Gateway service", "status": "pass", "detail": "running"},
-        {
-            "id": "bind-mounts",
-            "title": "Project bind mounts",
-            "status": "warn",
-            "detail": "enabled in gateway.toml, but the gateway has not been restarted since it changed",
-        },
+        {"id": "bind-mounts", "title": "Project bind mounts", "status": "fail", "detail": "disabled in gateway.toml"},
     ],
 }
 
 
+def _check(check_id: str, status: str, detail: str = "") -> dict[str, str]:
+    return {"id": check_id, "status": status, "detail": detail}
+
+
+# The doctor on a Mac whose gateway runs OpenShell's MicroVM (vm) driver,
+# with e2fsprogs missing.
+MAC_MICROVM = {
+    "ok": False,
+    "docker_version": "29.1.5",
+    "cli_version": "0.1.1",
+    "driver": "vm",
+    "checks": [
+        _check("platform", "warn", "macOS sandboxes run in OpenShell MicroVMs"),
+        _check("docker", "pass", "Docker 29.1.5 (Docker Desktop)"),
+        _check("landlock", "pass", "enforced by the MicroVM's own kernel; OpenShell refuses to start without it"),
+        _check("openshell-cli", "pass", "0.1.1 at /opt/homebrew/bin/openshell"),
+        _check("gateway-service", "pass", "running"),
+        _check("vm-driver", "fail", "e2fsprogs is not installed"),
+        # Even when a doctor reports it: a MicroVM mounts no host folders.
+        _check("bind-mounts", "fail", "disabled in gateway.toml"),
+    ],
+}
+MAC_MICROVM_LINES = [
+    "✓ Docker 29.1.5",
+    "✓ Landlock (MicroVM)",
+    "✓ OpenShell 0.1.1",
+    "✗ MicroVM driver: e2fsprogs is not installed",
+]
+MAC_DOCKER_DESKTOP_LINES = [
+    "✓ Docker 29.1.5",
+    "✗ Landlock",
+    "✓ OpenShell 0.1.1",
+    "✗ MicroVM driver: e2fsprogs is not installed",
+]
+
+
+def _install_field(machine, os_name: str):
+    fields = sandbox_wizard_fields({}, machine=machine, os_name=os_name)
+    return next(field for field in fields if field.label == "Install OpenShell")
+
+
+def _lines(report) -> list[str]:
+    return sandbox_machine_check(report).summary.split("\n")
+
+
+def test_a_microvm_gateway_skips_bind_mounts_and_checks_its_driver() -> None:
+    check = sandbox_machine_check(MAC_MICROVM)
+    assert check.summary.split("\n") == MAC_MICROVM_LINES
+    # Setup installs e2fsprogs with the OpenShell install's consent.
+    assert check.openshell_needed is True
+    assert check.openshell_detail == "the MicroVM driver needs attention: e2fsprogs is not installed"
+    install = _install_field(check, "darwin")
+    assert install.value == "yes" and "brew install e2fsprogs" in install.hint
+
+    # The driver the files configure counts before the gateway runs it.
+    assert _lines({**MAC_MICROVM, "driver": "", "configured_driver": "vm"}) == MAC_MICROVM_LINES
+    ready = {**MAC_MICROVM, "checks": [*MAC_MICROVM["checks"][:5], _check("vm-driver", "pass")]}
+    assert _lines(ready)[-1] == "✓ MicroVM driver"
+    assert sandbox_machine_check(ready).openshell_needed is False
+
+    # The docker driver skips the vm-driver check and keeps the bind-mount line.
+    docker = {**READY, "driver": "docker", "checks": [*READY["checks"], _check("vm-driver", "skip")]}
+    assert _lines(docker) == ["✓ Docker 29.4.0", "✓ OpenShell 0.1.1", "✓ bind mounts"]
+
+
+def test_a_docker_desktop_mac_is_checked_for_the_switch_to_microvms() -> None:
+    # Setup switches such a Mac's gateway to MicroVMs by default: the wizard
+    # shows the MicroVM driver's needs, installs them with OpenShell's
+    # consent, and asks about no bind mounts (sandboxcli/setup.go).
+    check = sandbox_machine_check(MAC_DOCKER_DESKTOP)
+    assert check.summary.split("\n") == [
+        "✓ Docker 29.1.5",
+        "✗ Landlock",
+        "✓ OpenShell 0.1.1",
+        "✗ MicroVM driver: " + MAC_DOCKER_DESKTOP["checks"][3]["detail"],
+    ]
+    assert check.openshell_needed is True
+    assert check.openshell_detail.startswith("the MicroVM driver needs attention: e2fsprogs is not installed")
+    assert _install_field(check, "darwin").value == "yes"
+    # A Docker VM with Landlock (Colima) keeps the docker driver and its
+    # bind mounts; so does Linux.
+    colima = {
+        **MAC_DOCKER_DESKTOP,
+        "checks": [
+            _check("platform", "warn", "darwin/arm64"),
+            _check("docker", "pass"),
+            _check("landlock", "pass", "ABI 6"),
+            _check("vm-driver", "skip", "the gateway runs the docker driver"),
+            _check("openshell-cli", "pass"),
+            _check("bind-mounts", "pass"),
+        ],
+    }
+    assert _lines(colima) == ["✓ Docker 29.1.5", "✓ Landlock ABI 6", "✓ OpenShell 0.1.1", "✓ bind mounts"]
+    linux = {**colima, "checks": [_check("platform", "pass", "linux/arm64"), *colima["checks"][1:2], _check("landlock", "fail"), *colima["checks"][3:]]}
+    assert _lines(linux)[-1] == "✓ bind mounts" and sandbox_machine_check(linux).openshell_needed is False
+
+
+def test_only_macos_offers_e2fsprogs_with_the_install() -> None:
+    for machine in (None, sandbox_machine_check(READY), sandbox_machine_check(NO_OPENSHELL)):
+        darwin, linux = _install_field(machine, "darwin").hint, _install_field(machine, "linux").hint
+        assert "e2fsprogs" in darwin and "e2fsprogs" not in linux, (darwin, linux)
+
+
 @pytest.mark.asyncio
-async def test_every_machine_check_is_on_screen_at_80x24(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("report", "lines"),
+    [(MAC_DOCKER_DESKTOP, MAC_DOCKER_DESKTOP_LINES), (MAC_MICROVM, MAC_MICROVM_LINES)],
+)
+async def test_every_machine_check_is_on_screen_at_80x24(monkeypatch, report, lines) -> None:
     # On one line, the machine check was cut off at 80 columns after the first few checks.
     from defenseclaw.tui import sandbox_panel
     from defenseclaw.tui.app import DefenseClawTUI
     from defenseclaw.tui.panels.setup import SetupPanelAction
     from fixtures import screen_text
 
-    monkeypatch.setattr(sandbox_panel, "probe_sandbox_machine", lambda: sandbox_machine_check(MAC_DOCKER_DESKTOP))
+    monkeypatch.setattr(sandbox_panel, "probe_sandbox_machine", lambda: sandbox_machine_check(report))
     app = DefenseClawTUI(config=None, setup_model=SetupPanelModel(None, os_name="darwin"))
     async with app.run_test(size=(80, 24)) as pilot:
         app.action_switch_panel("setup")
@@ -444,7 +601,7 @@ async def test_every_machine_check_is_on_screen_at_80x24(monkeypatch) -> None:
             await pilot.press("down")
         await pilot.pause()
         text = screen_text(app)
-    for check in ("✓ Docker 29.1.5", "✗ Landlock", "✓ OpenShell 0.1.1", "✗ bind mounts: enabled in gateway.toml"):
+    for check in lines:
         assert check in text, text
 
 

@@ -251,7 +251,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		}
 		row("Hook error", last+" (the hook failed closed)")
 	}
-	row("Egress", fmt.Sprintf("%d destinations (%d blocked), %s up, %s down", sb.Egress.Destinations, sb.Egress.Blocked,
+	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
 		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown)))
 	for _, ep := range sb.Endpoints {
 		row("Endpoint", ep.Host+" "+ep.Result)
@@ -420,16 +420,15 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	a.note("refreshing the project copy in " + s.sb.Name + "…")
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
-		return workspaceFailure("refresh the copy", err, a.diskFullHint(err))
+		hint := a.diskFullHint(err)
+		if errors.Is(err, workspace.ErrUploadNotArrived) {
+			hint = strayUploadHint
+		}
+		return workspaceFailure("refresh the copy", err, hint)
 	}
 	files, b := int64(rec.Files), rec.Bytes
 	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: "completed", FileCount: &files, ByteCount: &b})
-	for _, w := range rec.Warnings {
-		a.warn(w)
-	}
-	if len(rec.HeldBack) > 0 {
-		a.note("held back: " + strings.Join(firstN(rec.HeldBack, 8), "  "))
-	}
+	a.copyWarnings(rec)
 	return nil
 }
 

@@ -39,9 +39,11 @@ Overview and a Sandboxes panel. Still to come:
   `devin` have harness specs and sandbox artifacts. The `amp`, `cursor` and
   `devin` images stay unverified until a probe runs with a vendor account
   (see [Sandboxed connectors](#sandboxed-connectors)).
-- **macOS.** No sandbox can start on Docker Desktop, whose Linux VM kernel
-  has no Landlock (see [macOS and Docker Desktop](#macos-and-docker-desktop)).
-  The macOS code paths stay; macOS support (through OpenShell's MicroVM driver) is tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992).
+- **macOS.** A Mac runs sandboxes on OpenShell's MicroVM (`vm`) compute
+  driver, since no sandbox can start on Docker Desktop, whose Linux VM kernel
+  has no Landlock (see [compute drivers](#compute-drivers) and
+  [macOS and Docker Desktop](#macos-and-docker-desktop)). Every run there
+  works on a copy. OpenShell calls the driver experimental.
 
 ## Why OpenShell
 
@@ -76,7 +78,7 @@ parts of the boundary that depend on the project.
 | --- | --- | --- |
 | Network | The workload has no network; the supervisor is the only path out and applies per-endpoint, per-binary rules | The egress proxy for web traffic: blocklist feed, SSRF guard, per-destination decisions, byte counts |
 | Files | Landlock; only bind-mounted host paths are visible | Which host paths are mounted, secret masks, read-only git state, snapshot and undo, change review |
-| Identity | The process identity the policy names | Runs as your uid in mount and copy mode and builds a per-uid image |
+| Identity | The process identity the policy names (docker driver), or the gateway-wide `sandbox_uid`/`sandbox_gid` (vm driver) | Runs as your uid in mount and copy mode and builds a per-uid image; on the vm driver setup sets the gateway's identity to your uid and gid, and a check after each create and start refuses any other |
 | Credentials | Placeholders resolve only on bound endpoints, for bound binaries | Per-sandbox binding tokens, provider profiles pinned to the harness binary; LLM traffic never passes through DefenseClaw |
 | Agent actions | None | Hooks feed the existing guardrail pipeline: rule packs, CEL, the judge, HITL |
 | Hook integrity | Root-owned, read-only system paths | Managed hook config in the image, fail-closed hooks, a build-time hook-fire probe, hook tamper and hook silence detection |
@@ -107,6 +109,170 @@ The OpenShell client (`openshell.Dial`) talks to the gateway over gRPC with
 mTLS through the OpenShell Go SDK. The upstream `openshell` CLI is used only
 where the SDK has no transport: terminal attach, file upload and download,
 port forwarding, gateway registration and install.
+
+On a Mac the gateway is the `nvidia/openshell` Homebrew service (launchd),
+and each sandbox is a MicroVM (libkrun on Apple's Hypervisor) instead of a
+container; the rest of the picture is the same.
+
+## Compute drivers
+
+One OpenShell gateway runs one compute driver. DefenseClaw drives two:
+`docker` (Linux, and any Docker host) and `vm`, OpenShell's MicroVM driver,
+which a Mac runs sandboxes with. `internal/openshell/driver.go` holds the
+one table of what differs, and code asks its fields (`HostMounts`,
+`RunFilesInImage`, `SandboxLimits`, `GatewayIdentity`, `ImageRepository`),
+not the driver's name or `runtime.GOOS`.
+
+- **Which driver.** When the daemon connects it reads the driver from
+  `GetGatewayInfo` (`openshell.GatewayDriver`) and refuses a gateway that
+  reports none, several, or one DefenseClaw does not drive (podman,
+  kubernetes). The status API reports it as `gateway.driver`, each sandbox
+  record keeps the driver it was created on (empty in older records: docker),
+  and a record is re-resolved with its own driver, never the connected
+  gateway's. Setup and the doctor, before any gateway answers, read the
+  configured driver from the effective `gateway.env` and `gateway.toml`.
+  A connection outlives a gateway restart, which setup or `doctor --fix` can
+  make onto the other driver: create, start and reconcile ask the gateway
+  again, the status asks once its last answer is five seconds old, and a
+  gateway that now runs another driver is connected to again.
+- **No host mounts on vm.** libkrun attaches no shared folders, and the vm
+  `driver_config` takes only `gpu_device_ids`. So every vm sandbox is in copy
+  mode: the packs resolver clamps `workdir.mode` to copy with the constraint
+  `openshell.gateway.compute_driver`, a create without a staged copy is
+  answered with `CodeNeedsCopy`, and a template on a driver without host
+  mounts never carries a `driver_config` (checked before anything is made,
+  and again just before `CreateSandbox`). The CLI reads the driver from the
+  status and stages a copy up front, refuses `--context`, and says that
+  `--no-snapshot` does not apply.
+- **Run files in a run image.** The per-run managed files of Claude Code and
+  Codex cannot be bind-mounted, so on vm they are baked, root:root 0644, into
+  a content-addressed run image (`defenseclaw.invalid/sandbox-run:<harness>-<base>-<digest>-u<uid>`)
+  built on the verified overlay image. Hooks-only harnesses boot an alias of
+  the overlay image (`defenseclaw.invalid/sandbox:…`), which shares its image
+  ID. The files cannot change after create: a start whose render is stricter
+  is refused, a looser one keeps the image. A copy's work stays in the
+  sandbox and only a start reaches it (`pull` starts a stopped sandbox), so
+  that refusal says to pull the work under the settings the sandbox was made
+  with before deleting it and running it again. A value
+  of a secret-bearing variable that came from `--env` is refused on vm,
+  since it would sit in an image layer and in OpenShell's prepared-rootfs
+  cache; so is a URL from `--env` with a user name, a password, or a query
+  or fragment value. For the same reason an imported MCP server whose
+  arguments or URL look like they carry a credential (a `--api-key VALUE`
+  or `--token=VALUE` argument, a `NAME=VALUE` or `X-API-Key: VALUE`
+  argument with a credential name, a Bearer value, a well-known token
+  format, or a URL, as the server URL or in an argument, with a password,
+  a query or fragment value, or a user name; in an argument, a user name
+  alone counts only when it looks like a token, since package and
+  database URLs name an ordinary user such as `git@` or `postgres@`) is
+  left behind on vm, with a `--credential` hint.
+- **Image names.** The vm driver reads images from the local Docker image
+  store and falls back to a registry pull of the same name when it does not
+  find one. Its references use a registry host under the reserved `.invalid`
+  TLD (RFC 2606), which never resolves, so that fallback fails instead of
+  fetching someone else's image. An image ID is not accepted as a reference.
+- **Identity.** The vm driver runs every workload as the gateway's
+  `[openshell.drivers.vm] sandbox_uid` and `sandbox_gid` (default 1000:1000)
+  and ignores `process.run_as_user`; it rewrites the image's `sandbox`
+  account to that identity. Setup writes the host uid and gid there, so the
+  per-uid images, the hook-fire probe and the policy stay as they are.
+- **Workload check.** After ready, at create and at every start, one exec
+  (`/usr/bin/env -i`, every tool by absolute path) proves the uid and gid,
+  a writable HOME, an empty `CapEff`, and the digests, owners and modes of
+  the hook entrypoints and run files against what create recorded. Under
+  an admin `max_resources` it also counts the processors and reads the
+  memory the MicroVM got, since the running gateway can take other values
+  than its files say (launchd's environment, a change since its restart). A
+  mismatch rolls the create back or stops the started sandbox. It runs on
+  the vm driver, where the workload's identity is the gateway's
+  configuration. On docker it is off (`SkipWorkloadCheck` in the driver
+  table) until a Linux live run has passed it.
+- **Resources.** vm has no per-sandbox limits: every MicroVM gets the
+  gateway-wide `vcpus`, `mem_mib` and `overlay_disk_mib`. `--cpu` and
+  `--memory` are warned about and dropped, the record keeps the gateway-wide
+  values, and an admin `max_resources` below them refuses the create.
+- **Cost.** The first start of an image prepares a rootfs from it (about a
+  minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
+  keyed by image ID and kept by OpenShell); a cached one starts in seconds.
+  The pre-create `Explain` reports `vm_first_boot`. For a harness with run
+  files (Claude Code, Codex) that depends on the run image of this run's
+  `--env`, credentials and model provider. The preflight renders it from
+  the newest sandbox's, so the CLI asks again once it has built the create
+  request, sending `sandboxapi.ExplainRun`. That holds the values of the
+  variables the run files read (`connector.SandboxRunEnvReader`), a
+  secret-looking or header variable by name only (`env_withheld`, which the
+  daemon counts as a first boot), and credential names, never their values.
+  The CLI turns the answer into its "about a minute" note and a disk check
+  before it stages the copy
+  (`openshell.VMDiskShortage`: refused below the image's size plus 1 GiB,
+  never below the doctor's 6 GiB `VMDiskFailBytes`, warned below twice that,
+  never below 12 GiB; `image build` warns the same after a build). The
+  daemon's create refuses the same shortage (`unavailable`) once it knows the
+  image ID the sandbox boots and finds no disk prepared from it
+  (`Options.VMDiskFree`). `delete` keeps a sandbox's run image even when
+  no other sandbox uses it, and `image prune` keeps every run image of an
+  overlay image it keeps: the run image adds only its files' few layers to
+  Docker, while a rebuilt one gets a new image ID, which the driver
+  prepares another rootfs for (another minute and about 5 GB). So each
+  posture's run image, and its prepared rootfs of about 5 GB, stays until
+  its overlay image is superseded and pruned. Prune and teardown then remove
+  the rootfs of every image ID they removed (`PruneReport.RemovedImageIDs`:
+  no image they keep or leave has it, and `Keep` does not name it), and only
+  when the daemon listed the sandboxes (teardown: after its deletes, none
+  left that could boot it), no sandbox record names the image, and Docker no
+  longer holds the ID at all (`image ls --all`). They remove only
+  `sandbox-prepared-rootfs-*-sha256-<id>` directories (not links) in
+  `<state_dir>/images`, never the driver's other state (overlay templates,
+  the bootstrap rootfs, a preparation under way). A later start of such an
+  image prepares it again.
+- **Name resolution.** A MicroVM's `/etc/hosts` is empty (OpenShell 0.1.1:
+  the driver makes the root disk from a `docker export`, whose init layer
+  puts an empty file over the image's, and its guest init writes none), and
+  its loopback DNS relay at `127.0.0.53` answers `localhost` with SERVFAIL.
+  Antigravity CLI 1.2.12 exited at start there ("lookup localhost on
+  127.0.0.53:53: server misbehaving"), and any dev server, local MCP server
+  or test that resolves localhost failed the same way. The overlay images
+  built for the vm driver (`BuildSpec.MicroVM`, which the daemon sets from
+  the driver its gateway reports and `sandbox image build` from the
+  daemon's gateway or the gateway configuration) answer localhost with a
+  pinned `nss-myhostname` (see [Build](#build)): glibc programs, Node,
+  Python and Go programs linked with cgo (agy is one) now resolve it. The
+  images for the docker driver, whose sandboxes get Docker's `/etc/hosts`,
+  are built as before, byte for byte. Go's own resolver (a Go binary built without cgo, or with
+  `netgo`) and statically linked musl programs read `/etc/hosts` and DNS
+  themselves and still cannot, until OpenShell writes `/etc/hosts`.
+  `nss-myhostname` answers only the localhost names and the hostname, with
+  loopback addresses. Every other name goes on to the relay, which answers
+  it with a synthetic `198.18.x.x` address, even a name that does not
+  exist: in an OpenShell 0.1.1 MicroVM `getent hosts` gave `198.18.0.3` for
+  `_gateway` and `198.18.0.4` for `_outbound` (with no default route,
+  `nss-myhostname` does not answer those two), and `198.18.0.6` for
+  `nonexistent-zz9.invalid`. A connection to one of these addresses reaches
+  only the egress proxy, which refuses it as an invalid destination
+  (`curl http://_gateway/`), so nothing is exposed. The
+  hook-fire probe runs every image for the vm driver with a MicroVM's name
+  resolution too, and a driver without a hosts file (`HostsFile` in the
+  driver table) boots only an image that passed that run. An image whose
+  run settled nothing (it could not run, or the harness failed without a
+  failed lookup of localhost) is checked again before the next sandbox on
+  that driver boots it (`Record.MicroVMUnchecked`); `create` refuses an
+  image that still did not pass, with the probe's reason, and every refusal
+  names `defenseclaw sandbox image build <harness> --force`, which checks
+  it again. A harness that exits at once in a sandbox where localhost
+  does not resolve is named as such in the end-of-session summary, with
+  what to do (a sandbox made before the images answered localhost is
+  deleted and made again).
+- **Stops.** A MicroVM stopped without a flush brings back empty what its
+  workload wrote since the last one (OpenShell 0.1.1; `StopFlushes` is off
+  for vm). The daemon's stop runs `sync` in the sandbox first. Every gateway
+  restart that setup or the doctor makes (`GatewayConfigurator.Restart`, and
+  the restart of an `Apply`) first runs it in every ready sandbox on the
+  gateway, of every owner, and a sandbox that cannot be flushed refuses the
+  restart. On vm, `doctor --fix` asks before a fix that restarts the gateway
+  while sandboxes run on it, no by default, and `--yes` takes that default.
+- **Switching.** A record made on the other driver is never started, gc'd or
+  released as if it were this gateway's: `start` refuses it before any other
+  check, and `delete` releases DefenseClaw's host state for it.
 
 ## Networking
 
@@ -185,6 +351,15 @@ The harness spec builds the environment passed to `openshell sandbox create
   address. `--env` overrides them. OpenShell's refusal of a lookup of the
   container's own host name (Docker's 12-hex-digit default) is audited but is
   neither a blocked site nor a feed line.
+- `DEFENSECLAW_HOST_TZ` is the IANA time zone of the machine `sandbox run`
+  ran on (`CreateRequest.TimeZone`: `TZ`, else the zone `/etc/localtime`
+  links to, else `/etc/timezone`; `openshell.HostTimeZone`). A second
+  fragment next to the proxy one (`timeZoneScript`) exports `TZ` from it
+  in the launchers, the login-shell profile and the `sandbox exec` wrapper,
+  when `TZ` is not set already and the image has
+  `/usr/share/zoneinfo/<zone>`; without the file libc would show UTC under
+  the zone's name, so the sandbox stays on UTC. Both compute drivers. A
+  sandbox keeps the zone it was created with.
 
 One shell fragment (`egressEnvScript` in
 `internal/openshell/harness/shellenv.go`) exports `HTTPS_PROXY`,
@@ -213,6 +388,17 @@ seconds. The mark is in argv because a sandbox process cannot read another
 exec's `/proc/<pid>/environ` (Yama `ptrace_scope` 1), while it can read its
 `cmdline` and `status` and signal it. A process that leaves the tree
 (`setsid` and a double fork) keeps running until the sandbox stops.
+
+What the command leaves running when it exits normally is its own (a server
+started on purpose), and `sandbox-env` has the terminal supervisor keep it
+(`--keep-leftovers`). With `--tty`, though, OpenShell 0.1.1 keeps the exec
+open while a process of its terminal's session still runs (a `nohup`'d one,
+which the exit's SIGHUP does not end), for about 30 seconds, and then ends
+it with status 74 and no message (measured with `bash -c 'nohup sleep 304
+>/dev/null 2>&1 & exit'`; the same command with `--no-tty` returns at once).
+So the wrapper also passes `--say-kept`: half a second after the command
+exits, the supervisor names what still runs in its session ("defenseclaw:
+the command left 1 process running in the sandbox: sleep 304. …").
 
 The profile fragment and `sandbox-env` also put
 `/usr/local/lib/defenseclaw/shims` first on `PATH`. It holds a shim named
@@ -807,14 +993,18 @@ because every policy reload closes connections.
 
 - **Landlock** is `hard_requirement`: a kernel without the needed ABI refuses
   to start the sandbox instead of running it unconfined. This is why no
-  sandbox starts on Docker Desktop (see
-  [macOS and Docker Desktop](#macos-and-docker-desktop)).
+  Docker-driver sandbox starts on Docker Desktop (see
+  [macOS and Docker Desktop](#macos-and-docker-desktop)); a MicroVM's own
+  kernel has it.
 - **Read-only:** `/usr`, `/lib`, `/etc`, `/proc`, `/dev/urandom`, `/var/log`,
   `/opt`, the harness install roots and read-only context mounts.
 - **Read-write:** `/tmp`, `/dev/null`, `/dev/ptmx`, `/dev/pts`, `/dev/tty`,
   `/sandbox` and the workdir (`/work/<repo>` in mount mode).
-- **Process:** the numeric host uid and gid in mount mode (required), the
-  image's `sandbox` user in copy mode. Root is refused.
+- **Process:** on the docker driver, the numeric host uid and gid in mount
+  mode (required), the image's `sandbox` user in copy mode. The vm driver
+  ignores `run_as_user` and runs every workload as the gateway's
+  `sandbox_uid`/`sandbox_gid`, which setup sets to the host uid and gid (see
+  [compute drivers](#compute-drivers)). Root is refused.
 - **Network:** `defenseclaw_egress` for the `open` and `balanced` profiles,
   nothing for `strict`. Credentialed endpoints are left to OpenShell's
   provider rules, except the ingress of a `token_delivery: env` sandbox,
@@ -833,8 +1023,9 @@ nothing else, and lets the operator take back what the agent did.
 
 ### Mount mode
 
-Mount mode is the default. `PlanMount` validates the launch folder and turns
-it into docker-driver bind mounts:
+Mount mode is the default on the docker driver; the vm driver has no host
+mounts, so nothing in this section runs against it. `PlanMount` validates
+the launch folder and turns it into docker-driver bind mounts:
 
 | Mount | Target | Access |
 | --- | --- | --- |
@@ -1076,8 +1267,12 @@ operator applies it.
 
 ### Copy mode
 
-Copy mode is the choice for untrusted repositories or tasks. The agent works
-on a copy, and changes come back only through a verified pull.
+Copy mode is the choice for untrusted repositories or tasks, and the only
+mode on the vm driver. The agent works on a copy, and changes come back only
+through a verified pull, applied by git on the host as the host user: only
+the executable bit crosses, and the in-sandbox uid never reaches the host.
+Nothing is applied without a review: a session without a terminal, or with
+`--yes`, leaves the work in the sandbox and names the pull.
 
 1. **Stage.** A git project becomes a sanitized shallow clone (depth
    `openshell.workdir.git_depth`, 200 by default; no hooks, config written by
@@ -1116,6 +1311,16 @@ on a copy, and changes come back only through a verified pull.
 
    `patch` only writes the patch file, so the last two gates do not apply to
    it.
+
+   A 3-way apply that lands (or finds the folder already has the result)
+   sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
+   result. The next pull starts from it (`PullResult.Since`, kept in
+   `refs/defenseclaw/since`): its changes and review cover what changed in
+   the sandbox since, and its 3-way merge base and patch start there, so
+   work brought back once is not offered again and what the operator took
+   back of it stays taken back. `UndoApply` removes the mark (the next pull
+   starts from the baseline) and drops a kept pull that started from it. A
+   branch or patch does not set it.
 
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
@@ -1161,24 +1366,82 @@ modes and owners are set in the tar headers) and streams it to
 `docker build --pull=false -t <tag> -`. The Dockerfile:
 
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
-   (`/usr/bin:/bin:/usr/sbin:/sbin`).
+   (`/usr/bin:/bin:/usr/sbin:/sbin`). An image for the vm driver
+   (`BuildSpec.MicroVM`) also installs `nss-myhostname`, asked right after
+   `files` and before `dns` (`hosts: files myhostname dns`). It answers
+   `localhost`, `localhost.localdomain`, `*.localhost` and the hostname
+   with loopback addresses and does no network I/O, so localhost resolves
+   in a MicroVM, whose `/etc/hosts` is empty (see
+   [compute drivers](#compute-drivers)). The package is pinned next to the
+   base image (`NSSMyhostnameDebs` in `internal/openshell/version.go`):
+   Ubuntu 24.04's `libnss-myhostname` 255.4-1ubuntu8.17 for amd64 and
+   arm64, downloaded from Ubuntu's snapshot archive (Launchpad's librarian
+   as fallback), checked with `sha256sum -c` and installed with `dpkg -i`.
+   It needs only the base's `libc6` and `libcap2`, so no package index is
+   fetched, and two images with one content hash carry the same module.
+   The build fails unless the module answers `localhost` with `127.0.0.1`.
+   An image for the docker driver has no such step: its Dockerfile, content
+   hash and tag are those of the images before it, and its build fetches
+   nothing more than it did. `MicroVM` is part of the content hash only
+   when set, and of `images.json` (`microvm`), so the two kinds of image of
+   one harness never select each other, and prune keeps the newest of each
+   kind. The exception is a gateway known to run the vm driver
+   (`PruneOptions.MicroVMGateway`, set only with the daemon's sandbox list):
+   it never boots a docker driver image again, so its prune removes every
+   docker driver image, however new, with its run images, aliases and
+   prepared disks, unless a sandbox runs it. Records from before
+   `microvm` existed are docker driver images. (The digest-pinned base
+   has `curl` but not `jq`, so every build still runs `apt-get update` and
+   installs the archive's current `jq` there.)
 2. Installs the harness at a version whose Linux hook contract is known. Any
    other version fails before the build starts. Claude Code 2.1.156 is
    relocated from the digest-pinned base image, and no other Claude Code
    version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
-   outside every reviewed contract. An npm-installed harness (Codex,
+   outside every reviewed contract. OmniGent's sandbox range starts at 0.13.0,
+   above its host contract's 0.7.0: before 0.13.0 its server never evaluates
+   the response phase (`AfterAgentResponse`) for the sandbox agent, whose
+   runner it relays, so a 0.12.0 image failed the hook-fire probe. An npm-installed harness (Codex,
    OpenCode, Copilot CLI, Amp) is downloaded once with `npm pack`, installed
    from that tarball only after its SHA-512 matches the pinned registry
    integrity, and its native executable must match a pinned sha256 per
    architecture. Binaries move to root-owned
    `/opt/defenseclaw-harness/<harness>`, so a native installer's copy under
-   `$HOME` never becomes the pinned binary.
+   `$HOME` never becomes the pinned binary. The OpenCode image also records
+   `@opencode-ai/plugin` at the pinned version as installed in
+   `/sandbox/.config/opencode` (`package.json`, a `package-lock.json` whose
+   root package lists it, and an empty `node_modules`): OpenCode 1.18.31
+   installs that package, about 29 packages and 20 MiB from
+   registry.npmjs.org, into each writable config directory at every start
+   unless the lock lists it (it compares names only), and nothing in the
+   sandbox imports it, since the launcher refuses every other plugin and
+   custom tool. Measured with the pinned binary: the record stops the
+   registry request.
 3. Copies DefenseClaw's files root-owned and read-only under
    `/usr/local/lib/defenseclaw` (hooks in `hooks/`, launchers in `bin/`),
    the harness's managed configuration, and the user-owned first-run files
    under `/sandbox`.
 4. Creates `/work` root-owned, chowns `/sandbox` to the run-as uid and gid,
    and switches to the `sandbox` user.
+
+The Dockerfile, like a run image's, uses BuildKit-only syntax (`COPY
+--chmod`). Every build first runs `docker buildx version` and reads
+`DOCKER_BUILDKIT` from the environment docker runs in (`image.Docker.Getenv`),
+and refuses (`image.ErrNoBuildKit`, with the fix) a docker that would use the
+legacy builder, before `docker build` runs. It reads `DOCKER_BUILDKIT` as
+docker does: any value that is set, spaces and all, must parse as a boolean,
+or `docker build` refuses to run, so the build is refused too. A failed build
+returns an `image.BuildError` whose message ends with the last 40 lines (at
+most 8 KiB) docker printed. Each line is shortened to 300 characters and
+ends in "…" when cut, because docker's last line repeats the whole failing
+`RUN` command (6.9 KB for Hermes) and would otherwise push out the lines that
+say why it failed. Terminal escapes and control characters are removed,
+and anything shaped like a credential is redacted. It reaches the CLI's error,
+the daemon's create error and its `OPENSHELL_IMAGE_BUILD_FAILED` log line,
+because the daemon builds without a build log. The create's
+`OPENSHELL_SANDBOX_FAILED` line and its failed sandbox-health record
+(`error_summary`, which is exported) leave the lines out and end with the
+build's failure (`docker build exited 1`), so the output is logged once and
+never exported.
 
 The tag is `defenseclaw/sandbox:<harness>-<hash>-u<uid>`, where `<hash>` is
 the first 16 hex digits of a content hash over every input: the base digest,
@@ -1215,6 +1478,35 @@ them. The hooks must still fire, and none of the planted programs may run.
 container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
 `test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
 configuration below against the real harnesses.
+
+The probe of an image for the vm driver (`BuildSpec.MicroVM`) ends with the
+allowed run once more, with an OpenShell MicroVM's name resolution: an
+`/etc/hosts` that names neither `localhost` nor the hostname (only the
+stand-in ingress and, in relay mode, `host.docker.internal`), the guest's
+`resolv.conf` pointed at a resolver no server answers at (the container's
+own `127.0.0.53` in relay mode; the stand-in's address on the host network,
+where `127.0.0.53` is systemd-resolved), and the image's own
+`nsswitch.conf`. The two files are written to a new directory under the
+system temp directory (`Builder.TempDir`, `os.TempDir()`: the user's
+`$TMPDIR` under `/var/folders` on a Mac), which Docker Desktop shares by
+default wherever the data dir is (a managed install's
+`/opt/cisco/defenseclaw/runtime` is not shared), and removed with the
+container; the doctor's file sharing check on a vm gateway is of that
+directory. An image for the docker driver never runs this scenario. Its
+verdict is kept apart (`MicroVMVerified`, `MicroVMProblem` and
+`MicroVMInconclusive` in `images.json`) and never fails the probe; only an
+interrupted probe fails. It is definitive only two ways: a pass, or a
+harness that failed and printed a failed lookup of localhost
+(`MicroVMProblem`, named with the line it printed): it resolves names on
+its own, which the image cannot answer. Anything else settles nothing
+(`MicroVMInconclusive`): a MicroVM run that could not run at all (a mount
+Docker refused, a timeout, an address relay mode could not learn), or a
+harness that exited or fired no hook without saying why. Such an image
+stays unchecked for a MicroVM (`Record.MicroVMUnchecked`): `Build` probes
+it again when it is next asked for it, which the daemon's create on the vm
+driver does, and so does `sandbox image build`; a definitive problem stays
+until `sandbox image build <harness> --force`. `sandbox image build` says
+which of the two an image has.
 
 Kiro CLI has no model endpoint a mock can stand in for; its own
 scripted-response mode (`KIRO_MOCK_CHAT_RESPONSE`, with a placeholder
@@ -1257,9 +1549,11 @@ compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF process or
   network events of the harness's own binaries under its install root,
-  egress, native OTLP) for `HookSilence` without a single hook request.
-  Commands the harness did not start, such as the CLI's probe, a copy-mode
-  upload or pull, or your own `sandbox exec`, do not count.
+  their connections to the egress proxy included, native OTLP) for
+  `HookSilence` without a single hook request. Commands the harness did not
+  start, such as the CLI's probe, a copy-mode upload or pull, or your own
+  `sandbox exec`, do not count, and neither do the egress proxy's own
+  events, which cannot tell the harness's requests from theirs.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
   a tool that ran without a verdict. Per binding, the manager records each
   pre-tool decision and pairs it with the call's post-tool event. A
@@ -1321,19 +1615,36 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
   hooks that got through. A connection OpenShell closes because the policy
   changed while it was open ("policy generation is stale"; every policy
   reload does that) is no refusal and only counts as an attempt. A
-  transparent-mapping denial (`transparent_tcp_mapping_denied`), which
-  OpenShell also answers while it republishes the host alias's mapping, is a
-  refusal only when no authenticated request follows it within 15 seconds.
+  transparent-mapping denial (`transparent_tcp_mapping_denied`) is a refusal
+  only when neither a connection that gets through nor an authenticated
+  request follows it within 15 seconds, and none at all within 45 seconds of
+  the supervisor reporting a settings reload (`Settings poll: config change
+  detected` with `policy_changed` or `provider_env_changed` true) while the
+  host alias mapping it last reported covers the ingress port: the reload
+  drops the host alias's mapping, and a client that still connects to the
+  address it looked up before (OpenCode's Bun runtime keeps a lookup for 30
+  seconds) is denied until it looks the name up again. That denial is no
+  attempt either: a hook that is not retried, such as OpenCode's plugin event
+  as it opens, or a harness that quits leaves no request after it. A mapping
+  that leaves the ingress port out (another daemon's ingress profile) is a
+  refusal, and the warning says the mapping does not cover the port.
 - OpenShell lets a hook connect but no authenticated request (hook, OTLP or
   notify) follows within 15 seconds: the ingress does not answer, or the
   sandbox token did not reach the hook.
 - The harness calls its model for `HookReachWindow` (30 seconds) without one
   hook request reaching DefenseClaw. Only the harness's own model calls
   count: a connection its binary makes under a provider rule
-  (`_provider_*`), or to a host port. Its start-up and onboarding traffic
+  (`_provider_*`), or to a host port, and the requests OpenShell inspects on
+  such a connection. Its start-up and onboarding traffic
   (update checks, telemetry, downloads, through the egress proxy or around
   it) comes before the first prompt fires a hook, so it starts no window,
-  and neither does anything in a sandbox with no harness session. OTLP is no
+  and neither does a request for the model list (`GET /v1/models`: the
+  Codex TUI asks for it as it opens), a connection to the model endpoint
+  whose requests OpenShell does not show in the session's first 20
+  seconds, or anything in a sandbox with no harness session. A model call
+  OpenShell shows (`POST /v1/messages`, `/v1/chat/completions`,
+  `/v1/responses`, Bedrock's invoke and converse) starts the window at
+  once, also in those first 20 seconds. OTLP is no
   sign of work either: the Codex TUI exports it from its start and posts its
   first hooks only with the first prompt. Since no hook was seen failing,
   the warning then reads "No hook has reached DefenseClaw yet" (hook
@@ -1445,10 +1756,14 @@ shows:
 ### Per-sandbox managed configuration
 
 What differs per run cannot live in the image. For every sandbox the manager
-renders `connector.SandboxRunFiles` for the image's render target, writes the
-files under `<data_dir>/sandboxes/<name>/run-config/` (owner-only directory,
-files 0644) and bind-mounts each read-only at its in-sandbox path, in mount
-and copy mode alike. Stop and start keep the files; delete removes them.
+renders `connector.SandboxRunFiles` for the image's render target. On the
+docker driver it writes the files under
+`<data_dir>/sandboxes/<name>/run-config/` (owner-only directory, files 0644)
+and bind-mounts each read-only at its in-sandbox path, in mount and copy mode
+alike. Stop and start keep the files; delete removes them. On the vm driver,
+which has no mounts, the same bytes are baked root:root 0644 into the
+sandbox's run image instead (see [compute drivers](#compute-drivers)), and a
+start compares the render with the image's digest instead of rewriting.
 
 - **Claude Code:** `managed-settings.d/60-defenseclaw-run.json` sorts after
   the image's drop-in and wins over it. It pins every model-provider
@@ -1688,6 +2003,16 @@ These were measured on the pinned releases inside the community base image
   but not the nested session's tools. `opencode run --auto` is the headless
   skip-permissions mode. The base image ships OpenCode 1.2.18, which is
   outside every hook contract. The image removes it.
+- **OpenCode 1.18.31 can lose a shell command's output.** Its bash tool
+  reads the command's output in a fiber forked into a scope that closes as
+  soon as the exit code arrives, which interrupts the reader: output it had
+  not read yet is dropped, and the tool reports "(no output)" to the TUI and
+  the model although the command ran. Seen once, on the first tool call of a
+  new MicroVM sandbox (`echo dce2e-allowed > /tmp/dce2e-allowed.txt && cat
+  /tmp/dce2e-allowed.txt`, whose file was written); the next call, and the
+  same first call in an earlier round, returned the output. It is OpenCode's
+  race, not the supervisor's or the plugin's (which only reads the result in
+  `tool.execute.after`).
 - **OpenCode plugins share the process, so the tier is user.** OpenCode
   imports every plugin into the process the DefenseClaw plugin runs in: the
   `{plugin,plugins}/*.{js,ts}` files and `{tool,tools}` custom tools of every
@@ -1738,7 +2063,52 @@ These were measured on the pinned releases inside the community base image
   GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
   GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
   the per-plan Copilot API hosts) come from the CLI, not from a live run: no
-  Copilot-entitled account was available.
+  Copilot-entitled account was available. With the proxy settings, Copilot's
+  Node printed its `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
+  above the TUI at every start, so the launcher passes
+  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
+  Copilot's tool commands inherit it (a Node older than 20.11 would refuse
+  the flag).
+  In the interactive TUI every hook waits out Copilot's 30-second hook
+  timeout ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)),
+  on the Docker driver and in the macOS MicroVM alike: the sandbox's seccomp
+  filter makes `pidfd_open` fail with ENOSYS (in the MicroVM too, although
+  its 6.12 kernel has the call), so the CLI's native runtime (tokio, in a
+  Node.js addon inside Copilot's process) falls back to a `SIGCHLD` handler
+  to learn that a hook exited, and in the TUI Copilot's Node.js side
+  (libuv) resets `SIGCHLD` to its default after its own child processes.
+  The exited hook stays a zombie until the timeout; its verdict is still
+  applied. Headless runs keep the handler and are not slowed. The launch
+  banner of an interactive Copilot session says so
+  (`harness.Spec.InteractiveCaveat`). The fix is upstream: OpenShell
+  allowing `pidfd_open` in the workload's seccomp filter, or Copilot not
+  relying on `SIGCHLD` alone for its hook processes. What DefenseClaw cannot
+  do about it:
+  - Copilot's HTTP hooks (`"type": "http"`, which start no process) fail
+    open: GitHub's hook reference says a network error, a timeout or a
+    non-2xx status of an HTTP `preToolUse` or `permissionRequest` hook falls
+    through to the normal permission flow (with `--yolo`, an allow). A command
+    hook bounds its own requests and exits 2 on every failure. HTTP hooks
+    also refuse plain `http://` for those two events unless
+    `COPILOT_HOOK_ALLOW_HTTP_AUTH_HOOKS=1`, a variable the workload can drop
+    for a Copilot it starts itself, and expand a header variable
+    (`allowedEnvVars`) only over `https://` or to `localhost` with
+    `COPILOT_HOOK_ALLOW_LOCALHOST=1`; the ingress is plain HTTP at
+    `host.openshell.internal`, and the token's placeholder is scoped to a
+    policy revision, so it cannot be written into the image's policy
+    document either. The ingress route (`/api/v1/copilot/hook`) would also
+    have to answer with Copilot's bare hook output instead of its
+    `action`/`hook_output` envelope.
+  - A shorter `timeoutSec` lets the tool call run: a timed-out command hook
+    fails open, even a policy hook.
+  - The launcher cannot keep a handler in place: a caught signal's handler
+    does not survive `exec`, an inherited `SIG_IGN` lasts only until tokio
+    or libuv installs its own handler (and libuv's reset restores the
+    default, not `SIG_IGN`), and the single-executable CLI ignores
+    `NODE_OPTIONS` (measured with 1.0.86 on macOS: neither an unknown
+    option nor a `--require` preload took effect), so no preload can hold
+    the `SIGCHLD` listener that would keep libuv from resetting it.
+  - The hook cannot reap itself: only Copilot, its parent, can.
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
@@ -1832,7 +2202,41 @@ These were measured on the pinned releases inside the community base image
   `/agent` in an interactive session (it can switch to Kiro's built-in
   agent), project MCP servers, and a nested `kiro-cli-chat` started from a
   tool call, which skips the launcher. A real model through a Kiro Pro `KIRO_API_KEY` or
-  a device-flow login is unverified.
+  a device-flow login is unverified. At its first start Kiro downloads its
+  semantic-search embedding model, `all-MiniLM-L6-v2.zip` (79 MiB, from
+  `desktop-release.q.us-east-1.amazonaws.com/models`), into
+  `~/.semantic_search/models/all-MiniLM-L6-v2`; that was most of a new
+  sandbox's first-session download. `kiro-cli-chat` carries the SHA-256 of
+  both files and checks the ones it finds at every start, downloading again
+  when they differ. The image unpacks those files there at build, each
+  checked against the digests the pinned binary accepts (the URL names no
+  release, so the archive's own bytes are not pinned). The model is only a
+  cache, so a base image without `/usr/bin/python3`, a failed download or an
+  archive that does not hold exactly those files leaves the download to
+  Kiro: the build says so, writes none of it and goes on. Kiro's TUI runtime (`bun`
+  and `tui.js`, about 92 MB) is embedded in `kiro-cli-chat` and extracted into
+  `~/.local/share/kiro-cli` at the first interactive start, without a
+  download. Kiro does not check the extracted files themselves at a later
+  start, and offers no supported way to run the runtime from elsewhere
+  (`KIRO_TEST_TUI_JS_PATH` is a test hook), so it stays in the
+  workload-writable HOME: like Kiro's settings it is the agent's to change,
+  and the launch banner's Hooks line says so. An interactive session also "pins" `kiro-cli-chat`
+  into `~/.local/share/kiro-cli/run` (a hard link, or a copy where the link
+  fails; with `fs.protected_hardlinks`, the usual default, the sandbox user
+  cannot hard-link a root-owned file it cannot write) and runs that path; the
+  launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so Kiro runs the root-owned binary. At every
+  start Kiro also asks `management.<region>.kiro.dev` in four regions
+  (`us-east-1`, `eu-central-1`, `us-gov-east-1`, `us-gov-west-1`) for its
+  governance settings. The Kiro profile's placeholder resolves only on the
+  `us-east-1` host; without a working key Kiro prints `failed to retrieve
+  governance settings — MCP and web tools disabled` (its log:
+  `Failed to get governance config from API`), which is Kiro's account
+  check, not a DefenseClaw policy, and leaves MCP servers and web tools off
+  for that session. With `telemetry.enabled` false Kiro still sends its
+  CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`
+  (`Failed to send cw telemetry event` in its log without a working key); no
+  Kiro setting stops them.
 - **Devin CLI 3000.4.25.** Devin's versioned release manifest publishes
   SHA-256 digests. Hooks come from `~/.config/devin/config.json` (`hooks`) or
   a project `.devin/hooks.v1.json`; there is no system hook tier, so the tier
@@ -2049,7 +2453,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Behaviour | Design consequence |
 | --- | --- |
 | Any network policy update, even an unrelated rule, closes in-flight connections. So does the first settings poll, about 10 to 12 seconds after each sandbox start, and every global profile import. | Egress decisions live in the proxy, not in OpenShell rules. The policy renders deterministically. Profiles are imported once at setup; a create that must import one (a new `--credential` host, a new image's binaries) first tells the running sandboxes and waits, up to 30 seconds, until none has a hook in flight. The manager must start the harness only after the first settings poll (about 15 seconds) and batch rare policy updates for moments when no hook is in flight (`sandboxauth.InFlight`, `openshell.approvals.debounce_ms`, 3,000 ms by default). |
-| Any provider-profile change on the gateway, by any daemon, makes every running sandbox's supervisor report `Settings poll: config change detected [… policy_changed:false provider_env_changed:true]` within its next poll (measured: a `DeleteProviderProfile` from another daemon's sandbox delete, and an `ImportProviderProfiles` from another's create, each 5 to 12 seconds before), even for sandboxes that use none of the changed profiles. The supervisor then republishes its policy DNS mappings, which closes open connections ("policy generation is stale") and briefly denies new ones to the host alias. This is OpenShell's behaviour, not a DefenseClaw update. | The feed and the blocked counts leave out the connections such a reload closes and the denials of DefenseClaw's own ports, and a hook's mapping denial counts as a refusal only when no authenticated request follows it within 15 seconds. On a gateway shared by several daemons, expect these reloads whenever one of them creates or deletes a sandbox with its own credential or ingress profile. |
+| Any provider-profile change on the gateway, by any daemon, makes every running sandbox's supervisor report `Settings poll: config change detected [… policy_changed:false provider_env_changed:true]` within its next poll (measured: a `DeleteProviderProfile` from another daemon's sandbox delete, and an `ImportProviderProfiles` from another's create, each 5 to 12 seconds before), even for sandboxes that use none of the changed profiles. The supervisor then republishes its policy DNS mappings, which closes open connections ("policy generation is stale") and briefly denies new ones to the host alias. This is OpenShell's behaviour, not a DefenseClaw update. | The feed and the blocked counts leave out the connections such a reload closes and the denials of DefenseClaw's own ports, and a hook's mapping denial counts as a refusal only when nothing gets through within 15 seconds and no settings reload in the 45 seconds before it explains it. On a gateway shared by several daemons, expect these reloads whenever one of them creates or deletes a sandbox with its own credential or ingress profile. |
 | The relay drops about 0.3 to 0.7 percent of requests under concurrency, sometimes after the ingress acted. | Hooks retry once with an idempotency key, then fail closed; the ingress replays by key. |
 | `host.openshell.internal` reaches host `127.0.0.1` and the host sees a loopback client. | Separate sandbox listeners that trust credentials, never the source address. |
 | `protocol: tcp` alone on the proxy port is refused by the HTTP parser; `tcp` with `tls: skip` relays raw bytes. | The `defenseclaw_egress` rule uses `tcp` with `tls: skip`. |
@@ -2075,13 +2479,17 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Sandbox names are capped at 19 characters (`name exceeds maximum length`). | Test and probe names stay short. |
 | Bind mounts need `allow_driver_config` and `enable_bind_mounts` for the docker driver and resource admission off in `gateway.toml`, then a gateway restart. | `GatewayConfigurator` plans the TOML-preserving edit, runs the gateway's preflight, backs up, restarts and rolls back if the gateway does not come up. |
 | A read-only over-mount refuses writes, a bind-mounted file is effectively read-only, and an empty-file mask reads as empty. | Git internals and secrets are protected by the mounts themselves (Landlock cannot narrow a subtree of a read-write grant). |
-| `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
-| Content under `/sandbox` in the base image belongs to uid 998. | The overlay chowns `/sandbox` to the run-as uid; without it writes to `~/.claude` fail and `SessionStart` silently does not run. |
+| Docker driver: `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
+| Docker driver: content under `/sandbox` in the base image belongs to uid 998, the image's `sandbox` user. | The overlay chowns `/sandbox` to the run-as uid; without it writes to `~/.claude` fail and `SessionStart` silently does not run. |
+| vm driver: `run_as_user` is ignored. The driver rewrites the image's `sandbox` account to the gateway's `[openshell.drivers.vm] sandbox_uid`/`sandbox_gid` (default 1000:1000) and runs every workload as it, for every sandbox on the gateway. | Setup writes the host uid and gid there, so the per-uid overlay images (`/sandbox` chowned to that uid) work unchanged; the workload check refuses any other identity, and the doctor's vm-identity check catches a gateway without the keys before a boot is spent. |
+| vm driver: no shared folders and no `driver_config` but `gpu_device_ids`. | Per-run managed files are baked into a run image, root:root 0644, whose tag carries a digest of the files; a posture change on start is compared by digest and a stricter one refuses the start. |
 | Landlock hides `/dev` entries that are not listed. | `/dev/ptmx`, `/dev/pts` and `/dev/tty` are read-write for PTY tools. |
 | Claude Code drops a whole managed-settings drop-in with one invalid field, silently. | The hook-fire probe gates every image. |
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
-| Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session with no job-control shell above it, the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started from a `sandbox connect --shell` prompt (where Ctrl-Z suspends it to that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
+| Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session whose foreground process group is the launcher's, also as a foreground job at a `sandbox connect --shell` prompt (whose `fg` resumes with `killpg`, which the filter refuses too), the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. When such a harness takes the terminal back, the supervisor says at once, in the terminal's title (OSC 2, the previous title kept and restored when the harness exits) and as an OSC 9 notification with a bell, that Ctrl-Z cannot suspend it, and after the harness exits prints the same on the screen, answering the harness's own "suspended, use `fg`" line. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started in the background of a `sandbox connect --shell` prompt (the supervisor would take the terminal from that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
+| The same filter refuses a harness that ends a cancelled tool command through the command's process group. Measured with Kiro CLI 2.24.1 (on the vm driver): Ctrl-C during a shell tool call shows `● Cancelled …`, but the command runs to its end and Kiro's `postToolUse` still arrives when it finishes. Kiro's binary puts commands in process groups of their own and signals groups (it calls `setpgid` and `killpg`); a host run of the same release was not compared. | No launcher setting changes how the harness signals, and the supervisor never learns of the cancel. DefenseClaw judged the command before it started; to stop one that keeps running, end it by pid from another terminal (`defenseclaw sandbox connect <name> --shell`, then `pkill -f '<command>'`, which signals each process on its own). |
+| A harness that quits in the middle of a tool call leaves the tool's command running: OpenCode 1.18.31 starts its shell tool in a session of its own and does not end it when Ctrl-C quits it, so the command kept writing to the sandbox while DefenseClaw pulled the copy, until the sandbox stopped (macOS certification). | The terminal-session supervisor is a child subreaper (`prctl(PR_SET_CHILD_SUBREAPER)`), so what the harness leaves behind is re-parented to it rather than to the sandbox's init. Once the harness exits, what still runs below the supervisor gets two seconds to end on its own (a hook's last event and its retry), then `SIGTERM`, and `SIGKILL` two seconds later, pid by pid, and the terminal names it, before the exec ends, so before the pull or the review in both workdir modes. Where `prctl` is refused, the supervisor ends what its once-a-second scan saw below the harness (pid and start time). Nothing outside the harness's tree is signalled. OmniGent's launcher and the `sandbox exec` wrapper pass `--keep-leftovers` (OmniGent's host daemon and server serve the next session); headless and detached runs keep the plain `exec`. |
 
 ### Not measured
 
@@ -2101,7 +2509,9 @@ These were not measured, so the design does not rely on a result for them:
 | `sandbox exec` and `sandbox upload` hang while stdin is an open non-TTY pipe. | Non-interactive invocations read stdin from `/dev/null`. |
 | The first `sandbox exec` after create occasionally returns nothing. | `WaitReady` waits for `Ready` and the `ConfigurationReady` condition. |
 | Ending an exec stream does not stop the command in 0.1.1. | `Exec` wraps commands in `timeout(1)` inside the sandbox and retries only attempts whose stream never opened (plus unanswered attempts of idempotent commands). |
+| While `openshell sandbox exec` or `sandbox connect` holds a session open, the SSH proxy it starts carries that session's credential where other local users of the host can see it. | DefenseClaw starts every session through those two commands and does not handle that credential itself. Closing the exposure is OpenShell's (or means replacing both commands' session set-up); until then it lasts while a session is attached, which matters on a host other users share. |
 | `WatchSandbox` OCSF lines arrive at level `OCSF` with structured fields empty. The cursor looks like `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log buffer. | The shorthand text is parsed; an `OUT_OF_RANGE` cursor becomes a gap and a fresh subscription. |
+| The CLI opens `sandbox connect`, `upload`, `download` and `forward start` sessions by running `ssh` from `PATH`, with a `ProxyCommand` (`openshell ssh-proxy … --sandbox <name> --token …`) and the same host name, `sandbox`, for every sandbox, so the user's `ssh_config` applies to all of them alike. Measured on a Mac with `Host *`, `ControlMaster auto`, `ControlPersist 10m` and `ControlPath ~/.ssh/cm-%C`: every sandbox gets the same control socket, and for ten minutes after one session every other `openshell` ssh rides its connection, whatever sandbox it names. An `upload` to a second sandbox put its files in the first (the gateway logged a `CreateSshSession` and no `ForwardTcp` for it), and `forward start --background` failed with `ssh exited before local forward listener opened`. | Every openshell invocation DefenseClaw runs (`openshell.Invocation.Command`: connect, the harness terminal, copy-mode uploads, pulls, forwards and execs) gets a new private directory (0700, under `TMPDIR`) first on its `PATH`, holding an `ssh` shim that execs the first real `ssh` on the user's `PATH` with `-o ControlMaster=no -o ControlPath=none -o ControlPersist=no` before the CLI's arguments, with `PATH` set back to the user's (so an `ssh` wrapper that runs "the next ssh" on `PATH`, such as ssh-ident, does not find the shim again); options on the ssh command line win over every `ssh_config` file. The shim is written atomically and read back, and removed when the command ends. A PATH search passes over a file it cannot execute and runs the next `ssh` (with the user's sharing), so the shim counts only after a PATH search of the child's `PATH` has found it and it has answered a probe run: a `TMPDIR` on a filesystem mounted `noexec` (statfs `ST_NOEXEC` / `MNT_NOEXEC`), or one that it or a directory above it lets another user change (mode bits, or on macOS an ACL entry granting a write-capable right), is passed over for `<data dir>/openshell-ssh`, checked the same way, and when neither can hold a shim that runs the command is refused. The command-line options do not win over an `ssh` wrapper first on `PATH` that puts its own `ControlMaster`/`ControlPath` options before its arguments (ssh keeps the first value) or passes `-S` or `-M` (which win anywhere), so the shim also counts only once `<shim> -G -o ProxyCommand=true sandbox` (no connection; the placeholder `ProxyCommand` stands for the one the CLI always passes, with which ssh skips `CanonicalizeHostname`, so a canonicalizing `ssh_config` does not fail the check on the bare host) reports `controlmaster false` and no control path; otherwise the command is refused, naming the wrapper and the next `ssh` on `PATH` to put first. A pass is kept in memory while every `ssh` on `PATH` has the same device, inode, size and mtime (the check costs one ssh run, about 0.1 s on a Mac). DefenseClaw never edits `~/.ssh/config`. The doctor's `ssh-connection-sharing` check fails when no shim can be made or its ssh shares connections, confirms the override with `ssh -G sandbox` through the shim, and warns when the user's own configuration shares connections for `openshell` commands run outside DefenseClaw. As a second line, each copy-mode upload carries a nonce file that an exec in the named sandbox (over the gateway API, not ssh) must find, so an upload that went to another sandbox fails the run ("the upload to <name> did not arrive"). |
 
 ### macOS and Docker Desktop
 
@@ -2110,9 +2520,14 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 
 | Behaviour | Design consequence |
 | --- | --- |
-| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. The doctor checks the VM kernel for Landlock. The macOS code paths (the Homebrew install, `brew services`, the Docker Desktop host-networking and file-sharing checks) stay in place. |
-| OpenShell's MicroVM driver (opt-in: `OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor; needs `e2fsprogs` from Homebrew for the VM disk) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It pulls its image from a registry. | DefenseClaw drives only the Docker driver: the doctor requires it, each run's files and project mounts go in the Docker driver's config, and harness images are built into the local Docker image store, which the MicroVM driver does not read. Supporting the MicroVM driver is how DefenseClaw will run on macOS ([#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992)). |
-| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
+| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver, and a run that fails the probe there names the switch. |
+| OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
+| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
+| Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
+| With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
+| In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost. With only a loopback interface `nss-myhostname` does not answer `_gateway` and `_outbound`, so they go on to DNS; in a real MicroVM the `127.0.0.53` relay answers them, like every name but localhost and even nonexistent ones, with a synthetic `198.18.x.x` address (`_gateway` `198.18.0.3`, `_outbound` `198.18.0.4`, `nonexistent-zz9.invalid` `198.18.0.6`), and the egress proxy refuses a connection to one as an invalid destination. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
+| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, and setup refuses it (the installer would find that CLI and install nothing): stop that gateway and remove that OpenShell, then `setup --install-openshell` installs the formula. While such a gateway answers, the doctor does not fail it: `vm-driver` passes on the driver the gateway reports (found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`), and `gateway-service` warns, saying how it runs (the launchd label from `launchctl list`, or started by hand) and that DefenseClaw cannot restart it, with setup's way on as its fix; the TUI's machine check refuses it as setup does. With no gateway answering, `gateway-service` fails as not installed, with the same fix, and `vm-driver` checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
+| `docker build` uses BuildKit only through the buildx CLI plugin, which docker looks for in the `cli-plugins` directory of its config (`DOCKER_CONFIG`, else `~/.docker`), where Docker Desktop links it: a `HOME` or `DOCKER_CONFIG` without that directory hides it. Without it, or with `DOCKER_BUILDKIT=0`, docker falls back to the legacy builder with only a deprecation notice; it runs every step before the first `COPY --chmod` and then fails with `the --chmod option requires BuildKit`, and a caller that discards docker's output sees `docker build exited 1` and nothing else. The same holds for Docker Engine on Linux without the `docker-buildx-plugin` package. | Every image build checks `docker buildx version` and `DOCKER_BUILDKIT` first and refuses with the fix, before `docker build` runs; the doctor's `docker-buildkit` check reports the same, and a failed build's error carries the last lines docker printed. The daemon builds in the environment it started with. |
 
 ## Supported platforms and versions
 
@@ -2128,16 +2543,20 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
   OpenShell config directory that are symbolic links. The CA and client
   certificate may be readable by others, and group-writable files and entries
   only produce a warning.
-- Linux amd64 and arm64. macOS arm64 cannot run sandboxes today: Docker
-  Desktop's Linux VM kernel has no Landlock (see
-  [macOS and Docker Desktop](#macos-and-docker-desktop)), and macOS support is
-  tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992). Windows, WSL2 and Intel macOS are unsupported.
+- Linux amd64 and arm64 on the docker driver, and macOS on Apple silicon on
+  the vm driver (see [compute drivers](#compute-drivers)). Windows, WSL2 and
+  Intel Macs are unsupported: `openshell.CheckHost` refuses them before any
+  sandbox command runs, except `teardown`. The vm driver on Linux and a
+  Docker VM with Landlock on a Mac (Colima, OrbStack) may work, untested.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
-  or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
-  systemd linger, the gateway service, CLI, registration, mTLS files, gateway
-  version and driver, global policy, bind mounts, OpenShell telemetry and the
-  sandbox ports.
+  or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
+  host networking, file sharing, disk), systemd linger, the gateway service,
+  CLI, ssh connection sharing, registration, mTLS files, gateway version and
+  driver, global policy, bind mounts, OpenShell telemetry and the sandbox
+  ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor
+  signature, image architecture), `vm-identity` and `vm-resources`, and the
+  disk of the prepared-rootfs cache.
 
 ## Code map
 

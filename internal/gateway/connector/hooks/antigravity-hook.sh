@@ -67,13 +67,18 @@ defenseclaw_harden_env
 FAIL_MODE="closed"
 readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
-antigravity_emit_fallback() {
-  local closed="${1:-0}"
+{{if .Sandbox}}# A closed PreToolUse fallback's deny reason says why (the second argument):
+# an unreachable DefenseClaw, a request it refused, a reply that is no
+# verdict. The tool call is blocked either way.
+{{end}}antigravity_emit_fallback() {
+  local closed="${1:-0}"{{if .Sandbox}}
+  local reason="${2:-DefenseClaw policy service is unavailable.}"{{end}}
   case "$HOOK_EVENT" in
     PreToolUse)
       if [ "$closed" = "1" ]; then
-        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}'
-      else
+{{if .Sandbox}}        printf '{"decision":"deny","reason":"%s"}\n' "$(defenseclaw_json_escape "$reason")"
+{{else}}        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}'
+{{end}}      else
         printf '%s\n' '{"decision":"allow"}'
       fi
       ;;
@@ -93,7 +98,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if .Sandbox}}# The image registers exactly one documented lifecycle event per handler.
 if [ "$#" -ne 1 ]; then
   defenseclaw_log_hook_failure antigravity antigravity-hook "unexpected registered command arguments" response closed
-  antigravity_emit_fallback 1
+  antigravity_emit_fallback 1 "DefenseClaw hook was called with unexpected arguments, so the tool call is blocked."
   exit 0
 fi
 case "$HOOK_EVENT" in
@@ -110,7 +115,7 @@ case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
   ''|*$'\n'*|*$'\r'*)
     defenseclaw_log_hook_failure antigravity antigravity-hook "missing or malformed sandbox binding token" transport closed
     echo "defenseclaw: missing or malformed sandbox binding token (DEFENSECLAW_SANDBOX_TOKEN), blocking antigravity tool (sandbox hooks fail closed)" >&2
-    antigravity_emit_fallback 1
+    antigravity_emit_fallback 1 "DefenseClaw hook has no valid sandbox binding token, so the tool call is blocked."
     exit 0
     ;;
 esac
@@ -127,7 +132,7 @@ fi
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    antigravity_emit_fallback 1
+    antigravity_emit_fallback 1{{if .Sandbox}} "DefenseClaw hook payload is too large, so the tool call is blocked."{{end}}
   else
     antigravity_emit_fallback 0
   fi
@@ -163,7 +168,7 @@ fail_response() {
   defenseclaw_log_hook_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    antigravity_emit_fallback 1
+    antigravity_emit_fallback 1{{if .Sandbox}} "${2:-DefenseClaw answered the hook request without a verdict, so the tool call is blocked.}"{{end}}
   else
     antigravity_emit_fallback 0
   fi
@@ -224,7 +229,11 @@ if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
   fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if .Sandbox}}elif [ "$HTTP_CODE" -ge 400 ] 2>/dev/null && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
+  # The request was refused (a malformed hook input, a token or route the
+  # ingress does not accept, a rate limit), which is no unreachable service.
+  fail_response "gateway returned HTTP ${HTTP_CODE}" "DefenseClaw hook request was refused (HTTP ${HTTP_CODE}), so the tool call is blocked."
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 

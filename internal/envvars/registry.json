@@ -1788,6 +1788,29 @@
       "since": "0.1.0"
     },
     {
+      "name": "DEFENSECLAW_HOST_TZ",
+      "category": "hook_internal",
+      "purpose": "IANA time zone of the machine a sandbox was created from (`America/New_York`), set inside every OpenShell sandbox by `sandbox run`. The harness launchers, the login-shell profile and the sandbox exec wrapper export TZ from it when TZ is not set and the image has /usr/share/zoneinfo/<zone>, so the sandbox's clock reads like the host's instead of UTC.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "IANA zone name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/timezone.go",
+          "description": "Go constant and the host's zone the CLI sends with a create"
+        },
+        {
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "timeZoneScript: the in-image shells export TZ from it"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_CONNECTOR",
       "category": "hook_internal",
       "purpose": "Internal label identifying which connector's hook is executing. Set by every *-hook.sh; do not override manually.",
@@ -5978,6 +6001,29 @@
       ],
       "since": "0.8.0",
       "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
+    },
+    {
+      "name": "DEFENSECLAW_SSH_SHIM_PROBE",
+      "category": "hook_internal",
+      "purpose": "Set by DefenseClaw only for the one probe run of the ssh shim it puts first on the OpenShell CLI's PATH: the shim prints the value and exits without running ssh, which proves a PATH search finds and executes it. DefenseClaw removes it from the environment it gives the OpenShell CLI.",
+      "default": "unset (set only for the probe run)",
+      "accepted_values": [
+        "probe token",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sshshim.go",
+          "description": "Shim probe: set for the probe run, stripped from the OpenShell CLI's environment"
+        },
+        {
+          "location": "internal/openshell/sshshim_test.go",
+          "description": "Tests the probe answer and that the CLI never sees it"
+        }
+      ],
+      "since": "0.9.0"
     }
   ]
 }

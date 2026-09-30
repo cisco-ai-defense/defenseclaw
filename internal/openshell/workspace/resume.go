@@ -98,7 +98,9 @@ func FindResumable(ctx context.Context, lister SandboxLister, dataDir, project s
 type RefreshOptions struct {
 	// Stage carries the staging settings; Stage.Name selects the sandbox.
 	Stage StageOptions
-	Exec  Execer
+	// Exec runs the refresh's commands in the sandbox, the confirmation
+	// that the new copy arrived there among them.
+	Exec Execer
 	// Upload sends the new copy.
 	Upload Uploader
 	// Force discards work in the sandbox that was never pulled.
@@ -161,7 +163,7 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 	if err := removeRemoteCopy(ctx, opts.Exec, name, append([]*CopyRecord{old}, live...)...); err != nil {
 		return nil, err
 	}
-	err = uploadStaged(ctx, dir, rec, opts.Upload)
+	err = uploadStaged(ctx, dir, rec, opts.Upload, opts.Exec)
 	if err == nil {
 		err = establishBaseline(ctx, rec, opts.Exec)
 	}

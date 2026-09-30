@@ -99,7 +99,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
-	gw, err := m.gateway(ctx)
+	// What the sandbox is sent depends on the driver the gateway runs
+	// now, which a restart since the connection may have changed.
+	gw, err := m.driverGateway(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +110,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
 		CPU: req.CPU, Memory: req.Memory, Context: req.Context,
 	}
-	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gw.Port))
+	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +138,14 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	}
 	if err := m.checkPolicySources(mode, project, eff); err != nil {
 		return nil, err
+	}
+	// Before anything is made, on the host or on the gateway.
+	if err := driverRefusal(gw.Driver, spec, eff, req.Copy); err != nil {
+		return nil, err
+	}
+	resources, v := m.driverResources(gw.Driver, eff.Resources)
+	if v != nil {
+		return nil, m.violationError(ctx, v, req.Name)
 	}
 
 	name := strings.TrimSpace(req.Name)
@@ -186,6 +196,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	defer rb.run(m, name)
 	view, err := m.create(ctx, gw, b, createInput{
 		name: name, project: project, harness: spec, flags: flags, eff: eff, violations: violations, mode: mode, req: req,
+		resources: resources,
 	}, rb)
 	if err != nil {
 		rb.run(m, name)
@@ -206,6 +217,8 @@ type createInput struct {
 	violations []packs.Violation
 	mode       string
 	req        sandboxapi.CreateRequest
+	// resources is what the sandbox is limited to (driverResources).
+	resources *packs.Resources
 }
 
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
@@ -216,9 +229,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		return nil, err
 	}
 
-	img, err := m.image(ctx, cfg, spec, !in.req.NoBuild)
+	img, err := m.image(ctx, cfg, spec, gw.Driver, !in.req.NoBuild)
 	if err != nil {
 		return nil, err
+	}
+	if !gw.Driver.HostsFile && !img.MicroVMVerified {
+		return nil, microVMRefusal(spec, img)
 	}
 	uid, gid := m.runAs()
 	if img.UID != uid || img.GID != gid {
@@ -271,6 +287,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err := validateExtraEnv(in.req.Env, pinned); err != nil {
 		return nil, err
 	}
+	if tz := in.req.TimeZone; tz != "" && !openshell.ValidTimeZone(tz) {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "time zone %q is not an IANA zone name", truncate(tz, 80))
+	}
 
 	// Workspace: the live mount (and its snapshot), or the copy workdir.
 	rec := record{
@@ -281,8 +300,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		Violations: wireViolations(in.violations), TokenDelivery: config.OpenShellTokenDeliveryProvider,
 	}
 	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
-	resources := eff.Resources
-	rec.Resources = &resources
+	rec.Driver = string(gw.Driver.Name)
+	rec.Resources = in.resources
+	if note := limitsNote(gw.Driver, eff); note != "" {
+		rec.Warnings = append(rec.Warnings, note)
+	}
+	rec.Verify = verifyExpectation(img, spec, arts)
 	rec.ProviderEndpoints = providerEndpoints(name, llm, creds)
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
@@ -302,6 +325,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	workdir := sandboxauth.Workdir{Mode: sandboxauth.WorkdirMode(in.mode)}
 	var plan *workspace.MountPlan
 	if in.mode == config.OpenShellWorkdirMount {
+		// The pins and mask files a mount plan writes on the host, and the
+		// snapshot, are for a live mount only.
+		if !gw.Driver.HostMounts {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeInternal,
+				"sandbox %s: a live mount was planned on a gateway whose compute driver mounts no host folders", name)
+		}
 		plan, err = m.ws.PlanMount(ctx, workspace.MountOptions{
 			Project: in.project, Name: name, DataDir: m.opts.DataDir,
 			Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Context: in.req.Context,
@@ -405,9 +434,16 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	for k, v := range in.req.Env {
 		envOut[k] = v
 	}
+	// The host's time zone: the in-image shell fragment exports TZ from it
+	// where the image has that zone's file (a sandbox runs on UTC
+	// otherwise, and the harness's clock disagrees with the host's).
+	if in.req.TimeZone != "" {
+		envOut[openshell.EnvHostTimeZone] = in.req.TimeZone
+	}
 
 	// Per-run managed harness configuration: the model provider pins, safe
-	// mode and the MCP servers the run brings along, mounted read-only.
+	// mode and the MCP servers the run brings along, mounted read-only, or
+	// baked into the run image on a driver without host mounts.
 	var modelProvider *connector.SandboxModelProvider
 	if llm != nil {
 		modelProvider = llm.cp.ModelProvider
@@ -415,20 +451,28 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	credNames := credentialNames(llm, creds)
 	rc, err := m.planRunConfig(ctx, runConfigInput{
 		spec: spec, target: target, eff: eff, yolo: eff.Yolo, env: envOut, credentials: credNames,
-		provider: modelProvider, workdir: rec.Workdir, project: in.project,
+		provider: modelProvider, workdir: runWorkdir(gw.Driver, rec.Workdir), project: in.project, baked: gw.Driver.RunFilesInImage,
 	})
 	if err != nil {
 		return nil, err
 	}
 	rb.add("remove run configuration", func(context.Context) error { return m.removeRunConfig(name) })
-	runMounts, err := m.writeRunConfig(name, rc)
+	delivered, err := m.deliverRunConfig(ctx, gw.Driver, name, img, rc, in.req.Env)
 	if err != nil {
 		return nil, err
 	}
 	if rc != nil {
 		rec.MCP = rc.mcp
 		rec.Warnings = append(rec.Warnings, rc.notices...)
-		rec.RunConfig = &runConfigRecord{Files: rc.paths(), Credentials: credNames, ModelProvider: modelProvider, Safe: !eff.Yolo}
+		rec.RunConfig = &runConfigRecord{Files: rc.paths(), Credentials: credNames, ModelProvider: modelProvider, Safe: !eff.Yolo,
+			Delivery: delivered.how, Digest: delivered.digest}
+		rec.Verify = withRunFileChecks(rec.Verify, img.UID, img.GID, runFileChecks(rc.files, delivered.how, img.UID, img.GID))
+	}
+	if ri := delivered.runImage; ri != nil {
+		rec.RunImage, rec.RunImageID = ri.Tag, ri.ImageID
+	}
+	if err := m.vmDiskRoom(ctx, gw.Driver, img, rec.RunImageID); err != nil {
+		return nil, err
 	}
 
 	// Policy: the workload runs as the identity the image was built for.
@@ -464,13 +508,19 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if key, value := workspace.ProjectLabel(in.project); value != "" {
 		labels[key] = value
 	}
-	tmpl := &openshell.SandboxTemplate{Image: img.Tag}
+	tmpl := &openshell.SandboxTemplate{Image: delivered.image}
 	if plan != nil {
 		tmpl.DriverConfig = plan.DriverConfig()
 	}
-	tmpl.DriverConfig = withRunConfigMounts(tmpl.DriverConfig, runMounts)
-	if res := templateResources(eff.Resources); res != nil {
+	tmpl.DriverConfig = withRunConfigMounts(tmpl.DriverConfig, delivered.mounts)
+	if res := templateResources(eff.Resources); res != nil && gw.Driver.SandboxLimits {
 		tmpl.Resources = res
+	}
+	// driverRefusal keeps host mounts away from a driver without them; this
+	// keeps any other path from sending one.
+	if !gw.Driver.HostMounts && tmpl.DriverConfig != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal,
+			"sandbox %s: host mounts were planned on a gateway whose compute driver mounts none", name)
 	}
 	// The guard's baseline is what the project holds before the sandbox
 	// first runs.
@@ -512,9 +562,20 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return nil, err
 	}
+	// Before the sandbox is saved and watched: one that does not run as
+	// prepared is rolled back like one OpenShell rejected.
+	var hostname string
+	if !gw.Driver.SkipWorkloadCheck {
+		facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify)
+		if err != nil {
+			return nil, err
+		}
+		hostname = facts.Hostname
+	}
 
 	m.mu.Lock()
 	b.rec.ID = sb.ID
+	b.rec.Hostname = hostname
 	b.sb = sb
 	b.creating = false
 	m.mu.Unlock()
@@ -527,6 +588,151 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	m.refreshEgress()
 	view := m.viewOf(b)
 	return &view, nil
+}
+
+// vmDiskRoom refuses a create on a driver that prepares a disk from each
+// image it boots (the vm driver's ImageCache) when the image the sandbox
+// boots, id (its run image or alias; the overlay image img's own ID when
+// empty), has no disk prepared for img's workload identity yet and the
+// volume of the driver's image cache lacks the room for one
+// (openshell.VMDiskShortage): the preparation would fill the disk. The CLI
+// refuses such a run before it stages a copy, and warns when the room is
+// short of the recommended; this covers every other client. Nothing is
+// refused when the space cannot be measured.
+func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.Record, id string) error {
+	if d.ImageCache == "" || m.opts.VMDiskFree == nil {
+		return nil
+	}
+	if id == "" {
+		id = img.ImageID
+	}
+	dir, free, err := m.opts.VMDiskFree()
+	if err != nil || dir == "" {
+		return nil
+	}
+	for _, disk := range image.VMDisks(dir, id) {
+		if disk.UID == img.UID && disk.GID == img.GID {
+			return nil
+		}
+	}
+	var size uint64
+	if s, ok := m.opts.Images.(imageSizer); ok {
+		size, _ = s.ImageSize(ctx, id)
+	}
+	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"); err != nil {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error()}
+	}
+	return nil
+}
+
+// driverRefusal refuses a create the gateway's compute driver cannot carry
+// out as DefenseClaw prepares it: without host mounts (the MicroVM driver)
+// a sandbox cannot take a live mount of the project, and unless the driver
+// takes them baked into an image it cannot take the per-run managed
+// harness files either, which reach a docker sandbox as read-only bind
+// mounts and keep the harness's settings and MCP servers locked down. It
+// runs before anything is made, so a refused create leaves nothing behind.
+//
+// A project the policy runs on a copy only because the driver cannot mount
+// it (packs.ConstraintComputeDriver) needs a copy the caller staged: when
+// the request did not ask for one (an older CLI, or one that explained the
+// run before the daemon knew the driver), the create is refused with
+// CodeNeedsCopy, which the CLI answers by staging the copy and asking
+// again. No copy sandbox is made that nobody uploads to.
+func driverRefusal(d openshell.Driver, spec *harness.Spec, eff *packs.Effective, copyAsked bool) error {
+	if d.HostMounts {
+		return nil
+	}
+	why := d.MountRefusal
+	if why == "" {
+		why = "the gateway's compute driver mounts no host folders"
+	}
+	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles && !d.RunFilesInImage {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+			Message: spec.DisplayName + " sandboxes cannot run on this gateway: DefenseClaw delivers their per-run harness configuration as read-only host mounts",
+			Detail:  why}
+	}
+	if eff.Workspace.Mode == config.OpenShellWorkdirMount {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+			Message: "the project cannot be mounted live on this gateway", Detail: why + "; run it with --copy"}
+	}
+	if s, _ := eff.Setting("workdir.mode"); s.Origin == packs.ConstraintComputeDriver && !copyAsked {
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy",
+			Detail: "the project cannot be mounted live: " + why}
+	}
+	return nil
+}
+
+// driverResources is what a sandbox on a gateway running d is limited to,
+// as its record keeps it (record.Resources). A driver that enforces the
+// template's limits gets the resolved request, which the resolver held to
+// openshell.admin.max_resources already. One that does not (the vm driver)
+// gives every sandbox the gateway-wide cpu and memory: those are recorded
+// (nil when they cannot be read), and an administrator's maximum is judged
+// against them, failing closed like every other admin constraint: they
+// must be known and within it.
+func (m *Manager) driverResources(d openshell.Driver, requested packs.Resources) (*packs.Resources, *packs.Violation) {
+	if d.SandboxLimits {
+		return &requested, nil
+	}
+	var shared *packs.Resources
+	if m.opts.GatewayResources != nil {
+		if res, err := m.opts.GatewayResources(); err == nil {
+			shared = &res
+		} else {
+			m.logf("read the cpu and memory the %s driver gives every sandbox: %v", d.Name, err)
+		}
+	}
+	return shared, sharedResourcesViolation(d, shared, m.config().OpenShell.Admin.MaxResources)
+}
+
+// sharedResourcesViolation refuses the gateway-wide cpu and memory every
+// sandbox of d gets when they exceed an administrator's maximum or, with a
+// maximum set, are unknown (nil).
+func sharedResourcesViolation(d openshell.Driver, shared *packs.Resources, max config.OpenShellResourcesConfig) *packs.Violation {
+	if strings.TrimSpace(max.CPU) == "" && strings.TrimSpace(max.Memory) == "" {
+		return nil
+	}
+	table := "[openshell.drivers." + string(d.Name) + "]"
+	fix := "every sandbox on the " + string(d.Name) + " driver gets the gateway-wide vcpus and mem_mib; lower them under " + table +
+		" in the gateway's gateway.toml (`defenseclaw sandbox doctor --fix`)"
+	if shared == nil {
+		return &packs.Violation{Key: "resources", Source: packs.SourceUser, Attempted: "unknown",
+			Constraint: "openshell.admin.max_resources", Fatal: true,
+			Message: "your organization caps sandbox cpu and memory, and the gateway-wide vcpus and mem_mib every sandbox on the " +
+				string(d.Name) + " driver gets cannot be read",
+			Detail: fix}
+	}
+	v := resourceViolation(shared, max)
+	if v == nil {
+		return nil
+	}
+	what, key := strings.TrimPrefix(v.Key, "resources."), "vcpus"
+	if what == "memory" {
+		key = "mem_mib"
+	}
+	v.Message = "your organization caps sandbox " + what + " at " + v.Enforced + ", and every sandbox on the " + string(d.Name) +
+		" driver gets " + v.Attempted + " (" + table + " " + key + ")"
+	v.Detail = fix
+	return v
+}
+
+// limitsNote says that the cpu and memory limits asked for (a flag, or
+// openshell.resources) do nothing on a driver that sets no per-sandbox
+// limits (the vm driver); "" otherwise. The CLI prints the same text
+// before the create (sandboxcli's limitsIgnoredText) and does not repeat
+// this one.
+func limitsNote(d openshell.Driver, eff *packs.Effective) string {
+	if d.SandboxLimits {
+		return ""
+	}
+	for _, key := range []string{"resources.cpu", "resources.memory"} {
+		if s, _ := eff.Setting(key); s.Source == packs.SourceUser || s.Source == packs.SourceFlag {
+			return "cpu/memory limits have no effect on the OpenShell " + string(d.Name) + " driver: every MicroVM gets " +
+				"[openshell.drivers." + string(d.Name) + "] vcpus and mem_mib"
+		}
+	}
+	return ""
 }
 
 // deleteCreated is a failed create's rollback of its sandbox: it deletes
@@ -561,9 +767,13 @@ func (m *Manager) liveGateway(ctx context.Context, gw *Gateway) *Gateway {
 	return gw
 }
 
-// createFailed reports a failed create after its rollback.
+// createFailed reports a failed create after its rollback, with err's
+// errorSummary: the end of a failed docker build's output is in err, which
+// the caller gets, and in the OPENSHELL_IMAGE_BUILD_FAILED line before
+// this, not here.
 func (m *Manager) createFailed(ctx context.Context, b *box, name string, err error) {
-	m.logf("%s: create %s: %v", gatewaylog.ErrCodeOpenShellSandboxFailed, name, err)
+	summary := errorSummary(err)
+	m.logf("%s: create %s: %s", gatewaylog.ErrCodeOpenShellSandboxFailed, name, summary)
 	m.mu.Lock()
 	id := b.identity()
 	emitted := b.phase != ""
@@ -573,7 +783,7 @@ func (m *Manager) createFailed(ctx context.Context, b *box, name string, err err
 	}
 	_ = m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellSandboxFailed),
-		ErrorSummary: truncate(err.Error(), 512), Timestamp: m.now(),
+		ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
 }
 
@@ -701,8 +911,10 @@ func (m *Manager) credentialProvider(ctx context.Context, gw *Gateway, c credent
 	}
 }
 
-// image resolves the harness overlay image for this host user.
-func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.Spec, build bool) (image.Record, error) {
+// image resolves the harness overlay image for this host user and the
+// compute driver d the sandbox runs on: an image for the MicroVM driver
+// answers localhost itself (image.MicroVMTarget).
+func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.Spec, d openshell.Driver, build bool) (image.Record, error) {
 	if m.opts.Images == nil {
 		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "no image builder is configured")
 	}
@@ -710,7 +922,7 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 	bs := image.BuildSpec{
 		Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
 		UID: uid, GID: gid, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
-		DefenseClawVersion: m.opts.DefenseClawVersion,
+		DefenseClawVersion: m.opts.DefenseClawVersion, MicroVM: image.MicroVMTarget(d),
 	}
 	rec, err := m.opts.Images.Resolve(ctx, bs, build)
 	switch {
@@ -719,9 +931,81 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 			"no verified %s sandbox image is built; run `defenseclaw sandbox image build %s`", spec.DisplayName, spec.Name)
 	case err != nil:
 		m.logf("%s: %s: %v", gatewaylog.ErrCodeOpenShellImageBuildFailed, spec.Name, err)
-		return image.Record{}, &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "the " + spec.DisplayName + " sandbox image is not usable", Detail: err.Error()}
+		return image.Record{}, newImageError("the "+spec.DisplayName+" sandbox image is not usable", err)
 	}
 	return rec, nil
+}
+
+// microVMRefusal refuses a sandbox on a gateway whose driver writes no
+// /etc/hosts (openshell.Driver.HostsFile: a MicroVM) when its image did not
+// pass the hook-fire probe's MicroVM scenario: the harness would exit at
+// once, as Antigravity CLI did when localhost did not resolve. A harness
+// the scenario found to resolve names on its own cannot start; an image
+// whose scenario settled nothing, or never ran, is not checked yet. Each
+// refusal names the command that checks the image again.
+func microVMRefusal(spec *harness.Spec, img image.Record) error {
+	recheck := "`defenseclaw sandbox image build " + spec.Name + " --force`"
+	if img.MicroVMProblem != "" {
+		return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
+			Message: spec.DisplayName + " cannot start in an OpenShell MicroVM (the vm driver this gateway runs)",
+			Detail: img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName +
+				"; to check the image again: " + recheck}
+	}
+	detail := "its image " + img.Tag + " was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
+		"check it: " + recheck
+	if img.MicroVMInconclusive != "" {
+		detail = "its image " + img.Tag + " was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive +
+			"; check it again: " + recheck + " (a run without --no-build checks it first, too)"
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
+		Message: spec.DisplayName + "'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}
+}
+
+// imageError is the error of a sandbox image that could not be built or
+// made (image_unavailable), after its OPENSHELL_IMAGE_BUILD_FAILED line.
+// The caller gets api, whose Detail is the image error in full: for a
+// failed docker build it ends with the last lines docker printed
+// (image.BuildError). summary is the same without them, for what a failed
+// create logs and records after that line (errorSummary): the output is
+// logged once, and never goes into the exported sandbox-health telemetry.
+type imageError struct {
+	api     *sandboxapi.Error
+	summary string
+}
+
+func newImageError(message string, err error) *imageError {
+	return &imageError{
+		api:     &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: message, Detail: err.Error()},
+		summary: message + ": " + withoutBuildOutput(err),
+	}
+}
+
+func (e *imageError) Error() string { return e.api.Error() }
+func (e *imageError) Unwrap() error { return e.api }
+
+// withoutBuildOutput is err's message with the output of the docker build
+// that failed (image.BuildError.Output) left out, and the build's failure
+// ("docker build exited 1") kept.
+func withoutBuildOutput(err error) string {
+	msg := err.Error()
+	var buildErr *image.BuildError
+	if !errors.As(err, &buildErr) || buildErr.Output == "" {
+		return msg
+	}
+	if full := buildErr.Error(); strings.Contains(msg, full) {
+		return strings.Replace(msg, full, buildErr.Unwrap().Error(), 1)
+	}
+	return buildErr.Unwrap().Error()
+}
+
+// errorSummary is err's message for the log line and the sandbox-health
+// record of a failed create: an image error's summary (imageError).
+func errorSummary(err error) string {
+	var imgErr *imageError
+	if errors.As(err, &imgErr) {
+		return imgErr.summary
+	}
+	return err.Error()
 }
 
 // runAs is the one source of a sandbox's run-as identity: the numeric host

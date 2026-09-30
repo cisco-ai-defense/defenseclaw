@@ -76,6 +76,11 @@ type Gateway struct {
 	Workspace string `json:"workspace"`
 	Version   string `json:"version,omitempty"`
 	Healthy   bool   `json:"healthy"`
+	// Driver is the compute driver the gateway runs: "docker", or "vm"
+	// (OpenShell's MicroVM driver, which mounts no host folders, so every
+	// sandbox on it works on a copy). Empty from a daemon older than the
+	// field, which drove docker only.
+	Driver string `json:"driver,omitempty"`
 }
 
 // AdminStatus says whether openshell.admin constrains sandboxes and how far
@@ -126,6 +131,11 @@ type CreateRequest struct {
 	// Env adds non-secret environment variables. DefenseClaw, proxy and
 	// loader variables are refused.
 	Env map[string]string `json:"env,omitempty"`
+	// TimeZone is the IANA time zone of the machine the run starts on
+	// ("America/New_York"); the sandbox's harnesses and shells run in it
+	// where the image has its zone file (openshell.EnvHostTimeZone), and
+	// on UTC without it.
+	TimeZone string `json:"time_zone,omitempty"`
 }
 
 // LLMCredential selects one of the harness's provider profiles and carries
@@ -190,9 +200,15 @@ type Sandbox struct {
 	WorkdirMode string `json:"workdir_mode"`
 	Project     string `json:"project,omitempty"`
 	// Workdir is the project's path inside the sandbox.
-	Workdir        string    `json:"workdir,omitempty"`
-	Image          string    `json:"image,omitempty"`
-	ImageID        string    `json:"image_id,omitempty"`
+	Workdir string `json:"workdir,omitempty"`
+	Image   string `json:"image,omitempty"`
+	ImageID string `json:"image_id,omitempty"`
+	// RunImage and RunImageID are the image the sandbox runs when that is
+	// not Image: on the MicroVM (vm) driver, the image its per-run harness
+	// files are baked into, or an alias of Image under a name no registry
+	// serves. Empty on the docker driver.
+	RunImage       string    `json:"run_image,omitempty"`
+	RunImageID     string    `json:"run_image_id,omitempty"`
 	HarnessVersion string    `json:"harness_version,omitempty"`
 	HookContract   string    `json:"hook_contract,omitempty"`
 	TamperTier     string    `json:"tamper_tier,omitempty"`
@@ -314,12 +330,18 @@ type Endpoint struct {
 	ReportedAt string   `json:"reported_at,omitempty"`
 }
 
-// EgressStats totals the proxy's view of one sandbox.
+// EgressStats totals one sandbox's egress since the daemon started. Its
+// counts are destinations, as the activity feed names them: Destinations
+// those the sandbox reached, Blocked those refused at least once (by
+// DefenseClaw's proxy, invalid destinations included, or by OpenShell), so
+// a sandbox whose feed shows two ✗ destinations reports Blocked 2 however
+// often each was tried. BlockedRequests counts the refused requests.
 type EgressStats struct {
-	Destinations int   `json:"destinations"`
-	Blocked      int   `json:"blocked"`
-	BytesUp      int64 `json:"bytes_up"`
-	BytesDown    int64 `json:"bytes_down"`
+	Destinations    int   `json:"destinations"`
+	Blocked         int   `json:"blocked"`
+	BlockedRequests int   `json:"blocked_requests"`
+	BytesUp         int64 `json:"bytes_up"`
+	BytesDown       int64 `json:"bytes_down"`
 }
 
 // WorkspaceSummary is the launch-banner view of a mounted project.
@@ -577,6 +599,36 @@ type ExplainRequest struct {
 	Safe    bool     `json:"safe,omitempty"`
 	Yolo    bool     `json:"yolo,omitempty"`
 	Unmask  []string `json:"unmask,omitempty"`
+	// Run, for a new sandbox, is what of its create request its run files
+	// depend on, which a MicroVM gateway bakes into a run image, so
+	// Explain.VMFirstBoot does too. Without it the daemon takes the newest
+	// sandbox of the harness's.
+	Run *ExplainRun `json:"run,omitempty"`
+}
+
+// ExplainRun is what of a create request the run files of the sandbox
+// depend on. It carries no secret: the names of the credentials, never
+// their values.
+type ExplainRun struct {
+	// Env holds the variables of CreateRequest.Env that the harness's run
+	// files read (connector.SandboxRunEnvReader), except those whose name
+	// looks like a secret's and those whose value is a URL carrying a
+	// credential.
+	Env map[string]string `json:"env,omitempty"`
+	// EnvWithheld names the variables of CreateRequest.Env that the run
+	// files read but whose values Env leaves out, because the name looks
+	// like a secret's or the value is a URL carrying a credential. The
+	// daemon cannot render the files without them, so it takes the sandbox
+	// to boot a new run image.
+	EnvWithheld []string `json:"env_withheld,omitempty"`
+	// Credentials names the variables the sandbox gets as credential
+	// placeholders: those of CreateRequest.LLM.Credentials and of
+	// CreateRequest.Credentials.
+	Credentials []string `json:"credentials,omitempty"`
+	// LLMProfile and BedrockRegion are CreateRequest.LLM's Profile and
+	// BedrockRegion.
+	LLMProfile    string `json:"llm_profile,omitempty"`
+	BedrockRegion string `json:"bedrock_region,omitempty"`
 }
 
 // Explain is the resolved sandbox posture with provenance.
@@ -590,6 +642,11 @@ type Explain struct {
 	Admin       AdminStatus `json:"admin"`
 	Settings    []Setting   `json:"settings"`
 	Violations  []Violation `json:"violations,omitempty"`
+	// VMFirstBoot says the sandbox would boot an image the gateway's
+	// MicroVM (vm) driver has not prepared yet: the first start of each
+	// image prepares its MicroVM disk, which takes about a minute. Always
+	// false on the docker driver.
+	VMFirstBoot bool `json:"vm_first_boot,omitempty"`
 }
 
 // Setting is one resolved key and where its value came from.

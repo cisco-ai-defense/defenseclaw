@@ -115,7 +115,7 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-` + egressEnvScript + launcherJobControl
+` + egressEnvScript + timeZoneScript + launcherJobControl
 
 // launcherJobControl defines dc_launch COMMAND..., which every launcher
 // ends with: it execs COMMAND, except in a terminal session, where nothing
@@ -155,6 +155,20 @@ export NODE_DISABLE_COMPILE_CACHE
 // and exits with the harness's status (128+n for signals). Ctrl-C (SIGINT)
 // and resizes (SIGWINCH) reach the harness as usual.
 //
+// Before it exits, the supervisor ends what the harness left running: a
+// harness that quits in the middle of a tool call (OpenCode's Ctrl-C) leaves
+// the tool's command running in a session of its own, where it would keep
+// changing the sandbox while DefenseClaw pulls or reviews the session's
+// work. The supervisor is a child subreaper, so those commands are
+// re-parented to it; they get two seconds to end on their own, then SIGTERM
+// and SIGKILL, and the terminal names them. A launcher whose harness keeps
+// a server running between sessions (OmniGent), and the `sandbox exec`
+// wrapper, set dc_keep_leftovers=1 before dc_launch, which passes
+// --keep-leftovers; the wrapper also sets dc_say_kept=1 (--say-kept), and
+// the supervisor names what the command left running in the terminal's
+// session, which holds OpenShell's --tty exec open. The preamble unsets
+// both, so the caller's environment cannot set them.
+//
 // Without a terminal dc_launch execs COMMAND directly: headless and detached
 // runs keep the launcher's pid for the harness. Without /proc, or when the
 // supervisor or its interpreter (SupervisorInterpreter, which a base image
@@ -168,9 +182,10 @@ dc_foreground() {
   read -r rest rest own_pgrp rest rest tpgid rest <<<"${stat##*) }"
   [ "$tpgid" = "$own_pgrp" ]
 }
+unset dc_keep_leftovers dc_say_kept
 dc_launch() {
   if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_foreground && [ -x ` + SupervisorPath + ` ] && [ -x ` + SupervisorInterpreter + ` ]; then
-    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` "$@"
+    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` ${dc_keep_leftovers:+--keep-leftovers} ${dc_say_kept:+--say-kept} "$@"
   fi
   exec "$@"
 }
@@ -359,6 +374,11 @@ type Spec struct {
 	// edit, or code the user or a project adds that runs beside the hooks).
 	// It always equals the rendered artifacts' tier.
 	TamperTier string
+	// TamperNote says, for a user-tier harness, what of its hooks the image
+	// protects and what the agent can still change, as the launch banner's
+	// Hooks line shows it (the reason for the tier differs per harness, and
+	// on every compute driver it is the same).
+	TamperNote string
 
 	verification       Verification
 	probe              ProbeSpec
@@ -385,7 +405,16 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
+	// interactiveCaveat is a limit of the pinned harness in an OpenShell
+	// sandbox that an interactive session should know before it starts,
+	// whatever the credential profile; the launch banner prints it.
+	interactiveCaveat string
 }
+
+// InteractiveCaveat is the harness limit an interactive session should know
+// about before it starts ("" when there is none). A one-prompt run is not
+// shown it.
+func (s *Spec) InteractiveCaveat() string { return s.interactiveCaveat }
 
 // DirectFetch is a request the pinned harness binary makes on its own
 // around the egress proxy (its HTTP client ignores the proxy variables)
@@ -723,11 +752,12 @@ func SetNoProxy(env map[string]string, list string) {
 
 var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
-// ErrUnknownContract reports a harness version outside DefenseClaw's reviewed
-// Linux hook contracts; overlay builds refuse it.
-var ErrUnknownContract = errors.New("harness version has no reviewed Linux hook contract")
+// ErrUnknownContract reports a harness version outside the hook contracts
+// DefenseClaw reviewed for sandboxes (connector.ResolveSandboxHookContract,
+// which may start above the host contract); overlay builds refuse it.
+var ErrUnknownContract = errors.New("harness version has no reviewed hook contract for sandboxes")
 
-// CheckContract refuses a harness version whose Linux hook contract is not
+// CheckContract refuses a harness version whose sandbox hook contract is not
 // Known.
 func CheckContract(connectorName, version string) error {
 	resolution := connector.ResolveSandboxHookContract(connectorName, version)

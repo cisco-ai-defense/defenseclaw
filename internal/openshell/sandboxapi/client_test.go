@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -179,8 +180,20 @@ func TestClientActivity(t *testing.T) {
 
 func TestQueryRoundTrips(t *testing.T) {
 	req := ExplainRequest{Harness: "claudecode", Pack: "balanced", Project: "/p", Copy: true, Unmask: []string{".env.local", "a"}}
-	if got := ParseExplainQuery(req.Query()); got.Harness != req.Harness || got.Pack != req.Pack || !got.Copy || len(got.Unmask) != 2 {
+	if got := ParseExplainQuery(req.Query()); got.Harness != req.Harness || got.Pack != req.Pack || !got.Copy || len(got.Unmask) != 2 || got.Run != nil {
 		t.Fatalf("explain = %+v", got)
+	}
+	// A run's inputs round-trip, a value holding "=" too; a run with none
+	// is still a run (it renders with none, not the newest sandbox's).
+	req.Run = &ExplainRun{Env: map[string]string{"ANTHROPIC_BASE_URL": "http://h:1/?a=b", "ANTHROPIC_MODEL": ""},
+		EnvWithheld: []string{"ANTHROPIC_AUTH_TOKEN"}, Credentials: []string{"ANTHROPIC_API_KEY", "GH_TOKEN"},
+		LLMProfile: "defenseclaw-anthropic", BedrockRegion: "us-west-2"}
+	if got := ParseExplainQuery(req.Query()); !reflect.DeepEqual(got.Run, req.Run) {
+		t.Fatalf("explain run = %+v, want %+v", got.Run, req.Run)
+	}
+	req.Run = &ExplainRun{}
+	if got := ParseExplainQuery(req.Query()); !reflect.DeepEqual(got.Run, req.Run) {
+		t.Fatalf("explain of a run without inputs = %+v", got.Run)
 	}
 	q, err := ParseActivityQuery(url.Values{"since": {"3"}, "follow": {"1"}, "sandbox": {"b"}}, "")
 	if err != nil || q.Since != 3 || !q.Follow || q.Sandbox != "b" {

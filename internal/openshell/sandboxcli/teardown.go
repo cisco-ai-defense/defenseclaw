@@ -52,6 +52,13 @@ type teardownPlan struct {
 	// providers are deleted.
 	ownIngress map[string]bool
 	images     []string
+	// imageIDs are the image IDs of those images, and vmDisks the disks the
+	// MicroVM driver prepared from them, which teardown removes once the
+	// images are gone and no sandbox is left that boots one.
+	imageIDs []string
+	vmDisks  vmDiskSet
+	// listed is set when the gateway listed this data dir's sandboxes.
+	listed bool
 	// orphans are sandboxes whose data under <data_dir>/sandboxes the
 	// daemon has no record of.
 	orphans []string
@@ -189,7 +196,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		if owner != "" {
 			sel := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: owner}
 			if sbs, err := c.ListSandboxes(ctx, sel); err == nil {
-				listed = true
+				listed, p.listed = true, true
 				for _, sb := range sbs {
 					if !slices.Contains(p.sandboxes, sb.Name) {
 						p.sandboxes = append(p.sandboxes, sb.Name)
@@ -223,6 +230,10 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 	if !o.KeepImages {
 		if tags, err := a.Images.Remove(ctx, true); err == nil {
 			p.images = tags
+		}
+		if len(p.images) > 0 {
+			p.imageIDs = a.storeImageIDs()
+			p.vmDisks = a.vmDisksOf(p.imageIDs, nil)
 		}
 	}
 	if r, err := a.loadReceipt(); err == nil {
@@ -322,6 +333,10 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		row("images", "kept (--keep-images)")
 	} else {
 		list("images", p.images)
+		if n := len(p.vmDisks.disks); n > 0 {
+			row("", fmt.Sprintf("and the %s OpenShell prepared from them (%s in %s)",
+				plural(int64(n), "MicroVM disk", "MicroVM disks"), humanBytes(p.vmDisks.size), a.tildePath(p.vmDisks.dir)))
+		}
 	}
 	if len(p.orphans) > 0 {
 		list("leftover data", p.orphans)
@@ -412,6 +427,53 @@ func (a *App) profileRows(p *teardownPlan) []string {
 	return rows
 }
 
+// sandboxImageRefs are the images the sandboxes left after the teardown's
+// deletes are recorded with, by tag and ID: the daemon's, and the records
+// under the data dir. why says, instead, why they cannot be known, and the
+// MicroVM disks stay: a sandbox teardown could not delete, or no daemon or
+// gateway that lists them.
+func (a *App) sandboxImageRefs(ctx context.Context, p *teardownPlan, undeleted int) (map[string]bool, string) {
+	switch {
+	case undeleted > 0:
+		return nil, plural(int64(undeleted), "sandbox", "sandboxes") + " that may boot them could not be deleted"
+	case !p.daemon && !p.listed:
+		return nil, "neither the DefenseClaw daemon nor the OpenShell gateway listed the sandboxes that may boot them"
+	}
+	refs := map[string]bool{}
+	if p.daemon {
+		api, err := a.api()
+		if err != nil {
+			return nil, "the DefenseClaw daemon did not list its sandboxes: " + err.Error()
+		}
+		list, err := api.List(ctx)
+		if err != nil {
+			return nil, "the DefenseClaw daemon did not list its sandboxes: " + apiError(err).Error()
+		}
+		for _, sb := range list {
+			for _, ref := range []string{sb.Image, sb.ImageID, sb.RunImage, sb.RunImageID} {
+				refs[ref] = true
+			}
+		}
+	}
+	if p.listed && p.client != nil {
+		sel := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: a.owner()}
+		sbs, err := p.client.ListSandboxes(ctx, sel)
+		switch {
+		case err != nil:
+			return nil, "the OpenShell gateway did not list its sandboxes: " + err.Error()
+		case len(sbs) > 0:
+			return nil, plural(int64(len(sbs)), "sandbox", "sandboxes") + " of this install are still on the OpenShell gateway"
+		}
+	}
+	for _, r := range manager.RecordedSandboxes(a.dataDir()) {
+		for _, ref := range r.Images {
+			refs[ref] = true
+		}
+	}
+	delete(refs, "")
+	return refs, ""
+}
+
 // removeSandboxState removes what a recorded sandbox left on this machine
 // once it is gone from the gateway (manager.RemoveSandboxState): its mount
 // pins and masks, snapshot, copy, run files, binding and record, and the
@@ -431,6 +493,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		errs = append(errs, fmt.Errorf("%s: %w", what, err))
 	}
 	api, _ := a.api()
+	undeleted := 0
 	for _, name := range p.sandboxes {
 		deleted := false
 		if p.daemon && api != nil {
@@ -438,12 +501,14 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 				deleted = true
 			} else if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) && p.client == nil {
 				fail("delete sandbox "+name, apiError(err))
+				undeleted++
 				continue
 			}
 		}
 		if !deleted && p.client != nil {
 			if _, err := p.client.DeleteSandbox(ctx, name); err != nil {
 				fail("delete sandbox "+name, err)
+				undeleted++
 				continue
 			}
 			wctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -451,6 +516,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 			cancel()
 			if err != nil {
 				fail("wait for "+name+" to go", err)
+				undeleted++
 				continue
 			}
 			// No daemon cleans up after a delete it did not make.
@@ -517,6 +583,14 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		}
 		if err != nil {
 			fail("remove images", err)
+		}
+		if n := len(p.vmDisks.disks); n > 0 {
+			if refs, why := a.sandboxImageRefs(ctx, p, undeleted); why != "" {
+				a.note(fmt.Sprintf("kept the %s OpenShell prepared from them (%s in %s): %s",
+					plural(int64(n), "MicroVM disk", "MicroVM disks"), humanBytes(p.vmDisks.size), a.tildePath(p.vmDisks.dir), why))
+			} else {
+				a.removeVMDisks(ctx, a.vmDisksOf(p.imageIDs, refs), false, "them")
+			}
 		}
 	}
 	if len(p.gateway) > 0 {

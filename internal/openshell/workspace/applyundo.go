@@ -19,6 +19,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"os"
 )
 
 // UndoApplyOptions configures UndoApply.
@@ -138,5 +139,30 @@ func UndoApply(ctx context.Context, opts UndoApplyOptions) (*UndoApplyResult, er
 		return nil, fmt.Errorf("workspace: the apply was reverted, but recording that failed: %w", err)
 	}
 	res.Undone = true
+	forgetApplied(ctx, lay, rec)
 	return res, nil
+}
+
+// forgetApplied takes back what an apply that is undone now recorded for
+// the next pull (best effort): the next pull starts from the baseline
+// again, so it offers the undone work anew. A kept pull that started from
+// the undone apply is dropped (Apply would merge from a point the folder
+// no longer has; the next `pull` takes a new one), and one that the undone
+// apply landed counts as not applied any more.
+func forgetApplied(ctx context.Context, lay layout, rec *CopyRecord) {
+	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
+	applied := refCommit(ctx, base, appliedRef)
+	_ = deleteRef(ctx, base, appliedRef)
+	pr, err := LoadPull(lay.dataDir, rec.Name)
+	if err != nil || pr.Baseline != rec.Baseline {
+		return
+	}
+	switch {
+	case pr.Since != "":
+		_ = deleteRef(ctx, base, sinceRef)
+		_ = os.Remove(lay.pullRecord(rec.Name))
+	case applied != "" && pr.Effective == applied && pr.AppliedAt != nil:
+		pr.AppliedAt = nil
+		_, _ = savePull(lay, pr)
+	}
 }

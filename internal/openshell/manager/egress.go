@@ -634,14 +634,12 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
 	if b != nil {
+		// The proxy's requests are no sign of the harness at work (hook
+		// silence): the proxy cannot tell the harness's from a tool's or a
+		// `sandbox exec` command's. OpenShell's record of the connection
+		// to the proxy names the binary, and marks the harness's own
+		// (hostAliasEvent).
 		ident = b.identity()
-		if e.Kind == egress.EventAllowed || e.Kind == egress.EventClosed {
-			// Egress keeps the silence check going, but it is no sign that
-			// hooks are overdue (see reach.go): the proxy cannot tell the
-			// harness's start-up requests from anything else, and the
-			// harness reaches its model around the proxy.
-			b.activeAt = m.now()
-		}
 	}
 	m.mu.Unlock()
 	if b == nil {

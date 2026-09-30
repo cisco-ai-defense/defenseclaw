@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
@@ -63,6 +64,7 @@ var OpenCode = register(&Spec{
 	DefaultVersion: openCodePin.Version,
 	Provider:       connector.NewOpenCodeConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
+	TamperNote:     "the hook plugin and the managed config that loads it are root-owned; another plugin or custom tool would run beside them, so the launcher refuses to start while one is present",
 	verification: Verification{
 		Status: VerifiedLive,
 		Note:   "hook-fire probe (built-in mock LLM through OpenCode's bundled Anthropic SDK): the managed plugin loads, tool.execute.before/after reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied and has no side effect, user and project config plugin:[] cannot remove it, and the launcher refuses to start, naming the file, with a planted fetch-replacing project plugin, a planted user plugin or a project config entry naming one (its unit tests also cover ancestor, ~/.opencode and OPENCODE_CONFIG_DIR plugins, custom tools, JSONC, TUI and OPENCODE_CONFIG_CONTENT plugin entries, unbundled provider SDKs and wellknown remote-config logins); live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, with the shell tool on DefenseClaw's block list the DCBLOCK tool call gets the real gateway's block verdict, has no side effect and OpenCode shows the reason and passes it to the model, a tool call's plain curl reaches example.org through the proxy the launcher exports, the proxy blocks webhook.site, a connection around the proxy is refused",
@@ -85,6 +87,9 @@ var OpenCode = register(&Spec{
 		return []InstallStep{{
 			Comment: "Replace the base image's OpenCode with the pinned " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
 			Run:     run + "; " + check,
+		}, {
+			Comment: "Record OpenCode " + version + "'s plugin package as installed in the image HOME's config directory, so a new sandbox does not download it at every start",
+			Run:     openCodePluginRecordRun(OpenCodeGlobalConfigDir, version),
 		}}, nil
 	},
 	launcher: openCodeLauncher,
@@ -137,6 +142,35 @@ var OpenCode = register(&Spec{
 
 // OpenCodeLauncherPath is the in-image OpenCode launcher.
 const OpenCodeLauncherPath = LauncherDir + "/opencode-launch"
+
+// OpenCodeGlobalConfigDir is OpenCode's global config directory in the
+// image HOME (the sandbox sets no XDG_CONFIG_HOME).
+const OpenCodeGlobalConfigDir = connector.SandboxHomeDir + "/.config/opencode"
+
+// openCodePluginRecordRun records OpenCode's plugin package,
+// @opencode-ai/plugin at version, as installed in the config directory dir.
+//
+// At every start OpenCode 1.18.31 installs that package into each writable
+// config directory, in the background (Npm.install): about 29 packages and
+// 20 MiB from registry.npmjs.org into ~/.config/opencode for every new
+// sandbox, outside the pinned image. It skips the install when the
+// directory has a node_modules and its package-lock.json lists, in the root
+// package, every package.json dependency and @opencode-ai/plugin (it
+// compares names, not versions or files). Nothing in the sandbox imports the
+// package: the DefenseClaw plugin imports only node: builtins, and the
+// launcher refuses every other plugin and custom tool, the code that would.
+// So the image writes that record and an empty node_modules, pinned to the
+// harness version, rather than the packages. HOME's final chown makes them
+// the workload's, like the rest of HOME: removing them only brings back
+// OpenCode's own install.
+func openCodePluginRecordRun(dir, version string) string {
+	deps := `{"@opencode-ai/plugin":"` + version + `"}`
+	pkg := `{"dependencies":` + deps + `}`
+	lock := `{"name":"opencode","lockfileVersion":3,"requires":true,"packages":{"":{"dependencies":` + deps + `}}}`
+	return `set -eu; d=` + shellQuote(dir) + `; install -d -m 0755 "$d/node_modules"; ` +
+		`printf '%s\n' ` + shellQuote(pkg) + ` >"$d/package.json"; ` +
+		`printf '%s\n' ` + shellQuote(lock) + ` >"$d/package-lock.json"`
+}
 
 // openCodeBundledProviderSDKs are the provider SDK packages OpenCode 1.18.31
 // ships inside its executable. A provider (in config or the model catalog)
@@ -212,8 +246,20 @@ unset OPENCODE_PURE OPENCODE_TEST_MANAGED_CONFIG_DIR OPENCODE_TEST_HOME
 OPENCODE_DISABLE_AUTOUPDATE=1
 export OPENCODE_DISABLE_AUTOUPDATE
 
+# The sandbox's name, for the host commands that remove a refused file.
+case "${` + openshell.EnvSandboxName + `:-}" in
+  ''|*[!a-z0-9-]*) dc_sandbox='<sandbox>' ;;
+  *) dc_sandbox="$` + openshell.EnvSandboxName + `" ;;
+esac
 refuse() {
-  echo "defenseclaw: refusing to start OpenCode: $1 $2. OpenCode loads plugins, custom tools and provider SDKs into the process that runs the DefenseClaw policy plugin, where they could switch it off. Remove it and start OpenCode again." >&2
+  local fix="Remove it and start OpenCode again." file
+  if [ -f "$1" ] || [ -L "$1" ]; then
+    file="$1"
+    case "$file" in /*) ;; *) file="$PWD/$file" ;; esac
+    file="$(printf '%q' "$file")"
+    fix="Remove it and start OpenCode again. From your machine: defenseclaw sandbox start $dc_sandbox && defenseclaw sandbox exec $dc_sandbox -- rm $file, then defenseclaw sandbox connect $dc_sandbox."
+  fi
+  echo "defenseclaw: refusing to start OpenCode: $1 $2. OpenCode loads plugins, custom tools and provider SDKs into the process that runs the DefenseClaw policy plugin, where they could switch it off. $fix" >&2
   exit 2
 }
 bundled='` + jsonStringArray(openCodeBundledProviderSDKs) + `'

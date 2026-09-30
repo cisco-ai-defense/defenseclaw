@@ -32,8 +32,10 @@ import (
 // keys or inline tables). Nothing was written; the operator edits by hand.
 var ErrTOMLEdit = errors.New("openshell: cannot edit the TOML document safely")
 
-// tomlSetting is one scalar assignment: table path, key, value (bool or
-// int64).
+// tomlSetting is one scalar assignment: table path, key, value (bool,
+// int64 or string). Integers are int64, as TOML decodes them: editTOML
+// compares the edited document with the decoded original plus the
+// settings, and an int would never equal the int64 it decodes to.
 type tomlSetting struct {
 	Table []string
 	Key   string
@@ -150,11 +152,31 @@ func tomlLiteral(v any) string {
 		return strconv.FormatBool(t)
 	case int64:
 		return strconv.FormatInt(t, 10)
-	case int:
-		return strconv.Itoa(t)
+	case string:
+		return tomlString(t)
 	default:
 		panic(fmt.Sprintf("openshell: unsupported TOML literal %T", v))
 	}
+}
+
+// tomlString is s as a TOML basic string: quotes and backslashes escaped,
+// control characters as \uXXXX.
+func tomlString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 var bareTOMLKey = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)

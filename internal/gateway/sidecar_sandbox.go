@@ -155,7 +155,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	if cfg == nil || !cfg.OpenShell.Enabled {
 		return nil, nil
 	}
-	if err := openshell.CheckPlatform(runtime.GOOS); err != nil {
+	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
 		s.health.SetSandbox(StateDisabled, err.Error(), nil)
 		return nil, nil
 	}
@@ -208,6 +208,8 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		IngressAddr:        ingressAddr,
 		EgressAddr:         egressAddr,
 		DefenseClawVersion: manager.ImageVersion(),
+		GatewayResources:   manager.GatewayConfigResources(""),
+		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 	})

@@ -34,7 +34,9 @@ import (
 // CopyWorkspace is the copy-mode surface of package workspace.
 type CopyWorkspace interface {
 	Stage(ctx context.Context, opts workspace.StageOptions) (*workspace.CopyRecord, error)
-	Upload(ctx context.Context, dataDir, name string, up workspace.Uploader) (*workspace.CopyRecord, error)
+	// Upload sends the staged copy with up and confirms over ex, in the
+	// sandbox by name, that it arrived there.
+	Upload(ctx context.Context, dataDir, name string, up workspace.Uploader, ex workspace.Execer) (*workspace.CopyRecord, error)
 	Baseline(ctx context.Context, dataDir, name string, ex workspace.Execer) (*workspace.CopyRecord, error)
 	Refresh(ctx context.Context, opts workspace.RefreshOptions) (*workspace.CopyRecord, error)
 	Pull(ctx context.Context, opts workspace.PullOptions) (*workspace.PullResult, error)
@@ -53,8 +55,8 @@ type defaultCopyWorkspace struct{}
 func (defaultCopyWorkspace) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
 	return workspace.Stage(ctx, o)
 }
-func (defaultCopyWorkspace) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader) (*workspace.CopyRecord, error) {
-	return workspace.Upload(ctx, dataDir, name, up)
+func (defaultCopyWorkspace) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader, ex workspace.Execer) (*workspace.CopyRecord, error) {
+	return workspace.Upload(ctx, dataDir, name, up, ex)
 }
 func (defaultCopyWorkspace) Baseline(ctx context.Context, dataDir, name string, ex workspace.Execer) (*workspace.CopyRecord, error) {
 	return workspace.EstablishBaseline(ctx, dataDir, name, ex)
@@ -306,6 +308,10 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 	if len(res.Conflicts) > 0 {
 		return a.undoApplyConflict(res)
 	}
+	if res.Undone {
+		// The undone work is in the sandbox alone again.
+		a.forgetCleanCopy(sb.Name)
+	}
 	if stdout != nil {
 		return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: res})
 	}
@@ -429,11 +435,19 @@ type ReviewOptions struct {
 	Output OutputFormat
 }
 
-// Review prints the end-of-session review of a mounted project.
+// Review prints the end-of-session review of a mounted project. For a
+// copy-mode sandbox (every sandbox on a gateway that mounts no host
+// folders) it previews what `pull` would bring back, applying nothing.
 func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 	api, err := a.api()
 	if err != nil {
 		return err
+	}
+	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
+		if o.Diff && o.Output != OutputJSON {
+			a.note("--diff: the changes of a copy come back as a patch; `" + CommandName + " pull " + o.Name + " --patch-out FILE` writes one")
+		}
+		return a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true})
 	}
 	rev, err := api.Review(ctx, o.Name, sandboxapi.ReviewRequest{Diff: o.Diff})
 	if err != nil {
@@ -498,6 +512,9 @@ type PullOptions struct {
 	AcceptSensitive bool
 	Yes             bool
 	Output          OutputFormat
+	// preview is `review` of a copy-mode sandbox: a pull without a mode,
+	// whose way on names `pull`.
+	preview bool
 }
 
 // Pull brings a copy-mode sandbox's work back: review, then apply (3-way),
@@ -532,11 +549,20 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return err
 	}
 	cli := a.cli(gateway)
+	// handedOver is set once nothing of the sandbox's work is left to bring
+	// back; a sandbox this pull started, and stops again, is then marked so
+	// (markCleanCopy), and `delete` of it stopped need not warn.
+	handedOver := false
 	if sb.Phase != "ready" {
 		a.note("starting " + o.Name + " to read its work…")
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
+		defer func() {
+			if handedOver {
+				a.markCleanCopy(sb)
+			}
+		}()
 		// Leave it as it was found.
 		defer func() {
 			if _, err := api.Stop(context.WithoutCancel(ctx), o.Name); err != nil {
@@ -546,7 +572,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			a.note("stopped " + o.Name + " again")
 		}()
 	}
-	res, err := a.pull(ctx, api, cli, sb)
+	res, err := a.pull(ctx, api, cli, sb, true)
 	if err != nil {
 		return err
 	}
@@ -554,10 +580,13 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
 			"bring them back with --apply or --patch-out FILE", o.Name)
 	}
+	if res.Empty() && res.Effective != "" && len(res.Blocking) == 0 {
+		handedOver = true
+	}
 	if stdout != nil && modes == 0 {
 		return writeJSON(stdout, res)
 	}
-	a.line(a.bold(o.Name) + ": " + res.Review.SummaryLine())
+	a.line(a.bold(o.Name) + ": " + pullSummary(res))
 	if line := riskLine(&res.Review); line != "" {
 		a.line(a.style(line, ansiYellow))
 	}
@@ -570,29 +599,36 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	for _, b := range res.Blocking {
 		a.warn(b)
 	}
-	if modes == 0 {
-		if res.Kind == workspace.CopyPlain {
-			a.note("bring it back with --apply or --patch-out FILE")
-		} else {
-			a.note("bring it back with --apply, --branch or --patch-out FILE")
-		}
-		return nil
-	}
 	nothing := func() error {
 		if stdout == nil {
 			return nil
 		}
 		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
 	}
+	// With a mode or without: there is nothing to bring back either way.
 	if res.Empty() {
-		a.ok("nothing to bring back")
+		if res.Since != "" {
+			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
+		} else {
+			a.ok("nothing to bring back")
+		}
 		return nothing()
 	}
-	if res.Review.Sensitive() && !o.AcceptSensitive {
-		if secrets := res.Review.SecretPaths(); len(secrets) > 0 {
-			a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+	if modes == 0 {
+		switch {
+		case o.preview && res.Kind == workspace.CopyPlain:
+			a.note("nothing was applied; bring it back with `" + CommandName + " pull " + o.Name + " --apply` (or --patch-out FILE)")
+		case o.preview:
+			a.note("nothing was applied; bring it back with `" + CommandName + " pull " + o.Name + " --apply` (or --branch or --patch-out FILE)")
+		case res.Kind == workspace.CopyPlain:
+			a.note("bring it back with --apply or --patch-out FILE")
+		default:
+			a.note("bring it back with --apply, --branch or --patch-out FILE")
 		}
-		yes, err := a.ask("Some changes can run code on this machine or hold a secret. Bring them back anyway?", false, false)
+		return nil
+	}
+	if res.Review.Sensitive() && !o.AcceptSensitive {
+		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
 		if err != nil {
 			if errors.Is(err, ErrNoTerminal) {
 				return errors.New("some changes can run code on this machine; review them and pass --accept-sensitive")
@@ -608,6 +644,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return err
 	}
+	handedOver = true
 	if stdout != nil {
 		if err := writeJSON(stdout, applied); err != nil {
 			return err
@@ -640,16 +677,18 @@ func (o PullOptions) applyMode() workspace.ApplyMode {
 	return workspace.ApplyPatch
 }
 
-// pull captures the sandbox's work.
-func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox) (*workspace.PullResult, error) {
+// pull captures the sandbox's work, saying so when announce is set.
+func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox, announce bool) (*workspace.PullResult, error) {
 	var review []string
 	if eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: sb.Pack, Harness: sb.Harness, Project: sb.Project, Profile: sb.Profile, Copy: true}); err == nil {
 		review = eff.Workspace.Review
 	}
-	a.note("Pulling " + sb.Name + "'s work…")
+	if announce {
+		a.note("Pulling " + sb.Name + "'s work…")
+	}
 	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: review})
 	if err != nil {
-		return nil, workspaceFailure("pull "+sb.Name, err, a.diskFullHint(err))
+		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))
 	}
 	return res, nil
 }
@@ -657,6 +696,27 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 // lowDiskBytes is the free space under which a failed write is taken for
 // a full disk: git names only the file it could not write.
 const lowDiskBytes = 64 << 20
+
+// sandboxDiskHint is diskFullHint for a step that also writes inside the
+// sandbox (the upload, the pull's bundle). A disk full while this machine's
+// is not, and not full from a write of this process, is the sandbox's own:
+// on a driver that gives each sandbox a disk of its own (a MicroVM's
+// overlay) the hint names that disk and its size setting instead.
+func (a *App) sandboxDiskHint(ctx context.Context, api API, err error) string {
+	hint := a.diskFullHint(err)
+	if hint == "" || isNoSpace(err) {
+		return hint
+	}
+	if free, known := freeBytes(a.dataDir()); !known || free < lowDiskBytes {
+		return hint
+	}
+	disk := sandboxDisk(statusDriver(context.WithoutCancel(ctx), api))
+	if disk == "" {
+		return hint
+	}
+	return "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by " + disk +
+		"; free some space in the sandbox, or raise that size for new sandboxes (`" + CommandName + " doctor` shows it)"
+}
 
 // diskFullHint names a full disk as the cause of a workspace failure (no
 // space left on device), which git's own message does not say.
@@ -736,7 +796,13 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 	case applied.Mode == workspace.ApplyMerge && applied.UpToDate:
 		a.ok("nothing to apply: " + a.tildePath(sb.Project) + " already has these changes")
 	case applied.Mode == workspace.ApplyMerge:
-		a.ok(fmt.Sprintf("applied %s to %s", plural(int64(len(applied.Changes)), "change", "changes"), a.tildePath(sb.Project)))
+		line := fmt.Sprintf("applied %s to %s", plural(int64(len(applied.Changes)), "change", "changes"), a.tildePath(sb.Project))
+		if same := alreadyMatched(res.Changes, applied.Changes); same > 0 {
+			// The pull's count is against the copy's start; a path the
+			// folder already holds as the sandbox left it is not written.
+			line += fmt.Sprintf("; %d already matched your folder", same)
+		}
+		a.ok(line)
 		undo := "`" + CommandName + " undo " + sb.Name + "` reverts the apply"
 		if applied.PreApplyRef != "" {
 			a.note("your previous working tree is kept at " + applied.PreApplyRef + "; " + undo)
@@ -752,6 +818,23 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		a.warn(w)
 	}
 	return applied, nil
+}
+
+// alreadyMatched counts the pull's changed paths an apply did not write:
+// the folder already held them as the sandbox left them (an earlier
+// apply an undo did not take back, the same edit made on this machine).
+func alreadyMatched(pulled, written []workspace.TreeChange) int {
+	done := make(map[string]bool, len(written))
+	for _, c := range written {
+		done[c.Path] = true
+	}
+	n := 0
+	for _, c := range pulled {
+		if !done[c.Path] {
+			n++
+		}
+	}
+	return n
 }
 
 // findingLine renders a scanner finding like the flag lines above it:
@@ -835,6 +918,20 @@ func mergeFlags(flags []workspace.Flag) []fileFlag {
 		}
 	}
 	return out
+}
+
+// bringBackQuestion warns about what looks like a secret the sandbox
+// wrote and returns the question that confirms bringing sensitive changes
+// back: the same at a session's end and for `sandbox pull`.
+func (a *App) bringBackQuestion(r *workspace.ReviewReport) string {
+	secrets := r.SecretPaths()
+	if len(secrets) > 0 {
+		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+		if riskLine(r) == "" {
+			return "Some changes hold what looks like a secret. Bring them back anyway?"
+		}
+	}
+	return "Some changes can run code on this machine. Bring them back anyway?"
 }
 
 // riskLine is the review's warning about changed files that can run code

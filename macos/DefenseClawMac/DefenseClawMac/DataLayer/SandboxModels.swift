@@ -20,12 +20,39 @@ let sandboxAdminMessage = "blocked by your organization's DefenseClaw policy"
 /// sandboxapi.HooksUnreachableWarning.
 let sandboxHooksUnreachableWarning = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
 
+/// The OpenShell compute driver a gateway runs, as far as the app needs it:
+/// a port of the table in internal/openshell/driver.go (the TUI's
+/// COMPUTE_DRIVERS). A driver without host mounts runs every sandbox on a
+/// copy, and pull brings the work back.
+struct SandboxDriver: Sendable, Hashable {
+    var name: String
+    var label: String
+    var hostMounts: Bool
+
+    static let docker = SandboxDriver(name: "docker", label: "docker", hostMounts: true)
+    static let vm = SandboxDriver(name: "vm", label: "MicroVM", hostMounts: false)
+
+    /// openshell.LookupDriver: "" is docker (a daemon older than
+    /// gateway.driver drove docker only); a driver the table does not know
+    /// mounts nothing, as in Go.
+    static func lookup(_ name: String) -> SandboxDriver {
+        switch name.trimmingCharacters(in: .whitespaces) {
+        case "", "docker": return .docker
+        case "vm": return .vm
+        case let other: return SandboxDriver(name: other, label: other, hostMounts: false)
+        }
+    }
+}
+
 struct SandboxStatus: Sendable, Hashable {
     var loaded = false
     var enabled = false
     var available = false
     var reason = ""
     var gateway = ""
+    /// gateway.driver: "docker" or "vm"; empty from a daemon older than the
+    /// field, or before a gateway answered.
+    var driver = ""
     var pack = ""
     var profile = ""
     var adminConfigured = false
@@ -34,6 +61,14 @@ struct SandboxStatus: Sendable, Hashable {
     var sandboxes = 0
     var running = 0
     var pendingApprovals = 0
+
+    /// Why every new run works on a copy (the gateway's driver mounts no
+    /// host folders), or "".
+    var copyOnlyNote: String {
+        let current = SandboxDriver.lookup(driver)
+        guard !driver.isEmpty, !current.hostMounts else { return "" }
+        return "\(current.label) sandboxes work on a copy; pull brings the changes back."
+    }
 }
 
 struct SandboxRow: Identifiable, Sendable, Hashable {
@@ -68,9 +103,21 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var orphaned = false
     var undoAvailable = false
     var nestedRepos: [String] = []
+    /// The image the sandbox runs when it is not the harness image: on the
+    /// MicroVM (vm) driver, the image its per-run harness files are baked into.
+    var runImage = ""
 
     var id: String { name }
     var running: Bool { ["ready", "running"].contains(phase.lowercased()) }
+    /// The sandbox works on a copy: pull brings its work back, and undo
+    /// reverts its last `pull --apply` (it needs no snapshot).
+    var copyMode: Bool { workdirMode == "copy" }
+    var undoOffered: Bool { copyMode || undoAvailable }
+    var undoLabel: String { copyMode ? "reverts the last pull --apply" : (undoAvailable ? "available" : "no snapshot") }
+    /// Pull shows the work first; --apply, --branch or --patch-out FILE brings it back.
+    var pullCommand: String { "defenseclaw sandbox pull \(name)" }
+    /// The work on branch dc/<name>; the working tree stays as it is.
+    var pullToBranchArguments: [String] { ["sandbox", "pull", name, "--branch"] }
     var harnessLabel: String { harnessName.isEmpty ? (harness.isEmpty ? "—" : harness) : harnessName }
 
     var policyLabel: String {
@@ -482,10 +529,13 @@ enum SandboxDecoding {
         out.available = (d["available"] as? Bool) ?? false
         out.reason = str(d["reason"])
         let gateway = dict(d["gateway"])
+        out.driver = str(gateway["driver"]).trimmingCharacters(in: .whitespaces)
         if !gateway.isEmpty {
             let version = str(gateway["version"])
             out.gateway = "OpenShell" + (version.isEmpty ? "" : " \(version)") + " gateway \(str(gateway["name"]))"
-            if (gateway["healthy"] as? Bool) == false { out.gateway += " (unhealthy)" }
+            var notes: [String] = out.driver.isEmpty ? [] : [SandboxDriver.lookup(out.driver).label]
+            if (gateway["healthy"] as? Bool) == false { notes.append("unhealthy") }
+            if !notes.isEmpty { out.gateway += " (\(notes.joined(separator: ", ")))" }
         }
         out.pack = str(d["pack"])
         out.profile = str(d["profile"])
@@ -536,6 +586,7 @@ enum SandboxDecoding {
         row.hookFailed = int(hooks["hook_failed"])
         row.lastHookFailure = str(hooks["last_hook_failure"])
         row.orphaned = (d["orphaned"] as? Bool) ?? false
+        row.runImage = str(d["run_image"])
         // undone_at is omitted until undo ran (Go omitzero).
         row.undoAvailable = !snapshot.isEmpty && DCDates.parse(snapshot["undone_at"]) == nil
         row.nestedRepos = list(d["nested_repos"]).compactMap { item in

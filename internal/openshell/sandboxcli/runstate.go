@@ -177,17 +177,27 @@ func (a *App) forgetCleanCopy(name string) {
 // launchOptions are the harness options of args a later session passes
 // again: every option with its value, up to the first word that is not
 // one (a prompt, or a subcommand whose own options would not apply
-// without it). A one-prompt run's arguments (the harness's print mode)
-// are not kept at all. An option's value is the next word unless the
-// option carries it (--model=x) or the word is another option or holds a
-// space (a prompt after a switch).
+// without it) and is not the harness's launch operand (launchOperand). A
+// one-prompt run's arguments (the harness's print mode) are not kept at
+// all. An option's value is the next word unless the option carries it
+// (--model=x) or the word is another option or holds a space (a prompt
+// after a switch). A harness whose command line holds no prompt word
+// (keepsEveryArg) keeps every argument, in order.
 func launchOptions(spec *harness.Spec, args []string) []string {
 	if len(args) == 0 || printMode(spec, args) {
 		return nil
 	}
+	if keepsEveryArg(spec) {
+		return slices.Clone(args)
+	}
 	var out []string
+	operand := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if !operand && launchOperand(spec, arg) {
+			out, operand = append(out, arg), true
+			continue
+		}
 		if arg == "--" || arg == "-" || !strings.HasPrefix(arg, "-") {
 			break
 		}
@@ -201,6 +211,33 @@ func launchOptions(spec *harness.Spec, args []string) []string {
 		}
 	}
 	return out
+}
+
+// keepsEveryArg reports whether every word of spec's interactive command
+// line is a launch setting: `omnigent run [AGENT]` takes the agent (a YAML
+// file or directory) as its one operand, with options before or after it,
+// and a first message only through -p, a one-prompt run.
+func keepsEveryArg(spec *harness.Spec) bool {
+	return spec.Name == "omnigent"
+}
+
+// launchOperand reports whether word, a harness argument that is not an
+// option, is launch configuration a later session needs again rather than
+// a prompt or a one-off subcommand: OpenCode's project directory
+// (`opencode [project]`) when it reads as a path, which none of OpenCode's
+// subcommands does, and Hermes's chat, the interactive session a bare
+// `hermes` starts.
+func launchOperand(spec *harness.Spec, word string) bool {
+	if strings.HasPrefix(word, "-") || strings.ContainsAny(word, " \t\r\n") {
+		return false
+	}
+	switch spec.Name {
+	case "opencode":
+		return word == "." || word == ".." || strings.HasPrefix(word, "~") || strings.Contains(word, "/")
+	case "hermes":
+		return word == "chat"
+	}
+	return false
 }
 
 // sessionArgs are the harness arguments of a later session of a sandbox:

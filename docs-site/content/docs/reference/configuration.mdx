@@ -486,9 +486,10 @@ administrator's `openshell.admin` limits are explained in
 [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy).
 
 <Callout title="Where sandboxes run">
-Sandboxes run on Linux, with the DefenseClaw gateway and the OpenShell
-gateway both running as your own user. They cannot run on macOS yet: Docker
-Desktop's Linux VM kernel has no Landlock (see
+Sandboxes run on Linux and on Apple-silicon Macs, with the DefenseClaw
+gateway and the OpenShell gateway both running as your own user. On a Mac
+they are OpenShell MicroVMs, which mount no host folders, so
+`openshell.workdir.mode` is always `copy` there (see
 [macOS](/docs/setup/sandbox#macos)). In a `managed_enterprise`
 install the gateway doesn't start the sandbox runtime yet: `/health`
 reports the `sandbox` subsystem as `disabled`, and `sandbox setup` and

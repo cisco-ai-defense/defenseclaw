@@ -43,7 +43,8 @@ var kiroHostileLaunchEnv = []string{
 // in HOME and the project, under the DefenseClaw file name and under names
 // that sort before it, are never read (with the agent directory pinned Kiro
 // reads neither directory), the variables that move Kiro elsewhere are
-// dropped, and a missing DefenseClaw agent stops the launcher.
+// dropped, Kiro is told to run the pinned binary in place, and a missing
+// DefenseClaw agent stops the launcher.
 func TestKiroLauncherPinsTheRootOwnedAgentDir(t *testing.T) {
 	l := newLauncher(t, Kiro)
 	agentDir := filepath.Join(l.dir, filepath.FromSlash(connector.KiroSandboxAgentDir))
@@ -57,8 +58,10 @@ func TestKiroLauncherPinsTheRootOwnedAgentDir(t *testing.T) {
 	} {
 		writeFile(t, file, hookless)
 	}
-	want := map[string]string{connector.KiroSandboxAgentDirEnv: agentDir, "HOME": l.dir}
-	env := []string{"HOME=/elsewhere"}
+	// Kiro runs the binary it was started as, not a copy in its data
+	// directory's run/, whatever the caller exported.
+	want := map[string]string{connector.KiroSandboxAgentDirEnv: agentDir, "HOME": l.dir, kiroSkipBinaryPinningEnv: "1"}
+	env := []string{"HOME=/elsewhere", kiroSkipBinaryPinningEnv + "=0"}
 	for _, name := range kiroHostileLaunchEnv {
 		env = append(env, name+"=/elsewhere")
 		if name != connector.KiroSandboxAgentDirEnv {

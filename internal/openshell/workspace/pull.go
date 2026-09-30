@@ -66,6 +66,11 @@ type PullResult struct {
 	// Effective is Result with held-back paths reset, which Apply uses.
 	Result    string `json:"result"`
 	Effective string `json:"effective"`
+	// Since is where Changes (and the review, the apply's merge base and a
+	// patch) start: the effective result an earlier 3-way apply put in the
+	// folder, so what was brought back already is not brought back again;
+	// "" measures from the baseline.
+	Since string `json:"since,omitempty"`
 	// ResultTree is Result's tree: a refresh treats a sandbox whose HEAD
 	// and working tree still match SandboxHead and ResultTree as pulled.
 	ResultTree string       `json:"result_tree,omitempty"`
@@ -240,7 +245,12 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	if err := base.run(ctx, "update-ref", effectRef, effective); err != nil {
 		return nil, err
 	}
-	if pr.Changes, err = diffTrees(ctx, base, rec.Baseline, effective); err != nil {
+	// After an apply, the work it brought is in the folder: the pull says
+	// what changed since, and the next apply merges only that.
+	if pr.Since, err = markSince(ctx, base); err != nil {
+		return nil, err
+	}
+	if pr.Changes, err = diffTrees(ctx, base, pr.from(), effective); err != nil {
 		return nil, err
 	}
 	scanners := opts.Scanners
@@ -259,6 +269,45 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 		}
 	}
 	return savePull(lay, pr)
+}
+
+// from is the commit the pull's changes start from.
+func (p *PullResult) from() string {
+	if p.Since != "" {
+		return p.Since
+	}
+	return p.Baseline
+}
+
+// markSince points sinceRef at the result the last 3-way apply put in the
+// folder (appliedRef) and returns it; with none it removes sinceRef and
+// returns "".
+func markSince(ctx context.Context, base gitCmd) (string, error) {
+	applied := refCommit(ctx, base, appliedRef)
+	if applied == "" {
+		return "", deleteRef(ctx, base, sinceRef)
+	}
+	if err := base.run(ctx, "update-ref", sinceRef, applied); err != nil {
+		return "", err
+	}
+	return applied, nil
+}
+
+// refCommit is the commit ref names in g, "" when there is none.
+func refCommit(ctx context.Context, g gitCmd, ref string) string {
+	out, code, err := g.outputCode(ctx, "rev-parse", "-q", "--verify", ref+"^{commit}")
+	if oid := strings.TrimSpace(string(out)); err == nil && code == 0 && isOID(oid) {
+		return oid
+	}
+	return ""
+}
+
+// deleteRef removes ref from g when it exists.
+func deleteRef(ctx context.Context, g gitCmd, ref string) error {
+	if _, code, err := g.outputCode(ctx, "rev-parse", "-q", "--verify", ref); err != nil || code != 0 {
+		return err
+	}
+	return g.run(ctx, "update-ref", "-d", ref)
 }
 
 func savePull(lay layout, pr *PullResult) (*PullResult, error) {
@@ -609,6 +658,14 @@ func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if res.Mode == ApplyMerge && (res.Applied || res.UpToDate) {
+		// The folder has this result now: the next pull starts from it.
+		lay, _ := newLayout(opts.DataDir)
+		base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
+		if err := base.run(ctx, "update-ref", appliedRef, pr.Effective); err != nil {
+			res.Warnings = append(res.Warnings, "the next pull will show these changes again: recording the apply failed ("+err.Error()+")")
+		}
+	}
 	if res.Applied || res.UpToDate || res.Branch != "" || res.Mode == ApplyPatch {
 		t := time.Now().UTC()
 		pr.AppliedAt = &t
@@ -644,12 +701,15 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 	}
 	lay, _ := newLayout(opts.DataDir)
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
+	if pr.Since != "" && refCommit(ctx, base, sinceRef) != pr.Since {
+		return nil, fmt.Errorf("workspace: the last pull of %s started from an apply that is no longer recorded (it was undone); pull again", rec.Name)
+	}
 	switch mode {
 	case ApplyPatch:
 		if opts.PatchPath == "" {
 			return nil, errors.New("workspace: a patch path is required")
 		}
-		if err := writePatch(ctx, base, rec.Baseline, pr.Effective, opts.PatchPath, opts.Force); err != nil {
+		if err := writePatch(ctx, base, pr.from(), pr.Effective, opts.PatchPath, opts.Force); err != nil {
 			return nil, err
 		}
 		return &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, PatchPath: opts.PatchPath}, nil
@@ -695,14 +755,15 @@ func writePatch(ctx context.Context, base gitCmd, from, to, dest string, force b
 	return f.Close()
 }
 
-// importResult fetches the effective result and the baseline from base.git
-// into the project under refs/defenseclaw/copy/<name>/.
-func importResult(ctx context.Context, rec *CopyRecord, proj gitCmd) (result, baseline string, err error) {
+// importResult fetches the effective result and the commit its changes
+// start from (baseRef: the baseline, or sinceRef) from base.git into the
+// project under refs/defenseclaw/copy/<name>/.
+func importResult(ctx context.Context, rec *CopyRecord, proj gitCmd, baseRef string) (result, baseline string, err error) {
 	prefix := "refs/defenseclaw/copy/" + rec.Name
 	g := proj
 	g.config = append(g.config, "transfer.fsckObjects=true", "fetch.writeCommitGraph=false")
 	if err := g.run(ctx, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-auto-maintenance",
-		"--no-recurse-submodules", rec.BaseGit, "+"+effectRef+":"+prefix+"/result", "+"+baselineRef+":"+prefix+"/base"); err != nil {
+		"--no-recurse-submodules", rec.BaseGit, "+"+effectRef+":"+prefix+"/result", "+"+baseRef+":"+prefix+"/base"); err != nil {
 		return "", "", fmt.Errorf("workspace: import the sandbox result: %w", err)
 	}
 	return prefix + "/result", prefix + "/base", nil
@@ -736,7 +797,7 @@ func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts App
 			return "", fmt.Errorf("workspace: branch %s already exists", branch)
 		}
 	}
-	imported, importedBase, err := importResult(ctx, rec, proj)
+	imported, importedBase, err := importResult(ctx, rec, proj, baselineRef)
 	if err != nil {
 		return "", err
 	}
@@ -828,6 +889,24 @@ func mergeTrees(ctx context.Context, g gitCmd, args []string, ours, theirs strin
 	return "", dedupe(conflicts), nil
 }
 
+// onMergeBase commits the trees of ours and theirs on a parentless commit
+// of base's tree, so a merge-tree of the two uses base as its merge base.
+func onMergeBase(ctx context.Context, g gitCmd, base, ours, theirs, name string) (string, string, error) {
+	b, err := g.line(ctx, "commit-tree", base+"^{tree}", "-m", "defenseclaw: merge base for sandbox "+name)
+	if err != nil {
+		return "", "", err
+	}
+	o, err := g.line(ctx, "commit-tree", ours+"^{tree}", "-p", b, "-m", "defenseclaw: folder for sandbox "+name)
+	if err != nil {
+		return "", "", err
+	}
+	t, err := g.line(ctx, "commit-tree", theirs+"^{tree}", "-p", b, "-m", "defenseclaw: result of sandbox "+name)
+	if err != nil {
+		return "", "", err
+	}
+	return o, t, nil
+}
+
 func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, opts ApplyOptions) (*ApplyResult, error) {
 	v, err := hostGitVersion(ctx, rec.Project)
 	if err != nil {
@@ -835,9 +914,16 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 	}
 	out := &ApplyResult{Mode: ApplyMerge}
 	g := applyGit(rec)
+	// The merge base is where the pull's changes start: the baseline, or
+	// the result an earlier apply brought (what the operator changed of
+	// that since stays theirs).
 	var result, baseline, parent string
 	if rec.Kind == CopyGit {
-		if result, baseline, err = importResult(ctx, rec, g); err != nil {
+		baseRef := baselineRef
+		if pr.Since != "" {
+			baseRef = sinceRef
+		}
+		if result, baseline, err = importResult(ctx, rec, g, baseRef); err != nil {
 			return nil, err
 		}
 		defer func() {
@@ -850,7 +936,7 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 		}
 		parent = head
 	} else {
-		result, baseline, parent = pr.Effective, rec.Baseline, rec.Baseline
+		result, baseline, parent = pr.Effective, pr.from(), rec.Baseline
 	}
 	if !v.atLeast(2, 38) {
 		out.Warnings = append(out.Warnings, "git "+v.String()+" cannot merge without touching the working tree (git 2.38+ can)")
@@ -871,11 +957,15 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 		return nil, err
 	}
 
-	mergeArgs := []string{"--allow-unrelated-histories"}
-	if v.atLeast(2, 40) {
-		mergeArgs = []string{"--merge-base=" + baseline}
+	// Both sides go on one parentless commit of the base, which makes it
+	// the merge base on every git: 2.38 and 2.39 have no --merge-base and
+	// take the base from ancestry, which would be the baseline and bring
+	// back what the operator took back of an earlier apply, unreviewed.
+	ours, theirs, err := onMergeBase(ctx, g, baseline, cur, result, rec.Name)
+	if err != nil {
+		return nil, err
 	}
-	merged, conflicts, err := mergeTrees(ctx, g, mergeArgs, cur, result)
+	merged, conflicts, err := mergeTrees(ctx, g, nil, ours, theirs)
 	if err != nil {
 		return nil, fmt.Errorf("workspace: merge the sandbox result: %w", err)
 	}
@@ -938,7 +1028,7 @@ func fallback(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, 
 		out.Branch = branch
 	}
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
-	patch, err := writeFreePatch(ctx, base, rec.Baseline, pr.Effective, rec.Project, rec.Name)
+	patch, err := writeFreePatch(ctx, base, pr.from(), pr.Effective, rec.Project, rec.Name)
 	if err != nil {
 		return nil, err
 	}

@@ -71,6 +71,14 @@ type fakeDaemon struct {
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
+	// toolCalls is how many tool calls a harness the fakes ran makes
+	// (hookTraffic): a session with a turn.
+	toolCalls int64
+	// onStatus runs before the status is returned (the daemon notices a
+	// change).
+	onStatus func(st *sandboxapi.Status)
+	// onExplain, when set, edits the explain answer to a request.
+	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
 	createMCP        *sandboxapi.MCPSummary
 	createWarnings   []string
@@ -127,6 +135,7 @@ func (d *fakeDaemon) hookTraffic(argv []string) {
 	defer d.mu.Unlock()
 	if sb, ok := d.sandboxes[name]; ok {
 		sb.Hooks.HookRequests++
+		sb.Hooks.ToolCalls += d.toolCalls
 		sb.Hooks.LastHookAt = time.Now()
 	}
 }
@@ -211,9 +220,16 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 	defer d.mu.Unlock()
 	switch {
 	case path == sandboxapi.PathStatus:
+		if d.onStatus != nil {
+			d.onStatus(&d.status)
+		}
 		reply(d.status)
 	case path == sandboxapi.PathPolicyExplain:
-		reply(d.explain)
+		ex := d.explain
+		if d.onExplain != nil {
+			d.onExplain(sandboxapi.ParseExplainQuery(r.URL.Query()), &ex)
+		}
+		reply(ex)
 	case path == sandboxapi.PathApprovals && r.Method == http.MethodGet:
 		var out []sandboxapi.Approval
 		for _, a := range d.approvals {
@@ -510,18 +526,54 @@ type fakeImages struct {
 	removed []string
 	// missing are harnesses whose image is not built yet (Current).
 	missing map[string]bool
+	// gone are the recorded tags Docker no longer has (Gone).
+	gone map[string]bool
+	// presentIDs are the image IDs Docker still has (GoneIDs: every other
+	// one is gone), and goneIDsErr its failure.
+	presentIDs map[string]bool
+	goneIDsErr error
+	// sizes are the sizes of images (Size), by harness or image ref.
+	sizes map[string]uint64
+	// pruned are the options of each Prune; pruneReport, when set, is its
+	// answer.
+	pruned      []image.PruneOptions
+	pruneReport *image.PruneReport
+	// microVMProblem, by harness, is why a built image fails the probe's
+	// MicroVM scenario, and microVMInconclusive why that scenario settled
+	// nothing (neither: it passes).
+	microVMProblem, microVMInconclusive map[string]string
+	// buildOutput is what Build writes to the build log; buildErr, when
+	// set, fails it.
+	buildOutput string
+	buildErr    error
+	// preflightErr, when set, is Preflight's refusal.
+	preflightErr error
 }
 
-func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
+func (f *fakeImages) Preflight(context.Context, *harness.Spec, bool, bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.preflightErr
+}
+
+func (f *fakeImages) Current(spec *harness.Spec, _ bool) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return !f.missing[spec.Name], nil
 }
 
-func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, _ bool, _ io.Writer) (image.Record, bool, error) {
+func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, microVM, _ bool, log io.Writer) (image.Record, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true}
+	if log != nil {
+		_, _ = io.WriteString(log, f.buildOutput)
+	}
+	if f.buildErr != nil {
+		return image.Record{}, true, f.buildErr
+	}
+	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true,
+		MicroVM: microVM, MicroVMVerified: microVM && f.microVMProblem[spec.Name] == "" && f.microVMInconclusive[spec.Name] == "",
+		MicroVMProblem: f.microVMProblem[spec.Name], MicroVMInconclusive: f.microVMInconclusive[spec.Name]}
 	f.built = append(f.built, spec.Name)
 	f.recs = append(f.recs, rec)
 	return rec, true, nil
@@ -533,7 +585,49 @@ func (f *fakeImages) List() ([]image.Record, error) {
 	return append([]image.Record(nil), f.recs...), nil
 }
 
-func (f *fakeImages) Prune(context.Context, bool) (image.PruneReport, error) {
+func (f *fakeImages) Gone(_ context.Context, recs []image.Record) (map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]bool{}
+	for _, r := range recs {
+		if f.gone[r.Tag] {
+			out[r.Tag] = true
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeImages) Size(_ context.Context, spec *harness.Spec, _ bool, ref string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if spec != nil {
+		return f.sizes[spec.Name], nil
+	}
+	return f.sizes[ref], nil
+}
+
+func (f *fakeImages) GoneIDs(_ context.Context, ids []string) (map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.goneIDsErr != nil {
+		return nil, f.goneIDsErr
+	}
+	out := map[string]bool{}
+	for _, id := range ids {
+		if !f.presentIDs[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeImages) Prune(_ context.Context, opts image.PruneOptions) (image.PruneReport, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruned = append(f.pruned, opts)
+	if f.pruneReport != nil {
+		return *f.pruneReport, nil
+	}
 	return image.PruneReport{Removed: []string{"defenseclaw/sandbox:old"}}, nil
 }
 
@@ -604,9 +698,9 @@ func (f *fakeCopy) Stage(_ context.Context, o workspace.StageOptions) (*workspac
 	return &workspace.CopyRecord{Name: o.Name, Project: o.Project, Files: 3, Bytes: 1024, HeldBack: []string{".env"}}, nil
 }
 
-func (f *fakeCopy) Upload(_ context.Context, _, name string, _ workspace.Uploader) (*workspace.CopyRecord, error) {
+func (f *fakeCopy) Upload(_ context.Context, _, name string, _ workspace.Uploader, _ workspace.Execer) (*workspace.CopyRecord, error) {
 	f.step("upload " + name)
-	return &workspace.CopyRecord{Name: name, Files: 3, Bytes: 1024}, nil
+	return &workspace.CopyRecord{Name: name, Files: 3, Bytes: 1024, HeldBack: []string{".env"}, Warnings: []string{"nested repository vendor/lib is not copied"}}, nil
 }
 
 func (f *fakeCopy) Baseline(_ context.Context, _, name string, _ workspace.Execer) (*workspace.CopyRecord, error) {
@@ -652,9 +746,20 @@ type fakeGateway struct {
 	applied   int
 	rollbacks []*openshell.GatewayApplyResult
 	applyRes  *openshell.GatewayApplyResult
+	restarts  int
+	// stateErr, when set, fails State (a configuration that cannot be read).
+	stateErr error
 }
 
-func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) { s := f.state; return &s, nil }
+func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
+
+func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) {
+	if f.stateErr != nil {
+		return nil, f.stateErr
+	}
+	s := f.state
+	return &s, nil
+}
 
 func (f *fakeGateway) Plan(_ context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error) {
 	f.planned = append(f.planned, ch)
@@ -690,6 +795,10 @@ type testApp struct {
 	gitConfig map[string]string
 	// live is the stderr liveErr set.
 	live *lockedBuffer
+	// diskFree is the free space App.DiskFree reports anywhere, and
+	// diskProbed the path it was last asked about.
+	diskFree   uint64
+	diskProbed string
 }
 
 // newTestApp is an App wired to fakes, whose daemon holds sandboxes and
@@ -705,6 +814,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		copy: &fakeCopy{}, gateway: &fakeGateway{}, env: map[string]string{"SHELL": "/bin/bash"},
 		out: &bytes.Buffer{}, err: &bytes.Buffer{}, in: strings.NewReader(input),
 		project: filepath.Join(root, "home", "proj"), home: filepath.Join(root, "home"),
+		diskFree: 100 << 30,
 	}
 	for _, d := range []string{ta.project, ta.home, filepath.Join(root, "data")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -739,8 +849,10 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		Executable: func() (string, error) { return "/usr/local/bin/defenseclaw-gateway", nil },
 		Now:        func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) },
 		GOOS:       "linux",
+		GOARCH:     "arm64", // a test that makes this a Mac makes it an Apple-silicon one
 		WSL:        func() bool { return false },
 		Geteuid:    func() int { return 1000 },
+		DiskFree:   func(p string) (uint64, error) { ta.diskProbed = p; return ta.diskFree, nil },
 		Sleep:      func(context.Context, time.Duration) error { return nil },
 		OpenShell: func(context.Context) (openshell.Client, *openshell.Registration, error) {
 			return nil, nil, io.ErrClosedPipe
