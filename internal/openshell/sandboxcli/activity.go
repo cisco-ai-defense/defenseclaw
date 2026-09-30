@@ -108,7 +108,7 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			b.WriteString(a.dim("  → unblock: " + CommandName + " unblock " + ev.Host + scope))
 		}
 	case sandboxapi.ActivityEgressLargeUpload:
-		b.WriteString(a.style("⚠", ansiYellow) + " " + largeUploadText(ev))
+		b.WriteString(a.style("⚠", ansiYellow) + " " + largeUploadText(hostPort(ev), ev))
 	case sandboxapi.ActivityApprovalRequested:
 		// The destination always shows: nobody should approve one they
 		// cannot see. The daemon's message says why it is an ask.
@@ -186,16 +186,17 @@ func reasonText(token string) string {
 	return strings.ReplaceAll(token, "_", " ")
 }
 
-// largeUploadText is an egress.large_upload report without its ⚠: "large
-// upload to files.example.net (more than 25 MiB)". It is reported as it
-// crosses the threshold, before it ends: what had gone up then (the
-// report's bytes) is not what it sent (RT U4).
-func largeUploadText(ev sandboxapi.ActivityEvent) string {
+// largeUploadText is an egress.large_upload report to dest (the feed's
+// hostPort, a session's host) without its ⚠: "large upload to
+// files.example.net (more than 25 MiB)". It is reported as it crosses the
+// threshold, before it ends: what had gone up then (the report's bytes) is
+// not what it sent (RT U4).
+func largeUploadText(dest string, ev sandboxapi.ActivityEvent) string {
 	size := humanBytes(ev.BytesUp)
 	if ev.Threshold > 0 {
 		size = "more than " + egress.FormatThreshold(ev.Threshold)
 	}
-	return "large upload to " + hostPort(ev) + " (" + size + ")"
+	return "large upload to " + dest + " (" + size + ")"
 }
 
 // hostPort is ev's destination as the feed names it (sandboxapi.HostPort):

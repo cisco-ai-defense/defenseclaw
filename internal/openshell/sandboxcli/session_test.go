@@ -343,7 +343,10 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	stderr := liveErr(ta)
 	noChanges(ta)
 	ta.daemon.live = []sandboxapi.ActivityEvent{
-		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 443, Category: "webhook_catcher", Unblockable: true},
+		// The block holds the host on every port: the notice, once per
+		// host, said "webhook.site:80" after a plain-HTTP request came
+		// first, though HTTPS was blocked too (PR 1022 review of N3).
+		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 80, Category: "webhook_catcher", Unblockable: true},
 		{Seq: 2, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 443, Category: "webhook_catcher", Unblockable: true},
 		{Seq: 3, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "raw.githubusercontent.com", Reason: harnessFetchReason},
 		{Seq: 4, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "HIGH", Reason: "tool_alert", Host: "webhook.site",
@@ -361,28 +364,35 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		// A large upload only the report saw (the block off): the summary
 		// listed the ⚠ rule finding but not this ⚠ (PR 1022 live retest
 		// N2). Once per host.
-		{Seq: 9, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "httpbin.io", Port: 443, BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		{Seq: 9, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "httpbin.io", Port: 80, BytesUp: 1<<20 + 512, Threshold: 1 << 20},
 		{Seq: 10, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "HTTPBIN.io", Port: 443, BytesUp: 1<<20 + 9, Threshold: 1 << 20},
+		// A port the proxy does not carry is what is blocked: it shows.
+		{Seq: 11, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "example.org", Port: 8443, Category: "port_not_allowed"},
 	}
 	large := "⚠ large upload to httpbin.io (more than 1 MiB)"
+	port := "✗ DefenseClaw blocked example.org:8443 (port not allowed)"
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
 	upload := "✗ DefenseClaw blocked a large upload to files.example.net (this sandbox tried to send more than 10 MiB to a destination it had not " +
 		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
 	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
 		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "httpbin.io") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "example.org") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
 	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") ||
-		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") {
+		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") ||
+		strings.Count(live, "\x1b]9;DefenseClaw: "+port+"\a") != 1 {
 		t.Fatalf("live output = %q", live)
 	}
 	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict",
 		large+"\n")
 	if out := ta.output(); strings.Count(out, "large upload to httpbin.io") != 1 || strings.Contains(out, "HTTPBIN.io") {
 		t.Errorf("the large upload is summarised once:\n%s", out)
+	}
+	if out := ta.output() + live; strings.Contains(out, "webhook.site:80") || strings.Contains(out, "httpbin.io:80") {
+		t.Errorf("a notice once per host names the first request's port:\n%s", out)
 	}
 	if out := ta.output(); strings.Index(out, "Session ended") > strings.Index(out, block) {
 		t.Errorf("the notices come before the summary line:\n%s", out)

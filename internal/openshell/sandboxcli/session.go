@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -431,18 +432,29 @@ func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
 // blockNotice announces a destination DefenseClaw blocked, once per host,
 // with the command that lifts the block when one does. What the harness
 // fetches on its own and does without (a startup tip) is not announced.
+//
+// A block holds the host on every port, so the notice names the host
+// alone: the port of whichever request came first ("webhook.site:80")
+// would say the block stops there, though HTTPS is blocked too. The feed
+// keeps the port, which tells its request lines apart. A port the proxy
+// does not carry is what is blocked, so that one shows, once per port.
 func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	if ev.Host == "" || ev.Reason == harnessFetchReason {
 		return
 	}
-	text := "✗ DefenseClaw blocked " + hostPort(ev)
+	where, key := ev.Host, "block "+ev.Host
+	if ev.Category == string(egress.CategoryPortNotAllowed) {
+		where = hostPort(ev)
+		key = "block " + where
+	}
+	text := "✗ DefenseClaw blocked " + where
 	switch why := firstNonEmpty(ev.Category, ev.Reason); {
 	case ev.Category == sandboxapi.CategoryLargeUpload:
 		// The large-upload block (egress.block_large_uploads) cut an
 		// upload there (its event counts what went up), or refused a
 		// request after the cut, which its reason explains.
 		if ev.BytesUp > 0 {
-			text = "✗ DefenseClaw blocked a large upload to " + hostPort(ev)
+			text = "✗ DefenseClaw blocked a large upload to " + where
 		}
 		if clause := sandboxapi.LargeUploadReason(ev.Reason); clause != "" {
 			text += " (" + clause + ")"
@@ -469,18 +481,18 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	// Blocked again after an unblock: the command applies again.
 	delete(s.unblockedHosts, host)
 	s.noticeMu.Unlock()
-	s.noticeWith("block "+ev.Host, text, n)
+	s.noticeWith(key, text, n)
 }
 
 // largeUploadNotice announces a large upload only the report saw (the
 // large-upload block was off, or the destination is exempt from it), once
-// per host, as the feed words it: "⚠ large upload to files.example.net
-// (more than 25 MiB)".
+// per host, as the feed words it but for the port, which is the first
+// request's: "⚠ large upload to files.example.net (more than 25 MiB)".
 func (s *session) largeUploadNotice(ev sandboxapi.ActivityEvent) {
 	if ev.Host == "" {
 		return
 	}
-	text := "⚠ " + largeUploadText(ev)
+	text := "⚠ " + largeUploadText(ev.Host, ev)
 	s.notice("large upload "+strings.ToLower(ev.Host), text, text)
 }
 
