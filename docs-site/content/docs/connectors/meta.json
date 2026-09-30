@@ -2,20 +2,20 @@
   "title": "Connectors",
   "pages": [
     "index",
-    "compatibility",
-    "kiro",
     "claudecode",
     "codex",
-    "openclaw",
     "cursor",
-    "hermes",
-    "opencode",
-    "amp",
-    "omnigent",
     "copilot",
-    "openhands",
+    "opencode",
+    "kiro",
     "antigravity",
     "devin",
-    "zeptoclaw"
+    "amp",
+    "hermes",
+    "openhands",
+    "omnigent",
+    "openclaw",
+    "zeptoclaw",
+    "compatibility"
   ]
 }

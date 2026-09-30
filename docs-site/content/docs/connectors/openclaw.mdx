@@ -1,20 +1,21 @@
 ---
 title: OpenClaw
-description: The reference proxy connector. DefenseClaw ships a TypeScript plugin that wires OpenClaw's fetch interceptor and before_tool_call hook directly into the gateway.
+description: The reference proxy connector. A first-party plugin routes OpenClaw LLM traffic and before_tool_call events through the DefenseClaw gateway.
 keywords:
   - DefenseClaw OpenClaw connector
   - OpenClaw guardrail
   - OpenClaw plugin DefenseClaw
   - OpenClaw before_tool_call
+  - OpenClaw fetch interceptor
+  - OpenClaw HITL
 ---
 
-OpenClaw is the connector DefenseClaw was designed against. It ships a
-first-party TypeScript plugin (`extensions/defenseclaw/`) that routes
-recognized LLM provider requests and their responses through the guardrail
-proxy and sends OpenClaw's `before_tool_call` lifecycle events to the
-DefenseClaw gateway. Coverage depends on which Node transport emitted the
-request; unclassified traffic is not claimed as inspected or uniformly
-observable.
+OpenClaw is the connector DefenseClaw was designed against. DefenseClaw ships a
+first-party TypeScript plugin for it. The plugin routes recognized LLM provider
+requests and their responses through the guardrail proxy. It also sends
+OpenClaw's `before_tool_call` events to the DefenseClaw gateway. Coverage
+depends on which Node transport sent the request; see
+[Transport coverage](#transport-coverage).
 
 <Video
   src="openclaw-e2e"
@@ -53,117 +54,22 @@ VM, or mixed native/POSIX workaround; run the connector on macOS or Linux.
 
 </Tabs>
 
-`setup openclaw` is the dedicated OpenClaw alias. It delegates to the shared
-guardrail setup backend and exposes the proxy connector's common setup
-options; it is not a byte-for-byte copy of every `setup guardrail` flag. See
-the [quick-alias reference](/docs/setup/guardrail/aliases) for the alias and
-[full guardrail setup](/docs/setup/guardrail) for the complete wizard. The
-proxy is always in the data path: `--mode observe` records without policy
-blocking, while `--mode action` enforces.
+`setup openclaw` is the OpenClaw alias for the shared guardrail setup. The proxy
+is always in the data path: `--mode observe` records without blocking, and
+`--mode action` enforces.
 
-#### What this command sets vs. leaves at defaults
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
-The flags above explicitly set: connector, mode, optional HITL, and optional rule pack. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+OpenClaw-specific differences:
 
-| Knob | Value when omitted | Flag to override |
-| --- | --- | --- |
-| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
-| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
-| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
-| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
-| HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
-| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
-| Proxy port | `4000` | `--port <int>` |
-| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
+- Proxy aliases have no `--fail-mode` flag. Use `defenseclaw guardrail fail-mode <open|closed>`.
+- The proxy listens on port `4000` by default. Change it with `--port <int>`.
+- To add the LLM judge, pass `--detection-strategy regex_judge --judge-model <provider/model> --judge-api-key-env DEFENSECLAW_LLM_KEY`.
+- Redaction follows the v8 bucket and profile policy. Edit `observability.destinations[].routes[].selector.buckets`
+  and `observability.redaction_profiles`, then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
-See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
-
-#### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Pilot (observe)', 'Action + HITL', 'Action + judge', 'Strict / regulated']}>
-
-<Tab value="Pilot (observe)">
-
-```bash
-defenseclaw setup openclaw \
-  --mode observe \
-  --rule-pack permissive \
-  --restart
-```
-
-The proxy is in the data path but nothing blocks. Every collected prompt, response, and tool call lands in mandatory SQLite event history; optional v8 destinations receive their selected, redacted projections. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
-
-</Tab>
-
-<Tab value="Action + HITL">
-
-```bash
-defenseclaw setup openclaw \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --restart
-```
-
-HIGH findings can pause for operator approval; CRITICAL still blocks unconditionally. OpenClaw's bundled DefenseClaw plugin provides a native chat-origin approval surface, so approvals reach the agent UI directly. See the [HITL page](/docs/hitl) for the per-connector matrix.
-
-</Tab>
-
-<Tab value="Action + judge">
-
-```bash
-export DEFENSECLAW_LLM_KEY='replace-with-your-key'
-
-defenseclaw setup openclaw \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --restart
-```
-
-Adds the configured LLM judge as a second pass on regex-flagged prompts.
-Latency and provider cost depend on the selected judge model.
-
-</Tab>
-
-<Tab value="Strict / regulated">
-
-```bash
-defenseclaw policy activate strict
-defenseclaw setup openclaw \
-  --mode action \
-  --rule-pack strict \
-  --restart
-```
-
-Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with a reviewed
-first-party allow-list for additional containment.
-
-</Tab>
-
-</Tabs>
-
-#### Decision aids — should I turn this on?
-
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="When --human-approval is worth it. OpenClaw approvals reach chat-origin sessions via the bundled plugin, not just the TUI." />
-  <Card href="/docs/setup/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-## Files DefenseClaw will modify
+## Files DefenseClaw modifies
 
 <Files>
   <Folder name="~/.openclaw" defaultOpen>
@@ -185,9 +91,61 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   </Folder>
 </Files>
 
-A hash-checked backup of `openclaw.json` is stored before edits; teardown restores or surgically removes only DefenseClaw-owned entries.
+DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and
+its own allow and load entries in `openclaw.json`. It stores a hash-checked
+backup of `openclaw.json` before editing. Teardown restores the file, or
+removes only DefenseClaw entries when the file has changed since setup.
 
-## Transport coverage
+## Hook capabilities
+
+The proxy can block inspected fetch requests, fetch responses, and tool calls.
+The bundled plugin provides native approval for `before_tool_call`, including
+chat-origin sessions.
+
+<Sequence
+  caption="The plugin proxies LLM fetches through the guardrail and sends before_tool_call events to the gateway. Approval requests are returned to OpenClaw, which owns the operator decision."
+  participants={[
+    { id: 'u',  label: 'User / approver', kind: 'operator' },
+    { id: 'oc', label: 'OpenClaw',        kind: 'agent' },
+    { id: 'p',  label: 'Plugin',          kind: 'connector' },
+    { id: 'g',  label: 'Gateway',         kind: 'gateway' },
+    { id: 'm',  label: 'Model provider',  kind: 'agent' },
+  ]}
+>
+  <Message from="u"  to="oc" label="prompt" />
+  <Message from="oc" to="p"  label="LLM request" />
+  <Message from="p"  to="g"  label="via guardrail proxy" />
+  <Message from="g"  to="m"  label="allowed request" />
+  <Message from="m"  to="g"  kind="return" label="model response" />
+  <Message from="g"  to="p"  kind="return" label="scanned response" />
+  <Message from="p"  to="oc" kind="return" label="response or block" />
+  <Message from="oc" to="p"  label="before_tool_call" />
+  <Message from="p"  to="g"  label="inspect/tool" />
+  <Message from="g"  to="p"  kind="return" label="allow/block/confirm" />
+  <Message from="p"  to="oc" kind="return" label="requireApproval" />
+  <Message from="oc" to="u"  label="approval request" />
+  <Message from="u"  to="oc" kind="return" label="approve / deny" />
+  <Message from="oc" to="u"  label="response" />
+</Sequence>
+
+### HITL through the OpenClaw plugin
+
+OpenClaw has a native, plugin-mediated approval flow in its chat origin. The
+operator approves or denies without leaving OpenClaw.
+
+- For an action-mode `confirm` verdict, the plugin returns OpenClaw's
+  `requireApproval` object with a deny-on-timeout policy.
+- OpenClaw applies the decision.
+- The plugin's `onResolution` callback logs the result. It does not send a
+  separate resolve request to the gateway.
+
+Other native-ask connectors, such as Amp and Claude Code, use their own host
+approval UI instead of a plugin. Connectors and hook events without native ask
+apply their documented fallback. Their events stay visible in audit and
+`defenseclaw tui`, but the TUI cannot resume the original call. See
+[HITL](/docs/hitl) for the per-connector matrix.
+
+### Transport coverage
 
 The plugin patches `globalThis.fetch`, Node `https.request`, `http.request` and
 `http.get`, and the global Undici dispatcher. A matching request is redirected
@@ -206,41 +164,42 @@ points are outside this inspection boundary. An egress event proves that the
 plugin observed a transport branch; it does not mean the request or response
 was proxied and inspected.
 
-OpenClaw ≥2026.6.8 is the release range that first required the undici
-dispatcher layer. `defenseclaw doctor` now fails the **OpenClaw
-interception** row when the plugin self-test cannot prove a rewrite onto
-`:4000`, even if `/health/liveliness` returns 200.
+### Check interception
 
-## What the plugin does
+OpenClaw 2026.6.8 and later can send provider traffic through undici or
+embedded runtimes that skip a fetch-only patch. The plugin runs a sentinel
+self-test that never leaves the host, and `defenseclaw doctor` reports the
+result as **OpenClaw interception**.
 
-<Sequence
-  caption="The bundled plugin redirects recognized LLM traffic through the guardrail proxy and calls the inspect API before tool execution. Gateway is defenseclaw-gateway."
-  participants={[
-    { id: 'u',  label: 'User',                kind: 'operator' },
-    { id: 'oc', label: 'OpenClaw', kind: 'agent' },
-    { id: 'p',  label: 'Plugin',   kind: 'connector' },
-    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
-  ]}
->
-  <Message from="u"  to="oc" label="prompt" />
-  <Message from="oc" to="p"  label="recognized LLM request" />
-  <Message from="p"  to="g"  label="proxy request + X-DC-Target-URL" />
-  <Message from="g"  to="p"  kind="return" label="inspected upstream response" />
-  <Message from="p"  to="oc" kind="return" label="response (or policy block)" />
-  <Message from="oc" to="p"  label="before_tool_call(name, args)" />
-  <Message from="p"  to="g"  label="POST /api/v1/inspect/tool" />
-  <Message from="g"  to="p"  kind="return" label="verdict" />
-  <Message from="p"  to="oc" kind="return" label="allow / block / pause" />
-  <Message from="oc" to="u"  label="response" />
-</Sequence>
+- Doctor fails that row when the self-test cannot prove a rewrite onto
+  `:4000`, even if `/health/liveliness` returns 200.
+- If agent turns succeed while doctor says traffic is not intercepted, restart
+  OpenClaw so the plugin reloads, then rerun doctor.
 
-## Hook capabilities
+### Correlation headers
 
-The proxy can block inspected fetch requests, fetch responses, and tool calls.
-The bundled plugin provides native approval for `before_tool_call`, including
-chat-origin sessions.
+Plugin requests use the shared DefenseClaw header vocabulary, as context
+allows: `X-DefenseClaw-Run-Id`, `X-DefenseClaw-Session-Id`,
+`X-DefenseClaw-Trace-Id`, `X-DefenseClaw-Agent-Id`,
+`X-DefenseClaw-Agent-Name`, `X-DefenseClaw-Policy-Id`,
+`X-DefenseClaw-Agent-Instance-Id` and `X-DefenseClaw-Sidecar-Instance-Id`. The
+HTTP client also sends `X-DefenseClaw-Client`. There is no
+`X-DefenseClaw-Correlation-Id` header.
 
-## Subprocess policy
+- Optional fields are omitted when OpenClaw has not supplied their context.
+- The fetch interceptor mints a fresh trace ID for each LLM call and reuses the
+  latest tool context for run and session attribution.
+- The gateway can echo sticky agent and sidecar instance IDs, so later requests
+  share the same runtime identities.
+
+### Protocol compatibility
+
+The gateway client speaks the OpenClaw WebSocket handshake for protocols v3 and
+v4. It sends `minProtocol: 3` and `maxProtocol: 4`, and OpenClaw returns the
+negotiated protocol in `hello-ok`. Protocol v4 installs work, and v3 endpoints
+keep the challenge-response device flow.
+
+### Subprocess policy
 
 The policy is `shims` on every platform. Connector setup installs PATH shims
 for `curl`, `wget`, `ssh`, `nc`, `pip`, and `npm` that send each invocation to
@@ -248,16 +207,29 @@ the gateway's tool-inspection endpoint before running the real binary. Shims
 inspect those command paths only; they do not provide syscall, filesystem, or
 network isolation.
 
-OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox
-that used to run it as a separate Linux user was removed; a host that still
-carries it should run the [legacy cleanup](/docs/setup/sandbox). OpenShell 0.1
-support for OpenClaw is pending in the
-[capability matrix](/docs/capability-matrix).
+## Sandbox
+
+OpenClaw does not run in an OpenShell sandbox. See the
+[capability matrix](/docs/capability-matrix) for sandbox support by connector.
+A host that still carries the removed standalone OpenClaw sandbox should run the
+[legacy cleanup](/docs/setup/sandbox) first.
 
 ## Disable
 
 ```bash
-defenseclaw guardrail disable --yes
+defenseclaw guardrail disable --connector openclaw --yes
 ```
 
-Restores `~/.openclaw/openclaw.json` from the backup, removes the plugin entries, and stops the proxy.
+`--connector` turns off only OpenClaw on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. Teardown
+restores `~/.openclaw/openclaw.json` from the backup, removes the plugin
+entries, and stops the proxy. To remove the connector from the config, use
+`defenseclaw setup remove openclaw`; see [Quick aliases](/docs/setup/guardrail/aliases).
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/hitl" title="Human-in-the-loop" description="How approvals work across connectors." />
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/connectors/zeptoclaw" title="ZeptoClaw" description="The other proxy connector." />
+</Cards>
