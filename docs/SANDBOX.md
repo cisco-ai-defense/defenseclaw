@@ -1431,7 +1431,11 @@ Nothing is applied without a review: a session without a terminal, or with
    a branch for a plain folder (`ErrNotGitProject`), the branch name, a
    branch that exists and does not hold the last pull's tree, and a patch
    file that exists or whose folder does not. `sandbox pull` runs it before
-   it starts a stopped sandbox.
+   it starts a stopped sandbox, and says so (`ApplyOptions.Starts`, with
+   `Reuse` naming the pull it would be made from): a branch that holds only
+   the last pull's tree is then refused too (`*EarlierPullError`, unless
+   `Force`) when that pull cannot be reused, since the sandbox has run since
+   and only the boot would tell whether its work changed.
 
    A 3-way apply that lands (or finds the folder already has the result)
    sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
