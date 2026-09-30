@@ -264,17 +264,8 @@ pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
 ```
 
 `status` reports the state. `verify` also checks every file, permission,
-service and readiness check, and exits `1` when anything fails. Look for:
-
-| Field | Healthy value |
-| --- | --- |
-| `ok` | `true` |
-| `installed`, `installed_version` | `true` and the version you deployed |
-| `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
-| `coverage_complete` | `true`: the gateway, guardian and enumerator are ready |
-| `security_complete` | `true`: coverage is complete, the sensor helper is ready, and there are no errors |
-| `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
-| `errors` | Empty |
+service and readiness check, and exits `1` when anything fails. The fields to
+check are on [Health fields](/docs/enterprise/operations#health-fields).
 
 When the config enables no agent under `guardrail.connectors` while there
 are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
@@ -300,10 +291,8 @@ per-user product refuses to run:
 | `defenseclaw upgrade` | Refuses |
 | Per-user gateway | Refuses to start |
 
-Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
-Add `--all` to also delete `~/.defenseclaw`. See
-[Uninstall](/docs/get-started/install#uninstall).
+Remove per-user installs before you deploy; see
+[Handle existing per-user installs](/docs/enterprise/rollout#step-4-handle-existing-per-user-installs).
 
 ## Remove
 

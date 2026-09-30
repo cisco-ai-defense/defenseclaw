@@ -177,7 +177,7 @@ or `enterprise windows status`, with `--json`) has an
 | `unknown` | The gateway did not report its inspection state |
 
 On Windows, `ok` reflects the config and gateway readiness; it does not
-prove the key was accepted. On Linux and macOS this release reports
+prove the key was accepted. On Linux and macOS the field reports
 `unknown`. To confirm that the gateway loaded the key, check the gateway
 log for an error from the `cisco-inspect` subsystem after the restart: a
 missing or untrusted key is logged there. See

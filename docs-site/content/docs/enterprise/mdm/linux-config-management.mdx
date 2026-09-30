@@ -75,19 +75,10 @@ writes the file only when it is missing, before the first install.
 
 ## Get and verify the release
 
-On an administrator workstation, download the signed checksum list, check
-its signature, and read the SHA-256 of each package you deploy. Those values
+On an administrator workstation, verify the signed checksum list and read
+the SHA-256 of each package you deploy, as in
+[Install with any MDM](/docs/enterprise/mdm#what-you-deliver). Those values
 are the pins in the recipes.
-
-```bash
-VERSION="<version>"   # set this to the release you deploy
-BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
-curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle"
-cosign verify-blob --bundle checksums.txt.bundle \
-  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
-grep "defenseclaw-enterprise-$VERSION-linux-" checksums.txt
-```
 
 | Artifact | Name |
 | --- | --- |
@@ -126,7 +117,12 @@ guardrail:
     codex: {}
 ```
 
-## Ansible
+## Recipes
+
+Pick your tool. Each recipe follows the procedure above.
+
+<Tabs items={['Ansible', 'Puppet', 'Chef', 'Salt']}>
+  <Tab value="Ansible">
 
 This play uses `ansible.builtin` modules only
 ([copy](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/copy_module.html),
@@ -263,7 +259,8 @@ Notes:
 - `enterprise secret set` writes the key and runs `ensure`. Storing the same
   key again changes nothing, so the task reports no change.
 
-## Puppet
+  </Tab>
+  <Tab value="Puppet">
 
 This class uses the core `file`, `package` and `exec` types
 ([file](https://github.com/puppetlabs/puppet/blob/main/references/types/file.md),
@@ -383,7 +380,8 @@ Notes:
   If you do not want that copy, run `enterprise secret set` from standard
   input in a one-off task instead.
 
-## Chef
+  </Tab>
+  <Tab value="Chef">
 
 This recipe uses the `directory`, `file`, `cookbook_file`, `remote_file`,
 `dpkg_package` or `rpm_package`, and `execute` resources
@@ -488,7 +486,8 @@ Notes:
   retried. `sensitive true` keeps the key out of Chef's logs and reports.
 - `remote_file` checks the download against `checksum`, the SHA-256 pin.
 
-## Salt
+  </Tab>
+  <Tab value="Salt">
 
 This state uses `file.directory`, `file.managed`, `pkg.installed` and
 `cmd.run`
@@ -609,6 +608,9 @@ Notes:
 - `file.managed` checks the download against `source_hash`, and
   `show_changes: False` keeps the key out of the state output.
 - `retry` runs a failed state again, so a busy lock (`75`) is retried.
+
+  </Tab>
+</Tabs>
 
 ## Plain apt and dnf
 

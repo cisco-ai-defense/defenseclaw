@@ -22,6 +22,18 @@ agent that user runs, can no longer turn the protection off.
 In the config this is `deployment_mode: managed_enterprise`
 ([managed_enterprise](/docs/enterprise/concepts#managed_enterprise)).
 
+<Callout title="Choose your path">
+
+- **Evaluate:** read this page, then the [threat model](/docs/enterprise/threat-model).
+- **Pilot:** [plan a rollout](/docs/enterprise/rollout) in observe mode on a few computers.
+- **Deploy:** [install with an MDM](/docs/enterprise/mdm), or on
+  [Windows](/docs/enterprise/windows), [Linux](/docs/enterprise/linux) or
+  [macOS](/docs/enterprise/macos) by hand.
+- **Operate:** [verify and monitor](/docs/enterprise/operations), then
+  [upgrade, repair and remove](/docs/enterprise/lifecycle).
+
+</Callout>
+
 ## Two profiles
 
 A managed deployment runs in one of two
@@ -202,16 +214,8 @@ are on each [connector page](/docs/connectors#platform-support).
 
 ## A minimal config
 
-The administrator config is one YAML file. The example below protects Codex
-and Claude Code in observe mode, so policy verdicts do not block yet. The
-Linux and macOS tabs install as written with `ensure --config`. They leave
-`guardrail.rule_pack_dir` out, so the gateway uses a rule pack you put in
-`<policy_dir>/guardrail/default`, and otherwise the default pack that ships
-with DefenseClaw. If you create that folder after installing, run `ensure`:
-it notices the new pack and restarts the gateway with it.
-
-<Tabs items={['Linux', 'macOS', 'Windows']}>
-  <Tab value="Linux">
+The administrator config is one YAML file. This Linux example protects Codex
+and Claude Code in observe mode, so policy verdicts do not block yet:
 
 ```yaml title="/etc/defenseclaw/config.yaml"
 config_version: 8
@@ -231,84 +235,16 @@ guardrail:
     claudecode: {}
 ```
 
-  </Tab>
-  <Tab value="macOS">
+The macOS and Windows versions are in
+[Sample configs](/docs/enterprise/configuration#sample-configs). Four things
+to know before you deploy it:
 
-```yaml title="/opt/cisco/defenseclaw/etc/config.yaml"
-config_version: 8
-deployment_mode: managed_enterprise
-data_dir: /opt/cisco/defenseclaw/runtime   # must be exactly this path
-policy_dir: /opt/cisco/defenseclaw/etc/policies
-enterprise:
-  profile: standalone
-gateway:
-  api_bind: 127.0.0.1
-  api_port: 18970
-guardrail:
-  enabled: true
-  mode: observe                            # observe | action
-  connectors:
-    codex: {}
-    claudecode: {}
-```
-
-  </Tab>
-  <Tab value="Windows">
-
-```yaml title="config.yaml (Windows)"
-config_version: 8
-deployment_mode: managed_enterprise
-# Leave data_dir unset: the services use C:\ProgramData\Cisco\DefenseClaw\runtime.
-enterprise:
-  profile: standalone
-gateway:
-  api_bind: 127.0.0.1
-  api_port: 18970
-guardrail:
-  enabled: true
-  rule_pack_dir: ""                        # use the built-in rule packs
-  mode: observe                            # observe | action
-  connectors:
-    codex: {}
-    claudecode: {}
-```
-
-  </Tab>
-</Tabs>
-
-Four things to know before you deploy it:
-
-- **Nothing is protected until you list agents.** Each key under
-  `guardrail.connectors` turns on one agent. On Linux and macOS, the config the
-  lifecycle writes when you supply none lists no agents, so it protects
-  nothing. On Windows, install and `ensure` require a config. On Linux and
-  macOS, naming Codex, Claude Code, Cursor, GitHub Copilot or OpenCode anywhere
-  under `guardrail.connectors` (even with `enabled: false`) or under
-  `enterprise.machine_policy.connectors` makes the lifecycle publish
-  DefenseClaw's hook in that agent's machine policy; on Windows that rule
-  applies to Copilot and OpenCode. To leave an agent unprotected, leave it out
-  of both maps or set its `ownership: "off"`. See
+- **Nothing is protected until you list agents.** See
   [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
-- **Observe mode does not block on policy verdicts.** In `observe` mode
-  DefenseClaw records each decision, including what it would have blocked.
-  Switch `guardrail.mode` to `action` to enforce. The deployment's own checks
-  apply in both modes: a tool call is still refused while an unapproved foreign
-  hook is present (with `foreign_hooks: remove`), or when the user is not
-  enrolled where enrollment is enforced.
-- **The data directory is fixed.** On Linux and macOS the lifecycle rejects
-  any other `data_dir`. On Windows, a `data_dir` other than the runtime
-  directory is rejected too.
-- **Tell enrollment about unusual layouts (Linux and macOS).** Users are
-  enrolled from homes under `/home` and `/var/home` (Linux) or `/Users`
-  (macOS), and agent CLIs are found in the usual install locations. If
-  homes live elsewhere, such as `/srv/home`, list the parent folders under
-  `enterprise.enrollment.home_roots`; if agents are installed under an
-  administrator prefix, such as an npm `--prefix` of `/opt/tools`, list it
-  under `enterprise.enrollment.agent_prefixes`. See
+- **Observe mode does not block on policy verdicts.** Set `guardrail.mode: action` to enforce.
+- **The data directory is fixed.** The lifecycle rejects any other `data_dir`.
+- **Tell enrollment about unusual home or install paths.** See
   [Enrollment](/docs/enterprise/enrollment#home-roots-and-install-prefixes).
-
-Where the file goes on each OS, every `enterprise.*` setting, and the proxy
-settings are on [Configuration](/docs/enterprise/configuration).
 
 The optional Cisco AI Defense key never goes in the config: store it after the
 install, as [Cisco AI Defense key](/docs/enterprise/ai-defense-key) shows.
@@ -317,11 +253,12 @@ install, as [Cisco AI Defense key](/docs/enterprise/ai-defense-key) shows.
 
 <Cards>
   <Card title="Plan a rollout" href="/docs/enterprise/rollout" description="Choose agents and users, pilot in observe mode, handle existing per-user installs, and expand in rings." />
-  <Card title="Threat model" href="/docs/enterprise/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
-  <Card title="Windows" href="/docs/enterprise/windows" description="Install the four standalone services with the Setup program or PowerShell 7." />
-  <Card title="Linux" href="/docs/enterprise/linux" description="Install the systemd units with the deb or rpm package, or from a payload directory." />
-  <Card title="macOS" href="/docs/enterprise/macos" description="Install the LaunchDaemons and the hidden service user from the pkg." />
-  <Card title="Install with an MDM" href="/docs/enterprise/mdm" description="The MDM contract and recipes for Intune, Jamf, Kandji, Workspace ONE, Configuration Manager, and Linux configuration management." />
-  <Card title="Configure" href="/docs/enterprise/configuration" description="Where the config lives, how to choose agents, and every enterprise setting." />
-  <Card title="Operate" href="/docs/enterprise/operations" description="Check status and health, read logs and events, and verify machine policy." />
+  <Card title="Enterprise threat model" href="/docs/enterprise/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
+  <Card title="Windows standalone deployment" href="/docs/enterprise/windows" description="Install the four standalone services with the Setup program or PowerShell 7." />
+  <Card title="Linux standalone deployment" href="/docs/enterprise/linux" description="Install the systemd units with the deb or rpm package, or from a payload directory." />
+  <Card title="macOS standalone deployment" href="/docs/enterprise/macos" description="Install the LaunchDaemons and the hidden service user from the pkg." />
+  <Card title="Install with any MDM" href="/docs/enterprise/mdm" description="The MDM contract and recipes for Intune, Jamf, Kandji, Workspace ONE, Configuration Manager, and Linux configuration management." />
+  <Card title="Configure a standalone deployment" href="/docs/enterprise/configuration" description="Where the config lives, how to choose agents, and every enterprise setting." />
+  <Card title="Verify and monitor" href="/docs/enterprise/operations" description="Check status and health, read logs and events, and verify machine policy." />
+  <Card title="Upgrade, repair and remove" href="/docs/enterprise/lifecycle" description="Change the config, upgrade, roll back, and uninstall." />
 </Cards>

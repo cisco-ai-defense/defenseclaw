@@ -28,21 +28,11 @@ captured output in `last-activation-failure.log` in the lifecycle directory
 `/opt/cisco/defenseclaw/lifecycle` on macOS). Only root can read it, and the
 rollback does not remove it, even after a first install.
 
-Only one lifecycle run works at a time. On Linux and macOS a run that finds
-another one in progress waits 5 seconds and exits `75` (busy); pass
-`--lock-wait <duration>` (at most `15m`) to wait longer. The apply trigger
-and the deb, rpm and pkg install scripts wait up to 10 minutes, so a change
-made during another run is applied after it. The deb and rpm removal
-scripts wait the same, and a removal that still finds the lock busy fails
-without deleting anything (the macOS pkg has no removal script). On
-Windows a busy run exits `1618`. MDM agents retry both.
-
-A `config.yaml` or credential written while a run holds the lock is
-applied by a follow-up transaction of that run (warning `input_changed`).
-When the run fails instead, the apply trigger runs `ensure` again once it
-ends; a newer `config.yaml` written during a failed in-place apply is put
-back and applied then, and only the edit the failed run checked is kept as
-rejected.
+Only one lifecycle run works at a time. A run that finds another one in
+progress exits `75` on Linux and macOS, or `1618` on Windows. Retry on exit
+`75` or `1618`; MDM agents retry both. On Linux and macOS, `--lock-wait
+<duration>` (at most `15m`) waits longer before giving up. A config or
+credential you write during a run is applied after it.
 
 The examples use these paths:
 

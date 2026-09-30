@@ -34,30 +34,20 @@ It offers two routes:
 - DefenseClaw ships no privacy (PPPC) profile. See
   [macOS requirements](/docs/enterprise/macos#requirements) for when you need one.
 - For the script-only route, an HTTPS server of your own that serves the
-  package file directly. The wrapper does not follow HTTP redirects, and
-  GitHub release download links redirect, so a GitHub release URL does not
-  work as the source.
+  package file directly. The wrapper downloads with curl, which does not
+  follow redirects. GitHub release links redirect, so host the file at a
+  direct URL.
 - Your administrator config. See [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
   and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
   The default config protects no agent.
 
 ## Get and verify the release
 
-On an administrator workstation, download the package and the signed
-checksum list, then check the signature and the package's SHA-256. For the
-script-only route, that SHA-256 is the pin you paste into the script.
-
-```bash
-VERSION="<version>"   # set this to the release you deploy
-BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
-PKG=defenseclaw-enterprise-$VERSION-darwin-arm64.pkg
-curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle" -O "$BASE/$PKG"
-cosign verify-blob --bundle checksums.txt.bundle \
-  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
-grep "  $PKG\$" checksums.txt | shasum -a 256 -c -
-grep "  $PKG\$" checksums.txt   # the first field is the pin
-```
+On an administrator workstation, verify the signed checksum list and read
+the package's SHA-256 as in
+[Install with any MDM](/docs/enterprise/mdm#what-you-deliver), with
+`FILE=defenseclaw-enterprise-<version>-darwin-arm64.pkg`. For the script-only
+route, that SHA-256 is the pin you paste into the script.
 
 The MDM kit scripts are in `packaging/mdm/macos` in the source tree and in
 the `defenseclaw-enterprise-<version>-darwin-arm64.tar.gz` release archive.
@@ -221,8 +211,8 @@ Each run, the wrapper:
 3. runs `enterprise macos ensure` with your config;
 4. prints one lifecycle result document and exits with the lifecycle's code.
 
-The download happens on every run. The URL must serve the file directly: the
-wrapper does not follow redirects.
+The download happens on every run. curl does not follow redirects, so
+host the file at a direct URL.
 
 ## Optional health report
 

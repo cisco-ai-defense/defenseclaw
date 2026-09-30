@@ -167,7 +167,13 @@ put it in the ZIP, in `config.yaml` or in the script body.
 
 Add a second Windows script, **System** context, with the key as a variable
 named `AIDEFENSE_KEY` on its **Variables** tab. The script sends the value on
-standard input, never on a command line:
+standard input, never on a command line.
+
+<Callout type="warn" title="The key is stored in Workspace ONE">
+A script variable keeps the key simple to deliver, but Workspace ONE then
+stores the value. Limit who can edit the script.
+</Callout>
+
 
 ```powershell
 # Stores the Cisco AI Defense key from the Workspace ONE script variable
@@ -184,7 +190,7 @@ exit $LASTEXITCODE
 `enterprise secret set` needs an installed standalone deployment and an
 elevated context, which **System** provides. Each run stores the key and
 restarts the gateway, so run the script once, and again only when you rotate
-the key. Workspace ONE stores the value, so limit who can edit the script.
+the key.
 Then set `enterprise.inspection.ai_defense.enabled: true` and
 `credential: ai-defense-api-key` in `config.yaml`. See
 [AI Defense key](/docs/enterprise/ai-defense-key).
@@ -364,7 +370,13 @@ The sensor always exits `0` and reports the installed version,
 
 Add a second macOS script, **System** context, with the key as a variable named
 `AIDEFENSE_KEY`. `printf` is a shell built-in, so the value never appears on a
-command line:
+command line.
+
+<Callout type="warn" title="The key is stored in Workspace ONE">
+A script variable keeps the key simple to deliver, but Workspace ONE then
+stores the value. Limit who can edit the script.
+</Callout>
+
 
 ```bash
 #!/bin/bash
@@ -375,8 +387,7 @@ printf '%s' "$AIDEFENSE_KEY" | /opt/cisco/defenseclaw/bin/defenseclaw-gateway en
 
 `enterprise secret set` stores the key and runs `ensure`. Storing the same key
 again changes nothing, so a periodic trigger is safe. It fails until the
-package is installed. Workspace ONE stores the value, so limit who can edit
-the script. Then set `enterprise.inspection.ai_defense.enabled:
+package is installed. Then set `enterprise.inspection.ai_defense.enabled:
 true` and `credential: ai-defense-api-key` in the config.
 
 ### Upgrade, roll back and change the config on macOS

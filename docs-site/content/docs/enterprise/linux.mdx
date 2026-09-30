@@ -276,24 +276,11 @@ removal.
 
 ### Users who are enrolled
 
-The enumerator finds accounts through NSS, so directory users (LDAP, SSSD,
-Active Directory) count as well as local ones. It skips:
-
-- accounts below `UID_MIN` from `/etc/login.defs` (1000 when the file does
-  not set it), and local accounts above `UID_MAX` (60000 when unset).
-  `enterprise.enrollment.uid_min` changes the minimum, and
-  `enterprise.enrollment.uid_max` sets a maximum for local and directory
-  accounts alike. Without `uid_max`, directory users with id-mapped uids
-  above `UID_MAX`, common with SSSD and Active Directory, are enrolled;
-- accounts with a nologin shell, unless listed in `include_users`;
-- accounts whose home is outside `/home` and `/var/home`. Add roots with
-  `enterprise.enrollment.home_roots`; `include_users` does not override this;
-- accounts in `exclude_users` or `exempt_users`, and accounts that the
-  `include_groups` and `exclude_groups` filters leave out;
-- `root`, uid 65534 and `nobody`, always.
-
-See [Enrollment](/docs/enterprise/enrollment) for the filters and for how
-removed users are handled.
+The enumerator finds local and directory accounts (LDAP, SSSD, Active
+Directory) through NSS. It skips system accounts, nologin shells, homes
+outside `/home` and `/var/home`, and the users your filters leave out. See
+[Enrollment](/docs/enterprise/enrollment) for the filters and for how removed
+users are handled.
 
 ## Verify the install
 
@@ -304,17 +291,8 @@ systemctl list-timers defenseclaw-enterprise-verify.timer
 ```
 
 `status` reports the state. `verify` also checks every file, permission,
-service and readiness check, and exits `1` when anything fails. Look for:
-
-| Field | Healthy value |
-| --- | --- |
-| `ok` | `true` |
-| `installed`, `installed_version` | `true` and the version you deployed |
-| `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
-| `coverage_complete` | `true`: the gateway, guardian and enumerator are ready |
-| `security_complete` | `true`: coverage is complete, the sensor helper is ready, and there are no errors |
-| `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
-| `errors` | Empty |
+service and readiness check, and exits `1` when anything fails. The fields to
+check are on [Health fields](/docs/enterprise/operations#health-fields).
 
 When the config enables no agent under `guardrail.connectors` while there
 are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
@@ -387,10 +365,8 @@ product refuses to run:
 | `defenseclaw upgrade` | Refuses |
 | Per-user gateway | Refuses to start |
 
-Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
-Add `--all` to also delete `~/.defenseclaw`. See
-[Uninstall](/docs/get-started/install#uninstall).
+Remove per-user installs before you deploy; see
+[Handle existing per-user installs](/docs/enterprise/rollout#step-4-handle-existing-per-user-installs).
 
 ## Remove
 

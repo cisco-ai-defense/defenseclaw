@@ -17,23 +17,10 @@ document, run `verify` (see [Status and verify](/docs/enterprise/operations#stat
 
 ## Exit codes
 
-| Meaning | Linux and macOS | Windows standalone | What to do |
-| --- | --- | --- | --- |
-| Success, or nothing to change | `0` | `0` | Nothing |
-| The action failed. A mutating action has already rolled back | `1` | `1603` | Read `errors[].code` |
-| Invalid arguments | `2` | `1639` | Fix the command line or MDM settings. Retrying does not help |
-| Another lifecycle run holds the lock | `75` | `1618` | Retry later |
-| Reserved: success, reboot required | — | `3010` | Not used today |
-
-The Secure Client profile on Windows returns only `0` and `1603`.
-
-On Windows, the standalone Setup can also refuse before the lifecycle
-starts. A malformed command line exits `1639`: a relative or
-environment-expanded `CONFIG=` or `MANIFEST=` path, an unknown property,
-`/install` without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of
-range. Other refusals before the lifecycle starts, such as a token that is
-not elevated, exit `1603`. With `JSON=1` Setup then prints a short document
-with an `error` string and no `errors[].code`.
+Linux and macOS exit `0`, `1` (failed and rolled back), `2` (invalid
+arguments) or `75` (busy, retry). The Windows standalone Setup exits `0`,
+`1603`, `1639` or `1618`. The full table, and how an MDM should treat each
+code, is on [Install with any MDM: Exit codes](/docs/enterprise/mdm#exit-codes).
 
 ## Lifecycle error codes
 
@@ -121,36 +108,12 @@ Warnings do not fail an action. They appear in `warnings[]`.
 
 ## MDM wrapper error codes
 
-The wrapper scripts in `packaging/mdm` check their inputs before they start
-the lifecycle. Most codes that start with `mdm_` mean the wrapper stopped
-before the lifecycle ran. `mdm_secret_failed`, and `mdm_not_installed` after
-an apply, are reported after the lifecycle succeeded. In every `mdm_`
-document, `installed: false` means "not checked". They use the exit
-codes above. For the full contract, see [Exit codes](/docs/enterprise/mdm#exit-codes).
-
-| Code | Meaning |
-| --- | --- |
-| `mdm_invalid_arguments` | A flag or setting is missing, malformed, or conflicts with another. On Linux and macOS, any unknown or positional argument also exits `2` with this code |
-| `mdm_not_root`, `mdm_not_elevated` | Not running as root, SYSTEM, or an elevated administrator |
-| `mdm_wrong_platform` | The Linux copy ran on macOS, or the reverse |
-| `mdm_hash_mismatch` | The staged source does not match the pinned SHA-256 |
-| `mdm_signature_invalid`, `mdm_signer_not_allowed`, `mdm_signature_unsupported` | Signature trust failed, the signer is not allowed, or this source type cannot be checked by signature |
-| `mdm_version_mismatch` | Linux and macOS: the source is not the `--product-version` you set |
-| `mdm_untrusted_input` | A config, credential, or keyring file can be changed by a non-administrator, or (`uninstall.sh`) the installed gateway is not root-owned |
-| `mdm_untrusted_install` | Windows, `uninstall.ps1`: the installed CLI or its folders are not administrator-only |
-| `mdm_input_too_large` | The config is over 1 MiB or the credential is over 16 KiB |
-| `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture` | Linux and macOS: the archive or package is not a DefenseClaw enterprise artifact for this host |
-| `mdm_package_manager_busy` | Linux and macOS: dpkg, rpm, or the installer held its lock. Exit `75`; retry |
-| `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | Linux and macOS: the package manager failed or is missing |
-| `mdm_download_failed`, `mdm_download_unavailable` | Linux and macOS: the HTTPS download failed, or there is no curl or wget |
-| `mdm_not_installed` | A read-only action, or an `ensure` without a source, found no deployment |
-| `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | The lifecycle did not start or printed no result |
-| `mdm_secret_failed` | The deployment was applied, but storing the credential failed |
-| `mdm_staging_untrusted`, `mdm_package_incomplete` | The private staging folder or the Intune content is not as expected |
-
-Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,
-`/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` on macOS, and
-`%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` on Windows.
+Codes that start with `mdm_` come from the wrapper scripts in the MDM kit.
+Most mean the wrapper stopped before the lifecycle ran. Each code, its exit
+code and its meaning are in the table on
+[Install with any MDM: Exit codes](/docs/enterprise/mdm#exit-codes). The
+wrapper log paths are on
+[Logs and events](/docs/enterprise/operations#logs-and-events).
 
 ## Hook refusal codes
 
@@ -174,7 +137,107 @@ hook call.
 | `enterprise_foreign_hook_blocked` | all | A user or repository config adds a hook or plugin that your policy has not approved | Remove it, or add its digest to `enterprise.machine_policy.connectors.<name>.allowed_hooks`. See [Foreign-hook guard](/docs/enterprise/foreign-hook-guard) |
 | `enterprise_foreign_hook_check_failed` | Linux, macOS | Hermes only: DefenseClaw's Hermes hook got no usable answer from the foreign-hook check it runs through `defenseclaw-hook`, so it blocked the tool call | Check that `defenseclaw-hook` is installed and runs for the user; read `~/.defenseclaw/logs/hook-failures.jsonl`; run `repair` |
 | `enterprise_machine_policy_summary_untrusted` | all | The machine policy summary the hook reads is not administrator-owned | Run `repair` |
-| `enterprise_managed_rate_limited` | all | HTTP 429: this account sent more hook requests than its budget allows (60 a second, a burst of 120, 32 at a time; OTLP export has its own budget). Of the 32, an account runs at most half as many at once as the gateway has processors (at least one); the rest wait their turn (a request waiting on Cisco AI Defense or the LLM judge gives its turn up meanwhile), so the other accounts keep the other half. Other accounts are not refused. The hook treats it as a gateway failure, so with `hook_fail_mode: open` the call is allowed | Find what floods the gateway from that account (a loop, many parallel agents). The budget refills within a second |
+| `enterprise_managed_rate_limited` | all | HTTP 429: this account sent more hook requests than its budget (60 a second, a burst of 120). Other accounts are not refused. With `hook_fail_mode: open` the call is allowed | Find what floods the gateway from that account, such as a loop or many parallel agents |
+
+## Recover a pending Windows transaction
+
+A failed Windows run normally rolls back and exits `1603`. If the rollback
+itself cannot finish, the transaction stays pending:
+
+- the result reports `transaction_pending: true`;
+- the DefenseClaw services stay stopped;
+- vendor machine policy can still point at the stopped gateway;
+- `verify` refuses until you recover.
+
+To recover:
+
+<Steps>
+<Step>
+
+Run DefenseClaw Setup as LocalSystem: Intune install behavior **System**,
+another MDM's system context, or a one-time scheduled task that runs as SYSTEM.
+
+</Step>
+<Step>
+
+Run `/ensure` to recover and then install or upgrade, or `/uninstall` to
+recover and remove the deployment:
+
+```powershell title="As LocalSystem"
+DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
+DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
+```
+
+</Step>
+<Step>
+
+If Setup exits `1618`, another lifecycle run holds the lock. Wait and run it
+again.
+
+</Step>
+</Steps>
+
+`/repair` also recovers, but after a failed first install it stops with "run
+Install", so prefer `/ensure`. From a payload folder, run
+`"$Payload\defenseclaw.exe" enterprise windows ensure` as LocalSystem with the
+same `--profile`, trust and `--config` options. Do not edit DefenseClaw files
+or permissions by hand to recover.
+
+<Accordions>
+<Accordion title="How recovery picks a gateway">
+
+Recovery first uses the gateway the pending transaction staged. When that
+gateway cannot restore or retire the transaction's managed-hook state, or
+cannot remove the per-user runtime roots the transaction created (the
+target-runtime rollback cleanup), for example a release whose defect caused
+the failure, the standalone lifecycle
+retries that step once with the `defenseclaw-gateway.exe` that ships in the
+running Setup's payload (or beside the staged `defenseclaw.exe`), and only
+when all of these hold:
+
+- the lifecycle runs as LocalSystem;
+- that gateway passes the same checks an install applies to its payload: an
+  administrator-owned source on a local NTFS volume and the deployment's
+  trust mode (a valid Authenticode signature, limited to the allowed signers
+  when any are set, or the SHA-256 the payload manifest pins);
+- it is not the gateway that already failed, and it is not inside the
+  install root;
+- it is the same release as the gateway that failed or a newer one, read
+  from each gateway's version resource (an older Setup never recovers a
+  newer release's transaction);
+- the run is not an `--allow-unsigned` run. That flag is for testing only; never use it in production.
+
+The verified gateway is copied to `C:\Program Files\Cisco\DefenseClaw\bin`,
+where the hidden command must run, and the step runs again; the rollback
+then restores that file to its state before the transaction. The result and
+`enterprise-lifecycle.log` record a `recovery_gateway_fallback` warning with
+the binary, where it was copied from, its SHA-256, the trust basis, its
+release and the staged gateway's release, the account, and the staged
+gateway's failure. When recovery declines the
+fallback, a `recovery_gateway_not_used` warning gives the reason
+(`not_local_system`, `untrusted`, `same_binary`, `older_release`,
+`version_unknown`, `no_payload`, `inside_install_root`, `unsigned_scope`)
+and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
+the internal detail is kept in a `lifecycle_diagnostic` warning for support.
+Do not edit DefenseClaw files or permissions by hand to recover.
+
+Recovery then restarts the restored release, and its gateway starts only
+after that release's guardian publishes full coverage. When the restored
+release is the one that cannot (for example, its guardian cannot republish a
+user's lost per-user state), every recovery would fail the same way. Under
+the same conditions as above, the standalone lifecycle instead finishes the
+recovery with the restored release stopped and disabled and records a
+`recovery_activation_deferred` warning (the restored and the Setup's
+releases, the Setup gateway's SHA-256 and trust basis, and the coverage
+failure). `/ensure` then upgrades to the running Setup's release in the same
+run; its gateway also starts only after full coverage. `/repair` stops at
+that point with the next step, because it reapplies the installed release
+that could not start. With the same release, or from an elevated
+administrator prompt, recovery keeps the coverage failure and a
+`recovery_gateway_not_used` warning gives the reason.
+
+</Accordion>
+</Accordions>
 
 ## Symptoms
 

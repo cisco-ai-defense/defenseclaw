@@ -127,7 +127,7 @@ The MDM wrapper scripts print the same document.
 | `ok` | `true` only when `errors` is empty |
 | `exit_code` | The process exit code |
 | `installed`, `installed_version` | Whether a deployment is recorded, and its version |
-| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
+| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Windows, see [Recover a pending Windows transaction](/docs/enterprise/troubleshooting#recover-a-pending-windows-transaction) |
 | `services[]` | Each managed service or unit, with its state |
 | `readiness` | `gateway`, `guardian`, `enumerator`, `sensor_helper`: each `true` when that component is ready |
 | `coverage_complete` | The core services are ready (definition per OS below) |
@@ -162,7 +162,10 @@ The two summary fields are computed differently on each OS:
   is enabled, and `ai_defense_error` when it is not available. To check AI
   Defense, see [AI Defense is not used](/docs/enterprise/troubleshooting#symptoms).
 - **Users.** On Linux and macOS, neither summary field depends on whether any
-  user is enrolled. Check `enrollment` for that.
+  user is enrolled. Check `enrollment` for that. Machine-policy connectors
+  (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets
+  unless `enterprise.enrollment.unenrolled_users` is `deny`, so
+  `enrollment.targets: 0` is normal when you enable only those.
 
 ### What to alert on
 
@@ -416,6 +419,58 @@ only when it runs elevated.
 
 A healthy `status` or `verify` writes no event, so frequent polling does not
 fill the event log.
+
+#### Check event-log entries
+
+Only LocalSystem and Administrators can write the `DefenseClaw` log (source
+`DefenseClaw Lifecycle`), and the accounts that can read the Application log
+can read it. Each run that writes an event registers the log and resets its
+access. A
+successful uninstall unregisters it, so the uninstall event (110) goes only
+to the Application log; forward the `DefenseClaw` log to your SIEM if you
+need its entries after uninstall. Unregistering does not delete the entries:
+Windows keeps `%WINDIR%\System32\winevt\Logs\DefenseClaw.evtx` (the Event
+Log service holds it open until it restarts), and a later install that
+registers the log again shows the old entries with the new ones.
+
+Any account can write Application-log entries under any source name,
+including `DefenseClaw Enterprise`, so treat the Application-log copies as
+legacy. Point MDM detection rules
+and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
+DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
+source.
+
+Each DefenseClaw event ends with `record <id>`, and the matching line of
+`enterprise-lifecycle.log`, which only administrators and LocalSystem can
+write, holds the same id under `event.record` with the event ID
+(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
+event logs that took the entry (`event.logs`). Check the entries from any
+prompt:
+
+```powershell title="Check the DefenseClaw event-log entries"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
+# The legacy Application-log copies:
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application
+```
+
+An entry is DefenseClaw's only when all of these hold:
+
+- its message ends with `record <id>` and the lifecycle log has a line with
+  that record;
+- the entry's event ID and the SHA-256 of its message (the UTF-8 bytes of the
+  event's insertion string, `$event.Properties[0].Value`) match that line;
+- it was written within two minutes of that line's `time`;
+- no earlier entry carried the same record. A later entry with the same
+  record is a copy.
+
+`events` exits 1 and names each entry that fails, and also when the newest
+lifecycle line whose event went to the checked log has no DefenseClaw entry
+there.
+Entries older than the lifecycle log's first event record, such as those an
+earlier release wrote without records, show as unverifiable. Apply the same
+rules in a SIEM: matching a record alone is not enough, because anyone can
+copy a genuine entry.
 
 ### Linux
 

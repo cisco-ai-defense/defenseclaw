@@ -159,8 +159,8 @@ publishing machine policy for an agent, remove its name from both maps, or
 set `enterprise.machine_policy.connectors.<name>.ownership: "off"`.
 </Callout>
 
-The older single-agent key `guardrail.connector` also selects an agent.
-Use the map instead.
+`guardrail.connector`, the single-agent key, is legacy. Use
+`guardrail.connectors` instead.
 
 ## Settings reference
 
@@ -193,7 +193,7 @@ default shown. "Linux and macOS" means the key has no effect on Windows.
 | `machine_policy.connectors.claudecode.version_floor` | `enforce`, `report`, `off` | `enforce` | All | Whether DefenseClaw sets Claude Code's `requiredMinimumVersion` to its lowest verified hook contract while no other source sets it. Only `connectors.claudecode` takes this key; it does not inherit from `default`. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor). |
 | `trust.mode` | `authenticode`, `hash_pinned` | None | Windows | `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned`, `""` or unset admits both. See [Payload trust](#payload-trust). |
 | `trust.allowed_signers` | List of SHA-256 certificate thumbprints | Empty | Windows | Accept only payloads signed by these certificates, like `--allowed-signer`. |
-| `coexistence.per_user_install` | `migrate`, `block`, `ignore` | None | Reserved | Reserved: accepted and validated, no effect in this release. |
+| `coexistence.per_user_install` | `migrate`, `block`, `ignore` | None | Reserved | Reserved, no effect. The value is validated. |
 | `coexistence.disable_self_update` | `true`, `false` | `true` | Windows | Sets the Windows `DisableSelfUpdate` policy value. See below. |
 | `network.https_proxy` | `http://host[:port]` or `https://host[:port]` | Empty | All | Proxy for outbound HTTPS. See [Network proxy](#network-proxy). |
 | `network.no_proxy` | Comma-separated hosts, domains, IP addresses or CIDR ranges | Empty | All | Destinations that bypass the proxy. |

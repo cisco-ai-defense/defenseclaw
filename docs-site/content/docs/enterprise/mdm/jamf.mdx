@@ -36,19 +36,10 @@ for exit codes, detection and how config and keys are delivered.
 
 ## Get and verify the release
 
-On an administrator workstation, download the package and the signed
-checksum list, check the signature, then check the package's SHA-256:
-
-```bash
-VERSION="<version>"   # set this to the release you deploy
-BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
-PKG=defenseclaw-enterprise-$VERSION-darwin-arm64.pkg
-curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle" -O "$BASE/$PKG"
-cosign verify-blob --bundle checksums.txt.bundle \
-  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
-grep "  $PKG\$" checksums.txt | shasum -a 256 -c -
-```
+On an administrator workstation, verify the signed checksum list and read
+the package's SHA-256 as in
+[Install with any MDM](/docs/enterprise/mdm#what-you-deliver), with
+`FILE=defenseclaw-enterprise-<version>-darwin-arm64.pkg`.
 
 You also need three scripts from the MDM kit. They are in `packaging/mdm/macos`
 in the source tree and in the `defenseclaw-enterprise-<version>-darwin-arm64.tar.gz`

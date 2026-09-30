@@ -366,13 +366,15 @@ Which users are protected is set by enrollment. See
 ## Residual risks
 
 These risks remain by design or because of how an agent vendor works. Open
-each one for where it applies and what reduces it.
+each one for where it applies and what reduces it. The limits of each vendor's
+machine policy are on
+[Machine policy: Vendor limits](/docs/enterprise/machine-policy#vendor-limits).
 
 <Accordions>
 
 <Accordion title="Per-user agents are advisory against a deliberate user">
 
-Per-user agents are advisory against a deliberate user. DefenseClaw's registration or plugin lives in the user's own default config. A user can remove it until the guardian repairs it (usually within seconds, at most about a minute), and can start the agent with another config home (for example `XDG_CONFIG_HOME`, `HOME`, `OPENCODE_CONFIG_DIR`, `HERMES_HOME` or a non-default Hermes profile), with `devin --config <file>`, or with Hermes `--safe-mode`, so the registration is never loaded: no DefenseClaw hook runs, nothing fails closed, no audit record is written, and the guardian never repairs that session. Status and verify keep reporting the user's agent ready, because the registration in the default location is intact. On Linux and macOS a user can also leave a path the guardian refuses in their own home, such as a link or a file where the agent's config folder belongs; the registration is then not repaired until the path is fixed, and status and verify report it only as the warning `guardian_target_user_path`, which does not fail verify or `detect.sh --require-healthy`. This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity and OpenHands (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected.
+DefenseClaw's registration or plugin lives in the user's own default config. A user can remove it until the guardian repairs it (usually within seconds, at most about a minute), and can start the agent with another config home (for example `XDG_CONFIG_HOME`, `HOME`, `OPENCODE_CONFIG_DIR`, `HERMES_HOME` or a non-default Hermes profile), with `devin --config <file>`, or with Hermes `--safe-mode`, so the registration is never loaded: no DefenseClaw hook runs, nothing fails closed, no audit record is written, and the guardian never repairs that session. Status and verify keep reporting the user's agent ready, because the registration in the default location is intact. On Linux and macOS a user can also leave a path the guardian refuses in their own home, such as a link or a file where the agent's config folder belongs; the registration is then not repaired until the path is fixed, and status and verify report it only as the warning `guardian_target_user_path`, which does not fail verify or `detect.sh --require-healthy`. This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity and OpenHands (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected.
 
 **Where:** Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent, and OpenCode while it is on the per-user route
 
@@ -392,7 +394,7 @@ Unsupported, old, copied or self-built clients. A client below DefenseClaw's hoo
 
 <Accordion title="Agents installed in unusual places">
 
-Agents installed in unusual places. Discovery covers the usual install locations, the common Node version managers and package managers, and `agent_prefixes`. An agent installed or copied anywhere else in a home is neither enrolled nor reported.
+Discovery covers the usual install locations, the common Node version managers and package managers, and `agent_prefixes`. An agent installed or copied anywhere else in a home is neither enrolled nor reported.
 
 **Where:** Every OS
 
@@ -402,7 +404,7 @@ Agents installed in unusual places. Discovery covers the usual install locations
 
 <Accordion title="Hook process control">
 
-Hook process control. `defenseclaw-hook` and the per-user hook scripts run as the user, so that user can end, suspend or slow them until the agent's hook timeout. Agents that block only on an explicit deny or exit code then run the call, and no DefenseClaw decision or audit record is written before it runs. Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), and OpenHands, Devin and Hermes run it when the hook is killed. OpenHands can also run it when the hook stalls until its 60-second timeout, leaving only OpenHands' own confirmation prompt, which the user answers. GitHub Copilot stays closed unless every one of its hooks is stopped, and OpenCode, Amp and Antigravity stay closed. "Fail-closed" in the [capability matrix](/docs/capability-matrix) means blocking when the hook cannot reach the gateway, not when the user ends the hook.
+`defenseclaw-hook` and the per-user hook scripts run as the user, so that user can end, suspend or slow them until the agent's hook timeout. Agents that block only on an explicit deny or exit code then run the call, and no DefenseClaw decision or audit record is written before it runs. Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), and OpenHands, Devin and Hermes run it when the hook is killed. OpenHands can also run it when the hook stalls until its 60-second timeout, leaving only OpenHands' own confirmation prompt, which the user answers. GitHub Copilot stays closed unless every one of its hooks is stopped, and OpenCode, Amp and Antigravity stay closed. "Fail-closed" in the [capability matrix](/docs/capability-matrix) means blocking when the hook cannot reach the gateway, not when the user ends the hook.
 
 **Where:** Every OS
 
@@ -412,7 +414,7 @@ Hook process control. `defenseclaw-hook` and the per-user hook scripts run as th
 
 <Accordion title="Windows repairs need a session">
 
-Windows repairs need a session. The guardian writes a user's files only while that user has an active (connected) session, so a user who is signed out or disconnected is repaired when their session is active again. Revoked users are cleaned at their next sign-in.
+The guardian writes a user's files only while that user has an active (connected) session, so a user who is signed out or disconnected is repaired when their session is active again. Revoked users are cleaned at their next sign-in.
 
 **Where:** Windows, per-user agents
 
@@ -442,7 +444,7 @@ Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` 
 
 <Accordion title="The Windows Claude Code attestation is the administrator's statement">
 
-The Windows Claude Code attestation is the administrator's statement. `repair --attest-claude-effective-policy` records it; it does not run Claude Code.
+`repair --attest-claude-effective-policy` records it; it does not run Claude Code.
 
 **Where:** Windows, Claude Code
 
@@ -452,7 +454,7 @@ The Windows Claude Code attestation is the administrator's statement. `repair --
 
 <Accordion title="Agents without a lock or the guard">
 
-Agents without a lock or the guard. Antigravity, OpenHands and OmniGent have neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's.
+Antigravity, OpenHands and OmniGent have neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's.
 
 **Where:** Those agents, every OS; Hermes on Windows
 
@@ -462,7 +464,7 @@ Agents without a lock or the guard. Antigravity, OpenHands and OmniGent have nei
 
 <Accordion title="Hermes has no hook lock or ordering">
 
-Hermes has no hook lock or ordering. On Linux and macOS the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) blocks tool calls while `config.yaml`, or the managed-scope `config.yaml` a user points `HERMES_MANAGED_DIR` at, has a hook DefenseClaw did not write, but a Hermes process keeps the hooks it loaded at start or re-read on a plugin reload: an entry the user removes after Hermes loaded it and before the next session start or tool call keeps running in that process unseen (one the guardian removes keeps that process's tool calls blocked until Hermes restarts). Hermes Python plugins run inside Hermes and are not inspected.
+On Linux and macOS the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) blocks tool calls while `config.yaml`, or the managed-scope `config.yaml` a user points `HERMES_MANAGED_DIR` at, has a hook DefenseClaw did not write, but a Hermes process keeps the hooks it loaded at start or re-read on a plugin reload: an entry the user removes after Hermes loaded it and before the next session start or tool call keeps running in that process unseen (one the guardian removes keeps that process's tool calls blocked until Hermes restarts). Hermes Python plugins run inside Hermes and are not inspected.
 
 **Where:** Hermes, Linux and macOS
 
@@ -472,7 +474,7 @@ Hermes has no hook lock or ordering. On Linux and macOS the [foreign-hook guard]
 
 <Accordion title="OpenHands project hooks replace DefenseClaw's">
 
-OpenHands project hooks replace DefenseClaw's. OpenHands loads a project's `.openhands/hooks.json` instead of the user's `~/.openhands/hooks.json`: it uses the first of the two it finds, so in a project that has its own file, even one with a single unrelated hook, none of DefenseClaw's OpenHands hooks run. Tool calls there are not inspected or logged, OpenHands shows no DefenseClaw message, and status and verify do not report it. A repository a developer clones can carry the file.
+OpenHands loads a project's `.openhands/hooks.json` instead of the user's `~/.openhands/hooks.json`: it uses the first of the two it finds, so in a project that has its own file, even one with a single unrelated hook, none of DefenseClaw's OpenHands hooks run. Tool calls there are not inspected or logged, OpenHands shows no DefenseClaw message, and status and verify do not report it. A repository a developer clones can carry the file.
 
 **Where:** OpenHands, Linux and macOS
 
@@ -502,7 +504,7 @@ Amp has no machine-wide plugin location, and the order in which it loads plugins
 
 <Accordion title="OpenCode can start without plugins">
 
-OpenCode can start without plugins. Pure mode (`--pure`, `OPENCODE_PURE=1`) and `OPENCODE_TEST_MANAGED_CONFIG_DIR` start a session without any DefenseClaw plugin, the managed one included, and OpenCode does not document the order in which plugins run.
+Pure mode (`--pure`, `OPENCODE_PURE=1`) and `OPENCODE_TEST_MANAGED_CONFIG_DIR` start a session without any DefenseClaw plugin, the managed one included, and OpenCode does not document the order in which plugins run.
 
 **Where:** OpenCode, every OS
 
@@ -572,7 +574,7 @@ Agent sessions inside WSL 2 are outside Windows machine policy: Claude Desktop W
 
 <Accordion title="Devin Desktop is not covered">
 
-Devin Desktop is not covered. A user without the `devin` CLI is not enrolled, Devin Local under `devin acp` is not certified, and builds before 3.9.19 still run Cascade.
+A user without the `devin` CLI is not enrolled, Devin Local under `devin acp` is not certified, and builds before 3.9.19 still run Cascade.
 
 **Where:** Devin Desktop, every OS
 
@@ -622,7 +624,7 @@ Availability under a hook flood. Each account has its own hook budget (see `ente
 
 <Accordion title="Windows plugin listener check">
 
-Windows plugin listener check. The Windows Amp plugin and the per-user OpenCode plugin check the listener with a separate request before each hook call. A user who takes `127.0.0.1:18970` between that check and the hook call receives that call's per-user credential and tool payload, and the plugin accepts the answer. It needs the gateway to release the port at that moment (an administrator or upgrade restart) and the hook call to open a new connection. `defenseclaw-hook` checks the service process on every connection and is not affected.
+The Windows Amp plugin and the per-user OpenCode plugin check the listener with a separate request before each hook call. A user who takes `127.0.0.1:18970` between that check and the hook call receives that call's per-user credential and tool payload, and the plugin accepts the answer. It needs the gateway to release the port at that moment (an administrator or upgrade restart) and the hook call to open a new connection. `defenseclaw-hook` checks the service process on every connection and is not affected.
 
 **Where:** Windows, Amp and per-user OpenCode
 
@@ -632,7 +634,7 @@ Windows plugin listener check. The Windows Amp plugin and the per-user OpenCode 
 
 <Accordion title="Telemetry to a held port">
 
-Telemetry to a held port. The agents' own telemetry exporters send to `127.0.0.1:18970` without verifying the listener. A user who holds the port while the gateway is down receives that telemetry, which can include prompt text, and the sending user's per-user telemetry credential, and can then post telemetry attributed to that user for that agent until the user leaves enrollment. The credential never authenticates hook, inspect or management routes, or another agent.
+The agents' own telemetry exporters send to `127.0.0.1:18970` without verifying the listener. A user who holds the port while the gateway is down receives that telemetry, which can include prompt text, and the sending user's per-user telemetry credential, and can then post telemetry attributed to that user for that agent until the user leaves enrollment. The credential never authenticates hook, inspect or management routes, or another agent.
 
 **Where:** Codex, Claude Code, OpenHands and OmniGent telemetry. Every gateway restart on macOS and Windows; on Linux only while an administrator has the socket unit stopped
 
@@ -662,7 +664,7 @@ Group filters on Windows use cached membership. A signed-out user is decided fro
 
 <Accordion title="User namespaces on Linux">
 
-User namespaces on Linux. Where standard users can create a private user and mount namespace, an agent started inside one can be given its own view of the machine policy, the runtime descriptor and the hook socket directory. `enterprise linux verify` warns (`unprivileged_user_namespaces`), as it does on stock Ubuntu 24.04 and RHEL 9.
+Where standard users can create a private user and mount namespace, an agent started inside one can be given its own view of the machine policy, the runtime descriptor and the hook socket directory. `enterprise linux verify` warns (`unprivileged_user_namespaces`), as it does on stock Ubuntu 24.04 and RHEL 9.
 
 **Where:** Linux
 
@@ -672,7 +674,7 @@ User namespaces on Linux. Where standard users can create a private user and mou
 
 <Accordion title="Administrator actions have short windows">
 
-Administrator actions have short windows. A running gateway can reload an edited config just before the lifecycle rejects and reverts it, and on Linux an upgrade that changes a socket unit releases the gateway's port while the socket restarts.
+A running gateway can reload an edited config just before the lifecycle rejects and reverts it, and on Linux an upgrade that changes a socket unit releases the gateway's port while the socket restarts.
 
 **Where:** Linux and macOS
 
