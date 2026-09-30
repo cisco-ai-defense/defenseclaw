@@ -122,6 +122,21 @@ rest also reach per-user installs.
   which does not allow those calls, it still uses `Start-Process -Wait`. Run
   `defenseclaw setup kiro` again to replace the older command. Other
   connectors are unchanged.
+- **Uninstall removes the empty OpenCode folders DefenseClaw created.** The
+  gateway's install watcher creates missing `plugin`, `skill` and `skills`
+  folders under `~/.config/opencode`, and a per-user uninstall left them
+  behind, empty. The watcher now lists the OpenCode folders it creates in
+  the DefenseClaw data directory, and the uninstall's OpenCode teardown
+  removes each one that is still empty. Folders with content, folders outside the OpenCode
+  config folder and folders DefenseClaw did not create stay.
+- **A Windows uninstall drops a deleted account's runtime selector entry.**
+  On the enterprise standalone profile, an account deleted together with its
+  profile has left the enrollment manifest, so the teardown never removed its
+  Claude Code or Codex runtime selector entry, and even `/uninstall PURGE=1`
+  left `.defenseclaw-managed-runtime-selector.state` and its lock in the
+  vendor's machine-policy folder. Uninstall now drops the entries of local
+  accounts that no longer exist and whose profile folder is gone, and then
+  removes a selector left empty and its lock.
 - **Kiro's hook file goes when its version key is gone.** Teardown still
   left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
   file had lost its `version` key (as `uninstall --purge` on macOS found in

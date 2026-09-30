@@ -1186,6 +1186,13 @@ func finalizeWindowsManagedHooksTeardown(
 		}
 		collected += removed
 	}
+	// Standalone: a local account deleted with its profile has left the
+	// manifest, so the teardown above never reached its selector entries.
+	// They go now, before the selector locks below. Failing to drop one only
+	// leaves that stale entry, so it does not fail the uninstall.
+	if err := enterprisehooks.RemoveWindowsStandaloneDeletedAccountSelectorTargets(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: stale runtime selector entries were kept: %v\n", err)
+	}
 	// Standalone: the per-user connector directories and the hook runtime
 	// root hold only lock files by now (verification proved enrollments,
 	// selectors and the summary gone), so an uninstall leaves none behind.

@@ -90,6 +90,78 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 // runtime root.
 var windowsMachinePolicySelectorConnectors = []string{"claudecode", "codex", "cursor"}
 
+// windowsSelectorTargetAccountRemoved reports a runtime selector entry whose
+// local account was deleted together with its profile folder: no one can
+// sign in as it, and its runtime bundle went with the profile. A domain or
+// Entra account's lookup also fails while its directory is unreachable, so
+// only a local account qualifies. Tests replace it.
+var windowsSelectorTargetAccountRemoved = func(entry windowsManagedRuntimeSelectorTarget) bool {
+	if _, err := os.Lstat(entry.DataDir); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	sid, err := windows.StringToSid(entry.SID)
+	if err != nil || !WindowsLocalAccountSID(sid.String()) {
+		return false
+	}
+	_, _, _, err = sid.LookupAccount("")
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
+}
+
+// RemoveWindowsStandaloneDeletedAccountSelectorTargets drops, at the end of a
+// standalone uninstall, the runtime selector entries of local accounts that
+// were deleted together with their profile folder. Such an account has left
+// the enrollment manifest and the teardown revokes only the manifest's
+// targets, so its entry would otherwise keep the selector, and the lock
+// beside it, in the vendor's machine-policy folder after the uninstall. The
+// entry was already unusable. Every other entry is left to the teardown.
+func RemoveWindowsStandaloneDeletedAccountSelectorTargets() error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
+	connectors := append(
+		append([]string(nil), windowsMachinePolicySelectorConnectors...),
+		WindowsStandalonePerUserConnectorNames()...,
+	)
+	var errs []error
+	for _, name := range connectors {
+		path, err := windowsManagedRuntimeSelectorPath(name)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", path, err))
+			continue
+		}
+		if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
+			return err
+		}
+		err = withWindowsManagedRuntimeSelectorTransaction(name, func() error {
+			selector, _, exists, err := readWindowsManagedRuntimeSelector(name, true)
+			if err != nil || !exists {
+				return err
+			}
+			kept := make([]windowsManagedRuntimeSelectorTarget, 0, len(selector.Targets))
+			for _, entry := range selector.Targets {
+				if !windowsSelectorTargetAccountRemoved(entry) {
+					kept = append(kept, entry)
+				}
+			}
+			if len(kept) == len(selector.Targets) {
+				return nil
+			}
+			selector.Targets = kept
+			return publishOrRemoveWindowsManagedRuntimeSelector(selector)
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: drop deleted accounts from the %s runtime selector: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // RemoveWindowsStandaloneMachinePolicySelectorLocks drops the runtime selector
 // lock that selector transactions leave in each machine-policy connector's
 // vendor directory (Claude Code's managed-settings.d, and the Codex and Cursor
