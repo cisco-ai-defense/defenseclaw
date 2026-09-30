@@ -74,7 +74,8 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	}
 
 	directory := t.TempDir()
-	if _, err := writeWindowsEnterpriseLifecycleLog(directory, result, event); err != nil {
+	diagnostics := []string{"[hook-enumerator] skipped S-1-5-18: not an interactive-user SID"}
+	if _, err := writeWindowsEnterpriseLifecycleLog(directory, result, event, diagnostics); err != nil {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(filepath.Join(directory, windowsEnterpriseLogName))
@@ -82,13 +83,17 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 		t.Fatal(err)
 	}
 	var line struct {
-		Event *windowsEnterpriseEventRecord `json:"event"`
+		Event       *windowsEnterpriseEventRecord `json:"event"`
+		Diagnostics []string                      `json:"diagnostics"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(body))), &line); err != nil {
 		t.Fatal(err)
 	}
 	if line.Event == nil || !reflect.DeepEqual(*line.Event, *event) {
 		t.Fatalf("lifecycle log event = %+v, want %+v", line.Event, event)
+	}
+	if !reflect.DeepEqual(line.Diagnostics, diagnostics) {
+		t.Fatalf("lifecycle log diagnostics = %q, want %q", line.Diagnostics, diagnostics)
 	}
 }
 

@@ -595,7 +595,7 @@ func TestWindowsEnterpriseLifecycleLogRotatesFiveGenerations(t *testing.T) {
 	for run := 0; run < 40; run++ {
 		result := enterprisestatus.New("status", "standalone", "windows", "1.4.0")
 		result.Finish("windows", 0)
-		path, err := writeWindowsEnterpriseLifecycleLog(directory, result, nil)
+		path, err := writeWindowsEnterpriseLifecycleLog(directory, result, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

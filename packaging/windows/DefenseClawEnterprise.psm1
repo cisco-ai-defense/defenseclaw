@@ -16659,7 +16659,9 @@ function Get-DefenseClawStandaloneManifestAdoption {
                 "of the republished targets.yaml ($name record; $diagnostic)"
             )
             if (-not [string]::IsNullOrEmpty($nextStep)) {
-                return & $result $false "$nextStep ($incomplete)" -1
+                # Only the next step: the guardian's own counts would nest
+                # more parentheses into the refusal sentence.
+                return & $result $false $nextStep -1
             }
             return & $result $false "$incomplete; $retry" -1
         }

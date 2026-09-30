@@ -1309,7 +1309,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	var cleanupManifest func()
 	if plan.Action == "install" && strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
-		manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
+		manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), actionOpts.configPath)
 		if err != nil {
 			result.AddError(windowsEnterpriseEnsureStagingErrorCode(err), err.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -1347,7 +1347,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		actionOpts = *opts
 		actionOpts.jsonOutput = true
 		if strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
-			manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
+			manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), actionOpts.configPath)
 			if err != nil {
 				result.AddError(windowsEnterpriseEnsureStagingErrorCode(err), err.Error())
 				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -1686,12 +1686,30 @@ func windowsEnterpriseEnsureStagingErrorCode(err error) string {
 	return "manifest_staging_failed"
 }
 
+// windowsEnterpriseEnsureDiagnosticsLimit bounds the enumerator lines one
+// ensure keeps for the lifecycle log.
+const windowsEnterpriseEnsureDiagnosticsLimit = 256
+
+// windowsEnterpriseEnsureEnumerationLogger prints the enumerator's
+// per-profile lines to stderr for a person, and keeps them for the
+// lifecycle log in a JSON ensure, whose output an MDM parses.
+func windowsEnterpriseEnsureEnumerationLogger(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions) enterprisehooks.EnumerationLogger {
+	if !opts.jsonOutput {
+		return enumerationLoggerForStderr(cmd.ErrOrStderr())
+	}
+	return func(subject, reason string) {
+		if len(opts.diagnostics) < windowsEnterpriseEnsureDiagnosticsLimit {
+			opts.diagnostics = append(opts.diagnostics, fmt.Sprintf("[hook-enumerator] skipped %s: %s", subject, reason))
+		}
+	}
+}
+
 // stageWindowsEnterpriseEnsureManifest builds the first guardian manifest
 // with the same enumerator the installed service runs, from the supplied
 // standalone config, in a protected administrator-only directory.
 func stageWindowsEnterpriseEnsureManifest(
 	ctx context.Context,
-	cmd *cobra.Command,
+	logf enterprisehooks.EnumerationLogger,
 	configPath string,
 ) (string, func(), error) {
 	if strings.TrimSpace(configPath) == "" {
@@ -1742,7 +1760,7 @@ func stageWindowsEnterpriseEnsureManifest(
 		return "", nil, errWindowsEnterpriseEnsureManifestRequired
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
-		Logger: enumerationLoggerForStderr(cmd.ErrOrStderr()),
+		Logger: logf,
 	}))
 	if err != nil {
 		cleanup()

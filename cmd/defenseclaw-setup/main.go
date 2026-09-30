@@ -346,6 +346,11 @@ func run(opts options) (int, error) {
 			return 1, err
 		}
 		fmt.Println(report)
+		if report != setupVerifySignedReport {
+			// A caller that reads only stderr still learns that this
+			// Setup is unsigned and how to authenticate it.
+			fmt.Fprintln(os.Stderr, report)
+		}
 		return 0, nil
 	}
 	// INS-32: this read-only token/session/desktop gate must remain the first
@@ -2473,6 +2478,9 @@ func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
 	return zip.NewReader(readerAt, info.Size())
 }
 
+// setupVerifySignedReport is /verify's report for a signed Setup.
+const setupVerifySignedReport = "DefenseClaw Setup Authenticode verification succeeded"
+
 // verifySetupImage is /verify: it checks the embedded payload against its
 // manifest, then the Setup's Authenticode against the signing state that
 // manifest records. A release built without a code-signing certificate
@@ -2491,7 +2499,7 @@ func verifySetupImage(self string, payload *zip.Reader) (string, error) {
 		return "", setupNotPublished(fmt.Errorf("verify setup Authenticode policy: %w", err))
 	}
 	if !manifest.Unsigned {
-		return "DefenseClaw Setup Authenticode verification succeeded", nil
+		return setupVerifySignedReport, nil
 	}
 	digest, err := fileSHA256(self)
 	if err != nil {
