@@ -1367,6 +1367,15 @@ way on: stop its gateway if one runs and remove that OpenShell, then run
 with NVIDIA's installer and sets the unit up. Setup refuses such an
 OpenShell, on Linux as on a Mac (see [Troubleshooting](#troubleshooting)):
 it changes the gateway's settings and restarts it through the unit.
+Nor is the install the fix of a gateway that answers with another release
+than a supported CLI (``the gateway that answers runs OpenShell 0.0.40, not
+the OpenShell 0.1.1 installed here``): that gateway is not the one the
+CLI's install runs, so the **Gateway** check restarts the gateway service
+(the `openshell-gateway` unit, or Homebrew's `nvidia/openshell/openshell`
+service), which `--fix` does where that service runs the gateway, and
+says so when the restarted gateway is still of another release. With the
+service stopped, something else runs that gateway: stop it, then start
+the service. Setup then stops on that fix instead of offering the install.
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway

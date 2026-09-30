@@ -851,6 +851,132 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 			t.Fatalf("gateway service fix = %+v", c.Fix)
 		}
 	})
+	// The gateway answers with another release than the supported CLI:
+	// that is TestDoctorOnAGatewayOfAnotherRelease, and without the unit
+	// the way on is this OpenShell's too.
+	t.Run("gateway of another release", func(t *testing.T) {
+		f, cli := release(t, "0.1.1")
+		f.fake.SetHealth(true, "0.0.40")
+		r := f.run()
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1"), outside(cli))
+	})
+}
+
+// keepOpen keeps the shared fake gateway open when the doctor closes its
+// client.
+type keepOpen struct{ openshell.Client }
+
+func (keepOpen) Close() error { return nil }
+
+// TestDoctorOnAGatewayOfAnotherRelease: with the supported OpenShell 0.1.1
+// CLI and a gateway answering with 0.0.40 (or 0.1.2), the Gateway fix was
+// "install OpenShell 0.1.1" (or "reinstall OpenShell so the CLI and
+// gateway match") with `defenseclaw sandbox setup --install-openshell`,
+// which finds the supported CLI and installs nothing: every run of setup
+// and the doctor ended on the same fix. The gateway that answers is not
+// the one that CLI's install runs: the fix says which release answers and
+// restarts the gateway service, automatically only where the service
+// runs the gateway, and checks the restarted one runs the CLI's release.
+// A CLI the install upgrades keeps the install.
+func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
+	const (
+		install = "defenseclaw sandbox setup --install-openshell"
+		restart = "systemctl --user restart openshell-gateway"
+		unit    = "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing OpenShell would change nothing: " +
+			"restart the openshell-gateway user service so it runs the gateway installed with the CLI"
+	)
+	// restartTo has the restart bring up a gateway of version. The fake
+	// gateway stays open for the fix, after the doctor closed its client.
+	restartTo := func(f *doctorFixture, command, version string) {
+		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+			return keepOpen{f.fake.Client(openshell.ClientOptions{})}, nil
+		}
+		f.runner.OnFunc(command, func(context.Context, openshell.Command) ([]byte, error) {
+			f.fake.SetHealth(true, version)
+			return nil, nil
+		})
+	}
+	fixIs := func(t *testing.T, c *openshell.Check, summary, command string, auto bool) {
+		t.Helper()
+		if c.Fix == nil || c.Fix.Summary != summary || c.Fix.Command != command || c.Fix.Automatic != auto || (c.Fix.Apply != nil) != auto ||
+			c.Fix.RestartsGateway != auto {
+			t.Fatalf("%s fix = %+v\nwant summary %q, command %q, automatic %v", c.ID, c.Fix, summary, command, auto)
+		}
+	}
+
+	t.Run("older gateway, unit running", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.fake.SetHealth(true, "0.0.40")
+		restartTo(f, restart, "0.1.1")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1")
+		fixIs(t, c, unit, restart, true)
+		applyFixes(t, r, openshell.CheckIDGatewayVersion)
+		if !f.runner.Called(restart) {
+			t.Fatalf("the fix did not restart the unit: %v", f.runner.Calls())
+		}
+	})
+	// The unit's own gateway is of another release than the CLI: the
+	// restart does not help, and the fix says so.
+	t.Run("the unit runs another OpenShell", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.fake.SetHealth(true, "0.0.40")
+		restartTo(f, restart, "0.1.2")
+		r := f.run()
+		outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDGatewayVersion, nil })
+		if err != nil || len(outcomes) != 1 || outcomes[0].Applied ||
+			outcomes[0].Error != `the restarted gateway runs OpenShell "0.1.2", still not the 0.1.1 of the CLI at /usr/bin/openshell: the gateway service runs another OpenShell install than that CLI` {
+			t.Fatalf("ApplyFixes = %+v, %v", outcomes, err)
+		}
+	})
+	t.Run("newer gateway, unit running", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.fake.SetHealth(true, "0.1.2")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.2 but CLI 0.1.1")
+		fixIs(t, c, strings.Replace(unit, "0.0.40", "0.1.2", 1), restart, true)
+	})
+	t.Run("unrecognized release", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.fake.SetHealth(true, "dev")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "unrecognized version")
+		fixIs(t, c, strings.Replace(unit, "OpenShell 0.0.40", `an unrecognized OpenShell release ("dev")`, 1), restart, true)
+	})
+	// With the unit stopped, something else runs the gateway that answers,
+	// and a start of the unit would not get its port: the fix is the
+	// operator's.
+	t.Run("unit stopped", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
+		f.fake.SetHealth(true, "0.0.40")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1")
+		fixIs(t, c, "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing OpenShell would change nothing, "+
+			"and the openshell-gateway user service is stopped, so something else runs that gateway: stop it, then start the service",
+			"systemctl --user enable --now openshell-gateway", false)
+	})
+	t.Run("macOS", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.onBrew()
+		f.fake.SetHealth(true, "0.0.40")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1")
+		fixIs(t, c, strings.Replace(unit, "the openshell-gateway user service", "Homebrew's nvidia/openshell/openshell service", 1),
+			"brew services restart nvidia/openshell/openshell", true)
+	})
+	// NVIDIA's installer runs for a CLI it upgrades, and installs the
+	// gateway with it.
+	t.Run("CLI the install upgrades", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("/usr/bin/openshell --version", "openshell 0.0.40\n", nil)
+		f.fake.SetHealth(true, "0.0.40")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1")
+		if c.Fix == nil || c.Fix.Summary != "install OpenShell 0.1.1" || c.Fix.Command != install || c.Fix.Apply != nil {
+			t.Fatalf("gateway fix = %+v", c.Fix)
+		}
+	})
 }
 
 // TestDoctorChecksLandlockInTheDockerVM: on macOS sandboxes run on the

@@ -536,6 +536,40 @@ func TestSetupRefusesAnOpenShellWithoutTheUserUnit(t *testing.T) {
 	lacks(t, ta.output(), "user service")
 }
 
+// TestSetupOnAGatewayOfAnotherRelease: with the supported OpenShell 0.1.1
+// CLI and a gateway answering 0.0.40, setup asked "Install OpenShell 0.1.1
+// with NVIDIA's installer?", said "✓ OpenShell 0.1.1 is already
+// installed" on yes and "OpenShell 0.1.1 is needed" on no, then stopped on
+// the doctor's Gateway fix, that same install; every run did the same.
+// Setup offers no install that installs nothing: it stops on the doctor's
+// fix, which restarts the gateway service.
+func TestSetupOnAGatewayOfAnotherRelease(t *testing.T) {
+	const fix = "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing OpenShell would change nothing: " +
+		"restart the openshell-gateway user service so it runs the gateway installed with the CLI"
+	for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
+		ta := setupApp(t, "", "", false)
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+			r.GatewayVersion = "0.0.40"
+			c := r.Get(openshell.CheckIDGatewayVersion)
+			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1; upgrade it in place to 0.1.1"
+			c.Fix = &openshell.Fix{Summary: fix, Command: "systemctl --user restart openshell-gateway", Automatic: true, RestartsGateway: true,
+				Apply: func(context.Context) error { return nil }}
+		})
+		inst := &fakeInstaller{}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		wantErr(t, ta.Setup(bg, o), "the OpenShell gateway is not usable yet (Gateway); see `defenseclaw sandbox doctor`")
+		has(t, ta.output(), "✓ OpenShell 0.1.1", "✗ Gateway: OpenShell 0.0.40 is older than 0.1.1",
+			"→ "+fix+" systemctl --user restart openshell-gateway\n")
+		lacks(t, ta.output(), "Install OpenShell", "already installed", "is needed", "--install-openshell")
+		if inst.ran {
+			t.Fatalf("%+v: the installer ran", o)
+		}
+	}
+}
+
 func TestSetupStopsOnHostFailure(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	before, _ := os.ReadFile(ta.ConfigPath)

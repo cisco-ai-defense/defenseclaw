@@ -213,8 +213,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			"which runs NVIDIA's installer and sets up the service")
 		return &Silent{Err: fmt.Errorf("on Linux OpenShell must come with the %s user service NVIDIA's installer sets up", openshell.GatewayService)}
 	}
-	if cli := rep.Get(openshell.CheckIDCLI); cli == nil || cli.Status == openshell.StatusFail ||
-		failed(rep, openshell.CheckIDGatewayVersion) || failed(rep, openshell.CheckIDGatewayService) {
+	// A failed Gateway check with a supported CLI is not the install's:
+	// DefenseClaw's install step would find that CLI and install nothing,
+	// and the doctor's fix, printed below, is the way on (a gateway of
+	// another release than the CLI is restarted through its service).
+	if cli := rep.Get(openshell.CheckIDCLI); cli == nil || cli.Status == openshell.StatusFail || failed(rep, openshell.CheckIDGatewayService) {
 		install := o.InstallOpenShell
 		if !install && !o.NonInteractive {
 			// On macOS the installer installs a Homebrew formula, without sudo.

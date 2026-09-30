@@ -438,6 +438,33 @@ def test_a_stopped_gateway_or_a_failed_doctor() -> None:
     assert install.value == "no" and install.hint.startswith("Could not check this machine")
 
 
+def test_a_gateway_of_another_release_than_the_cli_is_not_an_install() -> None:
+    # A supported CLI and a gateway answering 0.0.40: the wizard preset
+    # "Install OpenShell" to yes, whose install found the CLI and installed
+    # nothing. Setup no longer offers it (sandboxcli/setup.go); the hint is
+    # the doctor's fix.
+    restart = (
+        "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing "
+        "OpenShell would change nothing: restart the openshell-gateway user service so it runs the gateway "
+        "installed with the CLI"
+    )
+    version = {
+        "id": "gateway-version",
+        "status": "fail",
+        "detail": "OpenShell 0.0.40 is older than 0.1.1; upgrade it in place to 0.1.1",
+        "fix": {"summary": restart, "command": "systemctl --user restart openshell-gateway", "automatic": True},
+    }
+    check = sandbox_machine_check({**READY, "gateway_version": "0.0.40", "checks": [*READY["checks"], version]})
+    assert not check.openshell_needed and not check.openshell_refused
+    assert "✗ OpenShell 0.1.1, but the gateway runs 0.0.40" in check.summary.split("\n")
+    install = next(f for f in sandbox_wizard_fields({}, machine=check) if f.label == "Install OpenShell")
+    assert install.value == "no"
+    assert install.hint == (
+        f"the OpenShell gateway needs attention: {restart} "
+        "(`systemctl --user restart openshell-gateway`); nothing to install."
+    )
+
+
 def test_the_answers_are_the_consent() -> None:
     machine = next(field for field in sandbox_wizard_fields({}) if field.label == "This machine")
     assert "Your answers here are the consent" in machine.hint

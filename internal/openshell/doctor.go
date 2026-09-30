@@ -970,6 +970,69 @@ func (r *doctorRun) cliWithoutUnit() {
 	}
 }
 
+// gatewayVersionFix is the fix of a gateway that answers with an
+// unsupported OpenShell release, or another one than the CLI's. install
+// (installOpenShellCommand) is it only where NVIDIA's installer would run:
+// with no CLI, or one it upgrades. A supported CLI DefenseClaw's install
+// step finds, and installs nothing (Installer.Install), so the gateway
+// that answers is not the one that CLI's install runs: the gateway service
+// is restarted, so that it runs the gateway installed with the CLI, which
+// is automatic only where that service runs the gateway. Without the
+// service, the OpenShell installed another way comes first.
+func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
+	if r.cli == (Version{}) || CheckSupported(r.cli) != nil {
+		return install
+	}
+	answers := "an unrecognized OpenShell release (" + strconv.Quote(r.gateway.RawVersion) + ")"
+	if r.gateway.Version != (Version{}) {
+		answers = "OpenShell " + r.gateway.Version.String()
+	}
+	answers = "the gateway that answers runs " + answers + ", not the OpenShell " + r.cli.String() +
+		" installed here, so installing OpenShell would change nothing"
+	service := "the " + GatewayService + " user service"
+	if r.GOOS == "darwin" {
+		service = "Homebrew's " + GatewayFormula + " service"
+	}
+	switch {
+	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
+		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
+	case r.serviceMissing() && r.report.OpenShellOutsideUnit():
+		return r.outsideUnitFix()
+	case r.service != nil && r.service.Installed && r.service.Active:
+		return &Fix{Summary: answers + ": restart " + service + " so it runs the gateway installed with the CLI",
+			Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.restartOnCLIRelease}
+	case r.service != nil && r.service.Installed:
+		// The service is stopped: something else runs that gateway, and
+		// the service's would not get its port.
+		return &Fix{Summary: answers + ", and " + service + " is stopped, so something else runs that gateway: stop it, then start the service",
+			Command: r.startCommand().String()}
+	}
+	return &Fix{Summary: answers + ": stop that gateway, then start the OpenShell " + r.cli.String() + " gateway"}
+}
+
+// restartOnCLIRelease restarts the gateway service (gatewayVersionFix) and
+// says so when the gateway it runs is still of another release than the
+// CLI: the service runs another OpenShell install than that CLI.
+func (r *doctorRun) restartOnCLIRelease(ctx context.Context) error {
+	if err := r.Gateway.Restart(ctx); err != nil {
+		return err
+	}
+	client, err := r.Dial(r.reg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	h, err := client.Health(ctx)
+	if err != nil {
+		return err
+	}
+	if h.Version.Compare(r.cli) != 0 {
+		return fmt.Errorf("the restarted gateway runs OpenShell %q, still not the %s of the CLI at %s: the gateway service runs another OpenShell install than that CLI",
+			h.RawVersion, r.cli, r.report.CLIPath)
+	}
+	return nil
+}
+
 // nothingToRestart reports no gateway service and no gateway answering:
 // no gateway runs to restart, and the configuration on disk is what the
 // one OpenShell's install starts loads.
@@ -1205,11 +1268,11 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	r.report.GatewayVersion = r.gateway.RawVersion
 	if err := r.gateway.CheckVersion(); err != nil {
 		version.Status, version.Detail = StatusFail, err.Error()
-		version.Fix = &Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand})
 	} else if r.cli != (Version{}) && r.cli.Compare(r.gateway.Version) != 0 {
 		version.Status = StatusWarn
 		version.Detail = fmt.Sprintf("gateway %s but CLI %s; keep them on the same release", r.gateway.Version, r.cli)
-		version.Fix = &Fix{Summary: "reinstall OpenShell so the CLI and gateway match", Command: installOpenShellCommand}
+		version.Fix = r.gatewayVersionFix(&Fix{Summary: "reinstall OpenShell so the CLI and gateway match", Command: installOpenShellCommand})
 	} else {
 		version.Status, version.Detail = StatusPass, fmt.Sprintf("%s healthy at %s", r.gateway.Version, r.reg.Endpoint)
 	}

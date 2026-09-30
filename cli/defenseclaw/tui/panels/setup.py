@@ -4745,8 +4745,10 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     """Summarize a ``sandbox doctor --json`` report (or why it did not run).
 
     OpenShell counts as needed exactly when ``sandbox setup`` would install
-    it: the CLI is missing or unsupported, or the gateway service or its
-    version check failed (sandboxcli/setup.go). On a MicroVM (vm) gateway,
+    it: the CLI is missing or unsupported, or the gateway service check
+    failed (sandboxcli/setup.go). A failed gateway check with a supported
+    CLI is not the install's (it would install nothing): it is shown with
+    the doctor's fix. On a MicroVM (vm) gateway,
     or a Mac whose docker driver has no Landlock (which setup switches to
     MicroVMs), a failed ``vm-driver`` check counts too: setup installs
     e2fsprogs or has the driver signed with the same consent. A MicroVM
@@ -4804,9 +4806,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     without_service = cli not in {"", "fail"} and not service.get("installed")
     outside_unit = without_service and service.get("manager") == "systemd"
     refused = outside_unit or (without_service and service.get("manager") == "brew")
-    needed = not refused and (
-        cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
-    )
+    needed = not refused and (cli in {"", "fail"} or status("gateway-service") == "fail")
     version = str(report.get("cli_version") or "").strip()
     name = f"OpenShell {version}" if version else "OpenShell"
     if outside_unit:
@@ -4826,6 +4826,22 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
             "whose service DefenseClaw runs the gateway through: stop its gateway and remove it, then install OpenShell here"
         )
         parts.append(f"✗ {name} is not from Homebrew's nvidia/openshell formula")
+    elif not needed and status("gateway-version") == "fail":
+        # A supported CLI: installing would change nothing. The doctor's
+        # fix is the way on (a gateway of another release than the CLI is
+        # restarted through its service).
+        fix = (checks.get("gateway-version") or {}).get("fix")
+        fix = fix if isinstance(fix, Mapping) else {}
+        summary, command = str(fix.get("summary") or "").strip(), str(fix.get("command") or "").strip()
+        if summary:
+            openshell = f"the OpenShell gateway needs attention: {summary}" + (f" (`{command}`)" if command else "")
+        else:
+            openshell = f"the OpenShell gateway needs attention: {detail('gateway-version') or 'not answering'}"
+        gateway = str(report.get("gateway_version") or "").strip()
+        if gateway and gateway != version:
+            parts.append(f"✗ {name}, but the gateway runs {gateway}")
+        else:
+            parts.append("✗ OpenShell gateway needs attention")
     elif not needed:
         openshell = f"{name} is installed"
         if status("gateway-service") == "warn":
@@ -4839,9 +4855,8 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell = f"OpenShell needs attention: {detail('openshell-cli') or 'not found'}"
         parts.append("✗ OpenShell " + (detail("openshell-cli") or "not found"))
     else:
-        failed = "gateway-service" if status("gateway-service") == "fail" else "gateway-version"
-        openshell = f"the OpenShell gateway needs attention: {detail(failed) or 'not running'}"
-        parts.append("✗ OpenShell gateway " + ("not running" if failed == "gateway-service" else "needs an update"))
+        openshell = f"the OpenShell gateway needs attention: {detail('gateway-service') or 'not running'}"
+        parts.append("✗ OpenShell gateway not running")
     vm_driver = status("vm-driver") if microvm else ""
     if vm_driver == "pass":
         parts.append("✓ MicroVM driver")
