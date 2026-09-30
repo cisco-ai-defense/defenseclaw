@@ -22,6 +22,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -137,9 +138,9 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 				case ok && result.Pending:
 					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": the home is not available")
 				case ok:
-					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedString(result.Error, 256))
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedWorkerError(result.Error))
 				case run.Err != nil:
-					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedString(run.Err.Error(), 256))
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedWorkerError(run.Err.Error()))
 				default:
 					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": the worker did not answer")
 				}
@@ -147,13 +148,13 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 			}
 			switch {
 			case !ok && run.Err != nil:
-				report.Failed = append(report.Failed, label+": "+boundedString(run.Err.Error(), 256))
+				report.Failed = append(report.Failed, label+": "+boundedWorkerError(run.Err.Error()))
 			case !ok:
 				report.Failed = append(report.Failed, label+": the worker did not answer")
 			case result.Pending:
 				report.Pending = append(report.Pending, label)
 			case !result.OK:
-				report.Failed = append(report.Failed, label+": "+boundedString(result.Error, 256))
+				report.Failed = append(report.Failed, label+": "+boundedWorkerError(result.Error))
 			case target.Mode == enterpriseHookWorkerModeRemoveLeftover && !result.Removed:
 				// Nothing of DefenseClaw's was registered there.
 			default:
@@ -371,4 +372,28 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifes
 			index++
 		}
 	}
+}
+
+// workerErrorMaxBytes bounds one worker error in the remove-all report.
+const workerErrorMaxBytes = 512
+
+// boundedWorkerError bounds a worker's error for the report. A wrapped error
+// ends with its cause (the OS error), so an oversized one keeps its start and
+// its end, cut at rune boundaries, instead of stopping in the middle of a
+// path before the cause.
+func boundedWorkerError(value string) string {
+	value = boundedString(value, len(value))
+	if len(value) <= workerErrorMaxBytes {
+		return value
+	}
+	const gap = " ... "
+	head := (workerErrorMaxBytes - len(gap)) / 3
+	tail := len(value) - (workerErrorMaxBytes - len(gap) - head)
+	for head > 0 && !utf8.RuneStart(value[head]) {
+		head--
+	}
+	for tail < len(value) && !utf8.RuneStart(value[tail]) {
+		tail++
+	}
+	return value[:head] + gap + value[tail:]
 }
