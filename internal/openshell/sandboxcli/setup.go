@@ -126,7 +126,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// gateway while it answers, and writes a gateway change for the user
 	// to restart it on (restartYourself).
 	unmanaged := rep.GatewayUnmanaged()
-	restartYourself := false
+	// restartYourself: setup wrote a change for that gateway; unwritten:
+	// the user declined to have it written, which a restart does not load.
+	restartYourself, unwritten := false, false
 	// Steps left out say so at the end, with the command that does them.
 	var skipped []string
 
@@ -373,6 +375,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 				}
 				if !write {
 					skipped = append(skipped, "the OpenShell gateway change above (`"+CommandName+" setup` writes it; then you restart the gateway, the way you started it)")
+					unwritten = true
 					break
 				}
 				res, err := a.Gateway.Write(ctx, plan)
@@ -435,14 +438,20 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// On a Docker VM without Landlock (Docker Desktop's) no sandbox starts
 	// until the gateway runs MicroVMs.
 	stuck := microVM && !onMicroVMs && failed(rep, openshell.CheckIDLandlock)
+	// A change the user did not let setup write: a restart alone loads
+	// nothing.
+	once := "once it restarts on them"
+	if unwritten {
+		once = "once `" + CommandName + " setup` writes the change above and you restart the gateway"
+	}
 	switch {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
 	case stuck:
 		a.warn("the gateway still runs the docker driver, where no sandbox can start (the Linux VM Docker runs in has no Landlock); " +
-			"it runs sandboxes in MicroVMs once it restarts on them")
+			"it runs sandboxes in MicroVMs " + once)
 	case microVM:
-		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs once it restarts on them")
+		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs " + once)
 	case copyOnly:
 		a.note("without bind mounts every run works on a copy (`--copy`)")
 	}
@@ -565,6 +574,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	a.println()
 	switch {
+	case stuck && unwritten:
+		a.warn("not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the docker driver. Rerun `" +
+			CommandName + " setup` and let it write the change, then restart the OpenShell gateway yourself, the way you started it; then `" +
+			CommandName + " run " + cmd + "`")
+		return nil
 	case stuck && unmanaged:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the MicroVM driver; then `" +
 			CommandName + " run " + cmd + "`")

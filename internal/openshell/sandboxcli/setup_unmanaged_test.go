@@ -42,6 +42,12 @@ const (
 // through, on a Mac (the MicroVM driver) or on Linux, with its gateway
 // answering or not.
 func unmanagedReport(mac, answers bool) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+	return unmanagedReportOn(mac, answers, openshell.DriverVM, nil)
+}
+
+// unmanagedReportOn is unmanagedReport with a Mac's gateway on driver,
+// which more adjusts.
+func unmanagedReportOn(mac, answers bool, driver openshell.ComputeDriver, more func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
 	edit := func(r *openshell.DoctorReport) {
 		svc := r.Get(openshell.CheckIDGatewayService)
 		service, cli, detail := "Homebrew's nvidia/openshell/openshell service", macReleaseCLI, startedByHand
@@ -65,12 +71,20 @@ func unmanagedReport(mac, answers bool) func(context.Context, *openshell.Doctor)
 		r.GatewayVersion = ""
 	}
 	if mac {
-		return macReport(openshell.DriverVM, func(r *openshell.DoctorReport) {
+		return macReport(driver, func(r *openshell.DoctorReport) {
 			edit(r)
 			r.MicroVM.DriverBinary, r.MicroVM.DriverFromFormula = "/Users/dev/openshell-direct/prefix/libexec/openshell-driver-vm", false
+			if more != nil {
+				more(r)
+			}
 		})
 	}
-	return hostReport(edit)
+	return hostReport(func(r *openshell.DoctorReport) {
+		edit(r)
+		if more != nil {
+			more(r)
+		}
+	})
 }
 
 // TestSetupUsesAGatewayRunAnotherWay (RT U1): on a Mac whose OpenShell
@@ -193,6 +207,52 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
 	has(t, ta.output(), "✗ OpenShell not installed", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
 	lacks(t, ta.output(), "user service", "⚠ Gateway service")
+}
+
+// TestSetupSaysAnUnwrittenChangeNeedsSetup (fu2 review 2): on a Mac with a
+// gateway run by hand on the docker driver, over a Docker VM without
+// Landlock, a yes to the MicroVMs and a no to "Write this change?" wrote
+// nothing, yet setup ended "restart the OpenShell gateway yourself … so it
+// runs the MicroVM driver" (and "…once it restarts on them"): a restart
+// leaves that gateway on docker. With nothing written, setup says to rerun
+// it and let it write the change first; a written change keeps the
+// restart.
+func TestSetupSaysAnUnwrittenChangeNeedsSetup(t *testing.T) {
+	for _, write := range []bool{false, true} {
+		answer := "n"
+		if write {
+			answer = "y"
+		}
+		t.Run("write "+answer, func(t *testing.T) {
+			ta := setupApp(t, "y\n"+answer+"\n", "", false)
+			ta.GOOS = "darwin"
+			ta.HostDoctor = unmanagedReportOn(true, true, openshell.DriverDocker, func(r *openshell.DoctorReport) {
+				*r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM
+			})
+			ta.gateway.applyRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: ta.ConfigPath}}}
+			_, _ = useGateway(ta)
+			ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+			out := ta.output()
+			has(t, out, "Run sandboxes in OpenShell MicroVMs?", "Write this change? DefenseClaw cannot restart this gateway")
+			lacks(t, out, "Done →", "every run works on a copy (the MicroVM driver")
+			if ta.gateway.applied != 0 || ta.gateway.restarts != 0 || len(ta.gateway.written) != map[bool]int{false: 0, true: 1}[write] {
+				t.Fatalf("applied %d, restarts %d, written %d", ta.gateway.applied, ta.gateway.restarts, len(ta.gateway.written))
+			}
+			if write {
+				has(t, out, "it runs sandboxes in MicroVMs once it restarts on them",
+					"not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the MicroVM driver; then `defenseclaw sandbox run ")
+				lacks(t, out, "the gateway change was not written")
+				return
+			}
+			has(t, out, "skipped: the OpenShell gateway change above (`defenseclaw sandbox setup` writes it; then you restart the gateway, the way you started it)",
+				"the gateway still runs the docker driver, where no sandbox can start (the Linux VM Docker runs in has no Landlock); "+
+					"it runs sandboxes in MicroVMs once `defenseclaw sandbox setup` writes the change above and you restart the gateway",
+				"not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the docker driver. "+
+					"Rerun `defenseclaw sandbox setup` and let it write the change, then restart the OpenShell gateway yourself, the way you started it; "+
+					"then `defenseclaw sandbox run ")
+			lacks(t, out, "once it restarts on them", "so it runs the MicroVM driver", "so it runs on the change above")
+		})
+	}
 }
 
 // TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay: the gateway files
