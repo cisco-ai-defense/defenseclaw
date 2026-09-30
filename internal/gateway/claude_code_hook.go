@@ -574,6 +574,24 @@ func claudeCodeToolName(req claudeCodeHookRequest) string {
 	return "ClaudeCodeTool"
 }
 
+// claudeCodeAgentTool is the name of Claude Code's subagent tool (Task in
+// releases before the 2.1.154 contract floor).
+const claudeCodeAgentTool = "Agent"
+
+// claudeCodeSpawnedAgentID is the subagent a finished Agent call ran. Claude
+// Code's PostToolUse for its Agent tool reports it as tool_response.agentId,
+// the agent_id every hook of that subagent carries; a backgrounded call
+// reports it at launch, with status async_launched (measured on 2.1.156,
+// #957). Any other tool's response is that tool's output and names no agent.
+func claudeCodeSpawnedAgentID(req claudeCodeHookRequest) string {
+	if req.HookEventName != "PostToolUse" || req.ToolName != claudeCodeAgentTool ||
+		strings.TrimSpace(req.MCPServerName) != "" {
+		return ""
+	}
+	response, _ := req.ToolResponse.(map[string]interface{})
+	return firstHookIdentityString(response, "agentId")
+}
+
 func claudeCodeToolArgs(req claudeCodeHookRequest) json.RawMessage {
 	if req.ToolInput == nil {
 		return json.RawMessage(`{}`)

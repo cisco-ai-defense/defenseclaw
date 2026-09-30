@@ -886,7 +886,14 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		if req.HookEventName == "PostToolUseFailure" {
 			spawnPhase = hookSpawnIntentFailed
 		}
-		a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), spawnPhase, arguments, output)
+		if child := claudeCodeSpawnedAgentID(req); child != "" && a.hookAgentStateKnown("claudecode", req.SessionID, child) {
+			// The subagent this Agent call ran has started: its SubagentStart
+			// took the call's spawn intent. A completed intent left behind
+			// would claim the next subagent of the session.
+			a.forgetHookSpawnIntent(meta)
+		} else {
+			a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), spawnPhase, arguments, output)
+		}
 		completionContext := a.emitHookToolSpan(ctx, meta, claudeCodeToolName(req), arguments, output, nil)
 		a.emitToolInvocationEventV8(completionContext, meta, "result", claudeCodeToolName(req), "", output, nil)
 	case "StopFailure":
