@@ -122,6 +122,10 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Disabling Kiro removes DefenseClaw's hook file.** When
+  `~/.kiro/hooks/defenseclaw.json` had changed since setup, teardown removed
+  DefenseClaw's hooks but left the file behind as `{"hooks": []}`. A file that
+  holds nothing else once those hooks are out is now removed.
 - **OpenHands tool calls are inspected.** OpenHands sends PascalCase
   `event_type` values (`PreToolUse`) that DefenseClaw did not route, so
   terminal calls ran uninspected even in action mode. OpenHands payloads now

@@ -90,13 +90,16 @@ func removeKiroV3Hooks(path, hookScript string) error {
 		}
 		kept = append(kept, item)
 	}
+	// Judge ownership on what is left: with DefenseClaw's entries out, a
+	// file that holds nothing else is DefenseClaw's own and goes, instead
+	// of staying behind as an empty {"hooks": []}.
+	cfg["hooks"] = kept
 	if len(kept) == 0 && kiroFileIsDefenseClawOwned(cfg, hookScript) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
-	cfg["hooks"] = kept
 	return writeJSONObject(path, cfg)
 }
 

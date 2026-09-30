@@ -5,6 +5,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -71,12 +72,23 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("repeated Setup: %v", err)
 	}
+	// A hook file changed since Setup recorded it (here only its
+	// formatting) loses DefenseClaw's entries one by one; with nothing of
+	// the user's left, the file DefenseClaw created goes too.
+	if cfg, err := readJSONObject(global); err != nil {
+		t.Fatal(err)
+	} else if data, err := json.Marshal(cfg); err != nil || os.WriteFile(global, data, 0o600) != nil {
+		t.Fatalf("rewrite %s: %v", global, err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean: %v", err)
+	}
+	if _, err := os.Stat(global); !os.IsNotExist(err) {
+		t.Fatalf("teardown left the DefenseClaw hook file %s (err=%v)", global, err)
 	}
 	if cfg, err := readJSONObject(settings); err != nil || len(cfg) != 1 || cfg["chat.enableAutoAgentUpgrade"] != false {
 		t.Fatalf("settings after teardown = %v (err %v), want only the user's key", cfg, err)
