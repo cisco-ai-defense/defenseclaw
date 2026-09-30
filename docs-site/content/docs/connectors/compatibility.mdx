@@ -53,11 +53,40 @@ rollout holds. Existing policy defaults are unchanged.
 | <ConnectorLabel id="kiro" /> | not gated | Kiro IDE and `kiro-cli --v3` read `.kiro/hooks/*.json` (workspace); `kiro-cli` 2.x reads its agent config | native hooks on both surfaces plus optional ACP contract lock | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
 
 Open-ended contracts leave `max_exclusive` empty until an upstream release
-publishes a breaking hook change. Bounded contracts stop setup from claiming
-compatibility beyond a source-reviewed surface. Codex's adjacent ranges also
-capture hook-event additions and the `0.135.0` expansion from selective to
-generic local-function tool payloads. Installed versions and selected
-contracts are recorded in `hook_contract_lock.json` for doctor drift checks.
+publishes a breaking hook change. A bounded contract records how far
+DefenseClaw has tested a connector, not where it stops working. Codex's
+adjacent ranges also capture hook-event additions and the `0.135.0` expansion
+from selective to generic local-function tool payloads. Installed versions and
+selected contracts are recorded in `hook_contract_lock.json` for doctor drift
+checks.
+
+## Version policy
+
+Agents update often, so DefenseClaw assumes a connector version works unless
+it knows otherwise:
+
+- **Untested newer version.** A version above every tested range (for example
+  Claude Code, Codex or Devin after an update) uses the newest contract.
+  Setup keeps the mode you asked for, and doctor and setup show an
+  informational line: "untested newer version: ... no known problems".
+  OmniGent 0.15.0, and Devin 3000.11.3 on macOS and Windows, run this way
+  until their hook contracts are measured on those builds.
+- **Floors stay.** A version below the lowest tested version, a version in a
+  gap between tested ranges, and a build that carries the same version as an
+  exact-build pin but not its build ID (such as Cursor's Agent build) have no
+  contract. Setup keeps them in observe mode
+  and refuses action mode.
+- **Known-broken versions.** The `known_broken_versions` list of each connector
+  in `hook_contracts.json` names versions that are known not to work, each with
+  a reason and an issue link. A listed version is treated like one below the
+  floor. The list is empty today.
+- **Lock drift.** When the agent updates after setup to a version that is still
+  compatible under these rules, doctor reports the update as information and
+  `defenseclaw setup <connector>` or the next gateway start refreshes the lock.
+  Amp's relative release age ("3d ago") is not part of the compared version.
+- **Managed enterprise.** The enterprise standalone profile follows the same
+  rules and reports an untested newer version in `enterprise <os> status` and
+  `verify`. The Secure Client profile keeps its exact version gating.
 
 The active floors and bounds come from upstream release notes, current vendor docs, or source review: Codex `0.124.0` is the stable-hooks release. Cursor introduced beta hooks in `1.7.0`, but DefenseClaw's current 21-event contract is pinned exactly to Cursor Agent build `2026.07.23-e383d2b`; the application/Desktop `cursor_version` field is not accepted as Agent CLI version evidence. Hermes is bounded to `>=0.19.0,<0.21.0` (`hermes-hooks-v1`) and `>=0.21.0,<0.22.0` (`hermes-hooks-v2`), OpenHands starts at `1.12.0` and is source-reviewed against `1.16.0`, and Devin is pinned exactly to the source-reviewed `3000.4.25` CLI contract, plus `3000.11.3` on Linux after a live check of its event names and blocking. Copilot CLI v1 starts at `1.0.18`, while v2 starts at `1.0.76`. OpenCode is bounded to the v1.18.10-v1.18.33 source-reviewed plugin/config/MCP contract. OmniGent is capped at `>=0.7.0,<0.14.0`. Antigravity (`agy`) starts at `1.1.8`; the protected harness currently pins official CLI `1.1.10`. Claude Code v1 is bounded to `>=2.1.154,<2.1.219`, and v2 begins at `2.1.219` with observational `DirectoryAdded`.
 
@@ -72,7 +101,7 @@ starts.
 
 ## Setup-time checks
 
-Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. Unsupported or unverified hook connector versions are allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing. OpenCode is the bounded exception: a detected version outside `>=1.18.10,<1.19.0` is refused before mutation in both observe and action mode because its plugin registration and contract lock must converge as one transaction.
+Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. An untested newer version keeps the requested mode (see [Version policy](#version-policy)). A version with no contract (below the floor, known broken, or an unmatched exact build) is allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing. Newer versions no longer need that variable. OpenCode is the bounded exception: a detected version with no contract is refused before mutation in both observe and action mode because its plugin registration and contract lock must converge as one transaction.
 
 The most common reason a version can't be read is the connector binary living outside a trusted install prefix (for example a bespoke install under `~/.local`). Interactive action-mode setup detects this and offers to trust the directory (defaulting to No, persisting to `~/.defenseclaw/.env`, then re-running the full contract check — trusting a path never bypasses the version gate). Non-interactive runs print the equivalent remediation: `defenseclaw setup trusted-paths add <dir>`. See the `trusted-paths` group on the [CLI reference](/docs/reference/cli) and the trust model in [AI Discovery](/docs/ai-discovery).
 
@@ -93,4 +122,4 @@ the lock records:
 | `hook_script_digests` | Hashes of installed hook scripts for drift detection. |
 | `defenseclaw_version` | The DefenseClaw build that produced the lock. |
 
-`defenseclaw doctor` reads the lock and compares it with the current discovery cache so connector upgrades, hook contract changes, and hook script drift show up before action-mode enforcement depends on them.
+`defenseclaw doctor` reads the lock and compares it with the current discovery cache so connector upgrades, hook contract changes, and hook script drift show up before action-mode enforcement depends on them. An agent update to a compatible version is reported as information, not a failure; the lock is refreshed by the next setup or gateway start.

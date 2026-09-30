@@ -80,7 +80,8 @@ func TestRefusePerUserGatewayOnWindowsStandaloneHost(t *testing.T) {
 func TestManagedWindowsSetupAnswer(t *testing.T) {
 	restore := managedHostWindowsStandalone
 	defer func() { managedHostWindowsStandalone = restore }()
-	root := &cobra.Command{Use: "defenseclaw"}
+	// The real root pre-run: the answer must not need a per-user config.
+	root := &cobra.Command{Use: "defenseclaw", PersistentPreRunE: rootPersistentPreRunE}
 	managedHostWindowsStandalone = func() (string, bool) { return "", false }
 	addManagedWindowsSetupAnswer(root)
 	if len(root.Commands()) != 0 {
@@ -93,6 +94,11 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	root.SetErr(io.Discard)
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("setup rotate-token on a managed Windows computer: %v", err)
+	}
+	root.SetArgs([]string{"setup", "kiro"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+		!strings.Contains(err.Error(), "enterprise acp enroll") {
+		t.Fatalf("setup kiro on a managed Windows computer: %v", err)
 	}
 }
 

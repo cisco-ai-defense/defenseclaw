@@ -61,7 +61,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
 
 from defenseclaw import credential_provenance, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
-from defenseclaw.connector_contracts import openclaw_needs_interception_advisory
+from defenseclaw.connector_contracts import (
+    openclaw_needs_interception_advisory,
+    resolve_connector_contract,
+    stable_agent_version,
+)
 from defenseclaw.connector_paths import (
     amp_config_home,
     amp_managed_settings_path,
@@ -10327,15 +10331,36 @@ def _check_hook_contract_lock(
                     "(Desktop hook host; compared separately from Agent CLI date-hash pins)"
                 )
             current_version = ""
-    if current_version and raw_version and current_version != raw_version:
-        _emit(
-            "fail",
-            "Hook contract",
-            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}"
-            + (f"; {native_runtime.runtime_description}" if native_runtime is not None else ""),
-            r=r,
+    if (
+        current_version
+        and raw_version
+        and stable_agent_version(connector, current_version) != stable_agent_version(connector, raw_version)
+    ):
+        # An agent update to a version that still resolves to a hook contract
+        # (tested, or untested newer with no known problems) is routine: setup
+        # or the next gateway start refreshes the lock. Secure Client keeps
+        # refusing every agent change, so its drift stays a failure.
+        current = resolve_connector_contract(connector, current_version)
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        if (
+            current.status != "known"
+            or current.contract is None
+            or _enterprise_profile(cfg) == "secure_client"
+        ):
+            _emit(
+                "fail",
+                "Hook contract",
+                f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}"
+                + (f" ({current.reason})" if current.status != "known" else "")
+                + (f"; {native_runtime.runtime_description}" if native_runtime is not None else ""),
+                r=r,
+            )
+            return
+        detail += (
+            f" agent_updated={current_version!r} ({current.reason});"
+            f" `defenseclaw setup {connector}` or the next gateway start refreshes the lock"
         )
-        return
     if connector == "cursor":
         expected_cursor_fail_mode = (
             "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"

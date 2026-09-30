@@ -1368,8 +1368,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
     elif signal is not None and getattr(signal, "version", ""):
+        from defenseclaw.connector_contracts import resolve_connector_contract
+
+        why = resolve_connector_contract(key, signal.version).reason
         record["reason"] = (
-            f"installed version {signal.version} is not covered by a known hook contract"
+            f"installed version {signal.version} is not covered by a known hook contract ({why})"
         )
         record["installed_version"] = signal.version
     return record

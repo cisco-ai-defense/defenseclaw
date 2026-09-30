@@ -24,6 +24,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
@@ -321,6 +322,11 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	}
 	cfg.declaredEnterpriseProfile = declared
 	cfg.Enterprise.Profile = profile
+	if cfg.SecureClientIntegration() {
+		// Secure Client keeps exact-range hook contract gating: an agent
+		// version newer than every tested range stays unknown there.
+		gatewayconnector.SetStrictHookContractResolution(true)
+	}
 	if cfg.StandaloneEnterprise() {
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}

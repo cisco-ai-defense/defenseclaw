@@ -529,6 +529,10 @@ func TestConnectorReconcileCompatibilityDriftLeavesClaudeSettingsByteExact(t *te
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"claudecode": {Mode: "action"},
 	}
+	// A compatible agent update is admitted and refreshed; exact-range
+	// (Secure Client) resolution still refuses every agent change.
+	connector.SetStrictHookContractResolution(true)
+	t.Cleanup(func() { connector.SetStrictHookContractResolution(false) })
 
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--data-dir", dataDir, "--config-home", home)
 	if !strings.Contains(stderr, "hook contract compatibility drift") {

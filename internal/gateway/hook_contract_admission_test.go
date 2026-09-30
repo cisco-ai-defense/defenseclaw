@@ -95,14 +95,39 @@ func TestHookContractAdmissionRefreshesDefenseClawReleaseContractChange(t *testi
 	}
 }
 
+// An agent update to a version that still resolves to a hook contract is
+// routine: admission refreshes the lock instead of refusing the connector.
+func TestHookContractAdmissionRefreshesCompatibleAgentUpdate(t *testing.T) {
+	s := admissionSidecar(t)
+	current := stageAdmissionFixture(t, s.cfg.DataDir)
+	previous := current
+	previous.RawAgentVersion = "Claude Code v1.0.0"
+	previous.NormalizedAgentVersion = "1.0.0"
+	previous.ContractID = "claudecode-hooks-retired"
+	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, previous); err != nil {
+		t.Fatal(err)
+	}
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
+	transaction, err := s.setupConnectorsIsolatedTransaction(
+		context.Background(), []connector.Connector{conn},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if !reflect.DeepEqual(transaction.succeeded, []string{"claudecode"}) ||
+		len(transaction.admissionRefused) != 0 || conn.setupCalls != 1 {
+		t.Fatalf("succeeded=%v refused=%v setupCalls=%d, want a refreshed connector",
+			transaction.succeeded, transaction.admissionRefused, conn.setupCalls)
+	}
+	if refreshed := connector.LoadHookContractLockEntry(s.cfg.DataDir, "claudecode"); refreshed.ContractID != current.ContractID ||
+		refreshed.RawAgentVersion != current.RawAgentVersion {
+		t.Fatalf("refreshed lock = %q %q, want %q %q", refreshed.ContractID, refreshed.RawAgentVersion, current.ContractID, current.RawAgentVersion)
+	}
+}
+
 func TestHookContractAdmissionStillRefusesUpstreamAgentDrift(t *testing.T) {
 	for name, mutate := range map[string]func(*connector.HookContractLockEntry){
-		"agent version changed": func(entry *connector.HookContractLockEntry) {
-			entry.RawAgentVersion = "Claude Code v1.0.0"
-			entry.NormalizedAgentVersion = "1.0.0"
-			entry.ContractID = "claudecode-hooks-retired"
-			entry.DefenseClawVersion = "0.8.10"
-		},
 		"same DefenseClaw release": func(entry *connector.HookContractLockEntry) {
 			entry.ContractID = "claudecode-hooks-retired"
 			entry.DefenseClawVersion = version.Current().BinaryVersion
@@ -174,10 +199,11 @@ func TestRunActiveGuardrailReportsSingleConnectorAdmissionRefusal(t *testing.T) 
 		health: NewSidecarHealth(),
 		router: routerWithDefaultRulePack(t),
 	}
+	// A compatible agent update is admitted, so the refused drift is a
+	// contract change this same release recorded for the same agent version.
 	previous := stageAdmissionFixture(t, dataDir)
-	previous.RawAgentVersion = "Claude Code v1.0.0"
-	previous.NormalizedAgentVersion = "1.0.0"
 	previous.ContractID = "claudecode-hooks-retired"
+	previous.DefenseClawVersion = version.Current().BinaryVersion
 	if err := connector.SaveHookContractLockEntry(dataDir, previous); err != nil {
 		t.Fatal(err)
 	}

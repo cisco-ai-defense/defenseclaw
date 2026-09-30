@@ -81,12 +81,28 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 		Hidden:             true,
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
-		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
-				"commands are not available; your administrator manages its connectors and credentials. "+
-				"Rotating the credentials of a managed Windows deployment is not available yet. Nothing was changed", where)
+		// The answer needs no per-user config. Without the skip the root
+		// pre-run tried to load ~/.defenseclaw/config.yaml, which a managed
+		// computer never has, and printed "failed to load config" instead.
+		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+		RunE: func(_ *cobra.Command, args []string) error {
+			return managedWindowsSetupRefusal(where, args)
 		},
 	})
+}
+
+// managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
+// Windows standalone managed computer. Kiro is covered there through the ACP
+// guard, so `setup kiro` names it.
+func managedWindowsSetupRefusal(where string, args []string) error {
+	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
+	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "kiro") {
+		detail = "On a managed Windows computer Kiro is protected through the ACP guard: " +
+			"your administrator enrolls it with `defenseclaw-gateway enterprise acp enroll`. "
+	}
+	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
+		"commands are not available; your administrator manages its connectors and credentials. "+
+		"%sNothing was changed", where, detail)
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {

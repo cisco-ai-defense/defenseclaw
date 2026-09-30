@@ -159,7 +159,7 @@ The important qualifier is **permanently**. A standard user—or an AI agent exe
 | Administrator-owned authorization ledger | Managed readiness claims | A target is enforcement-covered only after a privileged successful reconcile writes trusted authorization. |
 | Connector-scoped hook token | API least privilege and connector isolation | Token is accepted only for the matching hook/notify route and cannot authorize management APIs or another connector. |
 | Raw scoped-token format | Service/hook format consistency | The service validator and generated hook consume the same raw file; inherited generic gateway credentials cannot shadow it. |
-| Hook contract pinning | Vendor lifecycle compatibility | Action-mode installation rejects unknown or drifted agent hook contracts unless an administrator explicitly opts into exploratory drift. |
+| Hook contract pinning | Vendor lifecycle compatibility | Action-mode installation rejects agent versions with no hook contract (below the tested floor or on the known-broken list) unless an administrator explicitly opts into exploratory drift. The standalone profile accepts an untested newer version and reports it; the Secure Client profile keeps exact gating. See [Version policy](/docs/connectors/compatibility#version-policy). |
 | Filesystem footprint validation | Hook/config path integrity | Rejects path escapes, unsafe parents, foreign owners, special files, and first-install writable/symlinked targets. |
 | Authorized repair | Post-install user tamper | After trusted authorization, target-owned symlinks can be removed and unsafe target-owned modes—including SUID/SGID/sticky bits—are normalized before canonical reinstall. |
 | Atomic, idempotent writes | Partial updates and watcher loops | Same-directory replacement prevents partial files; unchanged bytes, modes, ownership, backups, and contracts preserve mtimes and do not retrigger the watcher. |
@@ -1801,7 +1801,7 @@ Multiple connectors for the same user must have separate manifest entries. They 
 
 ### Change an agent version
 
-Update `agent_version` in the root-owned manifest before or with the endpoint agent upgrade. Run a manual reconcile and review hook-contract output. In action mode, unknown contract drift is a hard error unless an administrator explicitly opts into exploratory drift. Do not set `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` as a persistent fleet default.
+Update `agent_version` in the root-owned manifest before or with the endpoint agent upgrade. Run a manual reconcile and review hook-contract output. In action mode, drift to a version with no hook contract is a hard error unless an administrator explicitly opts into exploratory drift; on the standalone profile an untested newer version is accepted and reported as one. Do not set `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` as a persistent fleet default.
 
 ### Remove a user from management
 

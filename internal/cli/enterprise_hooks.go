@@ -603,7 +603,7 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			label += "@" + row.UserHome
 		}
 		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled\n", Style("✓", "fg=green", "bold"), label)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled%s\n", Style("✓", "fg=green", "bold"), label, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), label)
 		} else {
@@ -618,6 +618,15 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
 	}
 	return nil
+}
+
+// enterpriseHookAgentVersionNote names an untested newer agent version on a
+// reconcile or verify line.
+func enterpriseHookAgentVersionNote(row enterpriseHookReconcileRow) string {
+	if row.Result == nil || row.Result.AgentVersionStatus == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (%s %s)", row.Result.AgentVersionStatus, strings.TrimSpace(row.Result.AgentVersion))
 }
 
 type enterpriseHookStatusReport struct {
@@ -1355,7 +1364,7 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	}
 	for _, row := range run.Rows {
 		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row))
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified%s\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row), enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
 		} else if enterpriseHookVerifyRowExcused(run, row) {

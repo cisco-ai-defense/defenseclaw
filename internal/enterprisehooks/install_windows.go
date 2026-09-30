@@ -295,7 +295,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		return InstallResult{}, err
 	}
 	if setupOpts.HookContractID == "" {
-		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
+		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
 		setupOpts.HookContractID = resolution.Contract.ContractID
 	}
 	if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
@@ -521,7 +521,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		return windowsGenericManagedTarget{}, err
 	}
 	if setup.HookContractID == "" {
-		resolution := connector.ResolveHookContract(conn.Name(), setup.AgentVersion)
+		resolution := resolveHookContract(conn.Name(), setup.AgentVersion)
 		setup.HookContractID = resolution.Contract.ContractID
 	}
 	if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {

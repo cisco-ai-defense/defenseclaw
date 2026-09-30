@@ -2643,11 +2643,12 @@ func genericHookAdditionalContext(connectorName, event, mode, rawAction, severit
 	// distinctly from "observed ...").
 	lead := "DefenseClaw observed"
 	switch {
-	case wouldBlock && mode == "action" && connectorName == "amp" && canonicalEvent(event) == "agentstart":
-		// Amp cannot block a prompt, so in action mode this hidden notice
-		// is what DefenseClaw does about a blocking rule. Saying it "would
-		// block this in action mode" read as observe mode; tell the model
-		// the request must not be carried out instead.
+	case wouldBlock && mode == "action" && promptNoticeOnlyEvent(connectorName, event):
+		// Amp (agent.start) and Hermes (pre_llm_call) cannot block a
+		// prompt, so in action mode this notice is what DefenseClaw does
+		// about a blocking rule. Saying it "would block this in action
+		// mode" read as observe mode; tell the model the request is
+		// blocked and must not be carried out instead.
 		lead = "This request matched a DefenseClaw blocking rule and must not be carried out:"
 	case wouldBlock:
 		lead = "DefenseClaw would block this in action mode:"
@@ -2657,6 +2658,19 @@ func genericHookAdditionalContext(connectorName, event, mode, rawAction, severit
 		return fmt.Sprintf("%s %s.", lead, finding)
 	}
 	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
+}
+
+// promptNoticeOnlyEvent reports a prompt event whose only DefenseClaw
+// response is a notice added to the model's context: the agent has no
+// prompt veto there.
+func promptNoticeOnlyEvent(connectorName, event string) bool {
+	switch connectorName {
+	case "amp":
+		return canonicalEvent(event) == "agentstart"
+	case "hermes":
+		return canonicalEvent(event) == "prellmcall"
+	}
+	return false
 }
 
 // connectorReason renders the user-facing reason string surfaced by
