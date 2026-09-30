@@ -989,7 +989,14 @@ it had not contacted before) → unblock: …"; the block stopped the upload
 before it crossed, so the sentence says what was tried), and in telemetry as a HIGH
 `sandbox.large_upload` finding and a blocked egress record
 (`SANDBOX_EGRESS_LARGE_UPLOAD`). Each later refusal is an ordinary blocked
-egress event with the same category. Without the block, a large upload stays
+egress event with the same category, whose reason says why the destination
+is blocked rather than repeat the upload, for a request that may send nothing
+("This destination is blocked since this sandbox tried to send more than 10
+MiB to it, a destination it had not contacted before."; with the domain or
+address total, "… to destinations under example.net it had not contacted
+before."); the run's live notice of such a refusal says "✗ DefenseClaw
+blocked HOST (…)", not "a large upload to", which only a cut, whose event
+counts `bytes_up`, says. Without the block, a large upload stays
 a MEDIUM finding and a ⚠ `egress.large_upload` feed event.
 
 The counts live in the daemon, so each destination is first-seen to a

@@ -671,10 +671,12 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	if status != http.StatusForbidden || body.Category != egress.CategoryLargeUpload || !body.Unblockable {
 		t.Fatalf("CONNECT after the cut = %d %+v", status, body)
 	}
+	// The refusal says why the host is blocked: the CONNECT sent nothing.
 	eventually(t, "the refusal in the feed", func() bool {
 		for _, got := range e.events("upbox", sandboxapi.ActivityEgressBlocked, "") {
-			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" &&
-				strings.Contains(got.Message, "(large upload blocked: this sandbox tried to send more than 1 MiB") {
+			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" && got.BytesUp == 0 &&
+				got.Message == "✗ example.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB "+
+					"to it, a destination it had not contacted before)" {
 				return true
 			}
 		}

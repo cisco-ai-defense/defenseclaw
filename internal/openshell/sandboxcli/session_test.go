@@ -352,20 +352,27 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 			Message: "⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)"},
 		{Seq: 6, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "INFO", Reason: "note", Message: "nothing to see"},
 		{Seq: 7, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "files.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
-			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true},
+			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true, BytesUp: 10 << 20},
+		// A request the block refused after a cut before the session sent
+		// nothing: not "a large upload" (RT U5).
+		{Seq: 8, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "cut.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
+			Reason:      "This destination is blocked since this sandbox tried to send more than 10 MiB to it, a destination it had not contacted before.",
+			Unblockable: true},
 	}
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
 	upload := "✗ DefenseClaw blocked a large upload to files.example.net (this sandbox tried to send more than 10 MiB to a destination it had not " +
 		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
+	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
+		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the tamper notice", func() bool { return strings.Contains(stderr.String(), "hook tamper") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "cut.example.net") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
 	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") {
 		t.Fatalf("live output = %q", live)
 	}
-	has(t, ta.output(), block, upload, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
+	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
 	if out := ta.output(); strings.Index(out, "Session ended") > strings.Index(out, block) {
 		t.Errorf("the notices come before the summary line:\n%s", out)
 	}

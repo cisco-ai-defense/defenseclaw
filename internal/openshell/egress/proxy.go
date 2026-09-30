@@ -825,7 +825,7 @@ func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (
 	}
 	if !exemptFromUploadBlock(dec) && p.counter.uploadBlocked(pr, dec.Host) {
 		release()
-		refused := p.largeUploadRefusal(pr, d, dec, "")
+		refused := p.largeUploadRefusal(pr, d, dec, "", false)
 		return nil, &refused
 	}
 	return release, nil
@@ -833,14 +833,33 @@ func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (
 
 // largeUploadRefusal is dec, made by d for pr, refused by the large-upload
 // block; scope names the domain or address total that crossed, empty for
-// the destination's own. An unblock of the destination lifts the block.
-func (p *Proxy) largeUploadRefusal(pr Principal, d *Decider, dec Decision, scope string) Decision {
+// the destination's own. cut marks the answer to the request whose upload
+// the block cut; any other request is refused because of that earlier
+// upload, which its reason says (a GET after the cut sends nothing). An
+// unblock of the destination lifts the block.
+func (p *Proxy) largeUploadRefusal(pr Principal, d *Decider, dec Decision, scope string, cut bool) Decision {
 	refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-	refused.Reason, refused.Unblockable = p.largeUploadReason(pr, true), d.UnblocksAllowed()
-	if scope != "" {
+	refused.Unblockable = d.UnblocksAllowed()
+	switch {
+	case cut && scope != "":
 		refused.Reason = p.largeUploadScopeReason(pr, scope, true)
+	case cut:
+		refused.Reason = p.largeUploadReason(pr, true)
+	default:
+		refused.Reason = p.largeUploadBlockedReason(pr, scope)
 	}
 	return refused
+}
+
+// largeUploadBlockedReason says why a request to a destination the
+// large-upload block holds is refused: an earlier upload to it (or to
+// scope's destinations) crossed pr's threshold.
+func (p *Proxy) largeUploadBlockedReason(pr Principal, scope string) string {
+	threshold := FormatThreshold(p.counter.thresholdFor(pr))
+	if scope != "" {
+		return fmt.Sprintf("This destination is blocked since this sandbox tried to send more than %s to %s it had not contacted before.", threshold, scope)
+	}
+	return fmt.Sprintf("This destination is blocked since this sandbox tried to send more than %s to it, a destination it had not contacted before.", threshold)
 }
 
 // exemptFromUploadBlock: destinations the user unblocked, or the operator
@@ -853,7 +872,8 @@ func exemptFromUploadBlock(dec Decision) bool {
 // largeUploadReason says what crossed pr's large-upload threshold. The block
 // stops an upload before the chunk that would cross it, so under the block
 // (blocked) at most the threshold left: the sentence says what the sandbox
-// tried to send, for the cut and the refusals after it alike.
+// tried to send. The refusals after the cut say why the destination is
+// blocked instead (largeUploadBlockedReason).
 func (p *Proxy) largeUploadReason(pr Principal, blocked bool) string {
 	threshold := FormatThreshold(p.counter.thresholdFor(pr))
 	if blocked {
@@ -941,7 +961,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		// refuse it now, with a body and an event, instead of cutting it
 		// silently after the 200.
 		_ = upstream.Close()
-		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(pr, d, dec, scope), start)
+		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(pr, d, dec, scope, false), start)
 		return
 	}
 	t := newTunnel(pr, cred, d, http.MethodConnect, dec, start, flow)

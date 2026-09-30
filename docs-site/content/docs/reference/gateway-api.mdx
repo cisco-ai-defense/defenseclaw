@@ -1011,9 +1011,11 @@ its domain or at its address) with a `403` of `category: "large_upload"`
 whose `reason` names the threshold. The cut is an `egress.blocked` activity
 event instead of `egress.large_upload`: `category` is `large_upload`,
 `reason` is the proxy's sentence ("This sandbox tried to send more than 10
-MiB to a destination it had not contacted before.", the same for the later
-refusals; a report without the block says "More than 10 MiB was sent to a
-destination this sandbox had not contacted before."), `bytes_up` is what
+MiB to a destination it had not contacted before."; a later refusal, of a
+request that may send nothing, says "This destination is blocked since this
+sandbox tried to send more than 10 MiB to it, a destination it had not
+contacted before."; a report without the block says "More than 10 MiB was
+sent to a destination this sandbox had not contacted before."), `bytes_up` is what
 reached the destination (at most the threshold), `severity` is `HIGH`, and `unblockable` says whether
 `POST /api/v1/sandbox/egress/unblock` lifts the block for the host. Each later
 refusal is an ordinary `egress.blocked` event with that category. Hosts an

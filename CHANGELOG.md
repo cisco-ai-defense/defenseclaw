@@ -745,7 +745,10 @@ deleted.
   reaches running sandboxes, whose feed says so. The upload is stopped before
   the chunk that crosses the threshold, and later requests to that host, or to
   other new hosts under its domain or at its address, get a 403 of category
-  `large_upload`. The feed shows a ✗ with the threshold and the unblock
+  `large_upload`, whose reason says why the destination is blocked rather
+  than repeat the upload (`This destination is blocked since this sandbox
+  tried to send more than 10 MiB to it, …`; a `GET` sends nothing), as the
+  run's live notice of it does (`✗ DefenseClaw blocked HOST (…)`). The feed shows a ✗ with the threshold and the unblock
   command (`✗ files.example.net (large upload blocked: this sandbox tried to
   send more than 10 MiB to a destination it had not contacted before)`) instead of
   the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
