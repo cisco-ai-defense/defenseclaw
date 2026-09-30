@@ -207,7 +207,7 @@ struct SandboxesView: View {
                 ("Harness", row.harnessLabel),
                 ("Project", row.project.isEmpty ? "—" : "\(row.project) → \(row.workdir) (\(row.workdirMode))"),
                 ("Skip-permissions", row.yolo ? "on" : "off"),
-                ("Tool calls", "\(row.toolCalls) (\(row.toolBlocked) blocked)"),
+                ("Tool calls", "\(row.toolCalls) (\(row.toolBlocked) blocked" + (row.toolAsked > 0 ? ", \(row.toolAsked) asked)" : ")")),
                 ("Hook events", row.hookEventsLabel),
                 ("Last tool block", row.lastBlocked.isEmpty ? "—" : row.lastBlocked),
                 ("Undo", row.undoLabel),

@@ -371,6 +371,7 @@ class SandboxRow:
     pending_approvals: int = 0
     tool_calls: int = 0
     tool_blocked: int = 0
+    tool_asked: int = 0
     # The hook verdicts per hook event, as the harness names it, the most
     # frequent first; other_hook_events counts those past the daemon's cap.
     hook_events: tuple[tuple[str, int], ...] = ()
@@ -485,10 +486,9 @@ class SandboxRow:
 
 
 def _tool_calls_text(row: SandboxRow) -> str:
-    """The Tool calls column: "57", or "57 (1 blocked)"."""
-    if row.tool_blocked:
-        return f"{row.tool_calls} ({row.tool_blocked} blocked)"
-    return str(row.tool_calls)
+    """The Tool calls column: "57", "57 (1 blocked)" or "57 (1 blocked, 2 asked)"."""
+    counts = [f"{n} {what}" for n, what in ((row.tool_blocked, "blocked"), (row.tool_asked, "asked")) if n]
+    return f"{row.tool_calls} ({', '.join(counts)})" if counts else str(row.tool_calls)
 
 
 def _hook_events(raw: Any) -> tuple[tuple[str, int], ...]:
@@ -534,6 +534,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
         tool_blocked=_int(hooks.get("tool_blocked")),
+        tool_asked=_int(hooks.get("tool_asked")),
         hook_events=_hook_events(hooks.get("events")),
         other_hook_events=_int(hooks.get("other_events")),
         last_blocked=_text(hooks.get("last_blocked")),
@@ -597,6 +598,7 @@ class ActivityRow:
             "approval.requested": "?",
             "approval.resolved": "·",
             "tool.blocked": "⊘",
+            "tool.asked": "?",
             "hook.failed": "✗",
             "finding": "⚠",
             "sandbox.lifecycle": "·",
@@ -649,6 +651,9 @@ class ActivityRow:
             if reason.startswith("Blocked by "):
                 return f"{tool} blocked by {reason.removeprefix('Blocked by ')}"
             return f"{tool} blocked" + (f": {reason}" if reason else "")
+        if self.kind == "tool.asked":
+            reason = verdict_reason(self.reason)
+            return f"{self.tool or 'tool call'} asked for your confirmation" + (f": {reason}" if reason else "")
         if self.kind == "sandbox.lifecycle":
             return text or f"now {self.message or self.reason or 'changed'}"
         return text or self.reason or self.kind
@@ -1370,7 +1375,7 @@ class SandboxesPanelModel:
             return SandboxPanelAction("hint", hint=f"Unblocking is {ADMIN_MESSAGE}; {ADMIN_UNBLOCK_NEXT}.")
         if self.view == "activity":
             event = self.selected_event()
-            if event is not None and event.kind == "tool.blocked":
+            if event is not None and event.kind in {"tool.blocked", "tool.asked"}:
                 return SandboxPanelAction("hint", hint=TOOL_BLOCK_HINT)
             if event is None or not event.blocked_destination:
                 return SandboxPanelAction("hint", hint="Select a blocked destination (✗) to unblock it.")
@@ -1691,10 +1696,11 @@ class SandboxesPanelModel:
             category = reason_label(event.category)
             if category:
                 pairs.append(("Category", category))
-            reason = verdict_reason(event.reason) if event.kind == "tool.blocked" else reason_label(event.reason)
+            tool_verdict = event.kind in {"tool.blocked", "tool.asked"}
+            reason = verdict_reason(event.reason) if tool_verdict else reason_label(event.reason)
             if reason and reason != category:
                 pairs.append(("Reason", reason))
-            if event.kind == "tool.blocked":
+            if tool_verdict:
                 pairs.append(("Decided by", TOOL_BLOCK_DECIDED_BY))
             if event.blocked_destination:
                 if event.unblocked:
@@ -1749,7 +1755,7 @@ class SandboxesPanelModel:
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked"),
-            ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked)"),
+            ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked" + (f", {row.tool_asked} asked)" if row.tool_asked else ")")),
         ]
         if row.hook_events_text:
             pairs.append(("Hook events", row.hook_events_text))

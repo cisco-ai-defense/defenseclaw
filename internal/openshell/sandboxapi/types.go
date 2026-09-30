@@ -290,10 +290,12 @@ type HookCoverage struct {
 	LastHookAt time.Time `json:"last_hook_at,omitzero"`
 	LastOTLPAt time.Time `json:"last_otlp_at,omitzero"`
 	// HookRequests counts authenticated hook posts; ToolCalls the
-	// pre-tool decisions among them, ToolBlocked those denied.
+	// pre-tool decisions among them, ToolBlocked those denied, ToolAsked
+	// those DefenseClaw asked the user to confirm in the harness.
 	HookRequests int64 `json:"hook_requests"`
 	ToolCalls    int64 `json:"tool_calls"`
 	ToolBlocked  int64 `json:"tool_blocked"`
+	ToolAsked    int64 `json:"tool_asked,omitempty"`
 	// Events counts the hook verdicts per hook event, under the name the
 	// harness sends (PreToolUse, preToolUse, tool.execute.before, ...).
 	// Their sum can be below HookRequests: a post refused before a verdict
@@ -758,9 +760,12 @@ const (
 	ActivityApprovalRequested = "approval.requested"
 	ActivityApprovalResolved  = "approval.resolved"
 	ActivityToolBlocked       = "tool.blocked"
-	ActivityLifecycle         = "sandbox.lifecycle"
-	ActivityFinding           = "finding"
-	ActivityWorkspace         = "workspace"
+	// ActivityToolAsked is a tool call DefenseClaw asked the user to
+	// confirm; the harness asks in its own UI.
+	ActivityToolAsked = "tool.asked"
+	ActivityLifecycle = "sandbox.lifecycle"
+	ActivityFinding   = "finding"
+	ActivityWorkspace = "workspace"
 	// ActivityHookFailed reports hook posts DefenseClaw answered with an
 	// error status (HookCoverage.HookFailed).
 	ActivityHookFailed = "hook.failed"

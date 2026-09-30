@@ -220,6 +220,8 @@ struct SandboxModelTests {
         expect(block.summary == "webhook.site (exfil destination)", "block summary \(block.summary)")
         let tool = SandboxActivity(kind: "tool.blocked", tool: "Bash")
         expect(tool.summary == "Bash blocked", "tool summary")
+        let ask = SandboxActivity(kind: "tool.asked", reason: "C2-WEBHOOK-SITE", tool: "Bash")
+        expect(ask.glyph == "?" && ask.summary == "Bash asked for your confirmation: C2-WEBHOOK-SITE", "ask summary \(ask.summary)")
         let private22 = SandboxActivity(kind: "egress.blocked", host: "10.0.0.5", port: 22, reason: "private network")
         expect(private22.summary == "10.0.0.5:22 (private network)", "private summary")
         let lifecycle = SandboxDecoding.event(["seq": 1, "kind": "sandbox.lifecycle", "phase": "Stopped"])!

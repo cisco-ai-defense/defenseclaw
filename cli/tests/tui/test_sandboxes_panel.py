@@ -627,6 +627,34 @@ def test_tool_blocks_do_not_offer_unblock() -> None:
     assert "u unblock" in model.keys_line()
 
 
+def test_a_defenseclaw_ask_is_on_the_feed() -> None:
+    """A tool call DefenseClaw asked the user to confirm reads as an ask, and counts."""
+    model = _model()
+    model.add_events(
+        [
+            {
+                "seq": 53,
+                "kind": "tool.asked",
+                "sandbox": "myapp-claude-7f3a",
+                "tool": "Bash",
+                "reason": "DefenseClaw rule C2-WEBHOOK-SITE asks you to confirm this.",
+                "message": "? DefenseClaw asked you to confirm Bash: DefenseClaw rule C2-WEBHOOK-SITE asks you to confirm this.",
+            }
+        ]
+    )
+    model.view = "activity"
+    model.cursor = 0
+    event = model.selected_event()
+    assert event is not None and event.glyph == "?"
+    assert event.summary.startswith("Bash asked for your confirmation: DefenseClaw rule C2-WEBHOOK-SITE")
+    assert model.unblock_offered() is False
+    assert "defenseclaw policy" in dict(model.detail_pairs()[1])["Decided by"]
+    model.set_snapshot(STATUS, [{**RUNNING, "hooks": {"tool_calls": 3, "tool_blocked": 1, "tool_asked": 1}}], [])
+    model.view = "sandboxes"
+    model.cursor = 0
+    assert dict(model.detail_pairs()[1])["Tool calls"] == "3 (1 blocked, 1 asked)"
+
+
 @pytest.mark.asyncio
 async def test_the_tool_block_detail_offers_no_unblock_key(fetch, monkeypatch) -> None:
     app = DefenseClawTUI(config=_config())

@@ -98,8 +98,8 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 }
 
 // ObserveHookDecision counts every verdict under its hook event, counts
-// tool calls and blocked tool calls for the session summary, puts blocks on
-// the activity feed, and correlates each tool call's pre-tool and post-tool
+// tool calls and blocked and asked tool calls for the session summary, puts
+// blocks and asks on the activity feed, and correlates each tool call's pre-tool and post-tool
 // events to detect hook tamper.
 func (m *Manager) ObserveHookDecision(d HookDecision) {
 	hooks := toolCallHooksFor(d.Connector)
@@ -111,6 +111,7 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		call = hooks.ref(d)
 	}
 	blocked := isBlockAction(d.Action)
+	asked := !blocked && isConfirmAction(d.Action)
 	reason := displayReason(d.Reason)
 	event := hookLabel(d.Event, maxHookEventName)
 	m.mu.Lock()
@@ -137,6 +138,9 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 			b.hooks.toolBlocked++
 			b.hooks.lastBlocked = truncate(firstNonEmpty(reason, d.Tool), 200)
 		}
+		if asked {
+			b.hooks.toolAsked++
+		}
 	}
 	var alarm *tamperAlarm
 	if tamper != tamperNone {
@@ -154,7 +158,18 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
 	}
-	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !isConfirmAction(d.Action) {
+	if counted && asked {
+		msg := "? DefenseClaw asked you to confirm a tool call"
+		if d.Tool != "" {
+			msg = "? DefenseClaw asked you to confirm " + d.Tool
+		}
+		if reason != "" {
+			msg += ": " + truncate(reason, 200)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolAsked, Sandbox: d.SandboxName, Tool: d.Tool,
+			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
+	}
+	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !asked {
 		// A verdict that let the tool call run but flagged it (an alert,
 		// or a block the event could not enforce) is a finding of the
 		// session: the feed shows every one.
