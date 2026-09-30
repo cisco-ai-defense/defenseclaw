@@ -948,7 +948,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         connector: [codex, claudecode, amp]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -964,10 +964,13 @@ jobs:
         shell: bash
         run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"
 
+  # macOS runners bill at ~10x Linux, so the macOS hook hardening cells and the
+  # enterprise packaging smoke share one runner and one gateway build instead
+  # of four separate jobs.
   macos-enterprise-packaging:
-    name: macOS Enterprise Packaging
+    name: macOS Enterprise Hook Hardening + Packaging
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -980,7 +983,20 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
           go build -o "$RUNNER_TEMP/defenseclaw-acp" ./cmd/defenseclaw-acp
+      - name: Test root boundary and connector repair (codex)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" codex
+      - name: Test root boundary and connector repair (claudecode)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" claudecode
+      - name: Test root boundary and connector repair (amp)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" amp
       - name: Test managed package ownership enforcement
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           MACOS_ENTERPRISE_PACKAGING_SMOKE: "1"

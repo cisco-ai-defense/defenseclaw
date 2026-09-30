@@ -37,6 +37,9 @@ jobs:
     name: Detect macOS app changes
     runs-on: ubuntu-latest
     env:
+      # App, packaging, and release-identity inputs only. Go and Python source
+      # changes are covered on PRs by ci.yml (Go Build darwin/arm64, wheel
+      # contract); every push to main still runs the full macOS build.
       MACOS_PATHS: >-
         :(glob)macos/**
         scripts/build-macos-app-release.sh
@@ -55,11 +58,10 @@ jobs:
         release/upgrade-baselines.json
         Makefile
         pyproject.toml
-        :(glob)cli/**
+        cli/defenseclaw/__init__.py
+        uv.lock
         go.mod
         go.sum
-        :(glob)cmd/**
-        :(glob)internal/**
         :(glob)extensions/defenseclaw/**
         .github/workflows/macos-app.yml
         .github/workflows/release-candidate-smoke.yml

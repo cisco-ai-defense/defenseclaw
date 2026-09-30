@@ -364,11 +364,10 @@ def test_macos_ci_gates_release_wrappers_with_system_bash() -> None:
         "release/upgrade-baselines.json",
         "Makefile",
         "pyproject.toml",
-        ":(glob)cli/**",
+        "cli/defenseclaw/__init__.py",
+        "uv.lock",
         "go.mod",
         "go.sum",
-        ":(glob)cmd/**",
-        ":(glob)internal/**",
         ":(glob)extensions/defenseclaw/**",
         ".github/workflows/macos-app.yml",
         ".github/workflows/release-candidate-smoke.yml",
@@ -438,7 +437,7 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
     assert 'scripts/build-macos-app-release.sh "$MACOS_CI_RELEASE_VERSION" dist' in package_step
     assert "make macos-app-release" not in package_step
     assert {
-        ":(glob)cli/**",
+        "cli/defenseclaw/__init__.py",
         "release/source-install-identity.json",
         "release/upgrade-baselines.json",
         "scripts/generate-upgrade-manifest.py",

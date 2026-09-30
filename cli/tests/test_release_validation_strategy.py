@@ -149,7 +149,7 @@ def test_enterprise_hook_hardening_covers_amp_without_provider_secrets() -> None
     job = _workflow(CI_PATH)["jobs"]["enterprise-hook-hardening"]
 
     assert job["strategy"]["matrix"] == {
-        "os": ["ubuntu-latest", "macos-latest"],
+        "os": ["ubuntu-latest"],
         "connector": ["codex", "claudecode", "amp"],
     }
     rendered = _render(job)
@@ -157,6 +157,15 @@ def test_enterprise_hook_hardening_covers_amp_without_provider_secrets() -> None
     assert "${{ matrix.connector }}" in rendered
     for provider_secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AMP_API_KEY"):
         assert provider_secret not in rendered
+
+    # macOS runs the same connectors in the shared packaging job.
+    macos = _workflow(CI_PATH)["jobs"]["macos-enterprise-packaging"]
+    assert macos["runs-on"] == "macos-latest"
+    macos_rendered = _render(macos)
+    for connector in ("codex", "claudecode", "amp"):
+        assert f'test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" {connector}' in macos_rendered
+    for provider_secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AMP_API_KEY"):
+        assert provider_secret not in macos_rendered
 
     hardening = (ROOT / "scripts/test-enterprise-hook-hardening.sh").read_text(encoding="utf-8")
     assert "native_config_rel='.config/amp/plugins/defenseclaw.ts'" in hardening
