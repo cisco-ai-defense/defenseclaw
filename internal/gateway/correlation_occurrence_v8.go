@@ -1441,6 +1441,17 @@ func putHookIdentityRelationships(
 			audit.CorrelationCausedBy, "spawned-agent-tool-cause",
 		})
 	}
+	if lifecycle == connector.CorrelationLifecycleToolEnd && req.ChildAgentID != "" && req.ToolInvocationID != "" {
+		// The result of a spawning call names the agent it ran (Claude
+		// Code's Agent tool: tool_response.agentId): the subagent, whose
+		// own hooks carry that ID, was caused by this call. Both IDs are the
+		// connector's own, so the edge joins the nodes its hooks name.
+		facts = append(facts, hookIdentityRelationshipFact{
+			audit.CorrelationNodeAgent, req.ChildAgentID, connector.CorrelationTargetChildAgent,
+			audit.CorrelationNodeTool, req.ToolInvocationID, connector.CorrelationTargetTool,
+			audit.CorrelationCausedBy, "spawned-agent-tool-result",
+		})
+	}
 
 	profileVersion := string(spec.ProfileVersion)
 	if profileVersion == "" {
