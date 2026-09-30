@@ -113,7 +113,12 @@ def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     written = set(_list("ManagedBinaries")) | {f"{shim}.cmd" for shim in _list("ManagedShims")} | {hook_state.group(1)}
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
-    assert written == windows_uninstall_helper._ALLOWED_BINARIES
+    # Install-Uv adds uv and the digest record uninstall checks it against.
+    uv = re.search(r"foreach \(\$name in @\(([^)]*)\)\)", _text()[_text().index("function Install-Uv") :])
+    assert uv is not None
+    uv_written = set(re.findall(r'"([^"]+)"', uv.group(1))) | {cmd_uninstall._UV_RECORD}
+    assert uv_written == set(cmd_uninstall._UV_NAMES["win32"]) | {cmd_uninstall._UV_RECORD}
+    assert written | uv_written == windows_uninstall_helper._ALLOWED_BINARIES
 
 
 def test_cli_shim_is_the_one_uninstall_recognizes() -> None:

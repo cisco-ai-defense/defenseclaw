@@ -296,6 +296,20 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 }
 
+// Kiro has no skills or plugin folder of its own. It must not fall back to
+// OpenClaw's layout: the install watcher creates the folders it watches, and
+// a Kiro-only install left an empty ~/.openclaw tree behind.
+func TestKiroWatchDirsDoNotFallBackToOpenClaw(t *testing.T) {
+	cfg := &Config{}
+	cfg.Claw.HomeDir = filepath.Join(t.TempDir(), ".openclaw")
+	if dirs := cfg.SkillDirsForConnector("kiro"); len(dirs) != 0 {
+		t.Errorf("SkillDirsForConnector(kiro) = %v, want none", dirs)
+	}
+	if dirs := cfg.PluginDirsForConnector("kiro"); len(dirs) != 0 {
+		t.Errorf("PluginDirsForConnector(kiro) = %v, want none", dirs)
+	}
+}
+
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}

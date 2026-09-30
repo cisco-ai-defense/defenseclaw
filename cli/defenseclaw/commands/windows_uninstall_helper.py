@@ -24,6 +24,11 @@ _ALLOWED_BINARIES = {
     "skill-scanner.cmd",
     "mcp-scanner.cmd",
     "defenseclaw-hook-state.json",
+    # uv, when the installer put it there (see cmd_uninstall._UV_RECORD).
+    "defenseclaw-uv.sha256",
+    "uv.exe",
+    "uvx.exe",
+    "uvw.exe",
 }
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
@@ -184,6 +189,33 @@ def _retry(action, description: str) -> None:
     raise OSError(f"{description} failed after waiting for file release: {last_error}")
 
 
+def _remove_earlier_results(status_path: str) -> None:
+    """Remove the result files earlier uninstall runs left beside this one.
+
+    Each run's result stays for the operator to read; only the newest is
+    kept, so repeated uninstalls do not pile them up in TEMP.
+    """
+    folder, current = os.path.split(status_path)
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                name = entry.name
+                if (
+                    name == current
+                    or not name.startswith("defenseclaw-uninstall-result-")
+                    or not name.endswith(".json")
+                    or not entry.is_file(follow_symlinks=False)
+                    or _is_reparse(entry.path)
+                ):
+                    continue
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _write_json(path: str, payload: dict[str, object]) -> None:
     temporary = f"{path}.tmp"
     with open(temporary, "w", encoding="utf-8") as stream:
@@ -236,6 +268,7 @@ def main() -> int:
 
             _retry(remove_data, f"remove {data_dir}")
         _write_json(status_path, {"status": "succeeded"})
+        _remove_earlier_results(status_path)
         return 0
     except Exception as exc:  # noqa: BLE001 - helper result boundary.
         payload = {"status": "failed", "detail": str(exc)}

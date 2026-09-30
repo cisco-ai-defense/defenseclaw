@@ -36,6 +36,25 @@ func TestLoadPluginsRejectsRegularFileRoot(t *testing.T) {
 	}
 }
 
+// An empty plugin folder loads nothing and leaves no cache folder in
+// TempDir, which an uninstall would otherwise leave behind.
+func TestLoadPluginsEmptyRootCreatesNoCacheDir(t *testing.T) {
+	base := t.TempDir()
+	original := pluginCacheDirOverride
+	t.Cleanup(func() { pluginCacheDirOverride = original })
+	pluginCacheDirOverride = base
+	root := filepath.Join(t.TempDir(), "plugins")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if connectors, err := LoadPlugins(root); err != nil || len(connectors) != 0 {
+		t.Fatalf("LoadPlugins(empty) = %v, %v", connectors, err)
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Fatalf("LoadPlugins(empty) created %v in the cache base", entries)
+	}
+}
+
 // TestValidatePluginRootChain_HappyPath confirms a strict-perms tree
 // owned by the test runner is accepted.
 func TestValidatePluginRootChain_HappyPath(t *testing.T) {
