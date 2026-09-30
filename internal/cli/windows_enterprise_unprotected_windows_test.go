@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -194,5 +196,74 @@ func TestWindowsStandaloneEnrollmentCountsOnlyPendingTargets(t *testing.T) {
 	enrollment, err := readWindowsEnterpriseStandaloneEnrollmentAt(manifest, dir)
 	if err != nil || enrollment.Targets != 2 || enrollment.Pending != 1 {
 		t.Fatalf("enrollment = %+v, %v; want 2 targets, 1 pending", enrollment, err)
+	}
+}
+
+// While the gateway service runs but another process holds its API port,
+// status names each holder (a loopback and a wildcard listener, and one this
+// account cannot identify) instead of the bare not_ready fallback, and never
+// names the gateway's own listener.
+func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousListeners, previousPID, previousIdentity, previousFailure := windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure
+	t.Cleanup(func() {
+		windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure = previousListeners, previousPID, previousIdentity, previousFailure
+	})
+	windowsEnterpriseGatewayStartFailure = func() (string, string) { return "", "" }
+	loopback, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loopback.Close()
+	wildcard, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wildcard.Close()
+	// The real listener table rows of this test's two listeners stand in for
+	// holders of the API port, plus the gateway's own row and a holder whose
+	// process this account cannot open.
+	const gatewayPID, hiddenPID = 7, 4242
+	windowsEnterpriseAPIListeners = func(host string, _ int) ([]daemon.Listener, error) {
+		var rows []daemon.Listener
+		for _, listener := range []net.Listener{loopback, wildcard} {
+			found, err := daemon.Listeners(host, listener.Addr().(*net.TCPAddr).Port)
+			if err != nil {
+				return nil, err
+			}
+			rows = append(rows, found...)
+		}
+		return append(rows, daemon.Listener{Address: "127.0.0.1:18970", PID: gatewayPID}, daemon.Listener{Address: "0.0.0.0:18970", PID: hiddenPID}), nil
+	}
+	windowsEnterpriseServicePID = func(string) int { return gatewayPID }
+	windowsEnterpriseProcessIdentity = func(pid int) (string, string) {
+		if pid == hiddenPID {
+			return "", ""
+		}
+		return describeWindowsEnterpriseProcess(pid)
+	}
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(status, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Installed: true, GatewayService: "DefenseClawGateway", GatewayServiceState: "running",
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1})
+	if len(status.Errors) != 1 || status.Errors[0].Code != "api_port_held" {
+		t.Fatalf("errors = %+v, want only api_port_held", status.Errors)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := status.Errors[0].Message
+	for _, want := range []string{
+		"127.0.0.1:18970", "listening on 127.0.0.1:", "listening on 0.0.0.0:", filepath.Base(self),
+		"pid 4242 (a process this account cannot identify)", "Stop those processes", "takes the port back by itself",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("api_port_held message %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "pid 7 ") || len(status.APIPortHolders) != 3 || status.APIPortHolders[0].PID != os.Getpid() ||
+		status.APIPortHolders[0].Account == "" || status.APIPortHolders[2].Image != "" {
+		t.Fatalf("holders = %+v, message %q; want this process twice and the hidden holder, not the gateway", status.APIPortHolders, message)
 	}
 }

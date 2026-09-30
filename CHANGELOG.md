@@ -320,6 +320,42 @@ rest also reach per-user installs.
   the file or a directory above it changed. The Windows Cursor runtime probe
   does the same for PowerShell, and the Windows watchdog repair uses the
   verified gateway executable instead of the first one on `PATH`.
+- **A failed first Windows standalone install rolls back accounts with
+  per-user agents.** For an account whose `%USERPROFILE%\.defenseclaw` the
+  install created, rollback refused the whole plan when the account had an
+  Amp, Antigravity, Copilot, Devin, Hermes or OpenCode row, and left the
+  folder behind. Each of these connectors now has a bounded list of the
+  files its managed install writes there (runtime sidecars, hook scripts,
+  scoped tokens, runtime generations, the executable selection and its own
+  config backup records), and rollback removes exactly those; any other
+  file, such as the backups of displaced user hooks, still keeps the folder.
+  Stale OpenCode runtime generations are now also cleaned up (#927).
+- **Windows standalone status names the process holding the gateway API
+  port.** While another process listened on `127.0.0.1:18970` (or another
+  account's wildcard listener made Windows refuse the gateway's bind),
+  `enterprise windows status` and `verify` reported only `not_ready`. They
+  now report `api_port_held` with each holder's PID, image and account (or
+  that this account cannot identify it), list them in `api_port_holders`
+  in `--json`, and say that the gateway takes the port back by itself once
+  it is free, as on Linux and macOS (#929).
+- **Windows Setup `/verify` accepts an authentic unsigned build.** `/verify`
+  required a Cisco Authenticode signature even when the Setup's own manifest
+  records an unsigned release, so the documented check failed for every
+  unsigned Setup. It now checks the embedded payload against its manifest,
+  requires the signing state that manifest records, and for an unsigned
+  build prints its SHA-256 to compare with the release's Sigstore-verified
+  `checksums.txt`. It fails only for a changed payload, a stripped signature
+  or an unexpected one. The Windows install page says how to authenticate a
+  0.8.x Setup whose `/verify` still reports the missing signature (#919).
+- **The Windows guardian restores the managed OpenCode plugin right after a
+  change to its attributes.** OpenCode's runtime needs the write-attributes
+  right to load a plugin, and with it a standard account could make the
+  plugin unreadable (read-only or a reparse point), so every account's
+  OpenCode ran without DefenseClaw until the next pass, about a minute. The
+  guardian now watches the plugin's folder and runs the same heal within
+  about a second and logs a tamper line. After 12 restores in a minute it
+  slows to one restore every 5 seconds, so repeated changes cannot keep the
+  plugin unreadable until the next pass, which stays the backstop (#930).
 
 ### Added
 
@@ -352,6 +388,19 @@ rest also reach per-user installs.
   now refuses before changing anything and names the administrator's
   rotation command, instead of failing when it tried to stop the per-user
   gateway. Other computers, Secure Client ones included, are unchanged.
+- **Windows standalone lifecycle events go to a `DefenseClaw` event log
+  that only administrators can write.** Any account can write
+  Application-log entries under any source name, so entries under
+  `DefenseClaw Enterprise` could be forged. Events 100 to 150 now go to the
+  `DefenseClaw` log (source `DefenseClaw Lifecycle`), which only LocalSystem
+  and Administrators can write and the Application log's readers can read;
+  each run that writes an event registers it and a successful uninstall
+  unregisters it. The Application-log copies continue in this release as legacy: move
+  MDM detection rules and SIEM forwarding that query the Application log by
+  source to the `DefenseClaw` log before a later release drops them.
+  `enterprise windows events` now checks the new log, and `--application`
+  the legacy copies. The lifecycle log line's `event.logs` names the logs
+  that took each event (#928).
 - **Plugin teardown without a backup receipt.** Removing the OpenCode or Amp
   connector (or uninstalling) deletes DefenseClaw's plugin file when its
   backup receipt is missing, as long as the file still starts with the

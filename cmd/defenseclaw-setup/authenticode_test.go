@@ -4,6 +4,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
@@ -280,6 +281,61 @@ func TestVerifyPayloadManifestAcceptsSchemaTwoAuthenticodeAndYaraContract(t *tes
 	}
 	if err := verifyPayloadManifest(root, manifest); err != nil {
 		t.Fatalf("verify schema-two payload manifest: %v", err)
+	}
+
+	// Setup /verify checks the same payload inside the embedded archive and
+	// accepts an unsigned Setup whose manifest records unsigned: true,
+	// printing the digest to compare with the release checksums. A payload
+	// changed after the build fails.
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := func(tamper string) *zip.Reader {
+		var buffer bytes.Buffer
+		writer := zip.NewWriter(&buffer)
+		add := func(name string, data []byte) {
+			entry, err := writer.Create("payload/" + name)
+			if err == nil {
+				_, err = entry.Write(data)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		add("manifest.json", manifestJSON)
+		for name := range manifest.Files {
+			data, err := os.ReadFile(filepath.Join(payloadRoot, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == tamper {
+				data = append(data, '!')
+			}
+			add(name, data)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reader, err := zip.NewReader(bytes.NewReader(buffer.Bytes()), int64(buffer.Len()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reader
+	}
+	self := filepath.Join(t.TempDir(), setupArtifactName)
+	if err := os.WriteFile(self, pe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := verifySetupImage(self, archive(""))
+	if err != nil {
+		t.Fatalf("verify unsigned setup image: %v", err)
+	}
+	if !strings.Contains(report, "not Authenticode signed") || !strings.Contains(report, digestBytes(pe)) {
+		t.Fatalf("unsigned setup /verify report %q does not name its state and SHA-256", report)
+	}
+	if _, err := verifySetupImage(self, archive(manifest.Wheel)); err == nil || !strings.Contains(err.Error(), "payload hash mismatch") {
+		t.Fatalf("verify accepted a payload changed after the build: %v", err)
 	}
 }
 

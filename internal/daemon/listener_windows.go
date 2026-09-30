@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"unsafe"
 
@@ -63,15 +64,13 @@ type tcp6OwnerPIDRow struct {
 }
 
 func listenerOwnerPID(host string, port int) (int, error) {
-	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("%w: invalid port %d", ErrListenerInspectionUnavailable, port)
+	found, err := listeners(host, port)
+	if err != nil {
+		return 0, err
 	}
 	owners := make(map[int]struct{})
-	if err := collectTCP4Owners(port, host, owners); err != nil {
-		return 0, err
-	}
-	if err := collectTCP6Owners(port, host, owners); err != nil {
-		return 0, err
+	for _, listener := range found {
+		owners[listener.PID] = struct{}{}
 	}
 	if len(owners) == 0 {
 		return 0, ErrNoListener
@@ -83,6 +82,20 @@ func listenerOwnerPID(host string, port int) (int, error) {
 		return pid, nil
 	}
 	return 0, ErrNoListener
+}
+
+func listeners(host string, port int) ([]Listener, error) {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("%w: invalid port %d", ErrListenerInspectionUnavailable, port)
+	}
+	var found []Listener
+	if err := collectTCP4Owners(port, host, &found); err != nil {
+		return nil, err
+	}
+	if err := collectTCP6Owners(port, host, &found); err != nil {
+		return nil, err
+	}
+	return found, nil
 }
 
 func listenerAddressMatches(host string, actual net.IP) bool {
@@ -116,27 +129,27 @@ func listenerAddressMatches(host string, actual net.IP) bool {
 	return actual.IsUnspecified() || wanted.Equal(actual)
 }
 
-func collectTCP4Owners(port int, host string, owners map[int]struct{}) error {
+func collectTCP4Owners(port int, host string, found *[]Listener) error {
 	return walkExtendedTCPTable(windows.AF_INET, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(row unsafe.Pointer) {
 		r := (*tcp4OwnerPIDRow)(row)
 		if int(windows.Ntohs(uint16(r.LocalPort))) != port {
 			return
 		}
 		addrBytes := *(*[4]byte)(unsafe.Pointer(&r.LocalAddr))
-		if listenerAddressMatches(host, net.IP(addrBytes[:])) {
-			owners[int(r.PID)] = struct{}{}
+		if address := net.IP(addrBytes[:]); listenerAddressMatches(host, address) {
+			*found = append(*found, Listener{Address: net.JoinHostPort(address.String(), strconv.Itoa(port)), PID: int(r.PID)})
 		}
 	})
 }
 
-func collectTCP6Owners(port int, host string, owners map[int]struct{}) error {
+func collectTCP6Owners(port int, host string, found *[]Listener) error {
 	return walkExtendedTCPTable(windows.AF_INET6, unsafe.Sizeof(tcp6OwnerPIDRow{}), func(row unsafe.Pointer) {
 		r := (*tcp6OwnerPIDRow)(row)
 		if int(windows.Ntohs(uint16(r.LocalPort))) != port {
 			return
 		}
-		if listenerAddressMatches(host, net.IP(r.LocalAddr[:])) {
-			owners[int(r.PID)] = struct{}{}
+		if address := net.IP(r.LocalAddr[:]); listenerAddressMatches(host, address) {
+			*found = append(*found, Listener{Address: net.JoinHostPort(address.String(), strconv.Itoa(port)), PID: int(r.PID)})
 		}
 	})
 }

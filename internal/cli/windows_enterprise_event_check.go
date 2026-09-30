@@ -41,8 +41,8 @@ const (
 	windowsEvtQueryChannelPath      = 0x1
 	windowsEvtQueryForwardDirection = 0x100
 	windowsEvtRenderEventXML        = 1
-	// windowsEnterpriseEventReadLimit bounds one check; the Application log
-	// keeps far fewer DefenseClaw entries on a real host.
+	// windowsEnterpriseEventReadLimit bounds one check; a real host keeps far
+	// fewer DefenseClaw entries.
 	windowsEnterpriseEventReadLimit = 100000
 )
 
@@ -52,25 +52,28 @@ func init() {
 
 func newWindowsEnterpriseEventsCommand() *cobra.Command {
 	var (
-		jsonOutput bool
-		limit      int
+		jsonOutput  bool
+		application bool
+		limit       int
 	)
 	cmd := &cobra.Command{
 		Use:   "events",
-		Short: "Tell DefenseClaw's Application-log events apart from entries other accounts wrote",
-		Long: `Check every Application-log entry under the "DefenseClaw Enterprise" source
-against the lifecycle log (%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log),
-which only administrators and LocalSystem can write.
+		Short: "Check DefenseClaw's lifecycle events against the lifecycle log",
+		Long: `Check every entry of the DefenseClaw event log (source "DefenseClaw Lifecycle")
+against the lifecycle log (%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log).
+Only administrators and LocalSystem can write either. With --application,
+check the legacy copies in the Application log (source "DefenseClaw
+Enterprise") instead, which any account can write under any source name.
 
-Any account can write Application-log entries under any source name. An entry
-is DefenseClaw's only when it ends with "record <id>", the lifecycle log holds
-that record with the same event ID and the SHA-256 of the exact message, it
-was written within two minutes of that lifecycle line, and no earlier entry
-carried the same record. Entries older than the lifecycle log's first event
-record are shown as unverifiable.
+An entry is DefenseClaw's only when it ends with "record <id>", the lifecycle
+log holds that record with the same event ID and the SHA-256 of the exact
+message, it was written within two minutes of that lifecycle line, and no
+earlier entry carried the same record. Entries older than the lifecycle log's
+first event record are shown as unverifiable.
 
 Exits 1 when an entry was not written by DefenseClaw, or when the newest
-lifecycle record has no entry in the Application log. Any account can run it.`,
+lifecycle record written to the checked log has no entry there. Any account
+can run it.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -86,12 +89,16 @@ lifecycle record has no entry in the Application log. Any account can run it.`,
 			if err != nil {
 				return err
 			}
-			entries, err := readWindowsEnterpriseApplicationEvents()
-			if err != nil {
-				return fmt.Errorf("read the Application log: %w", err)
+			log, source := windowsEnterpriseEventLog, windowsEnterpriseEventLogSource
+			if application {
+				log, source = windowsEnterpriseApplicationLog, windowsEnterpriseEventSrc
 			}
-			report := checkWindowsEnterpriseEvents(entries, lines)
-			report.Source, report.LifecycleLog = windowsEnterpriseEventSrc, logPath
+			entries, err := readWindowsEnterpriseLogEvents(log, source)
+			if err != nil {
+				return fmt.Errorf("read the %s log: %w", log, err)
+			}
+			report := checkWindowsEnterpriseEvents(entries, lines, log)
+			report.Log, report.Source, report.LifecycleLog = log, source, logPath
 			if jsonOutput {
 				encoder := json.NewEncoder(cmd.OutOrStdout())
 				encoder.SetIndent("", "  ")
@@ -105,31 +112,32 @@ lifecycle record has no entry in the Application log. Any account can run it.`,
 				}
 			}
 			if !report.OK {
-				return fmt.Errorf("%d DefenseClaw Enterprise Application-log problem(s); see the report above", len(report.Problems))
+				return fmt.Errorf("%d DefenseClaw %s-log event problem(s); see the report above", len(report.Problems), log)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON (every entry)")
+	cmd.Flags().BoolVar(&application, "application", false, "check the legacy Application-log copies instead of the DefenseClaw log")
 	cmd.Flags().IntVar(&limit, "max", 20, "show only the newest N entries (0 shows all); every entry is checked")
 	return cmd
 }
 
-// readWindowsEnterpriseApplicationEvents reads every Application-log entry
-// under the DefenseClaw Enterprise source, oldest first.
-func readWindowsEnterpriseApplicationEvents() ([]windowsApplicationLogEntry, error) {
-	channel, err := windows.UTF16PtrFromString("Application")
+// readWindowsEnterpriseLogEvents reads every entry of one event log under
+// one source, oldest first.
+func readWindowsEnterpriseLogEvents(log, source string) ([]windowsApplicationLogEntry, error) {
+	channel, err := windows.UTF16PtrFromString(log)
 	if err != nil {
 		return nil, err
 	}
-	query, err := windows.UTF16PtrFromString(fmt.Sprintf("*[System[Provider[@Name='%s']]]", windowsEnterpriseEventSrc))
+	query, err := windows.UTF16PtrFromString(fmt.Sprintf("*[System[Provider[@Name='%s']]]", source))
 	if err != nil {
 		return nil, err
 	}
 	handle, _, callErr := procWindowsEvtQuery.Call(0, uintptr(unsafe.Pointer(channel)), uintptr(unsafe.Pointer(query)),
 		uintptr(windowsEvtQueryChannelPath|windowsEvtQueryForwardDirection))
 	if handle == 0 {
-		return nil, fmt.Errorf("query the Application log: %w", callErr)
+		return nil, fmt.Errorf("query the %s log: %w", log, callErr)
 	}
 	defer procWindowsEvtClose.Call(handle)
 
@@ -143,7 +151,7 @@ func readWindowsEnterpriseApplicationEvents() ([]windowsApplicationLogEntry, err
 			if errors.Is(callErr, windows.ERROR_NO_MORE_ITEMS) {
 				return entries, nil
 			}
-			return nil, fmt.Errorf("read the Application log: %w", callErr)
+			return nil, fmt.Errorf("read the %s log: %w", log, callErr)
 		}
 		var renderErr error
 		for index := 0; index < int(returned); index++ {
@@ -172,13 +180,13 @@ func renderWindowsEventXML(event windows.Handle) (string, error) {
 	procWindowsEvtRender.Call(0, uintptr(event), windowsEvtRenderEventXML, 0, 0,
 		uintptr(unsafe.Pointer(&used)), uintptr(unsafe.Pointer(&properties)))
 	if used == 0 {
-		return "", errors.New("render an Application-log entry: empty event")
+		return "", errors.New("render an event-log entry: empty event")
 	}
 	buffer := make([]uint16, used/2+1)
 	ok, _, callErr := procWindowsEvtRender.Call(0, uintptr(event), windowsEvtRenderEventXML, uintptr(len(buffer)*2),
 		uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&used)), uintptr(unsafe.Pointer(&properties)))
 	if ok == 0 {
-		return "", fmt.Errorf("render an Application-log entry: %w", callErr)
+		return "", fmt.Errorf("render an event-log entry: %w", callErr)
 	}
 	return windows.UTF16ToString(buffer), nil
 }
@@ -197,8 +205,8 @@ const (
 
 var windowsEnterpriseEventRecordSuffix = regexp.MustCompile(`\r\nrecord ([0-9a-f]{32})$`)
 
-// windowsApplicationLogEntry is one Application-log entry under the
-// DefenseClaw Enterprise source, as the event log returns it.
+// windowsApplicationLogEntry is one DefenseClaw event-log or Application-log
+// entry, as the event log returns it.
 type windowsApplicationLogEntry struct {
 	RecordNumber uint64
 	EventID      uint32
@@ -224,14 +232,15 @@ type windowsEventCheckEntry struct {
 }
 
 type windowsEventCheckNewest struct {
-	Record           string    `json:"record"`
-	EventID          uint32    `json:"event_id"`
-	Action           string    `json:"action,omitempty"`
-	Time             time.Time `json:"time"`
-	InApplicationLog bool      `json:"in_application_log"`
+	Record  string    `json:"record"`
+	EventID uint32    `json:"event_id"`
+	Action  string    `json:"action,omitempty"`
+	Time    time.Time `json:"time"`
+	InLog   bool      `json:"in_log"`
 }
 
 type windowsEventCheckReport struct {
+	Log                string                   `json:"log"`
 	Source             string                   `json:"source"`
 	LifecycleLog       string                   `json:"lifecycle_log"`
 	RecordsSince       *time.Time               `json:"records_since,omitempty"`
@@ -253,14 +262,16 @@ func windowsEnterpriseEventDigest(message string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// checkWindowsEnterpriseEvents tells the DefenseClaw Enterprise entries
-// DefenseClaw wrote apart from entries another account wrote under the same
-// source. An entry is DefenseClaw's only when its record is on a lifecycle
+// checkWindowsEnterpriseEvents tells the entries of log DefenseClaw wrote
+// apart from entries another account wrote under the same source. An entry is DefenseClaw's only when its record is on a lifecycle
 // log line with the same event ID and the SHA-256 of the exact message, it
 // was written within two minutes of that line, and no earlier entry carried
 // the same record. Entries older than the first recorded line are reported
-// as before_records: they predate event records or the retained log.
-func checkWindowsEnterpriseEvents(entries []windowsApplicationLogEntry, lines []windowsLifecycleEventLine) windowsEventCheckReport {
+// as before_records: they predate event records or the retained log. Only a
+// line whose event went to log counts as the newest record log must hold;
+// a line without logs came from a release that wrote only the Application
+// log.
+func checkWindowsEnterpriseEvents(entries []windowsApplicationLogEntry, lines []windowsLifecycleEventLine, log string) windowsEventCheckReport {
 	report := windowsEventCheckReport{Events: []windowsEventCheckEntry{}}
 	ordered := append([]windowsApplicationLogEntry(nil), entries...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].RecordNumber < ordered[j].RecordNumber })
@@ -279,7 +290,11 @@ func checkWindowsEnterpriseEvents(entries []windowsApplicationLogEntry, lines []
 		if since.IsZero() || line.Time.Before(since) {
 			since = line.Time
 		}
-		if newest == nil || !line.Time.Before(newest.Time) {
+		written := len(line.Event.Logs) == 0 && log == windowsEnterpriseApplicationLog
+		for _, name := range line.Event.Logs {
+			written = written || strings.EqualFold(name, log)
+		}
+		if written && (newest == nil || !line.Time.Before(newest.Time)) {
 			newest = &lines[index]
 		}
 	}
@@ -341,13 +356,13 @@ func checkWindowsEnterpriseEvents(entries []windowsApplicationLogEntry, lines []
 		report.Newest = &windowsEventCheckNewest{Record: newest.Event.Record, EventID: newest.Event.ID, Action: newest.Action, Time: newest.Time}
 		for _, event := range report.Events {
 			if event.Verdict == windowsEventFromDefenseClaw && event.Record == newest.Event.Record {
-				report.Newest.InApplicationLog = true
+				report.Newest.InLog = true
 				break
 			}
 		}
-		if !report.Newest.InApplicationLog {
-			report.Problems = append(report.Problems, fmt.Sprintf("the Application log holds no DefenseClaw entry for the newest lifecycle record %s (%s, event %d at %s)",
-				newest.Event.Record, newest.Action, newest.Event.ID, newest.Time.UTC().Format(time.RFC3339)))
+		if !report.Newest.InLog {
+			report.Problems = append(report.Problems, fmt.Sprintf("the %s log holds no DefenseClaw entry for the newest lifecycle record %s (%s, event %d at %s)",
+				log, newest.Event.Record, newest.Action, newest.Event.ID, newest.Time.UTC().Format(time.RFC3339)))
 		}
 	}
 	report.OK = len(report.Problems) == 0
@@ -530,7 +545,7 @@ func unescapeWindowsEventXMLText(text string) (string, error) {
 }
 
 func writeWindowsEventCheckReport(out io.Writer, report windowsEventCheckReport, limit int) {
-	fmt.Fprintf(out, "Application-log entries under %q, checked against %s\n", report.Source, report.LifecycleLog)
+	fmt.Fprintf(out, "%s-log entries under %q, checked against %s\n", report.Log, report.Source, report.LifecycleLog)
 	shown := report.Events
 	if limit > 0 && len(shown) > limit {
 		fmt.Fprintf(out, "  (the newest %d of %d entries; --max 0 shows all)\n", limit, len(shown))
@@ -557,9 +572,9 @@ func writeWindowsEventCheckReport(out io.Writer, report windowsEventCheckReport,
 	if report.Newest == nil {
 		fmt.Fprintln(out, "Newest lifecycle record: none yet; the lifecycle log has no event records")
 	} else {
-		state := "in the Application log"
-		if !report.Newest.InApplicationLog {
-			state = "MISSING from the Application log"
+		state := "in the " + report.Log + " log"
+		if !report.Newest.InLog {
+			state = "MISSING from the " + report.Log + " log"
 		}
 		fmt.Fprintf(out, "Newest lifecycle record: %s (%s, event %d at %s): %s\n", report.Newest.Record, report.Newest.Action,
 			report.Newest.EventID, report.Newest.Time.UTC().Format(time.RFC3339), state)

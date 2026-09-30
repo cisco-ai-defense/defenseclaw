@@ -332,10 +332,20 @@ func run(opts options) (int, error) {
 		if err != nil {
 			return 1, err
 		}
-		if err := verifySetupExecutablePolicyAt(self, false); err != nil {
-			return 1, fmt.Errorf("verify setup Authenticode policy: %w", err)
+		archive, err := embeddedPayload.Open("payload/installer-payload.zip")
+		if err != nil {
+			return 1, fmt.Errorf("verify setup payload: %w", err)
 		}
-		fmt.Println("DefenseClaw Setup Authenticode verification succeeded")
+		defer archive.Close()
+		reader, err := zipReaderAtFile(archive)
+		if err != nil {
+			return 1, fmt.Errorf("verify setup payload: %w", err)
+		}
+		report, err := verifySetupImage(self, reader)
+		if err != nil {
+			return 1, err
+		}
+		fmt.Println(report)
 		return 0, nil
 	}
 	// INS-32: this read-only token/session/desktop gate must remain the first
@@ -2463,7 +2473,99 @@ func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
 	return zip.NewReader(readerAt, info.Size())
 }
 
+// verifySetupImage is /verify: it checks the embedded payload against its
+// manifest, then the Setup's Authenticode against the signing state that
+// manifest records. A release built without a code-signing certificate
+// records unsigned: true and must carry no signature; a signed release must
+// carry a valid Cisco RFC3161 signature. Either way a payload that no longer
+// matches its manifest, a signature stripped from a signed build or one
+// added to an unsigned build fails. /verify cannot authenticate an unsigned
+// Setup by itself, so it says so and prints the SHA-256 to compare with the
+// release's Sigstore-verified checksums.
+func verifySetupImage(self string, payload *zip.Reader) (string, error) {
+	manifest, err := verifyEmbeddedPayloadArchive(payload)
+	if err != nil {
+		return "", fmt.Errorf("verify setup payload: %w", err)
+	}
+	if err := verifySetupExecutablePolicyAt(self, manifest.Unsigned); err != nil {
+		return "", fmt.Errorf("verify setup Authenticode policy: %w", err)
+	}
+	if !manifest.Unsigned {
+		return "DefenseClaw Setup Authenticode verification succeeded", nil
+	}
+	digest, err := fileSHA256(self)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"DefenseClaw Setup %s is not Authenticode signed; its embedded payload matches its manifest. "+
+			"An unsigned Setup is authenticated only by its SHA-256 %s matching the %s entry of the release "+
+			"checksums.txt verified with its Sigstore signature.",
+		manifest.Version, digest, setupArtifactName,
+	), nil
+}
+
+// verifyEmbeddedPayloadArchive reads the payload manifest from the embedded
+// archive and checks every file it pins, without extracting anything.
+func verifyEmbeddedPayloadArchive(reader *zip.Reader) (payloadManifest, error) {
+	if len(reader.File) > maxZipFiles {
+		return payloadManifest{}, fmt.Errorf("zip payload contains too many entries: %d", len(reader.File))
+	}
+	entries := make(map[string]*zip.File, len(reader.File))
+	for _, file := range reader.File {
+		entries[strings.ReplaceAll(file.Name, `\`, "/")] = file
+	}
+	read := func(rel string) (io.ReadCloser, error) {
+		file := entries["payload/"+filepath.ToSlash(rel)]
+		if file == nil || file.FileInfo().IsDir() {
+			return nil, fmt.Errorf("payload has no file %s", rel)
+		}
+		if file.UncompressedSize64 > uint64(maxZipExpandedBytes) {
+			return nil, fmt.Errorf("payload file %s exceeds the expanded size limit", rel)
+		}
+		return file.Open()
+	}
+	body, err := read("manifest.json")
+	if err != nil {
+		return payloadManifest{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(body, 64<<20))
+	_ = body.Close()
+	if err != nil {
+		return payloadManifest{}, err
+	}
+	var manifest payloadManifest
+	if err := decodeJSONStrict(data, &manifest); err != nil {
+		return payloadManifest{}, fmt.Errorf("parse payload manifest: %w", err)
+	}
+	return manifest, verifyPayloadManifestWith(manifest, func(rel string) (string, error) {
+		file, err := read(rel)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+		hash := sha256.New()
+		// The zip reader checks each entry's CRC-32 when it reaches EOF.
+		if _, err := io.Copy(hash, io.LimitReader(file, maxZipExpandedBytes)); err != nil {
+			return "", fmt.Errorf("read payload file %s: %w", rel, err)
+		}
+		return hex.EncodeToString(hash.Sum(nil)), nil
+	})
+}
+
 func verifyPayloadManifest(root string, manifest payloadManifest) error {
+	return verifyPayloadManifestWith(manifest, func(rel string) (string, error) {
+		full, err := safeJoin(filepath.Join(root, "payload"), rel)
+		if err != nil {
+			return "", err
+		}
+		return fileSHA256(full)
+	})
+}
+
+// verifyPayloadManifestWith checks the manifest and the SHA-256 digest of
+// every file it pins; digest returns one file's digest by its payload path.
+func verifyPayloadManifestWith(manifest payloadManifest, digest func(rel string) (string, error)) error {
 	if manifest.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported payload schema version %d", manifest.SchemaVersion)
 	}
@@ -2494,11 +2596,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		if _, err := hex.DecodeString(expected); err != nil {
 			return fmt.Errorf("payload manifest has an invalid SHA-256 for %s", rel)
 		}
-		full, err := safeJoin(filepath.Join(root, "payload"), rel)
-		if err != nil {
-			return err
-		}
-		sum, err := fileSHA256(full)
+		sum, err := digest(rel)
 		if err != nil {
 			return err
 		}

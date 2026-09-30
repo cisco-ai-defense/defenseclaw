@@ -83,6 +83,16 @@ type Enrollment struct {
 	Exempt  int `json:"exempt"`
 }
 
+// PortHolder is a process, other than the DefenseClaw gateway, listening
+// where the gateway API must bind. Image and Account are empty when the
+// reporting account cannot identify the process.
+type PortHolder struct {
+	Address string `json:"address"`
+	PID     int    `json:"pid"`
+	Image   string `json:"image,omitempty"`
+	Account string `json:"account,omitempty"`
+}
+
 // Message is a stable machine code plus a human sentence.
 type Message struct {
 	Code    string `json:"code"`
@@ -115,9 +125,10 @@ type Result struct {
 	// changed on a deployment that was already installed (files rewritten,
 	// services started, per-account hooks rewritten). Empty means there was
 	// nothing to repair.
-	Changes  []string `json:"changes,omitempty"`
-	LogPath  string   `json:"log_path,omitempty"`
-	ExitCode int      `json:"exit_code"`
+	Changes        []string     `json:"changes,omitempty"`
+	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
+	LogPath        string       `json:"log_path,omitempty"`
+	ExitCode       int          `json:"exit_code"`
 }
 
 // New returns a result with the schema version and empty collections set,

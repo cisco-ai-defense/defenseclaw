@@ -393,7 +393,8 @@ it restarts.
    scheduled `ensure` installs DefenseClaw again.
 2. **Keep what you need.** A purge deletes the config, the data directory
    (with the audit database), the guardian state, the lifecycle state and
-   DefenseClaw's log directory. Copy them first. The systemd journal, the
+   DefenseClaw's log directory. Copy them first. On Windows, uninstall also
+   unregisters the `DefenseClaw` event log. The systemd journal, the
    Windows Application event log and `%WINDIR%\Logs\DefenseClaw` (where the
    uninstall run itself is logged) are not removed. See [Logs and events](/docs/enterprise/operations#logs-and-events).
 3. **Uninstall with purge**, as shown in [Uninstall](#uninstall).

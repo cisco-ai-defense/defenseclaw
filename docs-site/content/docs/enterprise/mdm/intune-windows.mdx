@@ -287,7 +287,7 @@ PowerShell, as a platform script for example. Both are idempotent.
 | `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\HealthScripts.log` | Remediations runs |
 | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result, one JSON line per run |
 | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` | The generic wrapper's steps, when you use it |
-| Application event log, source "DefenseClaw Enterprise" | Installed, upgraded, repaired, failed, busy and refused events |
+| `DefenseClaw` event log, source "DefenseClaw Lifecycle" (legacy copy: Application log, source "DefenseClaw Enterprise") | Installed, upgraded, repaired, failed, busy and refused events |
 
 To see the current state on a device, run from an elevated PowerShell:
 
