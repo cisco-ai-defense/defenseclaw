@@ -4329,7 +4329,9 @@ def _installed_kiro_ide_version() -> tuple[str, tuple[int, int, int]] | None:
             product = json.loads(data) if len(data) <= _KIRO_IDE_PRODUCT_MAX_BYTES else None
         except (OSError, ValueError):
             continue
-        if not isinstance(product, dict) or product.get("nameShort") != "Kiro" or product.get("applicationName") != "kiro":
+        if not isinstance(product, dict):
+            continue
+        if product.get("nameShort") != "Kiro" or product.get("applicationName") != "kiro":
             continue
         version = str(product.get("version") or "").strip()
         match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", version)
