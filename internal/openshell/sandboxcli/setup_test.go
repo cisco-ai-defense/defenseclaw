@@ -440,16 +440,100 @@ func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
 	if inst.ran {
 		t.Fatal("the installer ran")
 	}
-	// On Linux the systemd unit is what the package installs: setup offers it.
+	// On Linux what is missing is the openshell-gateway user unit, not the
+	// formula (TestSetupRefusesAnOpenShellWithoutTheUserUnit). Setup offered
+	// the install that installs nothing there, too.
 	ta = setupApp(t, "n\n", "", false)
 	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
 		c := r.Get(openshell.CheckIDGatewayService)
 		c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is not installed"
 		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService}
 	})
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "on Linux OpenShell must come with the openshell-gateway user service NVIDIA's installer sets up")
+	has(t, ta.output(), "✗ Gateway service: the openshell-gateway user service is not installed\n")
+	lacks(t, ta.output(), "Homebrew", "Install OpenShell", "is needed", "✓ OpenShell")
+}
+
+// TestSetupRefusesAnOpenShellWithoutTheUserUnit: on Linux with OpenShell
+// 0.1.1 from the release binaries in ~/.local/bin and no openshell-gateway
+// user unit, the doctor named that OpenShell, but setup showed "✓ OpenShell
+// 0.1.1", asked "Install OpenShell 0.1.1 with NVIDIA's installer?", whose
+// yes installed nothing (DefenseClaw's install step finds the supported CLI
+// and does not run NVIDIA's installer), and on no, or -n, said "OpenShell
+// 0.1.1 is needed" although it is installed. A gateway started by hand got
+// setup past that, to fail planning the gateway change ("the
+// openshell-gateway user service is not installed"). Setup refuses that
+// OpenShell up front, as it does on a Mac, before --install-openshell, and
+// names the way on; without a CLI the install still sets the unit up.
+func TestSetupRefusesAnOpenShellWithoutTheUserUnit(t *testing.T) {
+	const cli = "/home/dev/.local/bin/openshell"
+	withoutUnit := func(edit func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+		return hostReport(func(r *openshell.DoctorReport) {
+			c := r.Get(openshell.CheckIDGatewayService)
+			c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is not installed"
+			r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService}
+			r.CLIPath = cli
+			if edit != nil {
+				edit(r)
+			}
+		})
+	}
+	down := func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayVersion)
+		c.Status, c.Detail = openshell.StatusFail, "the gateway is not answering: connection refused"
+	}
+	for _, tc := range []struct {
+		name  string
+		input string
+		o     SetupOptions
+		edit  func(*openshell.DoctorReport)
+	}{
+		{"gateway down", "", SetupOptions{}, down},
+		{"gateway down, --install-openshell", "", SetupOptions{InstallOpenShell: true}, down},
+		{"gateway down, -n", "", SetupOptions{NonInteractive: true}, down},
+		// Mounts and telemetry are asked about in step 4, whose plan goes
+		// through the unit.
+		{"gateway run by hand", "y\ny\n", SetupOptions{}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, tc.input, "", false)
+			ta.HostDoctor = withoutUnit(tc.edit)
+			inst := &fakeInstaller{}
+			ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+				inst.consent = consent
+				return inst
+			}
+			err := ta.Setup(bg, tc.o)
+			var silent *Silent
+			if !errors.As(err, &silent) || !strings.Contains(err.Error(), "on Linux OpenShell must come with the openshell-gateway user service NVIDIA's installer sets up") {
+				t.Fatalf("Setup = %v, want the refusal, already printed", err)
+			}
+			has(t, ta.output(), "  ✗ OpenShell 0.1.1 has no openshell-gateway user service\n",
+				"✗ Gateway service: the openshell-gateway user service is not installed\n",
+				"→ on Linux DefenseClaw starts and restarts the OpenShell gateway through that user service, which NVIDIA's installer sets up. "+
+					"The OpenShell 0.1.1 at "+cli+" was installed another way, without it, and DefenseClaw's install step would find it and skip NVIDIA's installer, "+
+					"installing nothing. First stop its gateway if one runs and remove that OpenShell; then run `defenseclaw sandbox setup --install-openshell`, "+
+					"which runs NVIDIA's installer and sets up the service\n")
+			lacks(t, ta.output(), "Install OpenShell", "is needed", "already installed", "✓ OpenShell", "plan the gateway change", "Homebrew")
+			if inst.ran {
+				t.Fatal("the installer ran")
+			}
+			if len(ta.gateway.planned) != 0 || ta.gateway.applied != 0 {
+				t.Fatalf("setup planned %+v and applied %d gateway changes", ta.gateway.planned, ta.gateway.applied)
+			}
+		})
+	}
+
+	// Without a CLI NVIDIA's installer runs, and sets the unit up.
+	ta := setupApp(t, "n\n", "", false)
+	ta.HostDoctor = withoutUnit(func(r *openshell.DoctorReport) {
+		r.CLIVersion, r.CLIPath = "", ""
+		c := r.Get(openshell.CheckIDCLI)
+		c.Status, c.Detail = openshell.StatusFail, "openshell is not on PATH"
+	})
 	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-	has(t, ta.output(), "✓ OpenShell 0.1.1\n", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
-	lacks(t, ta.output(), "not from Homebrew")
+	has(t, ta.output(), "✗ OpenShell not installed", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+	lacks(t, ta.output(), "user service")
 }
 
 func TestSetupStopsOnHostFailure(t *testing.T) {

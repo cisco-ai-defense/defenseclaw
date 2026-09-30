@@ -178,13 +178,15 @@ func (r *DoctorReport) OpenShellOutsideFormula() bool {
 const OpenShellOutsideFormulaFix = "on macOS DefenseClaw starts and restarts the gateway through the " + GatewayFormula +
 	" Homebrew formula's service: stop that gateway and remove the OpenShell installed another way, then install the formula"
 
-// openShellOutsideUnit reports a Linux host whose supported OpenShell CLI
+// OpenShellOutsideUnit reports a Linux host whose supported OpenShell CLI
 // came without the openshell-gateway user unit DefenseClaw starts and
 // restarts the gateway through: it was installed another way than NVIDIA's
-// installer (from the release binaries, say). installOpenShellCommand
-// alone would not bring the unit: DefenseClaw's install step finds a
-// supported CLI and does not run NVIDIA's installer.
-func (r *DoctorReport) openShellOutsideUnit() bool {
+// installer (from the release binaries, say). Setup refuses it, as it
+// refuses OpenShellOutsideFormula on a Mac: installOpenShellCommand alone
+// would not bring the unit (DefenseClaw's install step finds a supported
+// CLI and does not run NVIDIA's installer), and the gateway changes setup
+// makes go through the unit.
+func (r *DoctorReport) OpenShellOutsideUnit() bool {
 	cli := r.Get(CheckIDCLI)
 	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "systemd" && !r.Service.Installed
 }
@@ -922,7 +924,7 @@ func (r *doctorRun) gatewayRecoveryFix() *Fix {
 	switch {
 	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
 		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
-	case r.serviceMissing() && r.report.openShellOutsideUnit():
+	case r.serviceMissing() && r.report.OpenShellOutsideUnit():
 		return r.outsideUnitFix()
 	case r.serviceMissing():
 		return &Fix{Summary: "install OpenShell, whose " + r.service.Unit + " service runs the gateway", Command: installOpenShellCommand}
@@ -941,9 +943,11 @@ func (r *doctorRun) gatewayRecoveryFix() *Fix {
 func (r *doctorRun) serviceMissing() bool { return r.service != nil && !r.service.Installed }
 
 // outsideUnitFix is the way on for an OpenShell installed without the
-// openshell-gateway user unit (openShellOutsideUnit), which the doctor
-// cannot take: run its gateway yourself, or remove that OpenShell so that
+// openshell-gateway user unit (OpenShellOutsideUnit), which the doctor
+// cannot take: stop its gateway and remove that OpenShell, so that
 // installOpenShellCommand runs NVIDIA's installer, which sets the unit up.
+// Running that gateway by hand is no way on: setup refuses the OpenShell,
+// and the gateway changes it makes go through the unit.
 func (r *doctorRun) outsideUnitFix() *Fix {
 	found := strings.TrimSpace("OpenShell " + r.report.CLIVersion)
 	if r.report.CLIPath != "" {
@@ -951,7 +955,7 @@ func (r *doctorRun) outsideUnitFix() *Fix {
 	}
 	return &Fix{Summary: "on Linux DefenseClaw starts and restarts the gateway through the " + GatewayService + " user service, which NVIDIA's installer sets up. " +
 		"The " + found + " was installed another way, without that service, and DefenseClaw's install step finds it and installs nothing: " +
-		"start and restart its gateway yourself, or remove that OpenShell, then install OpenShell with NVIDIA's installer",
+		"stop its gateway if one runs and remove that OpenShell, then install OpenShell with NVIDIA's installer",
 		Command: installOpenShellCommand}
 }
 
@@ -961,7 +965,7 @@ func (r *doctorRun) outsideUnitFix() *Fix {
 // that OpenShell and install nothing. It runs after checkCLI, which the
 // judgement needs.
 func (r *doctorRun) cliWithoutUnit() {
-	if c := r.report.Get(CheckIDGatewayService); c != nil && r.report.openShellOutsideUnit() {
+	if c := r.report.Get(CheckIDGatewayService); c != nil && r.report.OpenShellOutsideUnit() {
 		c.Fix = r.outsideUnitFix()
 	}
 }

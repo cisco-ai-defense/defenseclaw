@@ -183,24 +183,35 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 
 	// 3. OpenShell. On macOS DefenseClaw starts and restarts the gateway
-	// through the Homebrew formula's service. An OpenShell installed
-	// another way is found, but its gateway is not one DefenseClaw can
-	// restart, and DefenseClaw's install step (openshell.Installer.Install),
-	// finding its supported CLI, would not run NVIDIA's installer, which
-	// would install the formula.
+	// through the Homebrew formula's service, on Linux through the
+	// openshell-gateway user unit. An OpenShell installed another way is
+	// found, but its gateway is not one DefenseClaw can restart, and
+	// DefenseClaw's install step (openshell.Installer.Install), finding its
+	// supported CLI, would not run NVIDIA's installer, which would install
+	// the formula or set up the unit. Setup names where that OpenShell is,
+	// as the doctor's CLI row does, and says what comes before the install:
+	// run now, `--install-openshell` comes back here.
+	found := strings.TrimSpace("OpenShell " + rep.CLIVersion)
+	if rep.CLIPath != "" {
+		found += " at " + rep.CLIPath
+	}
 	if a.GOOS == "darwin" && rep.OpenShellOutsideFormula() {
-		// It names that OpenShell as the doctor's CLI row does, and says
-		// what comes before the install: run now, `--install-openshell`
-		// comes back here.
-		found := strings.TrimSpace("OpenShell " + rep.CLIVersion)
-		if rep.CLIPath != "" {
-			found += " at " + rep.CLIPath
-		}
 		a.bad("Gateway service: the " + openshell.GatewayFormula + " Homebrew formula is not installed")
 		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The " + found +
 			" was installed another way, so DefenseClaw cannot restart its gateway, and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. " +
 			"First stop that gateway and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, which installs the formula")
 		return &Silent{Err: fmt.Errorf("on macOS OpenShell must come from the %s Homebrew formula", openshell.GatewayFormula)}
+	}
+	// On Linux a gateway run by hand gets no further either: the gateway
+	// changes of step 4 go through the unit's environment
+	// (GatewayConfigurator.Plan), and its restarts through systemd.
+	if a.GOOS == "linux" && rep.OpenShellOutsideUnit() {
+		a.bad("Gateway service: the " + openshell.GatewayService + " user service is not installed")
+		a.note("→ on Linux DefenseClaw starts and restarts the OpenShell gateway through that user service, which NVIDIA's installer sets up. The " + found +
+			" was installed another way, without it, and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. " +
+			"First stop its gateway if one runs and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, " +
+			"which runs NVIDIA's installer and sets up the service")
+		return &Silent{Err: fmt.Errorf("on Linux OpenShell must come with the %s user service NVIDIA's installer sets up", openshell.GatewayService)}
 	}
 	if cli := rep.Get(openshell.CheckIDCLI); cli == nil || cli.Status == openshell.StatusFail ||
 		failed(rep, openshell.CheckIDGatewayVersion) || failed(rep, openshell.CheckIDGatewayService) {
@@ -818,6 +829,12 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 					label += " " + rep.CLIVersion
 				}
 				label += " is not from Homebrew's nvidia/openshell formula"
+			case a.GOOS == "linux" && rep.OpenShellOutsideUnit():
+				label, mark = "OpenShell", a.mark(false)
+				if rep.CLIVersion != "" {
+					label += " " + rep.CLIVersion
+				}
+				label += " has no " + openshell.GatewayService + " user service"
 			case withoutDriver:
 				label = "OpenShell and its MicroVM driver not installed"
 			case c.Status == openshell.StatusFail:

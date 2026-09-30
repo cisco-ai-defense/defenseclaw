@@ -372,6 +372,54 @@ def test_an_openshell_outside_the_homebrew_formula_is_refused_as_setup_refuses_i
     assert sandbox_machine_check(formula).openshell_refused is False
 
 
+@pytest.mark.parametrize(
+    ("gateway_status", "gateway_detail"),
+    [
+        ("fail", "the gateway is not answering: connection refused"),
+        ("pass", "0.1.1 healthy at https://127.0.0.1:17670"),
+    ],
+)
+def test_an_openshell_without_the_linux_user_unit_is_refused_as_setup_refuses_it(
+    gateway_status: str, gateway_detail: str
+) -> None:
+    # A supported CLI from the release binaries, no openshell-gateway unit:
+    # the wizard preset "Install OpenShell" to yes, whose
+    # `setup --install-openshell` installed nothing. Setup refuses it up
+    # front (sandboxcli/setup.go), with its gateway down or run by hand.
+    cli = "/home/dev/.local/bin/openshell"
+    report = {
+        **READY,
+        "cli_path": cli,
+        "checks": [
+            *READY["checks"][:2],
+            {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": f"0.1.1 at {cli}"},
+            {"id": "gateway-service", "status": "fail", "detail": "openshell-gateway is not installed"},
+            {"id": "gateway-version", "status": gateway_status, "detail": gateway_detail},
+        ],
+        "service": {"manager": "systemd", "unit": "openshell-gateway", "installed": False},
+    }
+    check = sandbox_machine_check(report)
+    assert check.openshell_refused and not check.openshell_needed
+    assert "✗ OpenShell 0.1.1 has no openshell-gateway user service" in check.summary.split("\n")
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.apply_sandbox_machine_check(check)
+    install = _row(model, "Install OpenShell")
+    assert install.value == "no", install
+    assert install.hint == (
+        f"OpenShell 0.1.1 at {cli} was installed another way, without the openshell-gateway user service "
+        "DefenseClaw runs the gateway through on Linux (NVIDIA's installer sets it up), so DefenseClaw's install step "
+        "would find it and install nothing: stop its gateway if one runs and remove that OpenShell, "
+        "then install OpenShell here, which runs NVIDIA's installer and sets up the service."
+    )
+    assert "--install-openshell" not in model.wizard_command_preview()
+    # The unit installed and stopped is started through it; without a CLI
+    # NVIDIA's installer runs and sets the unit up.
+    unit = {**report, "service": {"manager": "systemd", "unit": "openshell-gateway", "installed": True}}
+    assert sandbox_machine_check(unit).openshell_refused is False
+    assert sandbox_machine_check({**NO_OPENSHELL, "service": report["service"]}).openshell_needed
+
+
 def test_a_warning_gateway_service_is_shown() -> None:
     service = {"id": "gateway-service", "status": "warn", "detail": "runs but does not start at login"}
     check = sandbox_machine_check({**READY, "checks": [*READY["checks"][:3], service]})

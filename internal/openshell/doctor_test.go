@@ -760,9 +760,10 @@ func TestDoctorChecks(t *testing.T) {
 // defenseclaw sandbox setup --install-openshell". That command found the
 // supported CLI and installed nothing ("✓ OpenShell 0.1.1 is already
 // installed"), then stopped on the same fix. The Gateway and Gateway
-// service checks name that OpenShell and the ways on, and `--fix` runs
-// nothing; an OpenShell the install would upgrade, and a host with the
-// unit, keep their fixes.
+// service checks name that OpenShell and the way on (remove it, then the
+// install; not "start and restart its gateway yourself", after which setup
+// refuses it too), and `--fix` runs nothing; an OpenShell the install
+// would upgrade, and a host with the unit, keep their fixes.
 func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 	const (
 		notFound = "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
@@ -795,7 +796,7 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 	outside := func(cli string) string {
 		return "on Linux DefenseClaw starts and restarts the gateway through the openshell-gateway user service, which NVIDIA's installer sets up. " +
 			"The OpenShell 0.1.1 at " + cli + " was installed another way, without that service, and DefenseClaw's install step finds it and installs nothing: " +
-			"start and restart its gateway yourself, or remove that OpenShell, then install OpenShell with NVIDIA's installer"
+			"stop its gateway if one runs and remove that OpenShell, then install OpenShell with NVIDIA's installer"
 	}
 	wantFix := func(t *testing.T, c *openshell.Check, summary string) {
 		t.Helper()

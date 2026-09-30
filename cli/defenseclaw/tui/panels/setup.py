@@ -4732,8 +4732,9 @@ class SandboxMachineCheck:
     openshell_needed: bool = False
     openshell_detail: str = ""
     error: str = ""
-    # On macOS, an OpenShell installed another way than the Homebrew
-    # formula, which setup refuses (it would install nothing over it).
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux), which setup
+    # refuses (its install step would install nothing over it).
     openshell_refused: bool = False
 
 
@@ -4749,9 +4750,10 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     or a Mac whose docker driver has no Landlock (which setup switches to
     MicroVMs), a failed ``vm-driver`` check counts too: setup installs
     e2fsprogs or has the driver signed with the same consent. A MicroVM
-    mounts no host folders, so the bind-mount check is left out there. On
-    macOS an OpenShell installed another way than the Homebrew formula is
-    refused, as setup refuses it (it would install nothing over it), and a
+    mounts no host folders, so the bind-mount check is left out there. An
+    OpenShell installed another way than the Homebrew formula (macOS) or
+    without the openshell-gateway user unit (Linux) is refused, as setup
+    refuses it (its install step would install nothing over it), and a
     gateway service that warns is shown with its detail.
     """
 
@@ -4794,16 +4796,31 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     cli = status("openshell-cli")
     service = report.get("service")
     service = service if isinstance(service, Mapping) else {}
-    # On macOS setup refuses an OpenShell installed another way than the
-    # Homebrew formula whose service runs the gateway
-    # (DoctorReport.OpenShellOutsideFormula): it would install nothing.
-    refused = cli not in {"", "fail"} and service.get("manager") == "brew" and not service.get("installed")
+    # Setup refuses an OpenShell installed another way than the Homebrew
+    # formula (macOS) or without the openshell-gateway user unit (Linux)
+    # whose service runs the gateway (DoctorReport.OpenShellOutsideFormula,
+    # .OpenShellOutsideUnit): its install step would find it and install
+    # nothing.
+    without_service = cli not in {"", "fail"} and not service.get("installed")
+    outside_unit = without_service and service.get("manager") == "systemd"
+    refused = outside_unit or (without_service and service.get("manager") == "brew")
     needed = not refused and (
         cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
     )
     version = str(report.get("cli_version") or "").strip()
     name = f"OpenShell {version}" if version else "OpenShell"
-    if refused:
+    if outside_unit:
+        # As setup says it (sandboxcli/setup.go), naming where it is.
+        where = str(report.get("cli_path") or "").strip()
+        openshell = (
+            f"{name}{f' at {where}' if where else ''} was installed another way, without the openshell-gateway "
+            "user service DefenseClaw runs the gateway through on Linux (NVIDIA's installer sets it up), "
+            "so DefenseClaw's install step would find it and install nothing: stop its gateway if one runs "
+            "and remove that OpenShell, then install OpenShell here, which runs NVIDIA's installer "
+            "and sets up the service"
+        )
+        parts.append(f"✗ {name} has no openshell-gateway user service")
+    elif refused:
         openshell = (
             f"{name} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
             "whose service DefenseClaw runs the gateway through: stop its gateway and remove it, then install OpenShell here"
