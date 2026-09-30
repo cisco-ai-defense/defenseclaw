@@ -909,8 +909,38 @@ proxy credential carries the value of its resolved pack
 counter's own value applies only to a principal without one. Uploads to first-seen hosts are also
 totalled per registrable domain and per resolved address (per /64 for IPv6),
 so rotating subdomains or domains that point at one server does not reset the
-count. `CounterOptions.BlockLargeUploads` can also cut the tunnel; no
-configuration key selects it yet.
+count.
+
+The report can also be a block. With `egress.block_large_uploads: true` in the
+pack, `openshell.egress.block_large_uploads: true` in `config.yaml` (it turns
+the block on for every sandbox; `false`, the default, follows the pack), or
+`openshell.admin.block_large_uploads: true`, the proxy cuts the tunnel or
+request whose next chunk would take a total past the threshold, before that
+chunk reaches the destination, and refuses the sandbox's later tunnels to that
+host, domain or address with a 403 of category `large_upload`. The block is
+per sandbox too (`Principal.BlockLargeUploads`, re-registered with the
+credential); `CounterOptions.BlockLargeUploads` would set it for every
+principal, and the daemon leaves it off. Destinations an unblock, an allow
+entry or the administrator names are exempt: their uploads are only
+reported, so `defenseclaw sandbox unblock HOST --sandbox NAME` lifts a block
+(unless `openshell.admin.allow_unblock` is `false`). The administrator's key
+also keeps the report on: a pack whose `large_upload_mb` is `0` gets the
+default 25 MiB, and `sandbox policy explain` shows it as the administrator's.
+
+A cut shows in the activity feed as an `egress.blocked` event of category
+`large_upload` whose reason names the threshold ("✗ files.example.net (large
+upload blocked: more than 10 MiB was sent to a destination this sandbox had
+not contacted before) → unblock: …"), and in telemetry as a HIGH
+`sandbox.large_upload` finding and a blocked egress record
+(`SANDBOX_EGRESS_LARGE_UPLOAD`). Each later refusal is an ordinary blocked
+egress event with the same category. Without the block, a large upload stays
+a MEDIUM finding and a ⚠ `egress.large_upload` feed event.
+
+The counts live in the daemon, so each destination is first-seen to a
+sandbox until the sandbox first contacts it in this daemon's lifetime. With
+the block on, a first push or package publish of more than the threshold to a
+host that no allow entry or unblock names is cut too; add the host to
+`openshell.egress.allow`, or unblock it for the sandbox.
 
 ### Limits
 
@@ -2533,8 +2563,9 @@ posture becomes a floor) and `required_pack_digest`, `min_profile`,
 `allow_yolo`, `allow_mount`, `allow_host_ports`, `allow_unblock`,
 `allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked;
 a host name also covers its subdomains),
-`egress_allow_only` (forces an allowlist profile), `require_copy_for`,
-`max_resources`, and `locked` (keys run inputs may not loosen). In a
+`egress_allow_only` (forces an allowlist profile), `block_large_uploads`
+(turns the large-upload block on for every sandbox and keeps its report on),
+`require_copy_for`, `max_resources`, and `locked` (keys run inputs may not loosen). In a
 `managed_enterprise` install the administrator owns `config.yaml`, so the
 constraints are authoritative and a custom required pack must be an
 administrator-owned file. Elsewhere they are enforced but advisory, because

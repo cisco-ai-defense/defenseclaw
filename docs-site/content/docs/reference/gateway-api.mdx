@@ -738,8 +738,8 @@ Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 
 | `kind` | Meaning |
 | --- | --- |
-| `egress.allowed`, `egress.blocked` | A destination the egress proxy or OpenShell allowed or blocked. |
-| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before. |
+| `egress.allowed`, `egress.blocked` | A destination the egress proxy or OpenShell allowed or blocked. An upload the large-upload block cut, and later refused uploads to that host, are `egress.blocked` with `category: "large_upload"`. |
+| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before, which only the report saw (the block was off, or the host is exempt). |
 | `egress.unblocked` | An unblock was applied. |
 | `approval.requested`, `approval.resolved` | An ask was raised or answered. |
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
@@ -966,6 +966,22 @@ It follows configuration changes with the rest of the sandbox's egress
 policy. The report is an
 `egress.large_upload` activity event and a finding; the upload itself is not
 cut off.
+
+With the large-upload block on (the pack's `egress.block_large_uploads`,
+`openshell.egress.block_large_uploads`, or
+`openshell.admin.block_large_uploads`), the proxy also cuts the tunnel or
+request before the chunk that crosses the threshold, and answers the
+sandbox's later requests to that host (or to other first-seen hosts under
+its domain or at its address) with a `403` of `category: "large_upload"`
+whose `reason` names the threshold. The cut is an `egress.blocked` activity
+event instead of `egress.large_upload`: `category` is `large_upload`,
+`reason` is the proxy's sentence ("More than 10 MiB was sent to a
+destination this sandbox had not contacted before."), `bytes_up` is what
+reached the destination, `severity` is `HIGH`, and `unblockable` says whether
+`POST /api/v1/sandbox/egress/unblock` lifts the block for the host. Each later
+refusal is an ordinary `egress.blocked` event with that category. Hosts an
+unblock, an allow entry or `openshell.admin.egress_allow_only` names are
+exempt: their uploads are only reported.
 
 **Default per-sandbox limits.** 256 open connections, 256 concurrent tunnels
 or requests, and 50 new tunnels per second (burst 200), with 1024 connections

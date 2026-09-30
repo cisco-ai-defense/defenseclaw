@@ -1237,6 +1237,7 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
     assert llm.kind == "choice"
     assert llm.options == ("auto", "none", "anthropic", "claude-oauth", "openai", "bedrock", "gemini")
     assert _field_by_key(sections, "openshell.keep_headless").kind == "bool"
+    assert _field_by_key(sections, "openshell.egress.block_large_uploads").kind == "bool"
     assert _field_by_key(sections, "openshell.workdir.undo_ignored.enabled").kind == "bool"
     assert _field_by_key(sections, "openshell.workdir.undo_ignored.max_mb").kind == "int"
     assert _field_by_key(sections, "openshell.workdir.undo_ignored.dirs").kind == "string"

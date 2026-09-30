@@ -296,6 +296,11 @@ type OpenShellEgressConfig struct {
 	// LargeUploadMB overrides the pack's first-seen-host upload alert
 	// threshold; 0 inherits.
 	LargeUploadMB int `mapstructure:"large_upload_mb" yaml:"large_upload_mb,omitempty"`
+	// BlockLargeUploads also cuts the upload that crosses that threshold
+	// and refuses later requests to the destination, for every sandbox;
+	// false follows the pack's egress.block_large_uploads. An unblock of
+	// the destination, or an allow entry naming it, lifts the block.
+	BlockLargeUploads bool `mapstructure:"block_large_uploads" yaml:"block_large_uploads,omitempty"`
 	// Feed is "" (the pack's feeds), "builtin", or "none".
 	Feed string `mapstructure:"feed" yaml:"feed,omitempty"`
 	// Unblocked are the destinations the user unblocked or approved for
@@ -385,6 +390,12 @@ type OpenShellAdminConfig struct {
 	// host globs is reachable. Its entries match exactly: a host name
 	// admits that host only.
 	EgressAllowOnly []string `mapstructure:"egress_allow_only" yaml:"egress_allow_only,omitempty"`
+	// BlockLargeUploads turns the large-upload block on for every sandbox
+	// whatever its pack and the user's keys say
+	// (openshell.egress.block_large_uploads), and keeps the report it acts
+	// on from being turned off: a pack's large_upload_mb of 0 takes the
+	// default threshold. False imposes nothing.
+	BlockLargeUploads bool `mapstructure:"block_large_uploads" yaml:"block_large_uploads,omitempty"`
 	// RequireCopyFor lists project path globs that must use copy mode.
 	RequireCopyFor []string                 `mapstructure:"require_copy_for" yaml:"require_copy_for,omitempty"`
 	MaxResources   OpenShellResourcesConfig `mapstructure:"max_resources"    yaml:"max_resources,omitempty"`
@@ -400,7 +411,7 @@ func (a OpenShellAdminConfig) IsZero() bool {
 	return a.RequiredPack == "" && a.RequiredPackDigest == "" && a.MinProfile == "" && a.AllowYolo == nil &&
 		a.AllowMount == nil && a.AllowHostPorts == nil && a.AllowUnblock == nil &&
 		a.AllowLearnMode == nil && len(a.AllowedHarnesses) == 0 &&
-		len(a.EgressBlock) == 0 && len(a.EgressAllowOnly) == 0 &&
+		len(a.EgressBlock) == 0 && len(a.EgressAllowOnly) == 0 && !a.BlockLargeUploads &&
 		len(a.RequireCopyFor) == 0 && a.MaxResources == (OpenShellResourcesConfig{}) &&
 		len(a.Locked) == 0
 }

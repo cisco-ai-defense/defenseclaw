@@ -346,8 +346,12 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		{Seq: 5, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "HIGH", Reason: reasonHookTamper,
 			Message: "⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)"},
 		{Seq: 6, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "INFO", Reason: "note", Message: "nothing to see"},
+		{Seq: 7, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "files.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
+			Reason: "More than 10 MiB was sent to a destination this sandbox had not contacted before.", Unblockable: true},
 	}
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
+	upload := "✗ DefenseClaw blocked a large upload to files.example.net (more than 10 MiB was sent to a destination this sandbox had not " +
+		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
 	ta.term.during = func() {
 		waitFor(t, "the tamper notice", func() bool { return strings.Contains(stderr.String(), "hook tamper") })
 	}
@@ -356,7 +360,7 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") {
 		t.Fatalf("live output = %q", live)
 	}
-	has(t, ta.output(), block, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
+	has(t, ta.output(), block, upload, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
 	if out := ta.output(); strings.Index(out, "Session ended") > strings.Index(out, block) {
 		t.Errorf("the notices come before the summary line:\n%s", out)
 	}

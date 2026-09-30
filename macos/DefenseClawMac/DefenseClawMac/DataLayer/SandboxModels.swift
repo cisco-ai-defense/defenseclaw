@@ -241,7 +241,7 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
             return host.isEmpty ? text : SandboxFormat.hostPort(host, port)
         case "egress.blocked":
             guard !host.isEmpty else { return text.isEmpty ? "a destination was blocked" : text }
-            let why = category.isEmpty ? reason : category
+            let why = category == "large_upload" ? Self.largeUploadBlockedText(reason) : (category.isEmpty ? reason : category)
             return SandboxFormat.hostPort(host, port) + (why.isEmpty ? "" : " (\(why))")
         case "approval.requested":
             // The daemon's message is a whole sentence ("the sandbox asks to
@@ -252,6 +252,16 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
         default:
             return text.isEmpty ? (reason.isEmpty ? kind : reason) : text
         }
+    }
+
+    /// sandboxapi.LargeUploadBlockedText: the words for a block of the
+    /// large-upload block (egress.block_large_uploads), from the proxy's
+    /// sentence, which names the threshold.
+    static func largeUploadBlockedText(_ reason: String) -> String {
+        var clause = reason.trimmingCharacters(in: .whitespaces)
+        if clause.hasSuffix(".") { clause.removeLast() }
+        guard let first = clause.first else { return "large upload blocked" }
+        return "large upload blocked: " + first.lowercased() + clause.dropFirst()
     }
 }
 
@@ -693,6 +703,10 @@ enum SandboxAdminLocks {
             if let b = admin[key] as? Bool { return !b }
             return (admin[key] as? String)?.lowercased() == "false"
         }
+        func isTrue(_ key: String) -> Bool {
+            if let b = admin[key] as? Bool { return b }
+            return (admin[key] as? String)?.lowercased() == "true"
+        }
         if let required = admin["required_pack"] as? String, !required.isEmpty {
             lock(["openshell.pack", "openshell.pack_dir"], "your organization requires the \(required) pack")
         }
@@ -702,6 +716,9 @@ enum SandboxAdminLocks {
         if isFalse("allow_unblock") {
             lock(["openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"],
                  "unblocking and allow entries are not allowed")
+        }
+        if isTrue("block_large_uploads") {
+            lock(["openshell.egress.block_large_uploads"], "your organization blocks large uploads to first-seen hosts")
         }
         for entry in (admin["locked"] as? [String]) ?? [] {
             if let targets = lockedConfigKeys[entry] {

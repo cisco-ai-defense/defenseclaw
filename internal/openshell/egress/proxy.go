@@ -851,15 +851,17 @@ func exemptFromUploadBlock(dec Decision) bool {
 }
 
 func (p *Proxy) largeUploadReason(pr Principal) string {
-	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", formatBytes(p.counter.thresholdFor(pr)))
+	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", FormatThreshold(p.counter.thresholdFor(pr)))
 }
 
 func (p *Proxy) largeUploadScopeReason(pr Principal, scope string) string {
 	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
-		formatBytes(p.counter.thresholdFor(pr)), scope)
+		FormatThreshold(p.counter.thresholdFor(pr)), scope)
 }
 
-func formatBytes(n int64) string {
+// FormatThreshold is a large-upload threshold as refusals and events name
+// it: "25 MiB", or "1500 bytes" when it is not a whole number of MiB.
+func FormatThreshold(n int64) string {
 	const mib = 1 << 20
 	if n >= mib && n%mib == 0 {
 		return strconv.FormatInt(n/mib, 10) + " MiB"
@@ -1220,11 +1222,16 @@ func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	if v.scope != "" {
 		e.Reason = p.largeUploadScopeReason(t.principal, v.scope)
 	}
-	e.BytesUp = v.total
+	e.BytesUp, e.Threshold = v.total, p.counter.thresholdFor(t.principal)
 	if d := t.flow.dest.Load(); d != nil {
 		e.BytesDown = d.down.Load()
 	}
 	e.FirstSeen, e.Terminated = true, v.cut
+	if v.cut {
+		// As for the refusals that follow (largeUploadRefusal): an unblock
+		// of the destination lifts the block.
+		e.Unblockable = t.policy().d.UnblocksAllowed()
+	}
 	e.Duration = time.Since(t.started)
 	p.emit(e)
 }

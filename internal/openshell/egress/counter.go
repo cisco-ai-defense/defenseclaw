@@ -54,6 +54,8 @@ type CounterOptions struct {
 	// threshold and refuses further uploads to that destination (or every
 	// first-seen destination under that domain or at that address) for the
 	// binding, unless the decision came from an unblock or operator allow.
+	// It applies to every principal; Principal.BlockLargeUploads turns it
+	// on for one.
 	BlockLargeUploads bool
 	// KnownHost reports destinations that are not first-seen for a
 	// principal, for example hosts contacted in earlier sessions or trusted
@@ -251,6 +253,13 @@ func (c *Counter) thresholdFor(p Principal) int64 {
 	return c.threshold
 }
 
+// blocksFor reports whether the large-upload block applies to p's
+// traffic: the counter's (CounterOptions.BlockLargeUploads) or its own
+// (Principal.BlockLargeUploads). It still needs a threshold (thresholdFor).
+func (c *Counter) blocksFor(p Principal) bool {
+	return c.block || p.BlockLargeUploads
+}
+
 // contact returns p's record for host, creating it at the first contact,
 // and reports whether it was created.
 func (c *Counter) contact(p Principal, host string) (*destination, bool) {
@@ -370,7 +379,7 @@ func (c *Counter) evictRefusedLocked() {
 // is refused once its flow opens (flow.uploadRefused), and a forwarded
 // request's first upload chunk is cut.
 func (c *Counter) uploadBlocked(p Principal, host string) bool {
-	if !c.block || c.thresholdFor(p) <= 0 {
+	if !c.blocksFor(p) || c.thresholdFor(p) <= 0 {
 		return false
 	}
 	c.mu.Lock()
@@ -507,7 +516,7 @@ func (f *flow) openAt(remote netip.Addr) bool {
 // host and its domain (uploadBlocked); only an open flow knows its address.
 func (f *flow) uploadRefused(exempt bool) (scope string, refused bool) {
 	c, d := f.counter, f.dest.Load()
-	if d == nil || exempt || !c.block || c.thresholdFor(f.principal) <= 0 || !d.novel {
+	if d == nil || exempt || !c.blocksFor(f.principal) || c.thresholdFor(f.principal) <= 0 || !d.novel {
 		return "", false
 	}
 	if d.flagged.Load() {
@@ -562,7 +571,7 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 		c.reserve.Lock()
 		defer c.reserve.Unlock()
 	}
-	if armed && c.block && !exempt {
+	if armed && c.blocksFor(f.principal) && !exempt {
 		over := d.flagged.Load() || d.up.Load()+n > threshold
 		for _, a := range aggs {
 			over = over || a.flagged.Load() || a.up.Load()+n > threshold

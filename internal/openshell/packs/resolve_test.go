@@ -195,6 +195,66 @@ func TestResolveLayering(t *testing.T) {
 	wantPosture(t, eff, "harness=codex cpu=1 memory=2Gi")
 }
 
+// The large-upload block is off unless the pack, the user's
+// openshell.egress.block_large_uploads or the administrator turns it on.
+// The user's key cannot turn a pack's block off, and under the
+// administrator's block the report it acts on stays on: a pack that turns it
+// off gets the default threshold, and the user who picked that pack is told.
+func TestResolveLargeUploadBlock(t *testing.T) {
+	root := t.TempDir()
+	writePack(t, root, "blocking", strings.Replace(customPack("blocking"), "network: {mode: open}",
+		"network: {mode: open}\negress: {large_upload_mb: 5, block_large_uploads: true}", 1))
+	writePack(t, root, "silent", strings.Replace(customPack("silent"), "network: {mode: open}",
+		"network: {mode: open}\negress: {large_upload_mb: 0}", 1))
+	for _, tc := range []struct {
+		name          string
+		edit          func(*config.OpenShellConfig)
+		block         bool
+		source        Source
+		origin        string
+		largeUploadMB int
+		violation     *Violation
+	}{
+		{"default", nil, false, SourcePack, "pack open", 25, nil},
+		{"user", func(o *config.OpenShellConfig) { o.Egress.BlockLargeUploads = true }, true, SourceUser,
+			"openshell.egress.block_large_uploads", 25, nil},
+		{"pack", func(o *config.OpenShellConfig) { o.Pack = "blocking" }, true, SourcePack, "pack blocking", 5, nil},
+		{"user over a blocking pack", func(o *config.OpenShellConfig) {
+			o.Pack, o.Egress.BlockLargeUploads = "blocking", true
+		}, true, SourcePack, "pack blocking", 5, nil},
+		{"admin", func(o *config.OpenShellConfig) { o.Admin.BlockLargeUploads = true }, true, SourceAdmin,
+			"openshell.admin.block_large_uploads", 25, nil},
+		{"admin over a pack without the report", func(o *config.OpenShellConfig) {
+			o.Pack, o.Admin.BlockLargeUploads = "silent", true
+		}, true, SourceAdmin, "openshell.admin.block_large_uploads", 25, &Violation{
+			Key: "egress.large_upload_mb", Source: SourcePack, Attempted: "0", Enforced: "25",
+			Constraint: "openshell.admin.block_large_uploads", Detail: "the large-upload report stays on",
+		}},
+		{"pack without the report", func(o *config.OpenShellConfig) { o.Pack = "silent" }, false, SourcePack, "pack silent", 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eff, violations := mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
+				o.PackDir = root
+				if tc.edit != nil {
+					tc.edit(o)
+				}
+			}), Flags{})
+			if tc.violation == nil {
+				wantViolations(t, violations)
+			} else {
+				wantViolations(t, violations, *tc.violation)
+			}
+			if eff.Egress.BlockLargeUploads != tc.block || eff.Egress.LargeUploadMB != tc.largeUploadMB {
+				t.Fatalf("egress = %+v, want block %v at %d MiB", eff.Egress, tc.block, tc.largeUploadMB)
+			}
+			wantSetting(t, eff, "egress.block_large_uploads", strconv.FormatBool(tc.block), tc.source, tc.origin)
+			if tc.violation != nil {
+				wantSetting(t, eff, "egress.large_upload_mb", "25", SourceAdmin, "openshell.admin.block_large_uploads")
+			}
+		})
+	}
+}
+
 func TestResolveApprovalsFollowProfile(t *testing.T) {
 	root := t.TempDir()
 	writePack(t, root, "auto", strings.Replace(customPack("auto"), "mode: triage", "mode: auto", 1))
@@ -739,6 +799,9 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 	alerting.Name, alerting.Hooks.OnTamper = "alerting", OnTamperAlert
 	stopping := *open
 	stopping.Name, stopping.Hooks.OnTamper = "stopping", OnTamperStop
+	// Reporting a large upload without cutting it is looser than blocking it.
+	blocking := *open
+	blocking.Name, blocking.Egress.BlockLargeUploads = "blocking", true
 	for _, tc := range []struct {
 		candidate, baseline *Pack
 		want                string
@@ -754,6 +817,8 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		{&alerting, balanced, "hooks.on_tamper"},
 		{balanced, &alerting, ""},
 		{&stopping, open, ""},
+		{open, &blocking, "egress.block_large_uploads"},
+		{&blocking, open, ""},
 	} {
 		if got := looserPackKey(tc.candidate, tc.baseline, tc.candidate.Network.Mode); got != tc.want {
 			t.Errorf("looserPackKey(%s, %s) = %q, want %q", tc.candidate.Name, tc.baseline.Name, got, tc.want)

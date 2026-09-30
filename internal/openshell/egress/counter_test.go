@@ -164,6 +164,30 @@ func TestCounterPerPrincipalThreshold(t *testing.T) {
 	}
 }
 
+// TestCounterPerPrincipalBlock pins that the block is each sandbox's own
+// too: a principal's BlockLargeUploads blocks its uploads on a counter that
+// only reports, other principals' uploads are only reported, and with its
+// signal off the flag blocks nothing.
+func TestCounterPerPrincipalBlock(t *testing.T) {
+	c := NewCounter(CounterOptions{LargeUploadBytes: 100})
+	blocking := Principal{BindingID: "b-block", BlockLargeUploads: true}
+	b, _ := c.open(blocking, "drop.example", netip.Addr{})
+	if v := b.addUp(101, false); !v.signal || !v.cut || v.total != 0 {
+		t.Fatalf("the blocking sandbox's crossing verdict = %+v", v)
+	}
+	if !c.uploadBlocked(blocking, "drop.example") {
+		t.Fatal("the blocking sandbox's later uploads are not refused")
+	}
+	r, _ := c.open(Principal{BindingID: "b-report"}, "drop.example", netip.Addr{})
+	verdict(t, "a reporting sandbox", r.addUp(101, false), true, false)
+	if c.uploadBlocked(Principal{BindingID: "b-report"}, "drop.example") {
+		t.Fatal("a reporting sandbox was blocked")
+	}
+	off := Principal{BindingID: "b-off", LargeUploadBytes: -1, BlockLargeUploads: true}
+	o, _ := c.open(off, "drop.example", netip.Addr{})
+	verdict(t, "block without a threshold", o.addUp(1<<30, false), false, false)
+}
+
 // Eviction past MaxDestinations keeps live state: open flows, destinations
 // flagged for a large upload, the latest one, and upload totals toward the
 // threshold, which a flood of other destinations, or of refusals (which no

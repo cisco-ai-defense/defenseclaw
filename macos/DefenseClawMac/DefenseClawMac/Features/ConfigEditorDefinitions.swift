@@ -274,6 +274,8 @@ enum ConfigEditorCatalog {
             .init(label: "Egress Ports", key: "openshell.egress.ports", hint: "Proxy ports, comma-separated; empty inherits."),
             .init(label: "Large Upload MB", key: "openshell.egress.large_upload_mb", kind: .int,
                   hint: "First-seen-host upload alert; 0 inherits."),
+            .init(label: "Block Large Uploads", key: "openshell.egress.block_large_uploads", kind: .bool,
+                  hint: "Also cut that upload and refuse the host until it is unblocked; off follows the pack."),
             .init(label: "Blocklist Feed", key: "openshell.egress.feed", kind: .choice, options: ["", "builtin", "none"],
                   hint: "The pack's feeds unless set."),
             .init(label: "Base Image", key: "openshell.image.base", hint: "Overlay base image; empty is the pinned NVIDIA base."),

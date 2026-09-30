@@ -242,6 +242,9 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		_ = api.SetSandboxIngress(SandboxIngressConfig{})
 		return nil, fmt.Errorf("egress policy: %w", err)
 	}
+	// The counter's threshold is only the default: each sandbox's proxy
+	// credential carries its resolved policy's threshold and large-upload
+	// block (egress.block_large_uploads), so no block is set counter-wide.
 	proxy, err := egress.New(egress.Options{
 		Auth: mgr.EgressAuthenticator(), Decider: decider, Sink: mgr.EgressSink(),
 		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),

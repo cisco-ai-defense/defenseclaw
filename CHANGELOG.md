@@ -649,6 +649,28 @@ deleted.
   (`openshell.binary`, an `openshell.egress` pattern) is placed by the
   Python mirror of those checks. Messages still never contain the rejected
   value.
+- Large uploads to first-seen hosts can now be blocked, not only reported
+  (#967). The egress proxy already cut such uploads when asked, but nothing
+  asked. The pack key `egress.block_large_uploads`,
+  `openshell.egress.block_large_uploads: true` (every sandbox; `false`, the
+  default, follows the pack) and `openshell.admin.block_large_uploads: true`
+  (every sandbox, and a pack's `large_upload_mb: 0` gets 25 MiB) turn it on;
+  each sandbox's proxy credential carries its own, and a configuration change
+  reaches running sandboxes, whose feed says so. The upload is stopped before
+  the chunk that crosses the threshold, and later requests to that host, or to
+  other new hosts under its domain or at its address, get a 403 of category
+  `large_upload`. The feed shows a ✗ with the threshold and the unblock
+  command (`✗ files.example.net (large upload blocked: more than 10 MiB was
+  sent to a destination this sandbox had not contacted before)`) instead of
+  the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
+  egress audit records the cut as blocked (`SANDBOX_EGRESS_LARGE_UPLOAD`).
+  Unblocked hosts and those on an allow list the user or the administrator
+  wrote are only reported; an unblock lifts the block. `sandbox policy
+  explain` shows `egress.block_large_uploads` and where it came from, and
+  `policy show` the threshold. In the Python config, the v8 schema, and the
+  TUI and macOS app config editors, which show the key read-only under the
+  administrator's switch; the TUI and app feeds name the threshold. Both
+  drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 

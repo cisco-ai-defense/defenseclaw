@@ -1065,6 +1065,7 @@ _OPENSHELL_BOOL_KEYS = frozenset(
         "openshell.middleware.enabled",
         "openshell.keep_headless",
         "openshell.workdir.undo_ignored.enabled",
+        "openshell.egress.block_large_uploads",
     }
 )
 _OPENSHELL_INT_KEYS = frozenset(

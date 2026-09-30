@@ -135,6 +135,10 @@ func TestActivityRendering(t *testing.T) {
 		{Seq: 11, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 429 Too Many Requests",
 			Message: "✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)"},
 		{Seq: 12, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 403 Forbidden"},
+		// The large-upload block names the threshold the upload crossed.
+		{Seq: 13, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "files.example.net", Category: sandboxapi.CategoryLargeUpload,
+			Reason: "More than 10 MiB was sent to a destination this sandbox had not contacted before.", Unblockable: true},
+		{Seq: 14, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "drop.example.net", BytesUp: 30 << 20},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -151,6 +155,9 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2",
 		"12:01:02 ✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)",
 		"12:01:02 ✗ a hook call failed (HTTP 403 Forbidden), so the harness's action was blocked",
+		"12:01:02 ✗ files.example.net (large upload blocked: more than 10 MiB was sent to a destination this sandbox had not contacted before)" +
+			"  → unblock: defenseclaw sandbox unblock files.example.net --sandbox box",
+		"12:01:02 ⚠ large upload to drop.example.net (30.0 MiB)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -1287,6 +1294,25 @@ func TestPolicyOutputFormatting(t *testing.T) {
 	has(t, out, "more; -o json lists all)", "Organization constraints (openshell.admin)",
 		"required_pack          strict", "allow_yolo             false", "require_copy_for       ~/clients/*", "egress_allow_only      *.github.com",
 		"egress.allow: 1 entry outside the organization's allow-only list: not reachable")
+}
+
+// `policy show` says when large uploads to first-seen hosts are cut, and at
+// what size; `policy explain` lists the administrator's block among the
+// organization constraints.
+func TestPolicyShowsTheLargeUploadBlock(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
+		sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "10", Source: "pack", Origin: "pack balanced"},
+		sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "false", Source: "pack", Origin: "pack balanced"})
+	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{}))
+	lacks(t, ta.output(), "egress.block_large_uploads")
+	ta.Cfg.OpenShell.Admin.BlockLargeUploads = true
+	ta.daemon.explain.Settings[len(ta.daemon.explain.Settings)-1] = sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true",
+		Source: "admin", Origin: "openshell.admin.block_large_uploads"}
+	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "egress.block_large_uploads  true (an upload of more than 10 MiB to a host the sandbox had not contacted is cut)")
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "openshell.admin.block_large_uploads", "Organization constraints (openshell.admin)", "block_large_uploads    true")
 }
 
 func TestPackCommands(t *testing.T) {
