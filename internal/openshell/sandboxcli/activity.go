@@ -198,11 +198,10 @@ func largeUploadText(ev sandboxapi.ActivityEvent) string {
 	return "large upload to " + hostPort(ev) + " (" + size + ")"
 }
 
+// hostPort is ev's destination as the feed names it (sandboxapi.HostPort):
+// its port shows unless that is 443.
 func hostPort(ev sandboxapi.ActivityEvent) string {
-	if ev.Port != 0 && ev.Port != 443 && ev.Port != 80 {
-		return ev.Host + ":" + strconv.Itoa(ev.Port)
-	}
-	return ev.Host
+	return sandboxapi.HostPort(ev.Host, ev.Port)
 }
 
 // ApprovalsOptions are the `sandbox approvals` flags.

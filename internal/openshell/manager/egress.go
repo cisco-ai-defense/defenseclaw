@@ -700,10 +700,13 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		}
 		if blocked || e.FirstSeen {
 			kind := sandboxapi.ActivityEgressAllowed
-			msg := "✓ " + e.Host
+			// The port tells an HTTPS request from a plain-HTTP one to
+			// the same host, which are refused one by one.
+			where := sandboxapi.HostPort(e.Host, e.Port)
+			msg := "✓ " + where
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
-				msg = "✗ " + e.Host + " (" + categoryText(e) + ")" + more
+				msg = "✗ " + where + " (" + categoryText(e) + ")" + more
 			}
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
@@ -742,7 +745,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: e.SandboxName,
 			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Threshold: e.Threshold, Severity: "MEDIUM",
 			Reason:  truncate(e.Reason, 300),
-			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%s)", e.Host, size)})
+			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%s)", sandboxapi.HostPort(e.Host, e.Port), size)})
 	}
 }
 
@@ -778,7 +781,7 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
 		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
 		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),
-		Message: "✗ " + e.Host + " (" + sandboxapi.LargeUploadBlockedText(e.Reason) + ")"})
+		Message: "✗ " + sandboxapi.HostPort(e.Host, e.Port) + " (" + sandboxapi.LargeUploadBlockedText(e.Reason) + ")"})
 }
 
 func egressScheme(e egress.Event) string {

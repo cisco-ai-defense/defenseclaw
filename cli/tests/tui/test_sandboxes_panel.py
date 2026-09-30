@@ -510,6 +510,38 @@ def test_a_blocked_large_upload_names_its_threshold() -> None:
     assert pairs["Category"] == "large upload" and pairs["Reason"].startswith("This sandbox tried to send more than 10 MiB")
 
 
+def test_an_https_and_an_http_refusal_of_one_host_read_apart() -> None:
+    # PR 1022 live retest N3: after a cut, the two refusals read as one line
+    # twice. The port shows unless it is 443.
+    refusal = "This destination is blocked since this sandbox tried to send more than 1 MiB to it."
+    model = _model()
+    model.add_events(
+        [
+            {
+                "seq": 61,
+                "kind": "egress.blocked",
+                "sandbox": "s",
+                "host": "httpbin.org",
+                "port": 443,
+                "category": "large_upload",
+                "reason": refusal,
+            },
+            {
+                "seq": 62,
+                "kind": "egress.blocked",
+                "sandbox": "s",
+                "host": "httpbin.org",
+                "port": 80,
+                "category": "large_upload",
+                "reason": refusal,
+            },
+        ]
+    )
+    model.view = "activity"
+    why = "(large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)"
+    assert sorted(row[3] for row in model.data_table_rows()) == [f"httpbin.org {why}", f"httpbin.org:80 {why}"]
+
+
 def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
     model = _model()
     model.add_events([PROXY_BLOCK, OPENSHELL_BLOCK, TOOL_BLOCK])

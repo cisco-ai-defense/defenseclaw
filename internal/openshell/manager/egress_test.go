@@ -646,7 +646,7 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 		return false
 	})
 	if ev.Host != "example.org" || !ev.Unblockable || ev.Severity != "HIGH" || ev.BytesUp > 1<<20 ||
-		ev.Message != "✗ example.org (large upload blocked: this sandbox tried to send more than 1 MiB to a destination it had not contacted before)" {
+		ev.Message != "✗ example.org:80 (large upload blocked: this sandbox tried to send more than 1 MiB to a destination it had not contacted before)" {
 		t.Fatalf("feed event = %+v", ev)
 	}
 	if n := len(e.events("upbox", sandboxapi.ActivityEgressLargeUpload, "")); n != 0 {
@@ -672,6 +672,8 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 		t.Fatalf("CONNECT after the cut = %d %+v", status, body)
 	}
 	// The refusal says why the host is blocked: the CONNECT sent nothing.
+	// It went to port 443, the cut to port 80: the port tells the two
+	// lines apart (PR 1022 live retest N3).
 	eventually(t, "the refusal in the feed", func() bool {
 		for _, got := range e.events("upbox", sandboxapi.ActivityEgressBlocked, "") {
 			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" && got.BytesUp == 0 &&

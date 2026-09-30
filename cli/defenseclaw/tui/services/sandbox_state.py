@@ -292,7 +292,10 @@ def format_duration(seconds: int) -> str:
 
 
 def host_port(host: str, port: int) -> str:
-    if port and port not in (80, 443):
+    """sandboxapi.HostPort: the host, with its port unless that is 443 (HTTPS)
+    or unknown. Plain HTTP reads host:80, so an HTTPS and an HTTP refusal of
+    one host are told apart."""
+    if port and port != 443:
         return f"{host}:{port}"
     return host
 

@@ -702,7 +702,7 @@ go instead (see [work on a copy](#work-on-a-copy)).
 
 ```text
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
-✗ DefenseClaw blocked webhook.site:443 (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
@@ -712,7 +712,7 @@ The network counts are sites (destinations): the new ones the sandbox
 reached, and the ones blocked during the session, each counted once however
 often it was tried and listed below with `✗`. A site you unblocked for the
 sandbox later in the session is listed without the unblock command
-(``✗ DefenseClaw blocked webhook.site:443 (webhook catcher); unblocked
+(``✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked
 since``). An invalid destination (a
 host name without a dot, such as a mistyped `curl echo`) counts as blocked
 too. The counts cover everything in the sandbox while the session ran,

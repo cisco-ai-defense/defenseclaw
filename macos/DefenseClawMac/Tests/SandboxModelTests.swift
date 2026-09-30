@@ -221,6 +221,12 @@ struct SandboxModelTests {
                                      reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.")
         expect(upload.summary == "files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB "
                + "to a destination it had not contacted before)", "large upload summary \(upload.summary)")
+        // An HTTPS and a plain-HTTP refusal of one host read apart (PR 1022
+        // live retest N3): the port shows unless it is 443.
+        let https = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 443, category: "large_upload", reason: "Blocked.")
+        let http = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 80, category: "large_upload", reason: "Blocked.")
+        expect(https.summary == "httpbin.org (large upload blocked: blocked)", "https summary \(https.summary)")
+        expect(http.summary == "httpbin.org:80 (large upload blocked: blocked)", "http summary \(http.summary)")
     }
 
     private static func decodesSandboxAPIErrorBodies() {
