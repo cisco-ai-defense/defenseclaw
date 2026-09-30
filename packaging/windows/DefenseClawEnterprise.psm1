@@ -20238,8 +20238,9 @@ function Add-DefenseClawUserRegistrationCleanupResult {
                 -Value $lists[$name] `
                 -Force
     }
-    # The standalone finalize names each enrolled account's per-user folder,
-    # which the uninstall does not remove; a purge reports it.
+    # The standalone finalize names each enrolled account's per-user folder
+    # that stays: with purge, each one it could not remove and why. Only a
+    # purge reports it.
     $remaining = $null
     if ($null -ne $report) {
         $remaining = $report.PSObject.Properties['user_state_remaining']

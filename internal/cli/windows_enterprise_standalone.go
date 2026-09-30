@@ -86,7 +86,8 @@ type windowsEnterpriseInstallerReport struct {
 	UserRegistrationsPending json.RawMessage `json:"user_registrations_pending"`
 	UserRegistrationsFailed  json.RawMessage `json:"user_registrations_failed"`
 	// UserStateRemaining names each enrolled account's per-user folder the
-	// uninstall left ("user (SID): path").
+	// uninstall left ("user (SID): path"; with purge, each one it could
+	// not remove, followed by ": reason").
 	UserStateRemaining json.RawMessage `json:"user_state_remaining"`
 	// Pending-transaction recovery reports each managed-hook lifecycle step
 	// it ran with the Setup's verified gateway, and why it kept the staged
