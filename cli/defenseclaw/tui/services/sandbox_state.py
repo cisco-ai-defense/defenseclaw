@@ -294,8 +294,11 @@ def format_duration(seconds: int) -> str:
 def host_port(host: str, port: int) -> str:
     """sandboxapi.HostPort: the host, with its port unless that is 443 (HTTPS)
     or unknown. Plain HTTP reads host:80, so an HTTPS and an HTTP refusal of
-    one host are told apart."""
+    one host are told apart. An IPv6 literal with its port is bracketed
+    ("[fd00:ec2::254]:80"; "fd00:ec2::254:80" is another address)."""
     if port and port != 443:
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
         return f"{host}:{port}"
     return host
 

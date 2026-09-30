@@ -508,9 +508,15 @@ struct SandboxSnapshot: Sendable {
 enum SandboxFormat {
     /// sandboxapi.HostPort: the host, with its port unless that is 443
     /// (HTTPS) or unknown. Plain HTTP reads host:80, so an HTTPS and an HTTP
-    /// refusal of one host are told apart.
+    /// refusal of one host are told apart. An IPv6 literal with its port is
+    /// bracketed ("[fd00:ec2::254]:80"; "fd00:ec2::254:80" is another
+    /// address).
     static func hostPort(_ host: String, _ port: Int) -> String {
-        (port == 0 || port == 443) ? host : "\(host):\(port)"
+        if port == 0 || port == 443 {
+            return host
+        }
+        let shown = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return "\(shown):\(port)"
     }
 
     /// triage.NormalizeHost: lower case, no brackets, no trailing dot.

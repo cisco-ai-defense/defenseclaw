@@ -39,7 +39,7 @@ from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunchValues,
     harness_choices,
 )
-from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS
+from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port
 
 STATUS = {
     "enabled": True,
@@ -540,6 +540,14 @@ def test_an_https_and_an_http_refusal_of_one_host_read_apart() -> None:
     model.view = "activity"
     why = "(large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)"
     assert sorted(row[3] for row in model.data_table_rows()) == [f"httpbin.org {why}", f"httpbin.org:80 {why}"]
+
+
+def test_host_port_brackets_an_ipv6_literal_with_its_port() -> None:
+    # PR 1022 review of N3: "fd00:ec2::254:80" is another address.
+    assert host_port("fd00:ec2::254", 80) == "[fd00:ec2::254]:80"
+    assert host_port("fd00:ec2::254", 443) == "fd00:ec2::254"
+    assert host_port("[::1]", 8080) == "[::1]:8080"
+    assert host_port("example.com", 80) == "example.com:80"
 
 
 def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:

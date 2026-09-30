@@ -227,6 +227,11 @@ struct SandboxModelTests {
         let http = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 80, category: "large_upload", reason: "Blocked.")
         expect(https.summary == "httpbin.org (large upload blocked: blocked)", "https summary \(https.summary)")
         expect(http.summary == "httpbin.org:80 (large upload blocked: blocked)", "http summary \(http.summary)")
+        // An IPv6 literal with its port is bracketed: "fd00:ec2::254:80" is
+        // another address (PR 1022 review of N3).
+        expect(SandboxFormat.hostPort("fd00:ec2::254", 80) == "[fd00:ec2::254]:80", "ipv6 host port")
+        expect(SandboxFormat.hostPort("fd00:ec2::254", 443) == "fd00:ec2::254", "ipv6 on 443")
+        expect(SandboxFormat.hostPort("[::1]", 8080) == "[::1]:8080", "bracketed ipv6 host port")
     }
 
     private static func decodesSandboxAPIErrorBodies() {

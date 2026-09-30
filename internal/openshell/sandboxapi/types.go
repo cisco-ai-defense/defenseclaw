@@ -897,12 +897,17 @@ type ActivityEvent struct {
 // unless that is 443 (HTTPS, which nearly every request uses) or unknown.
 // A plain-HTTP request reads host:80, so an HTTPS and an HTTP request to
 // one host (the egress proxy refuses them one by one) do not read as one
-// line twice.
+// line twice. An IPv6 literal with its port is bracketed, as
+// net.JoinHostPort does: "[fd00:ec2::254]:80", not "fd00:ec2::254:80",
+// which is another address.
 func HostPort(host string, port int) string {
-	if port != 0 && port != 443 {
-		return host + ":" + strconv.Itoa(port)
+	if port == 0 || port == 443 {
+		return host
 	}
-	return host
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	return host + ":" + strconv.Itoa(port)
 }
 
 // ActivityQuery selects the activity stream.
