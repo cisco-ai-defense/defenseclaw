@@ -169,7 +169,7 @@ The two summary fields are computed differently on each OS:
 | `verify` exit code | Not `0` |
 | `coverage_complete` | `false` |
 | `security_complete` | `false` for longer than one enumerator cycle. On Windows with Claude Code enabled, it stays `false` until you complete the Claude Code attestation, so every such host alerts until then |
-| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `verify` reports each as an error, except `agent_unprotected` and `hook_contract_unverified` on Windows, which stay warnings |
+| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `verify` reports each as an error, except `agent_unprotected` and `hook_contract_unverified`, which stay warnings for that account |
 | `machine_policy.<connector>.conflicts` or `.higher_precedence` | Not empty |
 | `enrollment.failed` | Greater than `0` (Linux and macOS) |
 | `transaction_pending` | `true` on two runs in a row |

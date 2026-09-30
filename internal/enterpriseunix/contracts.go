@@ -248,7 +248,9 @@ const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
 // describeUnprotectedAgents reports the agents the enumerator found
 // installed but could not enroll (its unprotected-agents record next to the
-// manifest) and marks the deployment security-incomplete.
+// manifest) and marks the deployment security-incomplete. Each is one
+// account's agent, so it is a warning for that account, verify included; an
+// unreadable record hides which agents they are, so verify fails on it.
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
@@ -257,7 +259,12 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
 	if err != nil {
-		r.AddWarning(codeAgentUnprotected, "the enumerator's unprotected-agents record is unreadable: "+err.Error())
+		message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(codeVerify, message)
+		} else {
+			r.AddWarning(codeAgentUnprotected, message)
+		}
 		r.SecurityComplete = false
 		return
 	}

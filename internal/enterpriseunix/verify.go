@@ -78,8 +78,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		l.warnUnprivilegedUserNamespaces()
 	}
 	if strict {
+		// An agent the guardian or the enumerator could not protect for one
+		// account (an unverified hook contract, an agent it could not enroll)
+		// stays a warning for that account: the rest of the host is
+		// compliant, as on Windows.
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeHookContractUnverified || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected || warning.Code == codeAgentUnprotected {
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected {
 				problems = append(problems, warning.Message)
 			}
 		}

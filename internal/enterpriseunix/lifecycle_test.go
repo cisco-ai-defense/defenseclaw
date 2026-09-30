@@ -953,7 +953,8 @@ func TestAgentPrefixesReachDiscovery(t *testing.T) {
 
 // A guardian target refused for an agent version without a verified hook
 // contract runs with no DefenseClaw hooks. Status names it and reports the
-// deployment security-incomplete; verify fails.
+// deployment security-incomplete; verify keeps it a warning for that account
+// and fails only for the other failed target.
 func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -997,6 +998,9 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	requireError(t, verify, codeVerify)
 	if verify.SecurityComplete {
 		t.Fatal("verify reports security_complete with an unprotected agent")
+	}
+	if errs := messagesOf(verify.Errors, codeVerify); strings.Contains(errs, "user bob") || !strings.Contains(errs, "user carol") {
+		t.Fatalf("verify errors = %q, want only carol's failed target", errs)
 	}
 }
 
