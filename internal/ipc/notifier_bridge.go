@@ -242,7 +242,7 @@ func composeManaged(o notifier.Observation) (string, string) {
 		title, body = composeServiceStateManaged(o)
 	case notifier.CategoryCompactionRisk:
 		title = "DefenseClaw: possible memory poisoning"
-		body = "A possible forged user-role claim appeared in tool output before compaction. Start a new session before sensitive work."
+		body = "A forged user instruction may have entered Claude Code's exposed compaction summary. Start a new session before sensitive work."
 	default:
 		// Unknown category — recordFromObservation already returns
 		// nil above, so this is unreachable. Kept defensive so a

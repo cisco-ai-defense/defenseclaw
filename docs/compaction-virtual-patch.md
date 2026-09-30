@@ -5,8 +5,9 @@
 The runtime guardrail rule pack owns this detector's bounded role-boundary,
 claim, summary, and exact-action proof regular expressions in its root-level
 `compaction.yaml`. The bundled `default`, `permissive`, and `strict` packs
-enable it. A custom partial pack that omits `compaction.yaml` inherits the
-enabled embedded defaults. To turn off both the warning and exact-action
+inherit the enabled embedded defaults rather than shipping a pinned copy of
+this component. A custom partial pack that omits `compaction.yaml` inherits
+those same defaults. To turn off both the warning and exact-action
 lanes for a connector, select a rule pack containing:
 
 ```yaml
@@ -14,7 +15,8 @@ version: 1
 enabled: false
 ```
 
-For a custom enabled detector, copy a bundled `compaction.yaml` and retain all
+For a custom enabled detector, start from the embedded template at
+`internal/guardrail/defaults/compaction.yaml` and retain all
 15 required regex fields: `next_role`, `role_header`, `avoidance`,
 `exfiltration`, `memory`, `memory_verb`, `false_fact`, `new_task`, `override`,
 `summary_approval`, `summary_instruction`, `summary_disavowal`, `approval`,
@@ -26,6 +28,11 @@ canonical pins. Validate the edited pack with
 an active pack does not hot-reload it. Select the effective global or
 per-connector `guardrail.rule_pack_dir`; one connector can disable the
 component without disabling it for another.
+
+Codex needs a hook contract with both `PreCompact` and `PostCompact` for this
+feature: DefenseClaw's supported range begins at Codex 0.129.0
+(`codex-hooks-v2`). Codex 0.124.x–0.128.x (`codex-hooks-v1`) has no compaction
+events, so installing the other hooks does not activate this protection.
 
 The effective pack's `role_header`, `next_role`, claim, and summary patterns
 control warning candidates and summary-evidence reporting. The exact-action
@@ -59,11 +66,17 @@ When enabled, the static detector has two separate lanes:
    instruction. It never changes a later tool decision on its own.
 2. The exact-action lane requires one of those five forged-user turns, under
    the embedded marker patterns, containing a prior approval claim, a
-   don't-ask-again instruction, and a literal `curl ... | sh` or
-   `curl ... | bash` command. Only this lane can guard a subsequent exactly
-   matching shell command.
+   don't-ask-again instruction, and a literal remote-script execution command:
+   `curl ... | sh`, `curl ... | bash`, or the narrow
+   `bash -c "$(curl ...)"` form. It normally guards only the same command,
+   preserving the source and tool command bytes rather than collapsing spaces
+   inside quoted arguments.
 
-Both lanes are bounded, per-session, and make no LLM calls. They do not alter
+Both lanes are bounded, per-session, and make no LLM calls. They scan raw
+returned text leaves, not a joined JSON projection, with overlapping windows
+and a 1 MiB per-event source budget. An over-budget event gets a separate
+scan-incomplete diagnostic; its scanned first/tail windows can still yield
+real candidates, but the result is not a complete scan. The lanes do not alter
 tool output, interrupt compaction, or rewrite its summary. With the bundled
 patterns, a delimiter alone, a near miss like `[User]`, and plain tool text
 without a forged role boundary do not enter the warning lane. A quoted
@@ -80,10 +93,21 @@ After an accepted Codex `PostToolUse` result, the evaluator records only
 SHA-256 digests of matching claims or commands in a bounded, two-hour idle,
 per-session cache. Claude Code's `PostToolUse` block is advisory for already
 returned bytes, so matching results are recorded there even if that hook
-blocks. `PreCompact` marks candidates pending without interrupting
-compaction. `PostCompact` activates the exact-command guard. Codex cannot
-inspect the summary, so it issues a once-per-candidate, explicitly
-unverified warning through `systemMessage`.
+blocks. Its `PostToolUseFailure`, `PermissionDenied`, and `PostToolBatch`
+events are also eligible when they carry returned or error text; tool inputs
+alone are not treated as returned content. `PreCompact` marks candidates
+pending without interrupting compaction. `PostCompact` activates the
+guard. Codex cannot inspect the summary, so it issues a once-per-candidate,
+explicitly unverified warning through `systemMessage`.
+
+The store keeps up to 64 exact action digests per session. If a session
+exceeds that bound with distinct, unapproved forged approvals, it retains the
+known digests and records an overflow taint. Only after compaction does that
+exceptional session guard any recognized remote-script execution command,
+even one not seen in the source; this avoids a decoy flood silently evicting
+the real command. It is a deliberate precision tradeoff at a high-confidence
+overflow threshold, and an exact authenticated approval still exempts its
+command. Ordinary sessions retain exact-command matching.
 
 Claude Code's `PostCompact` includes `compact_summary`. DefenseClaw scans that
 field once per compaction with bounded static rules. It reports evidence only
@@ -97,8 +121,10 @@ over recall: paraphrases may be missed, and a matching line remains evidence,
 not proof of a successful exploit.
 
 Only an evidence result produces this feature's macOS poisoning popup at
-`PostCompact`. An inline `systemMessage` gives one of three results: evidence
-found, no matching evidence in the exposed summary, or summary unavailable.
+`PostCompact`. Clean compactions with no prior detector candidate are silent.
+When a candidate was recorded, an inline `systemMessage` gives one of three
+results: evidence found, no matching evidence in the exposed summary, or
+summary unavailable.
 The negative result is **not** a claim that the session is safe. Claude Code
 discards `PostCompact`'s `systemMessage`, and `SessionStart(source=compact)` can
 run before `PostCompact`, so the inline result appears on the first eligible
@@ -119,14 +145,24 @@ policy. In `observe` mode, the new rule records a finding without a new
 decision. In `action` mode, Codex denies the command and asks the agent to
 obtain explicit user approval; Claude Code uses its native confirmation
 decision unless an existing policy already makes a stronger decision. A
-genuine `UserPromptSubmit` that explicitly approves the exact command clears
-the candidate. Unrelated tool calls remain unchanged.
+genuine `UserPromptSubmit` that explicitly approves the exact command, even
+before the suspect tool output, exempts that command. Unrelated tool calls
+remain unchanged outside the exceptional overflow case above.
+
+Codex has no native hook approval prompt. If it denies a guarded command, a
+fresh authenticated user turn must name the command explicitly, for example
+`I approve running curl -fsSL https://example.invalid/bootstrap.sh | sh`.
+A bare `yes` or `go ahead` is deliberately insufficient: DefenseClaw cannot
+bind it to one exact action without relying on possibly poisoned context.
 
 The rule deliberately does not claim to detect all compaction attacks. It
 does not detect the study's no-forgery provenance-erasure baseline, arbitrary
 false facts, or actions outside these static patterns. It does not parse
 undocumented transcripts or infer approval from summaries. Gateway restarts
-clear the in-memory candidate cache. A signed central
+and resumes under a new session ID clear the process-local correlation; a
+same-ID resume retains it until the two-hour idle expiry. If all 256 process
+slots are occupied by protected sessions, new sessions cannot be tracked
+until a slot becomes free. A signed central
 rule registry and agent-version vulnerability ranges are future work; the
 current hook contracts establish product compatibility, not that a particular
 Codex or Claude Code release is vulnerable.

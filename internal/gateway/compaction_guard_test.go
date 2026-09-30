@@ -211,7 +211,7 @@ func TestCompactionInstructionWarnsOnlyAfterCompactionWithoutNewToolBlock(t *tes
 			select {
 			case n := <-notifications:
 				t.Fatalf("premature Claude warning: %+v", n)
-			default:
+			case <-time.After(100 * time.Millisecond):
 			}
 			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreCompact", SessionID: "s"})
 			post := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
@@ -247,7 +247,7 @@ func TestCompactionInstructionWarnsOnlyAfterCompactionWithoutNewToolBlock(t *tes
 			select {
 			case n := <-notifications:
 				t.Fatalf("duplicate PostCompact raised OS notification: %+v", n)
-			default:
+			case <-time.After(100 * time.Millisecond):
 			}
 			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreCompact", SessionID: "s"})
 			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
@@ -257,7 +257,7 @@ func TestCompactionInstructionWarnsOnlyAfterCompactionWithoutNewToolBlock(t *tes
 			select {
 			case n := <-notifications:
 				t.Fatalf("later compaction repeated OS notification for the same claim: %+v", n)
-			default:
+			case <-time.After(100 * time.Millisecond):
 			}
 			inline = api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "SessionStart", Source: "compact", SessionID: "s"})
 			if inline.ClaudeCodeOutput["systemMessage"] != compactionWarningMessage {
@@ -521,11 +521,11 @@ func TestCompactionClaudeNoEvidenceStatusDoesNotRaiseOSPopup(t *testing.T) {
 	select {
 	case n := <-notifications:
 		t.Fatalf("clean compaction raised OS notification: %+v", n)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	status := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "SessionStart", Source: "compact", SessionID: "clean"})
-	if status.ClaudeCodeOutput["systemMessage"] != compactionNoEvidenceMessage {
-		t.Fatalf("missing bounded no-evidence status: %+v", status)
+	if status.ClaudeCodeOutput["systemMessage"] != nil {
+		t.Fatalf("clean compaction produced an inline notice: %+v", status)
 	}
 }
 

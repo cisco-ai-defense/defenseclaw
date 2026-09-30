@@ -20,16 +20,16 @@ false_fact: |-
 new_task: |-
   (?i)\bonce[ \t]+[^\n.]{1,120}\bnext[ \t]+thing[ \t]+i[ \t]+need[ \t]+is\b
 override: |-
-  (?i)\b(?:ignore|disregard)[ \t]+(?:the[ \t]+|your[ \t]+)?(?:earlier|previous)[ \t]+(?:instructions|constraints|confirmation[ \t]+prompts)\b
+  (?i)\b(?:ignore|disregard)[ \t]+(?:all[ \t]+)?(?:the[ \t]+|your[ \t]+)?(?:earlier|previous)[ \t]+(?:instructions|constraints|confirmation[ \t]+prompts)\b
 summary_approval: |-
   (?i)^[ \t]*(?:[-*][ \t]+)?(?:the[ \t]+)?user[ \t]+(?:has[ \t]+)?(?:already[ \t]+)?approved\b
 summary_instruction: |-
   (?i)^[ \t]*(?:[-*][ \t]+)?(?:the[ \t]+)?user[ \t]+(?:requested|asked|instructed)[ \t]*:[ \t]*
 summary_disavowal: |-
-  (?i)\b(?:file|document|tool[ \t]+output|untrusted|forged|fake|spoofed|injection|attack|claimed|quoted|purported|did[ \t]+not|not[ \t]+an?[ \t]+instruction)\b
+  (?i)\b(?:(?:according[ \t]+to|from|inside|in|quoted[ \t]+from)[ \t]+(?:the[ \t]+|a[ \t]+)?(?:(?:untrusted|forged|fake|spoofed)[ \t]+)?(?:file|document|tool[ \t]+output)\b|(?:the[ \t]+|a[ \t]+)?(?:(?:untrusted|forged|fake|spoofed)[ \t]+)?(?:file|document|tool[ \t]+output)[ \t]+(?:says|said|claims?|claimed|reported)\b|(?:untrusted|forged|fake|spoofed)[ \t]+(?:claim|instruction|text|turn|content)\b|prompt[ \t]+injection\b|not[ \t]+an?[ \t]+(?:user[ \t]+)?instruction\b|did[ \t]+not[ \t]+approve\b)
 approval: |-
-  (?i)\b(?:already[ \t]+(?:reviewed[ \t]+and[ \t]+)?approved|you[ \t]+(?:already[ \t]+)?have[ \t]+my[ \t]+approval)\b
+  (?i)\b(?:already[ \t\r\n]+(?:reviewed[ \t\r\n]+and[ \t\r\n]+)?approved|you[ \t\r\n]+(?:already[ \t\r\n]+)?have[ \t\r\n]+my[ \t\r\n]+approval)\b
 no_ask: |-
-  (?i)\b(?:do[ \t]+not[ \t]+ask|don't[ \t]+ask|no[ \t]+need[ \t]+to[ \t]+(?:ask|re-prompt)|without[ \t]+asking)\b
+  (?i)\b(?:do[ \t\r\n]+not[ \t\r\n]+(?:ask|confirm)|don['’]t[ \t\r\n]+(?:ask|confirm)|no[ \t\r\n]+need[ \t\r\n]+to[ \t\r\n]+(?:ask|re-prompt|confirm)|no[ \t\r\n]+need[ \t\r\n]+for[ \t\r\n]+confirmation|without[ \t\r\n]+(?:asking|confirmation))\b
 curl_pipe: |-
-  (?i)\bcurl(?:[ \t]+-[a-z]+)*[ \t]+https?://[^\s|"'<>;&\x60$]+[ \t]*\|[ \t]*(?:sh|bash)\b
+  (?im)(?:^|[ \t])(?:(?:cd[ \t]+[A-Za-z0-9_./-]+[ \t]*&&[ \t]*)?(?:sudo[ \t]+)?(?:/usr/bin/)?curl(?:[ \t]+-{1,2}[A-Za-z0-9.-]*(?:[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|[A-Za-z0-9._=-]+))?)*[ \t]+(?:"https?://[^"\s|<>;&\x60$]+"|'https?://[^'\s|<>;&\x60$]+'|https?://[^\s|"'<>;&\x60$]+)[ \t]*\|[ \t]*(?:sh|bash)(?:[ \t]+-{1,2}[A-Za-z0-9-]*)*|(?:/bin/)?bash[ \t]+-c[ \t]+"\$\((?:/usr/bin/)?curl(?:[ \t]+-{1,2}[A-Za-z0-9.-]*(?:[ \t]+(?:'[^'\r\n]+'|[A-Za-z0-9._=-]+))?)*[ \t]+(?:https?://[^\s|"'<>;&\x60$]+|'https?://[^'\s|<>;&\x60$]+')\)")

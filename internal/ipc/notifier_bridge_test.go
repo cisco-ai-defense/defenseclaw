@@ -277,7 +277,7 @@ func TestRecordFromObservation_ManagedCopy(t *testing.T) {
 				Event:    notifier.CompactionRiskEvent{Connector: "claudecode"},
 			},
 			wantTitle: "DefenseClaw: possible memory poisoning",
-			wantBody:  "A possible forged user-role claim appeared in tool output before compaction. Start a new session before sensitive work.",
+			wantBody:  "A forged user instruction may have entered Claude Code's exposed compaction summary. Start a new session before sensitive work.",
 		},
 	}
 

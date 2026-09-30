@@ -76,8 +76,23 @@ const (
 // CompactionRiskEvent is intentionally content-free: the notification must
 // never repeat a potentially malicious tool result or claim the summary was
 // verified. The session-local detector handles once-per-candidate delivery.
+// sessionHash is private so observer serialization cannot expose the raw
+// session ID; it is used only to scope notification deduplication.
 type CompactionRiskEvent struct {
-	Connector string
+	Connector   string
+	sessionHash string
+}
+
+// NewCompactionRiskEvent scopes a compaction warning to its session without
+// retaining the raw session ID or any potentially poisoned content. An absent
+// session ID keeps the legacy connector-wide deduplication behavior.
+func NewCompactionRiskEvent(connector, sessionID string) CompactionRiskEvent {
+	ev := CompactionRiskEvent{Connector: connector}
+	if sessionID != "" {
+		sum := sha256.Sum256([]byte(sessionID))
+		ev.sessionHash = hex.EncodeToString(sum[:])
+	}
+	return ev
 }
 
 // ServiceState labels a coarse DefenseClaw availability transition
@@ -325,7 +340,11 @@ func (d *Dispatcher) OnCompactionRisk(ev CompactionRiskEvent) {
 		Subtitle: ev.Connector + " · compaction",
 		Body:     "A forged user instruction may have entered the exposed compaction summary. Start a new session before sensitive work.",
 	}
-	d.dispatch(CategoryCompactionRisk, SourceHook, ev.Connector, "forged-user-in-summary", n, ev)
+	dedupTarget := ev.Connector
+	if ev.sessionHash != "" {
+		dedupTarget += ":" + ev.sessionHash
+	}
+	d.dispatch(CategoryCompactionRisk, SourceHook, dedupTarget, "forged-user-in-summary", n, ev)
 }
 
 // OnServiceState fires when the gateway connection transitions

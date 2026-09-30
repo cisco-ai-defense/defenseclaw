@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -188,15 +189,22 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		a.compactionGuard.reset("codex", req.SessionID)
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	compactionEnabled := a.compactionLocalHookEnabled()
+	if compactionEnabled {
+		// Ordinary hooks and SessionEnd keep a still-resumable candidate from
+		// aging out while the same conversation is actively in use.
+		a.compactionGuard.touch("codex", req.SessionID)
+	}
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
 	var toolResultContent string
 	var compactionWarning bool
+	var preCompactionObserveEligible bool
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.Source != "resume" && req.Source != "compact" {
+		if compactionEnabled && req.Source != "resume" && req.Source != "compact" {
 			a.compactionGuard.reset("codex", req.SessionID)
 		}
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
@@ -258,7 +266,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if decision, matched := a.codexSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
-		if req.HookEventName == "PreToolUse" && a.compactionGuard.matchingAction("codex", req.SessionID, req.ToolName, req.ToolInput) {
+		// Preserve the pre-existing observe-mode enforcement signal before
+		// attaching the advisory INFO compaction detail below.
+		preCompactionObserveEligible = codexObserveContextEnforcementEligible(verdict)
+		if compactionEnabled && req.HookEventName == "PreToolUse" &&
+			!slices.Contains(verdict.Findings, "STATIC-ALLOW") &&
+			a.compactionGuard.matchingAction("codex", req.SessionID, toolName, req.ToolInput) {
 			if mode == "action" {
 				compactionGuardFinding(verdict, "matching_action", "block")
 			} else {
@@ -279,24 +292,29 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			verdict = a.scanCodexChangedFiles(ctx, req)
 		}
 	case "PreCompact":
-		pending := a.compactionGuard.preCompact("codex", req.SessionID)
-		if pending.action {
-			compactionGuardFinding(verdict, "pre_compact_candidate", "")
-		}
-		if pending.instruction {
-			compactionPoisonFinding(verdict, "pre_compact_candidate")
+		if compactionEnabled {
+			pending := a.compactionGuard.preCompact("codex", req.SessionID)
+			if pending.action {
+				compactionGuardFinding(verdict, "pre_compact_candidate", "")
+			}
+			if pending.instruction {
+				compactionPoisonFinding(verdict, "pre_compact_candidate")
+			}
 		}
 	case "PostCompact":
-		activation := a.compactionGuard.postCompact("codex", req.SessionID)
-		if activation.actionActive {
-			compactionGuardFinding(verdict, "post_compact_unverified", "")
+		if compactionEnabled {
+			activation := a.compactionGuard.postCompact("codex", req.SessionID)
+			if activation.actionActive {
+				compactionGuardFinding(verdict, "post_compact_unverified", "")
+			}
+			if activation.instructionWarn {
+				compactionPoisonFinding(verdict, "post_compact_warning")
+			}
+			compactionWarning = activation.actionWarn || activation.instructionWarn
 		}
-		if activation.instructionWarn {
-			compactionPoisonFinding(verdict, "post_compact_warning")
-		}
-		compactionWarning = activation.actionWarn || activation.instructionWarn
 	case "SessionEnd":
-		a.compactionGuard.reset("codex", req.SessionID)
+		// Same-ID resume can still carry the compacted context. Idle expiry,
+		// rather than SessionEnd, retires any armed guard state.
 	}
 
 	// Inject the cloud-controlled per-inspection redaction directive
@@ -353,15 +371,25 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// Only accepted prompts establish user authority. Likewise, a Codex
 	// PostToolUse block can keep returned bytes out of the next model turn;
 	// blocked output must not create a compaction candidate.
-	if action != "block" {
+	preCompactionObserveEligible = preCompactionObserveEligible || codexObserveContextEnforcementEligible(verdict)
+	if compactionEnabled && action != "block" {
 		switch req.HookEventName {
 		case "UserPromptSubmit":
 			a.compactionGuard.observeUserPrompt("codex", req.SessionID, req.Prompt)
 		case "PostToolUse":
-			if a.compactionGuard.observeToolResult("codex", req.SessionID, toolResultContent) {
+			leaves, complete := compactionSourceContentStrings(req.ToolResponse)
+			if !complete {
+				compactionScanIncompleteFinding(verdict)
+			}
+			var actionCandidate, instructionCandidate bool
+			for _, leaf := range leaves {
+				actionCandidate = a.compactionGuard.observeToolResult("codex", req.SessionID, leaf) || actionCandidate
+				instructionCandidate = a.compactionGuard.observeInstructionResult("codex", req.SessionID, leaf) || instructionCandidate
+			}
+			if actionCandidate {
 				compactionGuardFinding(verdict, "untrusted_tool_result", "")
 			}
-			if a.compactionGuard.observeInstructionResult("codex", req.SessionID, toolResultContent) {
+			if instructionCandidate {
 				compactionPoisonFinding(verdict, "untrusted_tool_result")
 			}
 		}
@@ -382,7 +410,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
 	if mode != "action" && resp.AdditionalContext != "" {
-		eligible := assetContextEligible || codexObserveContextEnforcementEligible(verdict)
+		eligible := assetContextEligible || preCompactionObserveEligible || codexObserveContextEnforcementEligible(verdict)
 		if !eligible || !a.codexAdditionalContextFirstInWindow(req, rawAction, verdict, time.Now()) {
 			clearCodexAdditionalContext(&resp, req.HookEventName)
 		}

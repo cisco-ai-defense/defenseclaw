@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,6 +125,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		a.compactionGuard.reset("claudecode", req.SessionID)
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	// The managed-enterprise hook lane delegates decisions exclusively to AID.
+	// Keep the local compaction detector out of that lane, and keep existing
+	// candidate state alive across ordinary activity and a resumable SessionEnd.
+	compactionEnabled := a.compactionLocalHookEnabled()
+	if compactionEnabled {
+		a.compactionGuard.touch("claudecode", req.SessionID)
+	}
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
@@ -132,7 +140,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	var compactionWarning bool
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.Source != "resume" && req.Source != "compact" {
+		if compactionEnabled && req.Source != "resume" && req.Source != "compact" {
 			a.compactionGuard.reset("claudecode", req.SessionID)
 		}
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
@@ -190,7 +198,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
-		if req.HookEventName == "PreToolUse" && a.compactionGuard.matchingAction("claudecode", req.SessionID, req.ToolName, req.ToolInput) {
+		if compactionEnabled && req.HookEventName == "PreToolUse" &&
+			!slices.Contains(verdict.Findings, "STATIC-ALLOW") &&
+			a.compactionGuard.matchingAction("claudecode", req.SessionID, toolName, req.ToolInput) {
 			if mode == "action" {
 				compactionGuardFinding(verdict, "matching_action", "confirm")
 			} else {
@@ -214,9 +224,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
-		if req.HookEventName == "SessionEnd" {
-			a.compactionGuard.reset("claudecode", req.SessionID)
-		}
+		// SessionEnd does not prove the context is gone: a same-ID resume can
+		// still carry a poisoned compacted summary. Idle expiry owns cleanup.
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
 		}
@@ -231,24 +240,28 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodeEventContent(req), "prompt",
 		))
-		pending := a.compactionGuard.preCompact("claudecode", req.SessionID)
-		if pending.action {
-			compactionGuardFinding(verdict, "pre_compact_candidate", "")
-		}
-		if pending.instruction {
-			compactionPoisonFinding(verdict, "pre_compact_candidate")
+		if compactionEnabled {
+			pending := a.compactionGuard.preCompact("claudecode", req.SessionID)
+			if pending.action {
+				compactionGuardFinding(verdict, "pre_compact_candidate", "")
+			}
+			if pending.instruction {
+				compactionPoisonFinding(verdict, "pre_compact_candidate")
+			}
 		}
 	case "PostCompact":
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodeEventContent(req), "prompt",
 		))
-		activation := a.compactionGuard.postCompact("claudecode", req.SessionID)
-		if activation.actionActive {
-			compactionGuardFinding(verdict, "post_compact_unverified", "")
-		}
-		if activation.completed && a.compactionGuard.inspectClaudeSummary(req.SessionID, claudeCodePayloadString(req.Payload, "compact_summary")) {
-			compactionPoisonFinding(verdict, "post_compact_warning")
-			compactionWarning = true
+		if compactionEnabled {
+			activation := a.compactionGuard.postCompact("claudecode", req.SessionID)
+			if activation.actionActive {
+				compactionGuardFinding(verdict, "post_compact_unverified", "")
+			}
+			if activation.completed && a.compactionGuard.inspectClaudeSummary(req.SessionID, claudeCodePayloadString(req.Payload, "compact_summary")) {
+				compactionPoisonFinding(verdict, "post_compact_warning")
+				compactionWarning = true
+			}
 		}
 	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
@@ -297,16 +310,37 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// so it must still be considered as a possible compaction source.
 	switch req.HookEventName {
 	case "UserPromptSubmit":
-		if action != "block" {
+		if compactionEnabled && action != "block" {
 			a.compactionGuard.observeUserPrompt("claudecode", req.SessionID, req.Prompt)
 		}
-	case "PostToolUse":
-		if req.ToolResponse != nil && req.ToolCalls == nil && req.Error == "" && req.ErrorDetails == "" {
-			if a.compactionGuard.observeToolResult("claudecode", req.SessionID, toolResultContent) {
+	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
+		// These result-content events can supply bytes to the next model
+		// turn even when the underlying tool failed or permission was denied.
+		// Never join unrelated payload leaves into a synthetic forged turn.
+		if compactionEnabled {
+			var actionCandidate, instructionCandidate, incomplete bool
+			results, batchComplete := claudeCodeCompactionResultValues(req)
+			if !batchComplete {
+				incomplete = true
+			}
+			for _, result := range results {
+				leaves, complete := compactionSourceContentStrings(result)
+				if !complete {
+					incomplete = true
+				}
+				for _, leaf := range leaves {
+					actionCandidate = a.compactionGuard.observeToolResult("claudecode", req.SessionID, leaf) || actionCandidate
+					instructionCandidate = a.compactionGuard.observeInstructionResult("claudecode", req.SessionID, leaf) || instructionCandidate
+				}
+			}
+			if actionCandidate {
 				compactionGuardFinding(verdict, "untrusted_tool_result", "")
 			}
-			if a.compactionGuard.observeInstructionResult("claudecode", req.SessionID, toolResultContent) {
+			if instructionCandidate {
 				compactionPoisonFinding(verdict, "untrusted_tool_result")
+			}
+			if incomplete {
+				compactionScanIncompleteFinding(verdict)
 			}
 		}
 	}
@@ -322,7 +356,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Only summary-correlated evidence produces the OS poisoning alert. The
 	// inline status is delivered by the first supported hook after PostCompact.
 	if compactionWarning && a.notifier != nil {
-		a.notifier.OnCompactionRisk(notifier.CompactionRiskEvent{Connector: "claudecode"})
+		a.notifier.OnCompactionRisk(notifier.NewCompactionRiskEvent("claudecode", req.SessionID))
 	}
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
@@ -335,7 +369,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// PostCompact discards systemMessage; compact-source SessionStart can run
 	// before it. UserPromptSubmit is the fallback for a user-visible status on
 	// the next turn, without injecting any model context or changing decisions.
-	if (req.HookEventName == "SessionStart" && req.Source == "compact") || req.HookEventName == "UserPromptSubmit" {
+	if compactionEnabled && ((req.HookEventName == "SessionStart" && req.Source == "compact") || req.HookEventName == "UserPromptSubmit") {
 		if notice := a.compactionGuard.takeClaudeInlineNotice(req.SessionID); notice != "" {
 			if resp.ClaudeCodeOutput == nil {
 				resp.ClaudeCodeOutput = make(map[string]interface{})
@@ -469,6 +503,37 @@ func (a *APIServer) claudeCodeMode() string {
 		}
 	}
 	return normalizeAgentHookMode(mode)
+}
+
+// The compaction guard is a local rule-pack detector. In managed enterprise,
+// AID is the sole hook decision-maker, including on lifecycle events.
+func (a *APIServer) compactionLocalHookEnabled() bool {
+	return a != nil && !a.managedAIDOnly() && !ManagedEnterpriseActive()
+}
+
+const compactionScanIncompleteRuleID = "COMPACTION-SCAN-INCOMPLETE-001"
+
+// A bounded payload we could not inspect completely is an observability
+// limitation, not evidence of a forged user claim. Keep it advisory and do
+// not create a candidate or change the underlying tool decision.
+func compactionScanIncompleteFinding(verdict *ToolInspectVerdict) {
+	if verdict == nil {
+		return
+	}
+	verdict.Findings = append(verdict.Findings, compactionScanIncompleteRuleID)
+	verdict.DetailedFindings = append(verdict.DetailedFindings, RuleFinding{
+		RuleID:      compactionScanIncompleteRuleID,
+		Title:       "Compaction source scan incomplete",
+		Severity:    "INFO",
+		Confidence:  1,
+		Evidence:    "result_content_bounds",
+		Tags:        []string{"compaction", "scan_incomplete"},
+		enforcement: findingEnforcementDetectionOnly,
+		disposition: findingDispositionAdvisory,
+	})
+	if verdict.Severity == "" || verdict.Severity == "NONE" {
+		verdict.Severity = "INFO"
+	}
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
@@ -769,6 +834,79 @@ func claudeCodePromptContent(req claudeCodeHookRequest) string {
 func claudeCodeToolOutput(req claudeCodeHookRequest) string {
 	parts := []string{claudeCodeString(req.ToolResponse), claudeCodeString(req.ToolCalls), req.Error, req.ErrorDetails}
 	return strings.Join(nonEmptyStrings(parts...), "\n")
+}
+
+// Only returned/error text can become a compaction source. The broad
+// claudeCodeToolOutput projection is useful to ordinary content inspection,
+// but contains JSON and tool-input metadata that must never arm a forged-user
+// candidate. Each value is scanned as independent string leaves downstream.
+func claudeCodeCompactionResultValues(req claudeCodeHookRequest) ([]interface{}, bool) {
+	values := make([]interface{}, 0, 4)
+	complete := true
+	if req.ToolResponse != nil {
+		values = append(values, req.ToolResponse)
+	}
+	if req.HookEventName == "PostToolBatch" {
+		var batch []interface{}
+		batch, complete = claudeCodeBatchResultValues(req.ToolCalls)
+		values = append(values, batch...)
+	}
+	if req.Error != "" {
+		values = append(values, req.Error)
+	}
+	if req.ErrorDetails != "" {
+		values = append(values, req.ErrorDetails)
+	}
+	return values, complete
+}
+
+// A batch call can carry both input and output. Select only fields that the
+// batch/result contract treats as returned text, never tool_input or command.
+func claudeCodeBatchResultValues(calls interface{}) ([]interface{}, bool) {
+	const (
+		maxNodes   = 4096
+		maxResults = 256
+	)
+	var values []interface{}
+	complete := true
+	nodes := 0
+	var visit func(interface{}, int)
+	visit = func(v interface{}, depth int) {
+		if !complete {
+			return
+		}
+		nodes++
+		if depth > 8 || nodes > maxNodes {
+			complete = false
+			return
+		}
+		switch value := v.(type) {
+		case []interface{}:
+			for _, item := range value {
+				visit(item, depth+1)
+			}
+		case []map[string]interface{}:
+			for _, item := range value {
+				visit(item, depth+1)
+			}
+		case map[string]interface{}:
+			for _, key := range []string{"tool_response", "tool_result", "result", "output", "stdout", "stderr", "error", "error_details"} {
+				if result, ok := value[key]; ok {
+					values = append(values, result)
+				}
+			}
+			for _, key := range []string{"tool_calls", "calls", "results"} {
+				if nested, ok := value[key]; ok {
+					visit(nested, depth+1)
+				}
+			}
+		}
+		if len(values) > maxResults {
+			complete = false
+		}
+	}
+	visit(calls, 0)
+	return values, complete
 }
 
 func claudeCodeEventContent(req claudeCodeHookRequest) string {
