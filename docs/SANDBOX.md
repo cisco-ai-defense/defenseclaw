@@ -700,8 +700,20 @@ Hook handlers then treat a sandbox request differently from a host request
   DefenseClaw's egress policy just blocked this sandbox's HTTPS connection to webhook.site (webhook catcher); a tool sees only a connection error, not the reason. The user can allow it for this sandbox with `defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a`. Tell the user if the task needs it, and do not try to reach it another way.
   ```
 
+  An upload the large-upload block cut on a CONNECT tunnel it had let
+  through ends the same way for the client (`curl: (56) Failure when
+  receiving data from the peer`), so the manager keeps the cut
+  (`egress.large_upload` with `terminated`) with the refusals, told once in
+  the same window. A refusal of the host after the cut is that news, not a
+  second note. The note says what went up and that the upload did not
+  complete:
+
+  ```text
+  DefenseClaw's egress policy cut this sandbox's upload to httpbin.org after 996 KiB, because it is a destination this sandbox had not contacted before (the large-upload block); the upload did not complete, and a tool sees only a connection error, not the reason. The user can allow it for this sandbox with `defenseclaw sandbox unblock httpbin.org --sandbox myapp-7f3a`. Tell the user if the task needs it, and do not try to reach it another way.
+  ```
+
   The audit row's `extra.sandbox_egress_refused` lists what was told
-  (`webhook.site:webhook_catcher`). Hermes, Kiro, OpenCode, OpenHands, Amp,
+  (`webhook.site:webhook_catcher`, `httpbin.org:large_upload`). Hermes, Kiro, OpenCode, OpenHands, Amp,
   Antigravity and OmniGent have no model-facing post-tool context field, so
   their agents are not told; the terminal's live notice still tells the
   user.

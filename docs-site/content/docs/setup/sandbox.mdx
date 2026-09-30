@@ -528,7 +528,12 @@ destination the proxy just refused, why, and the `sandbox unblock` command
 you can run. Claude Code, Codex, Copilot CLI, Cursor and Devin read this
 note; the other harnesses have no place for it, and there only your
 terminal's notice reports the block. Each block is told once, and only in
-the sandbox that hit it.
+the sandbox that hit it. An upload that
+[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+cuts ends the same way for the tool (`curl: (56) Failure when receiving data
+from the peer`), so the agent is told of it too: that the upload to the host
+was cut after how much, because the sandbox had not contacted it before, and
+the unblock command.
 
 The proxy address the sandbox gets (`HTTPS_PROXY` and `HTTP_PROXY`) holds a
 user name and password of its own, so a verbose tool such as `curl -v`

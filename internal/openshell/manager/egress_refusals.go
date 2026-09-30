@@ -32,7 +32,10 @@ import (
 // manager keeps each sandbox binding's recent CONNECT refusals, and the
 // gateway, answering a post-tool hook of a shell or fetch tool call from
 // that binding, takes the ones its agent has not been told of
-// (Manager.EgressRefusals) and adds them to the hook's context.
+// (Manager.EgressRefusals) and adds them to the hook's context. An upload
+// the large-upload block cut on a tunnel it had let through ends the same
+// way ("curl: (56) Failure when receiving data from the peer"), and is
+// kept with them.
 
 const (
 	// egressRefusalWindow is how long a refusal waits for a post-tool
@@ -56,6 +59,11 @@ type EgressRefusal struct {
 	// Remedy says who can allow it, and how: the unblock command for this
 	// sandbox when an unblock lifts the refusal.
 	Remedy string
+	// Cut marks an upload the large-upload block cut (category
+	// large_upload) on a tunnel it had let through, after Sent bytes went
+	// up; later refusals of the host within the window are told with it.
+	Cut  bool
+	Sent int64
 }
 
 // refusalMemory is the recent CONNECT refusals of every sandbox binding.
@@ -81,20 +89,30 @@ type refusedHost struct {
 	// told marks a refusal the agent was told of: a repeat within the
 	// window is not told again.
 	told bool
+	// cut marks an upload the large-upload block cut after sent bytes
+	// (EgressRefusal.Cut).
+	cut  bool
+	sent int64
 }
 
 func newRefusalMemory() *refusalMemory {
 	return &refusalMemory{byBinding: map[string]*bindingRefusals{}}
 }
 
-// note keeps a blocked CONNECT event of a sandbox binding. A refusal the
-// client got a readable 403 body for (a plain-HTTP request), a rate limit
-// and an invalid target are not kept: the first explains itself, and the
-// others are no policy decision about a destination. It runs on the proxy's
-// goroutines, so it only ever touches the event's binding.
+// note keeps a blocked CONNECT event of a sandbox binding, or the cut of
+// an upload on a CONNECT tunnel by the large-upload block. A refusal the
+// client got a readable 403 body for (a plain-HTTP request, a cut one
+// included), a rate limit and an invalid target are not kept: the first
+// explains itself, and the others are no policy decision about a
+// destination. It runs on the proxy's goroutines, so it only ever touches
+// the event's binding.
 func (r *refusalMemory) note(e egress.Event, now time.Time) {
-	if e.Kind != egress.EventBlocked || e.Method != http.MethodConnect || e.BindingID == "" || e.Host == "" {
+	cut := e.Kind == egress.EventLargeUpload && e.Terminated
+	if (e.Kind != egress.EventBlocked && !cut) || e.Method != http.MethodConnect || e.BindingID == "" || e.Host == "" {
 		return
+	}
+	if cut {
+		e.Category = egress.CategoryLargeUpload
 	}
 	switch e.Category {
 	case egress.CategoryRateLimited, egress.CategoryInvalidDestination:
@@ -116,6 +134,9 @@ func (r *refusalMemory) note(e egress.Event, now time.Time) {
 	}
 	b.sandbox, b.last = e.SandboxName, now
 	next := refusedHost{host: host, port: e.Port, category: e.Category, source: e.Source, unblockable: e.Unblockable, at: now}
+	if cut {
+		next.cut, next.sent = true, e.BytesUp
+	}
 	kept := b.hosts[:0]
 	for _, h := range b.hosts {
 		switch {
@@ -123,6 +144,10 @@ func (r *refusalMemory) note(e egress.Event, now time.Time) {
 			// Expired: a later refusal of it is told again.
 		case h.host == host && h.port == e.Port:
 			next.told = h.told
+			if h.cut && !next.cut && next.category == egress.CategoryLargeUpload {
+				// A refusal after the cut: the cut is what to tell.
+				next.cut, next.sent = true, h.sent
+			}
 		default:
 			kept = append(kept, h)
 		}
@@ -227,6 +252,7 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 			Host: h.host, Port: h.port, Category: string(h.category),
 			What:   refusalWhat(h.category),
 			Remedy: refusalRemedy(h, name, honored),
+			Cut:    h.cut, Sent: h.sent,
 		})
 	}
 	return out

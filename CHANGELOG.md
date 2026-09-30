@@ -370,7 +370,15 @@ deleted.
   model's context. It names each destination the proxy refused in the last
   two minutes and why, and gives the user's `sandbox unblock HOST --sandbox
   NAME` command when an unblock lifts the refusal, or says who can allow
-  it. The note tells the agent not to try another way. The harness hooks
+  it. The note tells the agent not to try another way. An upload the
+  large-upload block cut on an HTTPS tunnel, which the tool sees only as a
+  broken connection (`curl: (56) Failure when receiving data from the
+  peer`), is told the same way, once and in the same window: `DefenseClaw's
+  egress policy cut this sandbox's upload to HOST after 996 KiB, because it
+  is a destination this sandbox had not contacted before (the large-upload
+  block); the upload did not complete, …`, with the unblock command when an
+  unblock lifts it (a live test's agent had answered "Uploaded the file.").
+  The harness hooks
   that carry it are Claude Code `PostToolUse`/`PostToolUseFailure`, Codex
   `PostToolUse`, Copilot CLI `postToolUse`/`postToolUseFailure`, Cursor
   `postToolUse` and Devin `PostToolUse`. Each refusal is told once, and only

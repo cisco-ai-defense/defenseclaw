@@ -500,6 +500,11 @@ func newEgressSink(m *Manager) *egressSink {
 // EgressEvent implements egress.EventSink.
 func (s *egressSink) EgressEvent(e egress.Event) {
 	it := sinkItem{ev: e}
+	if e.Kind == egress.EventLargeUpload && e.Terminated {
+		// An upload the large-upload block cut: the agent sees only the
+		// broken connection too (EgressRefusals).
+		s.m.refusals.note(e, s.m.now())
+	}
 	if e.Kind == egress.EventBlocked {
 		// Every refusal, before the telemetry's folding and pacing: the
 		// agent is told of what its own calls hit (EgressRefusals).

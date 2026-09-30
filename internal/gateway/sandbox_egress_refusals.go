@@ -52,6 +52,12 @@ type SandboxEgressRefusal struct {
 	// Remedy says who can allow it, and how ("the user can allow it for
 	// this sandbox with `defenseclaw sandbox unblock ...`").
 	Remedy string
+	// Cut marks an upload the large-upload block cut on a tunnel it had
+	// let through, after Sent bytes went up: the client saw only the
+	// connection break ("curl: (56) Failure when receiving data from the
+	// peer").
+	Cut  bool
+	Sent int64
 }
 
 const (
@@ -151,6 +157,15 @@ func (a *APIServer) addSandboxEgressRefusals(
 func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 	if len(refusals) == 1 {
 		r := refusals[0]
+		if r.Cut {
+			// The upload itself went through the tunnel until the cut: an
+			// agent that saw only the broken connection may take the upload
+			// for done (RT U3).
+			return "DefenseClaw's egress policy cut this sandbox's upload to " + sandboxEgressTarget(r) + " after " + sandboxUploadSize(r.Sent) +
+				", because it is a destination this sandbox had not contacted before (the large-upload block); the upload did not complete, " +
+				"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) +
+				" Tell the user if the task needs it, and do not try to reach it another way."
+		}
 		connection := "connection to " + sandboxEgressTarget(r)
 		if r.Port == 443 || r.Port == 0 {
 			connection = "HTTPS " + connection
@@ -163,7 +178,11 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 	b.WriteString("DefenseClaw's egress policy just blocked these connections from this sandbox; a tool sees only a connection error, not the reason:")
 	shown := refusals[:min(len(refusals), sandboxEgressNoticeMaxHosts)]
 	for _, r := range shown {
-		b.WriteString("\n- " + sandboxEgressTarget(r) + " (" + r.What + "): " + sentence(r.Remedy))
+		what := r.What
+		if r.Cut {
+			what = "upload cut after " + sandboxUploadSize(r.Sent) + ", not completed: a destination this sandbox had not contacted before"
+		}
+		b.WriteString("\n- " + sandboxEgressTarget(r) + " (" + what + "): " + sentence(r.Remedy))
 	}
 	if more := len(refusals) - len(shown); more > 0 {
 		fmt.Fprintf(&b, "\n- and %d more", more)
@@ -183,6 +202,19 @@ func sandboxEgressTarget(r SandboxEgressRefusal) string {
 		host = "[" + host + "]"
 	}
 	return host + ":" + strconv.Itoa(r.Port)
+}
+
+// sandboxUploadSize is what went up before a cut: "1.0 MiB", "512 KiB", or
+// bytes.
+func sandboxUploadSize(n int64) string {
+	const kib, mib = 1 << 10, 1 << 20
+	switch {
+	case n >= mib:
+		return strconv.FormatFloat(float64(n)/mib, 'f', 1, 64) + " MiB"
+	case n >= kib:
+		return strconv.FormatInt(n/kib, 10) + " KiB"
+	}
+	return strconv.FormatInt(max(n, 0), 10) + " bytes"
 }
 
 func upperFirst(s string) string {

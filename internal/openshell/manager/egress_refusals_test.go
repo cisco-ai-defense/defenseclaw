@@ -19,6 +19,9 @@
 package manager
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -106,6 +109,60 @@ func TestEgressRefusalsReachTheBindingsAgentOnce(t *testing.T) {
 	}
 	if got := refusals(eg); len(got) != 0 {
 		t.Fatalf("a deleted sandbox's refusals = %+v", got)
+	}
+}
+
+// RT U3: when the large-upload block cut an upload on a tunnel it had let
+// through, the agent saw only "curl: (56) Failure when receiving data from
+// the peer" and replied "Uploaded the file."; the #954 note covered refused
+// CONNECTs only. The cut is kept like a refusal: told once, within the
+// window, with what went up and the unblock command, and a refusal of the
+// host after it is the same news.
+func TestEgressRefusalsTellOfALargeUploadCut(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) {
+		c.OpenShell.Egress.LargeUploadMB = 1
+		c.OpenShell.Egress.BlockLargeUploads = true
+	})
+	_, advance := e.fakeClock(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
+	e.run()
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "upbox"})
+	b := e.binding("upbox")
+	conn, br := proxy.open(t, "upbox", "example.org:80")
+	const size = 2 << 20
+	_, err := fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: example.org\r\nContent-Length: %d\r\n\r\n", size)
+	must(t, err)
+	chunk := bytes.Repeat([]byte("u"), 32<<10)
+	for sent := 0; sent < size; sent += len(chunk) {
+		if _, err := conn.Write(chunk); err != nil {
+			break // the proxy cut the tunnel
+		}
+	}
+	_, _ = io.Copy(io.Discard, br)
+	var got []EgressRefusal
+	eventually(t, "the cut among the refusals", func() bool {
+		got = append(got, e.m.EgressRefusals(b.ID, b.SandboxName)...)
+		return len(got) > 0
+	})
+	if len(got) != 1 || got[0].Host != "example.org" || got[0].Category != string(egress.CategoryLargeUpload) || !got[0].Cut ||
+		got[0].Sent <= 0 || got[0].Sent > 1<<20 ||
+		got[0].Remedy != "the user can allow it for this sandbox with `defenseclaw sandbox unblock example.org --sandbox upbox`" {
+		t.Fatalf("refusals = %+v", got)
+	}
+	// A refusal of the host after the cut is not told again.
+	if status, _ := proxy.connect(t, "upbox", "example.org:80"); status != http.StatusForbidden {
+		t.Fatalf("CONNECT after the cut = %d", status)
+	}
+	if got := e.m.EgressRefusals(b.ID, b.SandboxName); len(got) != 0 {
+		t.Fatalf("told again: %+v", got)
+	}
+	// Past the window it is an ordinary refusal of the blocked host.
+	advance(egressRefusalWindow + time.Second)
+	if status, _ := proxy.connect(t, "upbox", "example.org:80"); status != http.StatusForbidden {
+		t.Fatalf("CONNECT after the window = %d", status)
+	}
+	if got := e.m.EgressRefusals(b.ID, b.SandboxName); len(got) != 1 || got[0].Cut || got[0].Category != string(egress.CategoryLargeUpload) {
+		t.Fatalf("after the window = %+v", got)
 	}
 }
 
