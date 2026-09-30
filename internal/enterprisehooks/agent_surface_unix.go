@@ -24,6 +24,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // Unix app and extension discovery runs in the per-user worker, with the
@@ -49,7 +50,7 @@ var unixExtensionRoots = []unixExtensionRoot{
 	{"vscode-server-insiders", ".vscode-server-insiders/extensions"},
 	{"vscodium", ".vscode-oss/extensions"},
 	{"cursor", ".cursor/extensions"},
-	{"windsurf", ".windsurf/extensions"},
+	{legacyconnector.VendorToken, legacyconnector.InventoryDotDirs[0] + "/extensions"}, // Devin Desktop, pre-rename folder; live check
 	{"kiro", ".kiro/extensions"},
 	{"antigravity", ".antigravity/extensions"}, // live check
 }

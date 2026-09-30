@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -37,7 +38,7 @@ var windowsExtensionRoots = []struct{ host, dir string }{
 	{"vscode-insiders", `.vscode-insiders\extensions`},
 	{"vscodium", `.vscode-oss\extensions`},
 	{"cursor", `.cursor\extensions`},
-	{"windsurf", `.windsurf\extensions`},
+	{legacyconnector.VendorToken, legacyconnector.InventoryDotDirs[0] + `\extensions`}, // Devin Desktop, pre-rename folder; live check
 	{"kiro", `.kiro\extensions`},
 	{"antigravity", `.antigravity\extensions`}, // live check
 }
