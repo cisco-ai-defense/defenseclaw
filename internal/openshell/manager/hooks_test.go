@@ -81,13 +81,13 @@ func TestToolCallHooksClassify(t *testing.T) {
 }
 
 // Every sandboxed harness is listed, and each pairs by the identity its
-// hooks carry: a per-call ID, the call's content (Kiro CLI and Copilot CLI
-// send none), or nothing (harnesses whose post-tool events on a denied call
-// are unmeasured).
+// hooks carry: a per-call ID, the call's content (Kiro CLI, Copilot CLI and
+// Devin CLI send none the gateway reads), or nothing (harnesses whose
+// post-tool events on a denied call are unmeasured).
 func TestToolCallHooksKeying(t *testing.T) {
 	want := map[string]toolCallKeying{
 		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID, "kiro": keyByContent,
-		"copilot": keyByContent, "devin": keyNone, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
+		"copilot": keyByContent, "devin": keyByContent, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
 	}
 	if len(toolCallHooksByConnector) != len(want) {
 		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
@@ -313,7 +313,7 @@ func (e *harnessEnv) decider(sandbox, tool string) func(event, id, action string
 func TestHookTamperPerHarness(t *testing.T) {
 	for _, tc := range []struct {
 		connector, pre, post, status string
-		byContent                    bool // no per-call ID (Kiro CLI, Copilot CLI)
+		byContent                    bool // no per-call ID (Kiro CLI, Copilot CLI, Devin CLI)
 		paired                       bool
 	}{
 		{connector: "claudecode", pre: "PreToolUse", post: "PostToolUse", paired: true},
@@ -323,7 +323,7 @@ func TestHookTamperPerHarness(t *testing.T) {
 		{connector: "amp", pre: "tool.call", post: "tool.result", status: "done", paired: true},
 		{connector: "kiro", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
 		{connector: "copilot", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
-		{connector: "devin", pre: "PreToolUse", post: "PostToolUse"},
+		{connector: "devin", pre: "PreToolUse", post: "PostToolUse", byContent: true, paired: true},
 		{connector: "hermes", pre: "pre_tool_call", post: "post_tool_call"},
 		{connector: "openhands", pre: "PreToolUse", post: "PostToolUse"},
 		{connector: "antigravity", pre: "PreToolUse", post: "PostToolUse"},
@@ -406,6 +406,40 @@ func TestHookTamperPerHarness(t *testing.T) {
 				}
 				if len(hookTamperFindings(e)) != 2 {
 					t.Fatalf("a postToolUseFailure or an identical call pair raised %+v", hookTamperFindings(e)[2:])
+				}
+			}
+			if tc.connector == "devin" {
+				// As measured on Devin CLI 3000.11.3: a tool that failed
+				// before it ran sends no PostToolUse, so its call stays
+				// open, and an identical call after it pairs; parallel
+				// identical calls pair one by one; a command the user
+				// edits at Devin's permission prompt gets a new PreToolUse
+				// with the edited input, and only that one's PostToolUse
+				// arrives.
+				edited := d(tc.pre, "allow", "edited")
+				edited.ToolInput = json.RawMessage(`{"command":"echo dctamper-edited-by-the-user"}`)
+				editedRan := edited
+				editedRan.Event = tc.post
+				for _, dec := range []HookDecision{d(tc.pre, "allow", "failed"),
+					d(tc.pre, "allow", "failed"), d(tc.post, "allow", "failed"),
+					d(tc.pre, "allow", "twice"), d(tc.pre, "allow", "twice"), d(tc.post, "allow", "twice"), d(tc.post, "allow", "twice"),
+					d(tc.pre, "allow", "edited"), edited, editedRan} {
+					e.m.ObserveHookDecision(dec)
+				}
+				if len(hookTamperFindings(e)) != 2 {
+					t.Fatalf("a failed, identical or edited Devin call raised %+v", hookTamperFindings(e)[2:])
+				}
+				// An edited command whose PreToolUse DefenseClaw denied,
+				// and that ran anyway, is still reported.
+				denied := d(tc.pre, "block", "edited-denied")
+				denied.ToolInput = json.RawMessage(`{"command":"echo dctamper-edited-and-denied"}`)
+				deniedRan := denied
+				deniedRan.Event, deniedRan.Action = tc.post, "allow"
+				for _, dec := range []HookDecision{d(tc.pre, "allow", "edited-denied"), denied, deniedRan} {
+					e.m.ObserveHookDecision(dec)
+				}
+				if got := hookTamperFindings(e); len(got) != 3 || !strings.Contains(got[2].Title, "denied ran anyway") {
+					t.Fatalf("an edited Devin call DefenseClaw denied that ran anyway raised %+v", got[2:])
 				}
 			}
 		})

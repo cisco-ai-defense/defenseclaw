@@ -198,10 +198,10 @@ These are the settings each pack controls. The
   `stop` stops the sandbox; `alert` reports a high-severity finding and
   keeps it running. Both show in the activity feed. `open` alerts;
   `balanced` and `strict` stop. Claude Code, Codex, Cursor Agent, OpenCode,
-  Amp, Kiro CLI and Copilot CLI sandboxes get this check. Devin CLI hooks do
-  not say which call they belong to and were not measured, and for Hermes,
-  OpenHands, Antigravity and OmniGent that is not measured yet, so for those
-  DefenseClaw relies on noticing hooks that go silent.
+  Amp, Kiro CLI, Copilot CLI and Devin CLI sandboxes get this check. For
+  Hermes, OpenHands, Antigravity and OmniGent it is not measured yet which
+  call a hook belongs to, so for those DefenseClaw relies on noticing hooks
+  that go silent.
 
 Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
 workload runs as the same user as the hooks, so it could stop a hook

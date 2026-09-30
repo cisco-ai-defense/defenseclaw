@@ -306,9 +306,10 @@ func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
 // tamper detection for the hook-only harnesses: each one's pre-tool and
 // post-tool events reach the manager under the harness's own event names,
 // with what names the call. Cursor, OpenCode and Amp send a per-call ID;
-// Kiro CLI and Copilot CLI send none (measured on 2.24.1 and 1.0.88), so the
-// call's session and tool input must reach the manager byte for byte the
-// same from both events.
+// Kiro CLI and Copilot CLI send none (measured on 2.24.1 and 1.0.88), and
+// Devin CLI's tool_use_id is undocumented and not read as one (measured on
+// 3000.11.3), so the call's session and tool input must reach the manager
+// byte for byte the same from both events.
 func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 	var obs sandboxObserver
 	f := newSandboxIngressFixture(t, obs.observe)
@@ -367,6 +368,18 @@ func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 				`"toolName":"bash","toolArgs":{"command":"echo dce2e-pair","description":"write the pair marker"},` +
 				`"toolResult":{"resultType":"success","textResultForLlm":"dce2e-pair\n"}}`,
 			session: "506e99d3-3a4f-4a7c-9d0e-0f2c6d1e8b11", inputKeys: 2,
+		},
+		{
+			spec: harness.Devin, path: "/api/v1/devin/hook", pre: "PreToolUse", post: "PostToolUse",
+			// Devin CLI 3000.11.3's payloads as measured, with made-up
+			// values (the IDs at their measured lengths). Its tool_use_id
+			// does not reach the manager as the call's ID.
+			preBody: `{"hook_event_name":"PreToolUse","session_id":"amber-otter","prompt_id":"3f6c2a91-5d7e-4b08-9c1a-2e8f0d4b7a63",` +
+				`"tool_name":"exec","tool_input":{"command":"echo dce2e-pair > pair.txt"},"tool_use_id":"tu_9c41e07b2"}`,
+			postBody: `{"hook_event_name":"PostToolUse","session_id":"amber-otter","prompt_id":"3f6c2a91-5d7e-4b08-9c1a-2e8f0d4b7a63",` +
+				`"tool_name":"exec","tool_input":{"command":"echo dce2e-pair > pair.txt"},"tool_use_id":"tu_9c41e07b2",` +
+				`"tool_response":{"success":true,"output":"Exited with code 0","error":null}}`,
+			session: "amber-otter",
 		},
 		{
 			spec: harness.Amp, path: "/api/v1/amp/hook", pre: "tool.call", post: "tool.result",

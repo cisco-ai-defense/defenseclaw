@@ -591,7 +591,16 @@ deleted.
   was noticed. Copilot's hooks carry no per-call ID, so its calls are paired
   like Kiro CLI's, by session, tool name and tool arguments; measured on the
   pinned 1.0.88, a call a hook denied or the user refused sends no
-  `postToolUse`. Devin CLI is still not paired (not measured). Both drivers.
+  `postToolUse`. Both drivers.
+- Devin CLI sandboxes get hook tamper detection too: a tool call that ran
+  although DefenseClaw denied it, or whose `PreToolUse` hook never reached
+  DefenseClaw, raises the `hook_tamper` finding and `hooks.on_tamper`
+  applies. Devin documents no per-call ID, so its calls are paired like
+  Kiro CLI's and Copilot CLI's, by session, tool name and tool input;
+  measured on a logged-in Devin CLI 3000.11.3, a call a hook denied, the
+  user refused or that failed before it ran sends no `PostToolUse`. The
+  Devin CLI image is still unverified, so `sandbox run devin` still refuses
+  it. Both drivers.
 - The Kiro CLI sandbox image rebuilds: its agent hooks now set
   `timeout_ms` 30000, so a slow verdict no longer lets the tool run (see
   Kiro CLI tool hooks).

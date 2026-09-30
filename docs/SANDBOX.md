@@ -1715,7 +1715,8 @@ compromised hook shows:
   | Amp | `tool.call` | `tool.result` with status `done` | `tool.result` with another status | the plugin's `toolUseID` |
   | Kiro CLI | `preToolUse` | `postToolUse` | | session, tool name and tool input |
   | Copilot CLI | `preToolUse` | `postToolUse` | `postToolUseFailure` | session, tool name and tool input |
-  | Devin CLI, Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
+  | Devin CLI | `PreToolUse` | `PostToolUse` | | session, tool name and tool input |
+  | Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
 
   A failure event closes a call but never proves tamper: Claude Code can
   report a failure before `PreToolUse` ran. Kiro CLI 2.24.1 sends no
@@ -1733,12 +1734,23 @@ compromised hook shows:
   both events, `postToolUse` fires only for a tool that ran (not for one a
   `preToolUse` deny blocked, nor for one the user refused at Copilot's
   permission prompt, and neither sends `postToolUseFailure`), and parallel
-  or identical calls each get their own pair. Devin CLI hooks carry no
-  per-call ID either, and whether its `PostToolUse` fires for a call a hook
-  denied is not measured (no Devin account), so for it hook silence is the
-  backstop. The same holds for Hermes,
-  OpenHands, Antigravity and OmniGent until their hook payloads are
-  measured. Every harness's pre-tool events
+  or identical calls each get their own pair. Devin CLI documents no
+  per-call ID and is keyed the same way (`session_id`, `tool_name` and
+  `tool_input`). Measured on a logged-in Devin CLI 3000.11.3 in its own TUI
+  (the image pins 3000.4.25, whose hook payload declares the same fields
+  but was not run): `tool_input` is the same object in both events, and
+  `PostToolUse` fires only for a tool that ran. A call a `PreToolUse` exit 2
+  or `{"decision":"block"}` denied, one the user refused at Devin's
+  permission prompt, and one that failed before it ran (a read of a missing
+  file) send no `PostToolUse`, and Devin has no failure event. A
+  `PreToolUse` hook that dies with another exit code lets the tool run, and
+  its `PostToolUse` still arrives, which is the tamper this check reports.
+  Parallel or identical calls each get their own pair, and a command the
+  user edits at Devin's permission prompt gets a new `PreToolUse` with the
+  edited input. 3000.11.3 also sends an undocumented `tool_use_id`, the same
+  in both events, which the gateway does not read as the call's ID. For
+  Hermes, OpenHands, Antigravity and OmniGent hook silence is the backstop
+  until their hook payloads are measured. Every harness's pre-tool events
   count in the session summary's tool calls and blocks.
 
 The pack's `hooks.on_tamper` picks the response: `stop` (the default in
