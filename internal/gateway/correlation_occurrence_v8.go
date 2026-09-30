@@ -100,7 +100,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 
 	now := time.Now().UTC()
 	lifecycle, hasLifecycle := spec.LifecycleForEvent(req.HookEventName)
-	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req)
+	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req, spec)
 	if hasCursor {
 		if req.AgentID == "" {
 			req.AgentID = cursor.AgentID
@@ -198,6 +198,18 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		if identity.valid() {
 			pending = identity.pendingMatch(audit.CorrelationOperationModel, req.ModelRequestID, "", req)
 			pendingLocator = identity.locator(instance.ConnectorInstanceID, audit.CorrelationOperationModel, req.ModelRequestID)
+		}
+	}
+	// A result that reported no agent takes its agent from its pending start
+	// (restoreHookOperationContext). That agent's cursor was not read above:
+	// the lookup had no agent to go by, and with a subagent's cursor also
+	// active it was ambiguous. Continue that cursor; a fresh sequence-1
+	// cursor for an agent that already has one is refused as stale on every
+	// attempt, and the result would lose its correlation (#957: Claude Code's
+	// PostToolUse for the Agent tool, which follows the subagent's hooks).
+	if !hasCursor && req.SessionID != "" && req.AgentID != "" {
+		if restored, cursorErr := repo.GetCursor(ctx, instance.ConnectorInstanceID, req.SessionID, req.AgentID); cursorErr == nil {
+			cursor, hasCursor = restored, true
 		}
 	}
 
@@ -469,7 +481,7 @@ func (a *APIServer) finalizeHookCorrelationReceipt(
 	return repo.MarkOccurrenceCanonicalPersisted(ctx, *receipt, time.Now().UTC())
 }
 
-func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationRepository, instance audit.ConnectorInstanceID, req agentHookRequest) (audit.CorrelationCursor, bool) {
+func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationRepository, instance audit.ConnectorInstanceID, req agentHookRequest, spec connector.CorrelationSpec) (audit.CorrelationCursor, bool) {
 	if req.SessionID == "" {
 		return audit.CorrelationCursor{}, false
 	}
@@ -479,6 +491,14 @@ func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationReposi
 		cursor, err = repo.GetCursor(ctx, instance, req.SessionID, req.AgentID)
 	} else {
 		cursor, err = repo.FindActiveCursor(ctx, instance, req.SessionID)
+		if errors.Is(err, audit.ErrCorrelationConflict) && spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {
+			// A subagent's cursor is active next to the main agent's (a
+			// subagent running, backgrounded, or interrupted before its
+			// SubagentStop). The profile guarantees that an agentless hook
+			// is the main agent's; nextHookCorrelationCursor marked that
+			// cursor as its own root.
+			cursor, err = repo.FindActiveRootCursor(ctx, instance, req.SessionID)
+		}
 	}
 	return cursor, err == nil
 }
@@ -1502,6 +1522,14 @@ func nextHookCorrelationCursor(existing audit.CorrelationCursor, found bool, ins
 	cursor.ParentAgentID = firstNonEmpty(req.ParentAgentID, cursor.ParentAgentID)
 	cursor.RootSessionID = firstNonEmpty(req.RootSessionID, cursor.RootSessionID)
 	cursor.ParentSessionID = firstNonEmpty(req.ParentSessionID, cursor.ParentSessionID)
+	if spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) && cursor.ParentAgentID == "" &&
+		req.CorrelationOrigins[connector.CorrelationTargetAgent] != connector.CorrelationOriginReported {
+		// The hook reported no agent (DefenseClaw minted the main agent's ID,
+		// or restored it from this cursor or the call's pending start), so
+		// under this profile it is the main agent's: its cursor is its own
+		// root, which FindActiveRootCursor looks for.
+		cursor.RootAgentID = firstNonEmpty(cursor.RootAgentID, cursor.AgentID)
+	}
 	switch lifecycle {
 	case connector.CorrelationLifecycleSessionStart:
 		cursor.Active = true

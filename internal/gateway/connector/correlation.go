@@ -203,6 +203,15 @@ const (
 	CorrelationInferenceSubagentIdentity           CorrelationInferenceRule = "derive_subagent_identity"
 	CorrelationInferenceUniquePendingTool          CorrelationInferenceRule = "unique_pending_tool"
 	CorrelationInferenceTraceLink                  CorrelationInferenceRule = "w3c_trace_link"
+	// CorrelationInferenceAgentlessMainAgent attributes a hook that reports
+	// no agent to the session's main agent, also while subagents of the
+	// session are active. A profile may declare it only for a connector that
+	// stamps every hook a subagent fires with that subagent's ID. Claude Code
+	// does (2.1.156, measured for #957): the main thread's hooks carry no
+	// agent_id, and every hook of a subagent's work (its PreToolUse,
+	// PermissionRequest, PostToolUse, PostToolUseFailure, PostToolBatch,
+	// SubagentStart and SubagentStop) carries agent_id and agent_type.
+	CorrelationInferenceAgentlessMainAgent CorrelationInferenceRule = "agentless_hook_is_main_agent"
 )
 
 type CorrelationLifecycle string
@@ -682,7 +691,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetModelRequest, ns, "client_request", "client_request_id"),
 			reported(CorrelationTargetModelResponse, ns, "model_response", "request_id"),
 		)
-		spec, ok := makeSpec(CorrelationProfileClaudeCodeV1, hookContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "prompt_id is available in Claude Code 2.1.196 and later; hook events do not report provider request/response IDs"))
+		spec, ok := makeSpec(CorrelationProfileClaudeCodeV1, hookContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink, CorrelationInferenceAgentlessMainAgent}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "prompt_id is available in Claude Code 2.1.196 and later; hook events do not report provider request/response IDs"))
 		if ok {
 			// prompt_id is the exact hook/native turn anchor, but it was added
 			// after the broader v1 hook contract. Record the narrower reviewed

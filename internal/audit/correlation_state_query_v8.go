@@ -63,6 +63,27 @@ func (repo *CorrelationRepository) FindActiveCursor(
 	connectorInstanceID ConnectorInstanceID,
 	sessionID string,
 ) (CorrelationCursor, error) {
+	return repo.findUniqueActiveCursor(ctx, connectorInstanceID, sessionID, "")
+}
+
+// FindActiveRootCursor is FindActiveCursor restricted to the session's root
+// cursors: those whose agent is its own root (root_agent_id = agent_id).
+// Subagent cursors never qualify, so a session with active subagents still
+// has one answer when a single root cursor is active.
+func (repo *CorrelationRepository) FindActiveRootCursor(
+	ctx context.Context,
+	connectorInstanceID ConnectorInstanceID,
+	sessionID string,
+) (CorrelationCursor, error) {
+	return repo.findUniqueActiveCursor(ctx, connectorInstanceID, sessionID, " AND root_agent_id=agent_id")
+}
+
+func (repo *CorrelationRepository) findUniqueActiveCursor(
+	ctx context.Context,
+	connectorInstanceID ConnectorInstanceID,
+	sessionID string,
+	extraWhere string,
+) (CorrelationCursor, error) {
 	if err := repo.validateStateQuery(ctx, connectorInstanceID); err != nil {
 		return CorrelationCursor{}, err
 	}
@@ -75,7 +96,7 @@ func (repo *CorrelationRepository) FindActiveCursor(
 	}
 	defer release()
 	rows, err := repo.store.db.QueryContext(ctx, correlationCursorSelect+`
-		WHERE connector_instance_id=? AND session_id=? AND active=1
+		WHERE connector_instance_id=? AND session_id=? AND active=1`+extraWhere+`
 		ORDER BY updated_time_unix_nano DESC, agent_id LIMIT 2`, string(connectorInstanceID), sessionID)
 	if err != nil {
 		return CorrelationCursor{}, fmt.Errorf("audit: find active correlation cursor: %w", err)

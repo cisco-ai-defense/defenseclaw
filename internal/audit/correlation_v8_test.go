@@ -655,6 +655,30 @@ func TestCorrelationStateQueriesSurviveRestartAndRejectAmbiguity(t *testing.T) {
 	if _, err := repo.FindActiveCursor(t.Context(), instance.ConnectorInstanceID, "session"); !errors.Is(err, ErrCorrelationConflict) {
 		t.Fatalf("ambiguous active cursor error=%v", err)
 	}
+	// Only a cursor that is its own root answers the root lookup: one such
+	// cursor next to the others is the answer; two are ambiguous again.
+	if _, err := repo.FindActiveRootCursor(t.Context(), instance.ConnectorInstanceID, "session"); !errors.Is(err, ErrCorrelationNotFound) {
+		t.Fatalf("root cursor without a root error=%v", err)
+	}
+	for index, agent := range []string{"agent-main", "agent-other-main"} {
+		at := now.Add(time.Duration(2+index) * time.Second)
+		seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: at, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+			if err := tx.PutCursor(t.Context(), CorrelationCursor{
+				ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "session", AgentID: agent,
+				RootAgentID: agent, Phase: "active", Sequence: 1, LastSemanticEventID: event.SemanticEventID,
+				ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: at,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}})
+		root, err := repo.FindActiveRootCursor(t.Context(), instance.ConnectorInstanceID, "session")
+		if index == 0 && (err != nil || root.AgentID != "agent-main") {
+			t.Fatalf("root cursor=%+v err=%v", root, err)
+		}
+		if index == 1 && !errors.Is(err, ErrCorrelationConflict) {
+			t.Fatalf("two root cursors: cursor=%+v err=%v", root, err)
+		}
+	}
 	if _, err := repo.FindUniquePendingOperation(t.Context(), CorrelationPendingQuery{
 		ConnectorInstanceID: instance.ConnectorInstanceID, Namespace: "cursor", Kind: CorrelationIdentifierTool,
 		Type: CorrelationOperationTool, ScopeKind: CorrelationOperationScopeSession, ScopeID: "session",
