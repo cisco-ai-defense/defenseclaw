@@ -222,7 +222,11 @@ not the driver's name or `runtime.GOOS`.
   Docker, while a rebuilt one gets a new image ID, which the driver
   prepares another rootfs for (another minute and about 5 GB). So each
   posture's run image, and its prepared rootfs of about 5 GB, stays until
-  its overlay image is superseded and pruned. Prune and teardown then remove
+  its overlay image is superseded and pruned. Each run configuration of one
+  harness image is such a posture: runs of Claude Code with and without a
+  `--credential`, `--env` or model provider render other run files, so each
+  boots its own run image and prepares its own rootfs of about 5 GB, which
+  disk budgets on a Mac should count. Prune and teardown then remove
   the rootfs of every image ID they removed (`PruneReport.RemovedImageIDs`:
   no image they keep or leave has it, and `Keep` does not name it), and only
   when the daemon listed the sandboxes (teardown: after its deletes, none
