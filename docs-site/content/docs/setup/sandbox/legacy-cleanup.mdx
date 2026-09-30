@@ -1,0 +1,156 @@
+---
+title: Legacy sandbox cleanup
+description: Detect and remove a retired openshell-sandbox 0.0.x install with defenseclaw sandbox legacy-cleanup, then rescan and rewire OpenClaw.
+keywords:
+  - legacy-cleanup
+  - openshell-sandbox 0.0.x
+  - legacy sandbox
+---
+
+Use this page on a Linux host that still has the retired standalone
+`openshell-sandbox` install. It shows how to detect it, remove it with
+`defenseclaw sandbox legacy-cleanup`, and check OpenClaw afterwards.
+
+DefenseClaw no longer ships the legacy standalone sandbox integration. That
+integration targeted the standalone `openshell-sandbox` 0.0.x binary and
+OpenClaw only: it ran OpenClaw as a `sandbox` Linux user inside a network
+namespace joined to the host by a veth pair (`10.200.0.1` host,
+`10.200.0.2` sandbox), added iptables NAT rules, installed root systemd units
+and launcher scripts, and changed ownership and ACLs on the OpenClaw home. The
+per-connector sandbox policy it generated was never enforced.
+
+The old `sandbox init` command and the legacy options of `sandbox setup`
+(sandbox and host IPs, auto-pairing, host networking) were removed with it.
+OpenClaw and ZeptoClaw use the `shims` subprocess policy on every platform;
+see the [capability matrix](/docs/capability-matrix).
+
+## Detect a legacy install
+
+On a host whose DefenseClaw config still says `openshell.mode: standalone`,
+until cleanup runs:
+
+- if `guardrail.host` is non-empty and not `localhost`, the gateway API keeps
+  binding to that host (for example `10.200.0.1`) so `upgrade` health checks
+  keep working; see [Gateway API: bind address](/docs/reference/gateway-api#bind-address);
+- `/health` reports a `sandbox` subsystem in state `degraded` whose
+  `last_error` says a legacy standalone install was detected. On any other
+  host the `sandbox` subsystem is absent only while `openshell.enabled` is
+  `false`; with sandboxes on, it reports the sandbox runtime's state, as the
+  [Gateway API reference](/docs/reference/gateway-api) describes under
+  Health & status; and
+- `defenseclaw doctor` warns about the legacy install and names
+  `defenseclaw sandbox legacy-cleanup` as the remediation.
+
+## Run cleanup
+
+Cleanup is Linux-only. Review the plan first; `--dry-run` prints every step
+and its exact commands without changing anything:
+
+```bash
+defenseclaw sandbox legacy-cleanup --dry-run
+```
+
+Then run it. The plan is printed with every command, and cleanup asks once
+for confirmation unless you pass `--yes`:
+
+```bash
+defenseclaw sandbox legacy-cleanup
+```
+
+| Option | Behavior |
+| --- | --- |
+| `--dry-run` | Print the plan and change nothing. |
+| `--yes` | Apply the plan without asking for confirmation. |
+| `--remove-user` | Also run `userdel -r sandbox`. Refused while that user has running processes, until its ownership and ACLs are gone from the OpenClaw home, or when the account's home is not the configured sandbox home. |
+| `--remove-binary` | Also remove `/usr/local/bin/openshell-sandbox`, only when it reports a 0.0.x version and is not owned by a package. |
+
+Privileged steps run through `sudo`, with binaries resolved only from the
+root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. Each artifact is
+handled idempotently and recorded in a JSON receipt at
+`<data_dir>/legacy-sandbox-cleanup.json`, so an interrupted run can be
+repeated.
+
+## What cleanup changes
+
+1. **systemd units.** Runs
+   `systemctl disable --now defenseclaw-sandbox.target openshell-sandbox.service`,
+   removes those two unit files from `/etc/systemd/system` and the four
+   `/usr/local/lib/defenseclaw/{pre,start,post,cleanup}-sandbox.sh` launchers
+   only when they are root-owned and DefenseClaw-generated, then runs
+   `systemctl daemon-reload`.
+2. **Nothing still running.** Before any later step, checks that no legacy
+   unit is active (including one cleanup left alone because it is not
+   DefenseClaw-generated), that no PID recorded in `<data_dir>/sandbox.pids`
+   or `<data_dir>/openshell.pid` still runs that program, and that
+   `pgrep -u <sandbox uid>` finds nothing (run through sudo when `/proc` is
+   mounted with `hidepid`, which hides other users' processes from a normal
+   user). Otherwise cleanup stops and changes
+   nothing else. Cleanup never runs the non-systemd launcher itself, because
+   it lives in the operator-writable data directory; stop it first with
+   `sudo <data_dir>/scripts/run-sandbox.sh stop`.
+3. **Networking.** Deletes the recorded network namespace and the host veths
+   whose peer is in it, removes the exact iptables NAT rules the legacy
+   launcher added (each checked with `iptables -C` first), and restores
+   `net.ipv4.conf.all.route_localnet` from the saved value. A veth that
+   carries `10.200.0.1` but cannot be tied to the recorded namespace is
+   reported, not deleted.
+4. **OpenClaw home.** Removes the `sandbox` user's ACLs (access and default
+   entries on the home, and its entries on every ancestor), then restores the
+   home's original ownership from the validated backup, and removes the
+   `/home/sandbox/.openclaw` symlink. On an ancestor, the backup can only
+   clear the `o+x` bit legacy setup added, and only on a directory the home's
+   owner owns; any other recorded mode is reported and left alone. A backup
+   that disagrees with the pinned `claw.openclaw_home_original` (or with the
+   home an earlier cleanup run recorded), names a system path, or carries a
+   non-integer uid/gid is refused and kept. On a host where the old
+   `sandbox setup --disable` already removed the pin and the backup, the
+   ACLs are still removed from `claw.home_dir` (or `~/.openclaw`). If the
+   `sandbox` account was already deleted, its uid is recovered from the
+   unmapped uid that owns or has ACL entries on the home.
+5. **OpenClaw gateway settings.** Once ownership is restored, rewrites
+   `openclaw.json` as the invoking user to bind loopback on port `18789`, and
+   points the provider `baseUrl` back to localhost if it pointed at
+   `10.200.0.1`. Symlinked files are refused. JSON with comments or trailing
+   commas is accepted and written back as plain JSON. A failed rewrite is
+   retried on the next run.
+6. **Group membership.** Removes the invoking user from the `sandbox` group.
+7. **Optional removals.** `--remove-user` and `--remove-binary`, as above.
+   Neither runs by default. The group and user steps only run on a host with
+   legacy evidence, since an account named `sandbox` alone proves nothing.
+8. **DefenseClaw config.** Once the ownership and `openclaw.json` steps are
+   done, clears `openshell.mode`, sets `gateway.host: 127.0.0.1`,
+   `gateway.port: 18789`, and `guardrail.host: localhost`, points
+   `claw.home_dir` and `claw.config_file` back at the original OpenClaw home,
+   and clears `claw.openclaw_home_original`.
+9. **Data-dir artifacts.** Backs up legacy files under the data directory to
+   `<data_dir>/backups/legacy-sandbox-<timestamp>/`, then removes them. Each
+   file an unfinished step still needs (the ownership backup, the PID files,
+   `run-sandbox.sh`) is kept until that step is done.
+10. **Next steps.** Prints the follow-up commands below.
+
+## After cleanup
+
+While sandboxed, the agent could write anywhere in the OpenClaw home,
+including `openclaw.json`, `extensions/`, `skills/`, and `hooks/`. Cleanup
+only resets the gateway settings, so scan what the agent could have left
+before OpenClaw runs on the host again. Then rewire the guardrail, which also
+re-registers the DefenseClaw plugin and restarts the gateway and OpenClaw:
+
+```bash
+defenseclaw skill scan --all
+defenseclaw plugin scan --all
+defenseclaw mcp scan --all
+defenseclaw setup guardrail
+```
+
+The `openshell:` config block stays in `config.yaml`. The legacy keys
+`mode` and `sandbox_home` are read only until cleanup resets them, and
+`policy_dir`, `version`, `auto_pair` and `host_networking` are accepted and
+ignored; see
+[OpenShell sandbox settings](/docs/reference/configuration#openshell-sandbox-settings).
+
+## Next steps
+
+- [Run coding agents in OpenShell sandboxes](/docs/setup/sandbox)
+- [`sandbox legacy-cleanup` flags](/docs/reference/sandbox-cli#sandbox-legacy-cleanup)
+- [OpenClaw connector](/docs/connectors/openclaw)

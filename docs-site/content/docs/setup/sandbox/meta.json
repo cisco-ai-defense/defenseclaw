@@ -1,0 +1,11 @@
+{
+  "title": "Sandboxes",
+  "pages": [
+    "index",
+    "../sandbox-policy",
+    "macos-microvm",
+    "apps",
+    "troubleshooting",
+    "legacy-cleanup"
+  ]
+}

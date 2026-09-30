@@ -1,0 +1,138 @@
+---
+title: Sandboxes on macOS
+description: How OpenShell sandboxes run on a Mac in MicroVMs, and what differs from Linux for your folder, run flags, first starts and localhost.
+keywords:
+  - OpenShell MicroVM
+  - macOS sandbox
+  - vm driver
+  - Apple silicon sandbox
+---
+
+On a Mac, each DefenseClaw sandbox is a small virtual machine of its own.
+This page explains how that works and what differs from Linux. For the
+requirements and setup, see [macOS](/docs/setup/sandbox#macos) in the
+sandbox guide.
+
+## Supported environments
+
+DefenseClaw runs sandboxes on a Mac with:
+
+- Apple silicon. Intel Macs cannot run sandboxes.
+- OpenShell's **MicroVM driver** (`vm`), from NVIDIA's `nvidia/openshell`
+  Homebrew formula. OpenShell calls this driver experimental.
+- Docker Desktop, which builds the harness images. The MicroVM driver reads
+  the images from it.
+- Homebrew's `e2fsprogs`, which the driver formats its disks with.
+
+OpenShell's **Docker driver** is not supported on a Mac. Each sandbox would
+be a container in Docker Desktop's Linux VM, whose kernel does not run
+Landlock. OpenShell's supervisor needs Landlock, so every such sandbox ends
+in an error state. Other Docker VMs, such as Colima or OrbStack, are not
+supported either.
+
+## How the MicroVM driver works
+
+Each sandbox boots in its own small virtual machine on Apple's Hypervisor,
+with a Linux kernel of its own that runs Landlock. Setup installs OpenShell
+from the Homebrew formula, runs its gateway with `brew services`, and
+switches that gateway to the MicroVM driver (see
+[one-time setup](/docs/setup/sandbox#one-time-setup)).
+
+The hooks, policy packs, egress proxy, asks, credential placeholders,
+telemetry and tamper detection work as on Linux. In addition:
+
+- After each create and start, DefenseClaw checks inside the sandbox that it
+  runs as your uid with no capabilities. It also checks that its hooks and
+  managed settings are the files DefenseClaw prepared. It stops a sandbox
+  that is not as prepared.
+- The images a MicroVM starts are named under `defenseclaw.invalid/`, a host
+  name that never resolves. So a driver that does not find an image in
+  Docker cannot fetch a stand-in for it from a registry.
+- `pull` scans the changed files for secrets and insecure code before they
+  reach your folder.
+
+## What is different on a Mac
+
+| Topic | Linux (Docker driver) | macOS (MicroVM driver) |
+| --- | --- | --- |
+| Your folder | Mounted live, with a snapshot for undo. | Always a copy. |
+| End of a session | Keep or undo the changes. | Bring the changes back, or leave them in the sandbox. |
+| `review` and `undo` | `review` compares the folder with its snapshot; `undo` restores it. | `review` previews what `pull` brings back; `undo` reverts the last `pull --apply`. |
+| Run flags | All apply. | `--context` is refused; `--no-snapshot`, `--cpu` and `--memory` have no effect. |
+| First start of an image | A few seconds. | About a minute, to prepare a disk of about 5 GB. |
+| Per-run harness settings | Read-only files mounted into the sandbox. | Baked into a small run image. |
+| The sandbox user | Your uid, set for each sandbox. | Your uid, set for the whole gateway. |
+| `localhost` | Resolves through Docker's `/etc/hosts`. | The image answers it. |
+
+### Your folder is always a copy
+
+A MicroVM mounts no host folders. `run` says so in one line
+(`copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`).
+The changes come back through the end-of-session question or
+`defenseclaw sandbox pull` (see [work on a copy](/docs/setup/sandbox#work-on-a-copy)).
+
+At the end of a session you apply the changes, put them on a branch or in a
+patch, or leave them in the sandbox. Without a terminal, or with `--yes`,
+nothing is applied:
+
+- The run ends with `N files changed; nothing was applied` and the `pull`
+  command.
+- `--rm` keeps a sandbox whose work was not brought back.
+
+### Run flags and resources
+
+- `--context` is refused, because it mounts a folder.
+- `--no-snapshot` does not apply.
+- `--cpu` and `--memory` have no effect. Every MicroVM gets the gateway's
+  `vcpus` and `mem_mib`, under `[openshell.drivers.vm]` in its
+  `gateway.toml`. An organization's `openshell.admin.max_resources` is
+  checked against those.
+
+### First start of an image
+
+The first start of each image takes about a minute. The driver prepares a
+MicroVM disk of about 5 GB from the image and keeps it, so the next start
+takes a few seconds. The run says so. To remove these disks, see
+[MicroVM disk cleanup](/docs/reference/sandbox-cli#microvm-disk-cleanup).
+
+### Harness settings and the sandbox user
+
+For Claude Code and Codex, the per-run harness settings are baked, root-owned
+and read-only, into a small run image that the MicroVM starts. They cannot
+change after the sandbox is created. If an organization policy became
+stricter since, the sandbox refuses to start: delete it and run again.
+
+Setup writes your uid and gid as `sandbox_uid` and `sandbox_gid` under
+`[openshell.drivers.vm]`. So every MicroVM on this gateway runs as you.
+
+### localhost in a MicroVM
+
+A MicroVM's `/etc/hosts` is empty. So the images DefenseClaw builds for
+MicroVMs answer `localhost` themselves, with a pinned `nss-myhostname`:
+
+- This works for every program that uses the system resolver: Node, Python,
+  glibc programs, and Go programs built with cgo, such as Antigravity CLI.
+- A program that resolves names on its own, such as a Go binary built
+  without cgo or a static musl binary, cannot resolve `localhost` in a
+  MicroVM. Each image is checked for this when it is built. A harness that
+  fails this way is refused on a Mac, and `sandbox image build` says why.
+- The images answer `localhost` and the sandbox's hostname with loopback
+  addresses. The MicroVM's DNS relay answers every other name with a
+  synthetic `198.18.x.x` address. The egress proxy refuses a connection to
+  such an address as an invalid destination unless it names a real one.
+
+## Switch from the Docker driver
+
+A Mac whose gateway still runs the Docker driver cannot start a sandbox.
+`sandbox run` refuses before it builds an image or makes a sandbox, and its
+next line names `defenseclaw sandbox setup`, which offers the switch.
+
+Sandboxes made on the Docker driver cannot start on the MicroVM driver. Setup
+lists them before it switches. After that you can only delete them.
+
+## Next steps
+
+- [Run an agent](/docs/setup/sandbox#run-an-agent)
+- [Work on a copy](/docs/setup/sandbox#work-on-a-copy)
+- [Sandbox troubleshooting](/docs/setup/sandbox/troubleshooting)
+- [Sandbox CLI](/docs/reference/sandbox-cli)

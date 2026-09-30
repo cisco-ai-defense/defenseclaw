@@ -1,0 +1,565 @@
+---
+title: Sandbox troubleshooting
+description: Fix OpenShell sandbox problems with defenseclaw sandbox doctor, and find the fix for common sandbox messages and exit statuses.
+keywords:
+  - defenseclaw sandbox doctor
+  - sandbox troubleshooting
+  - OpenShell gateway
+  - MicroVM
+---
+
+This page helps you fix a sandbox that does not start or does not behave.
+Start with the sandbox doctor, then look up the message you see.
+
+## Start with the doctor
+
+```bash
+defenseclaw sandbox doctor
+```
+
+```text
+  ✓ Platform                   linux/arm64
+  ✓ User                       alice (uid 1000)
+  ✓ Landlock                   ABI 6
+  ✓ Docker                     Docker <version> (Ubuntu 24.04 LTS)
+  ✓ Docker BuildKit            docker build uses BuildKit (buildx <version>)
+  …
+  ✓ Project bind mounts        enabled for the docker driver
+  ✓ OpenShell telemetry        OpenShell usage telemetry is off
+  ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
+  ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.1 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ Sandbox hooks              the hooks of 1 running sandbox reach DefenseClaw (ingress 127.0.0.1:18971)
+  ⚠ Harness images             not built yet: codex (the first run builds it, which takes a while)
+    → build the images now: defenseclaw sandbox image build codex
+  ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)
+  ✓ Organization policy        no openshell.admin constraints
+
+  ✓ ready for sandboxes
+```
+
+The doctor checks:
+
+- the platform, your user and Landlock;
+- Docker: its version, BuildKit, disk space, and on Docker Desktop its host
+  networking and file sharing;
+- systemd linger;
+- OpenShell: the service, CLI, ssh connection sharing, registration, mTLS
+  files, version and driver, and the gateway-global policy;
+- bind mounts and telemetry;
+- the sandbox ports, the DefenseClaw daemon and the sandbox hooks;
+- the harness images, the shell wrappers and your organization's policy.
+
+Every failed check names its fix. `defenseclaw sandbox doctor --fix` applies
+the fixes that need only your user, such as starting or restarting the
+gateway, or turning bind mounts on. It asks first and reports each fix by
+the check's name.
+
+`defenseclaw doctor` shows the same checks as rows in its **Sandbox**
+section, and skips them while `openshell.enabled` is off.
+
+### Read the result
+
+- The command exits 1 when a check fails. Its last line then reads
+  **✗ not ready for sandboxes: N checks failed**.
+- With `--json` it prints the report as JSON and always exits 0. The
+  report's `ok` field says whether every check passed, and `ready` says that
+  sandboxes are also turned on.
+- While `openshell.enabled` is false, the last line reads **not ready for
+  sandboxes yet**.
+- The image check warns about a configured harness whose image is not built.
+  It also lists every other harness image built for you, and counts no image
+  Docker no longer has. It skips harnesses your organization or the pack
+  does not allow, and says so.
+
+### The doctor on macOS
+
+On a Mac the doctor also checks the MicroVM driver:
+
+- **vm-driver**: `e2fsprogs`, and the driver's signature for Apple's
+  Hypervisor.
+- **vm-identity**: the gateway runs sandboxes as your uid and gid.
+- **vm-resources**: the gateway-wide `vcpus`, `mem_mib` and
+  `overlay_disk_mib`, against what builds need and your organization's
+  `max_resources`.
+- The free space and size of the MicroVM driver's prepared disks.
+
+It skips the host networking check, which only Docker Desktop's VM needs,
+and the bind mounts check, and says why. Its file sharing check is of your
+temp directory (`$TMPDIR`, under `/var/folders`). An image build mounts a
+MicroVM's `/etc/hosts` from there into the container that checks the image.
+Docker Desktop shares it by default.
+
+A gateway configured for the MicroVM driver that still runs the Docker
+driver shows as a restart pending. On a gateway still on the Docker driver
+whose Docker VM has no Landlock, the doctor skips the Docker Desktop host
+networking and file sharing checks and says why: no setting there lets a
+sandbox start, and MicroVMs use neither.
+
+## Gateway and install checks
+
+### No gateway service installed
+
+With no gateway service (the `nvidia/openshell` formula on a Mac, the
+`openshell-gateway` user unit on Linux), `--fix` has no gateway to start.
+
+- The **Gateway** check's fix is
+  `defenseclaw sandbox setup --install-openshell`, which `--fix` does not
+  run.
+- `--fix` does not restart a gateway for a setting either, such as the
+  MicroVM sandbox user or resources. With no gateway running, the check says
+  the setting takes effect once the gateway is installed and started.
+- For a gateway you run another way, restart it the way you started it.
+
+### OpenShell installed another way
+
+`--install-openshell` installs nothing when a supported OpenShell CLI is
+already installed. If you installed OpenShell another way (from the release
+binaries, say), the **Gateway** and **Gateway service** checks name that CLI
+(``the OpenShell 0.1.1 at <path> was installed another way``).
+
+- While its gateway answers, **Gateway service** only warns, and setup uses
+  that gateway. DefenseClaw cannot start or restart it, so after a gateway
+  change you restart it yourself, the way you started it.
+- With no gateway answering, start it yourself. Or, for a gateway that
+  DefenseClaw starts and restarts, stop it, remove that OpenShell, and run
+  `defenseclaw sandbox setup --install-openshell`. That installs the formula
+  or runs NVIDIA's installer, which sets up the unit.
+
+### When setup offers the install
+
+Setup offers the install only where it runs NVIDIA's installer: with no
+OpenShell CLI, or one older than 0.1.1, which it upgrades.
+
+- It does not downgrade a CLI newer than DefenseClaw drives. The
+  **OpenShell CLI** fix is to remove that CLI first.
+- With OpenShell installed, a failing **Gateway**, **Gateway service**,
+  registration or mTLS check is not fixed by the install. Setup prints that
+  check's fix and stops
+  (``the OpenShell gateway is not usable yet (Gateway service)``, pointing
+  at `defenseclaw sandbox doctor`), with `--install-openshell` too.
+- A stopped service's fix is to start it.
+- The TUI shows that fix as the hint of **Install OpenShell** and leaves the
+  field off. It does the same for a failing **MicroVM driver** check, whose
+  fix setup makes with the install's consent.
+
+### The gateway runs another OpenShell release
+
+The gateway that answers may run another release than the installed CLI
+(``the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here``).
+That gateway is not the one the CLI's install runs.
+
+1. The **Gateway** check restarts the gateway service (the
+   `openshell-gateway` unit, or Homebrew's `nvidia/openshell/openshell`
+   service). `--fix` does this where that service runs the gateway.
+2. If the restarted gateway still answers with another release, the service
+   runs another OpenShell's gateway, and `--fix` says so
+   (``the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell 0.0.40``).
+3. Stop that gateway (`systemctl --user stop openshell-gateway`, or
+   `brew services stop nvidia/openshell/openshell`) and remove the other
+   OpenShell. Then run `defenseclaw sandbox setup --install-openshell`.
+
+The doctor does not restart the gateway again for the same pair of releases.
+
+If the service is stopped while a gateway answers, something else runs that
+gateway, and the service could not get its port. The **Gateway service** fix
+is to stop that gateway, then start the service. `--fix` leaves this to you.
+
+## Common messages
+
+### Sandboxes are off
+
+You see:
+``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on``
+
+Run setup.
+
+### Homebrew could not install the OpenShell formula
+
+You see (macOS):
+`install OpenShell: Homebrew could not install the nvidia/openshell formula`
+
+- Read Homebrew's `Error:` line just above it.
+- When NVIDIA's tap has no bottle (prebuilt package) for your macOS release,
+  Homebrew builds the formula. It first checks your developer tools, and
+  stops when Xcode or the Command Line Tools are too old
+  (`Your Xcode (26.2) … is too outdated`).
+- The oldest version Homebrew builds with depends on your macOS release:
+  - From macOS 26 on, it is the release's own: Xcode 27.0 and the Command
+    Line Tools 27.0 on macOS 27.
+  - Before macOS 26, its major version is one above the macOS major: Xcode
+    16.0 and the Command Line Tools 16.0 on macOS 15, 15.0 on macOS 14, and
+    Xcode 14.1 and the Command Line Tools 14.0 on macOS 13.
+- Update them as Homebrew says: Xcode from the App Store, the Command Line
+  Tools from Software Update in System Settings. Then run
+  `defenseclaw sandbox setup` again.
+- Homebrew checks `/Applications/Xcode.app` even when `xcode-select` selects
+  the Command Line Tools. When those are current and that Xcode is older
+  (``Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please update to Xcode 27.0 (or delete it).``),
+  setup says so
+  (``Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so``).
+  Update that Xcode or delete it. Updating the Command Line Tools does not
+  help.
+
+### The Mac gateway runs the Docker driver
+
+You see, on macOS, one of:
+
+- the doctor's **Landlock** check reports no Landlock;
+- `sandbox run` refuses with
+  ``no sandbox can start on this gateway: it runs sandboxes on the docker driver``;
+- a run or start ends with ``sandbox "<name>" is in error state`` and a
+  next line ``→ this gateway runs sandboxes on the docker driver``.
+
+The gateway still runs the Docker driver, and Docker Desktop's Linux VM
+kernel has no Landlock. Run `defenseclaw sandbox setup` (or
+`defenseclaw sandbox doctor --fix`) and answer yes to the MicroVM question.
+See [Sandboxes on macOS](/docs/setup/sandbox/macos-microvm).
+
+### localhost does not resolve in an old image
+
+You see (macOS):
+``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: … does not resolve in <name>: its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves``
+
+The sandbox was made from a harness image built before DefenseClaw's
+MicroVM images answered `localhost`, and a sandbox keeps its image. Do what
+the next line says: delete the sandbox
+(`defenseclaw sandbox delete <name>`) and run it again. The new sandbox boots
+a rebuilt image.
+
+### The harness cannot resolve localhost in a MicroVM
+
+You see one of:
+
+- on macOS, a run ends with
+  ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: it could not resolve localhost ("…"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and <Harness> does not use the system resolver, which answers localhost here``;
+- a run says
+  ``<Harness> cannot start in an OpenShell MicroVM (the vm driver this gateway runs): <Harness> cannot resolve localhost in an OpenShell MicroVM: it printed "…"``;
+- `sandbox image build` says
+  ``<Harness> cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: …``.
+
+The harness resolves names on its own, as a Go program built without cgo or
+a static musl program does. No image can answer `localhost` for it in a
+MicroVM, whose `/etc/hosts` is empty.
+
+- Run the harness on a Linux host, whose Docker driver writes `/etc/hosts`.
+- The refusal stays until the image is checked again, which
+  ``defenseclaw sandbox image build <harness> --force`` does.
+
+### The image is not checked for a MicroVM
+
+You see:
+``<Harness>'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs): its image <tag> was not checked with a MicroVM's name resolution``
+
+A MicroVM gateway boots only an image checked with a MicroVM's name
+resolution. Check it with
+``defenseclaw sandbox image build <harness> --force``, then run again.
+
+### The MicroVM image check settled nothing
+
+You see ``<Harness>'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs): its image <tag> was run with a MicroVM's name resolution, which settled nothing: …``
+(a run), or
+``<Harness>'s image is not checked for an OpenShell MicroVM yet: …``
+(`sandbox image build`).
+
+The check failed without showing that the harness cannot resolve
+`localhost`. The rest of the message says how:
+
+- ``the hook-fire probe could not run <Harness> with an OpenShell MicroVM's name resolution: …``
+  means the check could not run at all, for example because Docker refused
+  a mount or it timed out.
+- ``with the name resolution of an OpenShell MicroVM (…), <Harness> exited <code>; …``
+  or ``hook … never fired`` means the harness failed there.
+
+The next run checks the image again, and so does
+``defenseclaw sandbox image build <harness> --force``. When the check could
+not mount its files, make sure Docker Desktop shares your temp directory
+(`$TMPDIR`, under `/var/folders`). The doctor's **Docker file sharing**
+check reports it.
+
+### Intel Mac
+
+You see:
+``OpenShell sandboxes do not run on this machine: … Apple silicon only``
+
+OpenShell's MicroVM driver needs Apple silicon, so an Intel Mac cannot run
+sandboxes. `defenseclaw sandbox teardown` still removes what an earlier
+setup left.
+
+### Copy mode on a Mac
+
+| You see | Do this |
+| --- | --- |
+| ``copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`` | Nothing: every run on a Mac works on a copy. Bring the work back at the end of the session or with `defenseclaw sandbox pull <name>`. |
+| ``--context mounts a folder into the sandbox read-only, and the OpenShell MicroVM (vm) driver mounts no host folders`` | Run without `--context`. To give the agent a reference folder, put a copy of it inside the project. |
+| ``stage the project copy: the copy (files and history) is …, above the … limit`` | Raise `openshell.workdir.max_upload_mb` in `config.yaml`, or use a shallower history (`openshell.workdir.git_depth`). |
+
+### The MicroVM disk is full
+
+You see:
+``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …``
+
+- Free space in the sandbox. `defenseclaw sandbox exec <name> -- df -h`
+  shows it.
+- Or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new
+  sandboxes. `defenseclaw sandbox doctor` shows the value and where it is
+  set.
+
+### The MicroVM sandbox user is wrong
+
+You see: the doctor's **vm-identity** check fails, or a create on a Mac says
+the MicroVM driver runs sandboxes as another uid.
+
+The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so
+the harness images DefenseClaw built for you would not match. Run
+`defenseclaw sandbox doctor --fix`, which sets them and restarts the
+gateway.
+
+### macOS gateway not from Homebrew
+
+You see, on macOS with OpenShell installed outside Homebrew (for example
+from NVIDIA's release binaries):
+
+- the doctor's **Gateway service** check says
+  ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``;
+- setup marks its machine line
+  ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula``, as
+  the TUI does, then shows ``⚠ Gateway service: …`` and
+  ``→ setup uses this gateway as it runs: after a gateway change, restart it yourself, the way you started it``.
+
+On macOS, DefenseClaw starts and restarts only the gateway of the
+`nvidia/openshell` Homebrew formula, with `brew services`. It uses a gateway
+run another way as it runs:
+
+- The **MicroVM driver** check passes on the driver the gateway runs, and
+  names the binary when it finds it.
+- The **Gateway service** check warns and says how the gateway runs: under
+  launchd, as a LaunchAgent of your own, or started by hand (which does not
+  start again at login).
+- Setup goes on. It shows a gateway change it needs (the MicroVM sandbox
+  user or resources) and asks
+  ``Write this change? DefenseClaw cannot restart this gateway: …``. It
+  writes the change without a restart, then ends with
+  ``restart the OpenShell gateway yourself, the way you started it, so it runs on the change above``.
+- Restarting the gateway stops every sandbox on it. DefenseClaw cannot flush
+  the MicroVM sandboxes before a restart it does not make. So first stop the
+  ones running on it (the line names them) with
+  `defenseclaw sandbox stop NAME`, which flushes their disks. Otherwise what
+  they wrote since their last sync is lost.
+- Answer no and nothing is written, so a restart alone changes nothing.
+  Setup lists the change as skipped. Where the gateway still runs the Docker
+  driver on a Docker VM without Landlock, it ends with
+  ``not ready for sandboxes yet: the gateway change was not written, … Rerun `defenseclaw sandbox setup` and let it write the change, then restart the OpenShell gateway yourself``.
+
+With no gateway answering, **Gateway service** and **Gateway** fail.
+**MicroVM driver** checks the `openshell-driver-vm` it finds, such as the
+one next to the `openshell-gateway` on your `PATH`. Setup stops
+(``the OpenShell gateway is not usable yet (Gateway)``) with the fix:
+
+- Start that gateway yourself, the way you started it before.
+- Or, for a gateway DefenseClaw starts and restarts, stop it and remove that
+  OpenShell. DefenseClaw's install step would otherwise find its CLI and
+  install nothing. Then run `defenseclaw sandbox setup --install-openshell`,
+  which installs the formula.
+
+### Linux gateway without the user service
+
+You see, on Linux with OpenShell installed without NVIDIA's installer (for
+example from its release binaries in `~/.local/bin`):
+
+- setup marks its machine line
+  ``⚠ OpenShell 0.1.1 has no openshell-gateway user service``, as the TUI
+  does;
+- then
+  ``⚠ Gateway service: openshell-gateway is not installed; the gateway that answers runs another way, so DefenseClaw cannot start or restart it``.
+
+On Linux, DefenseClaw starts and restarts the gateway through the
+`openshell-gateway` user unit that NVIDIA's installer sets up. It uses a
+gateway started by hand as it runs:
+
+- Setup asks about bind mounts and telemetry, writes the change to
+  `gateway.toml` and `gateway.env` without a restart, and tells you to
+  restart the gateway yourself.
+- It writes bind mounts only once the gateway that answers refuses a client
+  without a certificate and `gateway.toml` keeps it on loopback.
+- With no unit to read its environment from, setup takes the port the
+  gateway was started on (`OPENSHELL_SERVER_PORT=8080`, say) from the
+  registration.
+- A gateway you start by hand reads `gateway.env` only if you give it that
+  environment.
+
+The doctor then compares those files with the start time of your
+`openshell-gateway` process:
+
+- Until you restart the gateway, **Project bind mounts** and **OpenShell
+  telemetry** warn
+  ``… but the gateway has not been restarted since it changed``.
+- Where it finds no such process, they warn
+  ``… but DefenseClaw cannot tell whether the gateway was restarted on it``.
+
+With no gateway answering, setup stops with the doctor's fix: start the
+gateway yourself, or stop it, remove that OpenShell and run
+`defenseclaw sandbox setup --install-openshell`. That runs NVIDIA's
+installer and sets up the service.
+
+### Daemon and hooks
+
+| You see | Do this |
+| --- | --- |
+| ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
+| ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
+| `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**. Fix the cause, then start the session again. |
+| `blocked by your organization's DefenseClaw policy: <key>` | An `openshell.admin` limit refused the setting. `defenseclaw sandbox policy explain` shows which one. |
+| `` `sandbox run` attaches Claude Code to your terminal, and there is none `` | Run it from a terminal, or pass `--prompt`. |
+
+### Project folder
+
+| You see | Do this |
+| --- | --- |
+| `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
+| `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
+| `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |
+| `the folder (for its undo snapshot) is …, above the 1.0 GiB limit` | Make the folder a git repository, or run with `--copy`, or with `--no-snapshot` (no undo). |
+| Project folder mounts show as disabled | Run `defenseclaw sandbox doctor --fix`, or setup again. On a Mac the doctor skips this check. |
+| A tool cannot reach a site | Find the block in `defenseclaw sandbox activity`, then unblock it. |
+
+DefenseClaw also refuses to share system folders, shared roots such as
+`/tmp`, credential folders such as `~/.ssh`, and agent homes such as
+`~/.claude` and `~/.codex`, whose settings and hooks run on your machine.
+
+A folder without git has a 1 GiB snapshot cap.
+
+Git over SSH and databases do not go through the web proxy. Use HTTPS
+remotes, or `--host-port` for a service on your machine.
+
+### An image build fails
+
+The error ends with the last lines docker printed (up to 40, with anything
+that looks like a token redacted):
+
+- This holds whether `setup` or `image build` ran the build, or the daemon
+  did for `sandbox run` or `create`.
+- The daemon log (`~/.defenseclaw/gateway.log`, under
+  `OPENSHELL_IMAGE_BUILD_FAILED`) has them too.
+- The error from `setup` or `image build` names the whole build log,
+  `~/.defenseclaw/logs/sandbox-image-<harness>.log`.
+- `defenseclaw sandbox image build <harness> --verbose` streams the build
+  instead.
+
+### Docker BuildKit is missing
+
+You see
+``docker's buildx plugin is not available (`docker buildx version`: …)``,
+or the doctor's **Docker BuildKit** check fails.
+
+The harness images need BuildKit, which docker uses only through its buildx
+plugin. Without it docker falls back to its legacy builder, which cannot
+build them (`the --chmod option requires BuildKit`).
+
+- Install the plugin. Docker Desktop provides it. On Linux it is the
+  `docker-buildx-plugin` package from Docker's repository.
+- docker looks for it in the `cli-plugins` directory of its config:
+  `DOCKER_CONFIG`, or `~/.docker` when that is unset. A `DOCKER_CONFIG` or
+  `HOME` that points elsewhere hides it. Point `DOCKER_CONFIG` at the config
+  that has `cli-plugins/docker-buildx`.
+- The daemon builds in the environment it started with, so restart it
+  (`defenseclaw-gateway restart`) after you change that.
+
+If you see ``DOCKER_BUILDKIT=0 turns BuildKit off``, unset `DOCKER_BUILDKIT`
+or set it to `1` where you run DefenseClaw and where the daemon starts. Then
+restart the daemon.
+
+### Low disk space
+
+- `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness
+  images.
+- `defenseclaw sandbox image rm <harness>` removes every image of a harness
+  you no longer run.
+- Avoid `docker system prune` on a machine you share. It also removes every
+  stopped container, unused network and build cache, other users' too.
+- On a Mac, the MicroVM driver keeps a prepared disk of about 5 GB for each
+  image it started. The doctor shows their size, and prune and `image rm`
+  remove the disks of the images they remove. See
+  [MicroVM disk cleanup](/docs/reference/sandbox-cli#microvm-disk-cleanup).
+
+On a Mac you may see
+``not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about … from its image in …``.
+The first start of an image prepares a disk of about the image's size on
+the volume of `~/.local/state/openshell/vm-driver`. The run is refused
+before anything is copied when that volume lacks the space. Free space
+there, for example with `defenseclaw sandbox image prune`. A warning that
+only some space is free means the start goes ahead with little to spare.
+
+### SSH connection sharing
+
+OpenShell's CLI gives every sandbox the same ssh host name, `sandbox`. A
+shared ssh connection left open by one sandbox's session would carry the
+next session into that sandbox, whichever sandbox it names.
+
+**The doctor warns that
+`your ssh configuration shares connections for host "sandbox"`.** Your
+`~/.ssh/config` turns on connection sharing (`ControlMaster` with a
+`ControlPath`, often under `Host *`).
+
+- DefenseClaw turns sharing off for every OpenShell command it runs. So
+  `defenseclaw sandbox` sessions, copies and pulls are not affected, and it
+  does not change your ssh configuration.
+- An `openshell sandbox connect`, `upload`, `download` or `forward` that you
+  run yourself is affected. Add a `Host sandbox` block with
+  `ControlMaster no` and `ControlPath none` above any `Host *` in
+  `~/.ssh/config`.
+
+**You see
+`ssh shim: DefenseClaw found no directory for an ssh with connection sharing off …; set TMPDIR to a directory only you can write, on a filesystem not mounted noexec`.**
+
+- DefenseClaw runs each OpenShell command with a small `ssh` wrapper (your
+  ssh, with connection sharing off) in a private folder in your temporary
+  directory.
+- It skips a temporary directory that other users could change (by its
+  permissions or, on a Mac, an ACL), or that is on a filesystem mounted
+  `noexec`. It then uses `~/.defenseclaw/openshell-ssh` instead.
+- This error means neither worked, and the message says why for each.
+- Point `TMPDIR` at a folder only you can write, on a filesystem that runs
+  programs, for example `mkdir -p -m 700 ~/.cache/tmp` and
+  `export TMPDIR=~/.cache/tmp`.
+
+**You see
+`ssh shim: <path>/ssh, the first ssh on PATH, does not keep connection sharing off …`**,
+or the doctor's **SSH connection sharing** check fails with it.
+
+- The first `ssh` on your `PATH` is a wrapper (a script in `~/bin`, for
+  example) that adds its own `ControlMaster` or `ControlPath` options, or
+  `-S` or `-M`, before its arguments. Those win over the options DefenseClaw
+  puts first.
+- DefenseClaw checks with `ssh -G sandbox`, which does not connect, and
+  refuses to run the OpenShell command.
+- Make the wrapper pass its arguments to ssh without options of its own. Or
+  put the directory of OpenSSH's `ssh` (the message names it, often
+  `/usr/bin`) before the wrapper's on `PATH`.
+- The same error says "could not confirm" when that `ssh` cannot answer
+  `-G`. Run the `ssh -G -o ProxyCommand=true sandbox` command it names to see
+  why.
+
+**You see `upload the project copy: the upload to <name> did not arrive …`.**
+OpenShell reported the upload done, but the sandbox does not have it. The
+files went elsewhere, for example into another sandbox through a shared ssh
+connection. The run stops, and the sandbox it made is removed. Run
+`defenseclaw sandbox doctor` and look at its **SSH connection sharing**
+check.
+
+## Exit statuses
+
+Exit statuses: 3 means the platform or deployment is unsupported (Windows,
+WSL2, an Intel Mac, `managed_enterprise`, or running as root), 4 means `pull --apply` left
+your working tree alone and put the changes on a branch and in a patch file
+(a conflict, or git older than 2.38), 69 means no hook of the session reached
+DefenseClaw, and a harness's own non-zero status is passed through.
+
+The [Sandbox CLI](/docs/reference/sandbox-cli#how-the-commands-run) lists
+every exit status.
+
+## Next steps
+
+- [Sandboxes on macOS](/docs/setup/sandbox/macos-microvm)
+- [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy)
+- [Sandbox CLI](/docs/reference/sandbox-cli)
