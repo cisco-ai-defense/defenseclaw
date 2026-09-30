@@ -1346,7 +1346,10 @@ each one by the check's name, as its question does. With no gateway service
 installed (the `nvidia/openshell` formula on a Mac, the `openshell-gateway`
 user unit on Linux) it has no gateway to start: the **Gateway** check's fix
 is then `defenseclaw sandbox setup --install-openshell`, which `--fix` does
-not run.
+not run. Nor does it restart a gateway for a setting then (such as the
+MicroVM sandbox user or resources): with no gateway running, the check says
+the setting takes effect once the gateway is installed and started, and for
+a gateway you run another way, to restart it the way you started it.
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway

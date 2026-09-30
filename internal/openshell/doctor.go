@@ -921,6 +921,53 @@ func (r *doctorRun) gatewayRecoveryFix() *Fix {
 // way. It is false when the service's state is unknown.
 func (r *doctorRun) serviceMissing() bool { return r.service != nil && !r.service.Installed }
 
+// nothingToRestart reports no gateway service and no gateway answering:
+// no gateway runs to restart, and the configuration on disk is what the
+// one OpenShell's install starts loads.
+func (r *doctorRun) nothingToRestart() bool {
+	return r.serviceMissing() && (r.gateway == nil || !r.gateway.Healthy)
+}
+
+// takesEffectOnStart says when a gateway setting takes effect where no
+// gateway runs (nothingToRestart).
+const takesEffectOnStart = "it takes effect once the gateway is installed and started"
+
+// gatewayChangeFix is the fix of a gateway setting, which the gateway
+// loads when it starts: change is what to change, which apply writes
+// before it restarts the gateway, or "" (apply nil) when the configuration
+// on disk only needs loading; after ends the summary (a reason, or a
+// parenthesis). DefenseClaw restarts the gateway only through its service.
+// Without one (serviceMissing) the fix is the operator's, and says when
+// the change takes effect: once a gateway is installed and started where
+// none runs, or when the one run another way is restarted that way. It is
+// nil with no change and no gateway: there is nothing to do.
+func (r *doctorRun) gatewayChangeFix(change, after string, apply func(context.Context) error) *Fix {
+	end := func(s string) string {
+		switch {
+		case after == "":
+			return s
+		case change == "" && r.serviceMissing():
+			return s + ", " + after
+		}
+		return s + " " + after
+	}
+	switch {
+	case !r.serviceMissing() && change == "":
+		return &Fix{Summary: end("restart the gateway"), Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+	case !r.serviceMissing():
+		return &Fix{Summary: end(change + " and restart the gateway"), Automatic: true, RestartsGateway: true, Apply: apply}
+	case r.nothingToRestart() && change == "":
+		return nil
+	case r.nothingToRestart():
+		return &Fix{Summary: end(change) + "; " + takesEffectOnStart}
+	}
+	how := "restart the gateway the way you started it"
+	if change != "" {
+		how = change + ", then " + how
+	}
+	return &Fix{Summary: end(how) + "; DefenseClaw restarts it only through the " + r.service.Unit + " service, which is not installed"}
+}
+
 // credentialFailure reports an error from the gateway refusing
 // DefenseClaw's TLS credentials, or from the credentials themselves,
 // rather than from a gateway that is down.
@@ -1164,7 +1211,7 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		// what it started with.
 		c.Status = StatusWarn
 		c.Detail = fmt.Sprintf("%s, but its configuration selects vm (OpenShell MicroVM): the gateway has not been restarted since", r.running.Name)
-		c.Fix = &Fix{Summary: "restart the gateway to run sandboxes in MicroVMs", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+		c.Fix = r.gatewayChangeFix("", "to run sandboxes in MicroVMs", nil)
 	case mac && r.landlock == StatusFail:
 		c.Status = StatusFail
 		c.Detail = fmt.Sprintf("%s: the Linux VM Docker runs in has no usable Landlock, so no sandbox can start on it", r.running.Name)
@@ -1190,7 +1237,6 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
-	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	if d, known := r.traits(); known && !d.HostMounts {
 		// Nothing to enable, and no reason to edit docker settings or
 		// restart the gateway for them.
@@ -1220,14 +1266,21 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		}
 		mounts.Detail = fmt.Sprintf("disabled in %s; only --copy sandboxes work", st.TOMLPath)
 		switch why := errors.Join(blocked, unverified); {
+		case why == nil && r.serviceMissing():
+			// A gateway run another way, which DefenseClaw cannot restart
+			// on the change.
+			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway it restarts through the " + r.service.Unit + " service, which is not installed"}
 		case why == nil:
 			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
 				RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
 		default:
 			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
+	case r.restartPending(ctx, st) && r.nothingToRestart():
+		mounts.Status, mounts.Detail = StatusPass, "enabled in "+st.TOMLPath+"; "+takesEffectOnStart
 	case r.restartPending(ctx, st):
-		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
+		mounts.Status, mounts.Detail = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed"
+		mounts.Fix = r.gatewayChangeFix("", "to load its changed configuration", nil)
 		if r.gatewayStartedAt(ctx).IsZero() {
 			// No start time known: DefenseClaw's mark says only that no
 			// restart of its own followed its change.
@@ -1258,8 +1311,8 @@ func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr e
 		want := strconv.FormatBool(*r.WantTelemetry)
 		tele.Status = StatusWarn
 		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
-		tele.Fix = &Fix{Summary: "set " + EnvTelemetryEnabled + "=" + want + " in gateway.env and restart the gateway", Automatic: true,
-			RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}})}
+		tele.Fix = r.gatewayChangeFix("set "+EnvTelemetryEnabled+"="+want+" in gateway.env", "",
+			r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}}))
 	default:
 		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
 	}

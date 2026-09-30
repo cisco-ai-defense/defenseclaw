@@ -939,6 +939,15 @@ func TestDoctorPendingRestart(t *testing.T) {
 		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
 		mark(f, f.started.Add(time.Second))
 		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
+
+		// Without the user unit and no gateway answering there is nothing
+		// to restart: the gateway the install starts loads the setting.
+		f.runner.On("systemctl --user show openshell-gateway", "LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		if c := expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass,
+			"/openshell/gateway.toml; it takes effect once the gateway is installed and started"); c.Fix != nil {
+			t.Fatalf("bind mounts fix = %+v", c.Fix)
+		}
 	})
 }
 

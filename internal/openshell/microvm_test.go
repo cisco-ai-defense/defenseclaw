@@ -565,6 +565,89 @@ func wantOutsideFormulaFix(t *testing.T, c *openshell.Check) {
 	}
 }
 
+// TestDoctorOffersNoRestartWithoutAGatewayService: on a Mac without the
+// nvidia/openshell formula, "MicroVM sandbox user" (a pending-restart mark)
+// and "MicroVM resources" (below what builds need) offered `doctor --fix`
+// restarts of the gateway ("this restarts the OpenShell gateway, which
+// stops every sandbox running on it"), which `brew services restart` of a
+// formula that is not installed fails. With no gateway there is nothing
+// to restart, and a setting takes effect once the gateway is installed and
+// started; a gateway run another way is restarted the way it was started.
+func TestDoctorOffersNoRestartWithoutAGatewayService(t *testing.T) {
+	const pass, warn = openshell.StatusPass, openshell.StatusWarn
+	setup := func(t *testing.T) *doctorFixture {
+		f := newDoctorFixture(t)
+		f.onMicroVMs()
+		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+		f.writeTOML(strings.Replace(microVMTOML, "mem_mib = 4096\noverlay_disk_mib = 16384\n", "mem_mib = 2048\noverlay_disk_mib = 4096\n", 1),
+			f.started.Add(-time.Minute))
+		writeFile(t, filepath.Join(f.dir, ".defenseclaw-restart-pending"), time.Now().UTC().Format(time.RFC3339Nano)+"\n", 0o600)
+		f.runner.OnFunc("brew services", func(_ context.Context, c openshell.Command) ([]byte, error) {
+			t.Errorf("ran brew %v without the formula", c.Args)
+			return []byte("Error: Formula `openshell` is not installed."), errors.New("brew: exit status 1")
+		})
+		return f
+	}
+	// noRestarts wants no fix of r to restart the gateway, and doctor
+	// --fix to run no brew services command.
+	noRestarts := func(t *testing.T, r *openshell.DoctorReport) {
+		t.Helper()
+		for _, c := range r.Checks {
+			if c.Fix != nil && (c.Fix.RestartsGateway || strings.Contains(c.Fix.Command, "brew services")) {
+				t.Errorf("%s offers a gateway restart: %+v", c.ID, c.Fix)
+			}
+		}
+		if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resources := "raise them under [openshell.drivers.vm] in "
+
+	t.Run("no OpenShell", func(t *testing.T) {
+		f := setup(t)
+		f.found["openshell"] = false
+		_ = os.Remove(f.vmDriverPath())
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		r := f.run()
+		toml, _ := f.doctor.Gateway.TOMLPath()
+		if c := expectCheck(t, r, openshell.CheckIDVMIdentity, pass, "sandboxes run as 501:20, your user, once the gateway is installed and started (set in "+toml+")"); c.Fix != nil {
+			t.Fatalf("vm-identity fix = %+v", c.Fix)
+		}
+		c := expectCheck(t, r, openshell.CheckIDVMResources, warn, "every MicroVM gets 4 vCPUs, 2048 MiB of memory and a 4096 MiB disk")
+		if want := resources + toml + " (the disk is sparse on the host: it costs nothing until used); it takes effect once the gateway is installed and started"; c.Fix == nil || c.Fix.Summary != want || c.Fix.Automatic || c.Fix.Apply != nil {
+			t.Fatalf("vm-resources fix = %+v\nwant summary %q", c.Fix, want)
+		}
+		noRestarts(t, r)
+	})
+	t.Run("gateway run another way", func(t *testing.T) {
+		f := setup(t)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "restart the gateway if you have not since it changed")
+		const how = "; DefenseClaw restarts it only through the nvidia/openshell/openshell service, which is not installed"
+		if want := "restart the gateway the way you started it, to load its changed configuration" + how; c.Fix == nil || c.Fix.Summary != want || c.Fix.Apply != nil {
+			t.Fatalf("vm-identity fix = %+v\nwant summary %q", c.Fix, want)
+		}
+		c = expectCheck(t, r, openshell.CheckIDVMResources, warn, "an agent that builds code may need more")
+		toml, _ := f.doctor.Gateway.TOMLPath()
+		if want := resources + toml + ", then restart the gateway the way you started it (the disk is sparse on the host: it costs nothing until used)" + how; c.Fix == nil || c.Fix.Summary != want || c.Fix.Apply != nil {
+			t.Fatalf("vm-resources fix = %+v\nwant summary %q", c.Fix, want)
+		}
+		noRestarts(t, r)
+	})
+	// With the formula's service, the same checks restart the gateway.
+	t.Run("formula installed", func(t *testing.T) {
+		f := setup(t)
+		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		r := f.run()
+		for _, id := range []string{openshell.CheckIDVMIdentity, openshell.CheckIDVMResources} {
+			if c := r.Get(id); c.Fix == nil || !c.Fix.Automatic || !c.Fix.RestartsGateway {
+				t.Fatalf("%s fix = %+v", id, c.Fix)
+			}
+		}
+	})
+}
+
 // TestDoctorFollowsTheDriverTheGatewayRuns: a gateway can run vm through
 // a variable DefenseClaw does not read (the launchd environment, F9): the
 // machine checks follow the driver it reports, not a docker Landlock Fail
