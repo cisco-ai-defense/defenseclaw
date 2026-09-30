@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **A Windows install that fails on a held API port names the holder.** On
+  the enterprise standalone profile, a first install whose gateway could not
+  bind `127.0.0.1:18970` reported only `enterprise readiness timed out:
+  broker_ready=True gateway_ready=False ...`, and `status` could not run on
+  the rolled-back computer. The result now carries `api_port_held` and
+  `api_port_holders[]` with the PID, image and account of each holder.
 - **Setup `/verify` says what a failure means.** A per-user Windows Setup
   whose payload or signature was changed failed `/verify` with internal text
   such as `zip: checksum error`. The message now says the file is not the

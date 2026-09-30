@@ -266,4 +266,18 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 		status.APIPortHolders[0].Account == "" || status.APIPortHolders[2].Image != "" {
 		t.Fatalf("holders = %+v, message %q; want this process twice and the hidden holder, not the gateway", status.APIPortHolders, message)
 	}
+
+	// A first install that timed out waiting for the gateway names the
+	// holders too; with no gateway running, every listener is one.
+	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(ensure, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Error: "enterprise readiness timed out: broker_ready=True gateway_ready=False guardian_ready=False",
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1603})
+	held := false
+	for _, e := range ensure.Errors {
+		held = held || (e.Code == "api_port_held" && strings.Contains(e.Message, "could not start") && strings.Contains(e.Message, "pid 7 "))
+	}
+	if !held || len(ensure.APIPortHolders) != 4 {
+		t.Fatalf("failed ensure errors = %+v holders = %+v, want api_port_held naming every listener", ensure.Errors, ensure.APIPortHolders)
+	}
 }

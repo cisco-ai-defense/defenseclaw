@@ -43,8 +43,16 @@ var (
 // gateway service runs but its API is not ready and processes other than the
 // gateway listen where the API binds.
 func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	if (result.Action != "status" && result.Action != "verify") || !report.Installed || report.TransactionPending ||
-		report.GatewayReady || strings.TrimSpace(report.GatewayService) == "" || report.GatewayServiceState != "running" {
+	inspection := result.Action == "status" || result.Action == "verify"
+	gatewayRunning := strings.TrimSpace(report.GatewayService) != "" && report.GatewayServiceState == "running"
+	// A lifecycle run (a first install, for example) whose gateway never
+	// became ready: its result named only the readiness booleans, and status
+	// could not run on the rolled-back host to name the holder.
+	lifecycleFailed := !inspection && !report.GatewayReady && (len(report.Errors) > 0 || strings.TrimSpace(report.Error) != "")
+	if inspection && (!report.Installed || report.TransactionPending || report.GatewayReady || !gatewayRunning) {
+		return
+	}
+	if !inspection && !lifecycleFailed {
 		return
 	}
 	address := fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
@@ -52,10 +60,14 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	if err != nil || len(listeners) == 0 {
 		return
 	}
-	// Without the gateway's own process ID a listener cannot be told apart
-	// from the gateway itself.
-	gatewayPID := windowsEnterpriseServicePID(report.GatewayService)
-	if gatewayPID == 0 {
+	// Without the running gateway's own process ID a listener cannot be told
+	// apart from the gateway itself. A gateway that is not running holds no
+	// listener.
+	gatewayPID := 0
+	if strings.TrimSpace(report.GatewayService) != "" {
+		gatewayPID = windowsEnterpriseServicePID(report.GatewayService)
+	}
+	if gatewayRunning && gatewayPID == 0 {
 		return
 	}
 	var names []string
@@ -81,6 +93,13 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	stop := "Stop that process"
 	if len(names) > 1 {
 		stop = "Stop those processes"
+	}
+	if !inspection {
+		result.AddError("api_port_held", fmt.Sprintf(
+			"the gateway API port %s is held by %s, not by the DefenseClaw gateway, so the gateway could not start. "+
+				"%s, then run %s again",
+			address, strings.Join(names, "; "), stop, result.Action))
+		return
 	}
 	result.AddError("api_port_held", fmt.Sprintf(
 		"the gateway API port %s is held by %s, not by the DefenseClaw gateway; hooks fail closed until the port is free. "+
