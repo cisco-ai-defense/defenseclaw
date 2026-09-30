@@ -4652,30 +4652,69 @@ def _codex_auth_key_source(env: Mapping[str, str], home: str) -> str:
     return label if isinstance(key, str) and key.strip() else ""
 
 
-def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str | None = None) -> str:
+def _sandbox_credential_summary(
+    env: Mapping[str, str] | None = None, home: str | None = None, llm: str = ""
+) -> str:
     """Which model credential each harness would share (names only, never values).
 
-    Mirrors ``sandboxcli.detectLLM`` with the default ``--llm auto``:
-    environment variables, and for Codex the API key in auth.json, with an
-    Amazon Bedrock key (``AWS_BEARER_TOKEN_BEDROCK``) last.
+    Mirrors ``sandboxcli.runLLM`` and ``detectLLM`` for a run without
+    ``--llm``, which takes ``openshell.llm`` (*llm*): under ``auto`` (the
+    default) environment variables, and for Codex the API key in auth.json,
+    with an Amazon Bedrock key (``AWS_BEARER_TOKEN_BEDROCK``) last; ``none``
+    shares nothing; a provider shares only its own key, and a run without it
+    is refused. A provider the harness has no credential for gives way to
+    ``auto``.
     """
 
     env = os.environ if env is None else env
     home = os.path.expanduser("~") if home is None else home
+    choice = str(llm or "").strip().lower() or "auto"
 
     def first(*names: str) -> str:
         return next((name for name in names if str(env.get(name, "")).strip()), "")
 
-    claude = first("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK")
-    codex = (
-        first("OPENAI_API_KEY", "CODEX_API_KEY")
-        or _codex_auth_key_source(env, home)
-        or first("AWS_BEARER_TOKEN_BEDROCK")
+    bedrock = ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", lambda: first("AWS_BEARER_TOKEN_BEDROCK"))
+    # (openshell.llm choice, the variable a refusal names, the source found)
+    harnesses = (
+        (
+            "Claude Code",
+            (
+                ("anthropic", "ANTHROPIC_API_KEY", lambda: first("ANTHROPIC_API_KEY")),
+                ("claude-oauth", "CLAUDE_CODE_OAUTH_TOKEN", lambda: first("CLAUDE_CODE_OAUTH_TOKEN")),
+                bedrock,
+            ),
+        ),
+        (
+            "Codex",
+            (
+                (
+                    "openai",
+                    "OPENAI_API_KEY",
+                    lambda: first("OPENAI_API_KEY", "CODEX_API_KEY") or _codex_auth_key_source(env, home),
+                ),
+                bedrock,
+            ),
+        ),
     )
-    parts = [
-        f"Claude Code: {claude} found" if claude else "Claude Code: none found (log in inside the sandbox)",
-        f"Codex: {codex} found" if codex else "Codex: none found (log in inside the sandbox)",
-    ]
+    parts = []
+    for label, candidates in harnesses:
+        if choice == "none":
+            parts.append(f"{label}: none shared (openshell.llm none; log in inside the sandbox)")
+            continue
+        chosen = [c for c in candidates if c[0] == choice]
+        found = ""
+        for _llm, _name, value in chosen or candidates:
+            found = value()
+            if found:
+                break
+        if found:
+            parts.append(f"{label}: {found} found")
+        elif chosen:
+            parts.append(
+                f"{label}: none found (openshell.llm {choice}: runs are refused until you set {chosen[0][1]})"
+            )
+        else:
+            parts.append(f"{label}: none found (log in inside the sandbox)")
     return " · ".join(parts)
 
 
@@ -4896,7 +4935,12 @@ def sandbox_wizard_fields(
     if macos:
         install_hint += e2fsprogs
     fields += [
-        WizardFormField("Credentials", "section", hint=_sandbox_credential_summary(), visible_when=is_setup),
+        WizardFormField(
+            "Credentials",
+            "section",
+            hint=_sandbox_credential_summary(llm=str(get_config_value(cfg, "openshell.llm", "") or "")),
+            visible_when=is_setup,
+        ),
         WizardFormField(
             "This machine",
             "section",

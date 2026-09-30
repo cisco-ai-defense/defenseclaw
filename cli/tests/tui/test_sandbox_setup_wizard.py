@@ -678,6 +678,41 @@ def test_credential_summary_counts_a_bedrock_key_last(tmp_path: Path) -> None:
     assert both == "Claude Code: ANTHROPIC_API_KEY found · Codex: OPENAI_API_KEY found"
 
 
+def test_credential_summary_follows_openshell_llm(tmp_path: Path) -> None:
+    # Runs take openshell.llm (the wrappers, the TUI and the app pass no --llm),
+    # as sandboxcli.runLLM does, and so does Go `sandbox setup`.
+    keys = {"AWS_BEARER_TOKEN_BEDROCK": "b", "ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm="bedrock") == (
+        "Claude Code: AWS_BEARER_TOKEN_BEDROCK found · Codex: AWS_BEARER_TOKEN_BEDROCK found"
+    )
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm="none") == (
+        "Claude Code: none shared (openshell.llm none; log in inside the sandbox)"
+        " · Codex: none shared (openshell.llm none; log in inside the sandbox)"
+    )
+    # A provider without its key refuses the run; one the harness has no
+    # credential for takes auto.
+    missing = _sandbox_credential_summary({"ANTHROPIC_API_KEY": "a"}, str(tmp_path), llm="bedrock")
+    assert missing == (
+        "Claude Code: none found (openshell.llm bedrock: runs are refused until you set AWS_BEARER_TOKEN_BEDROCK)"
+        " · Codex: none found (openshell.llm bedrock: runs are refused until you set AWS_BEARER_TOKEN_BEDROCK)"
+    )
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm="claude-oauth") == (
+        "Claude Code: none found (openshell.llm claude-oauth: runs are refused until you set CLAUDE_CODE_OAUTH_TOKEN)"
+        " · Codex: OPENAI_API_KEY found"
+    )
+    assert _sandbox_credential_summary(keys, str(tmp_path), llm=" AUTO ") == (
+        "Claude Code: ANTHROPIC_API_KEY found · Codex: OPENAI_API_KEY found"
+    )
+
+
+def test_wizard_credentials_row_reads_openshell_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    fields = sandbox_wizard_fields({"openshell": {"llm": "none"}})
+    row = next(f for f in fields if f.label == "Credentials")
+    assert "none shared (openshell.llm none" in row.hint
+    assert "ANTHROPIC_API_KEY" not in row.hint
+
+
 # --- the config editor ----------------------------------------------------------
 
 
