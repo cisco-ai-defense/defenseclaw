@@ -394,27 +394,30 @@ func TestWindowsEnterpriseStandaloneActionReportsSchemaTwo(t *testing.T) {
 		t.Fatalf("result %+v", result)
 	}
 
-	// A repair refused before it read the host reports the deployment as
-	// status reads it, with the refusal as its error, not as uninstalled.
+	// A repair refused, or a verify that failed, before it read the host
+	// reports the deployment as status reads it, with the failure as its
+	// error, not as uninstalled.
 	refusal := "deployment managed-hook activation evidence does not bind installed targets.yaml"
-	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
-		if containsString(args, "Status") {
-			return windowsEnterpriseStandaloneRun{Output: statusBody}, nil
+	for _, action := range []string{"repair", "verify"} {
+		windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+			if containsString(args, "Status") {
+				return windowsEnterpriseStandaloneRun{Output: statusBody}, nil
+			}
+			body, _ := json.Marshal(map[string]any{"schema_version": 1, "ok": false, "action": action, "error": refusal})
+			return windowsEnterpriseStandaloneRun{Output: body, ExitCode: 1603}, nil
 		}
-		body, _ := json.Marshal(map[string]any{"schema_version": 1, "ok": false, "action": "repair", "error": refusal})
-		return windowsEnterpriseStandaloneRun{Output: body, ExitCode: 1603}, nil
-	}
-	stdout.Reset()
-	if err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "repair", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("repair", opts)); err == nil {
-		t.Fatal("a refused repair succeeded")
-	}
-	result = enterprisestatus.Result{}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("decode %q: %v", stdout.String(), err)
-	}
-	if result.OK || !result.Installed || result.InstalledVersion != "1.4.0" || len(result.Services) != 4 ||
-		!result.Readiness.Guardian || len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, refusal) {
-		t.Fatalf("refused repair result %+v", result)
+		stdout.Reset()
+		if err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs(action, opts)); err == nil {
+			t.Fatalf("a refused %s succeeded", action)
+		}
+		result = enterprisestatus.Result{}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("decode %q: %v", stdout.String(), err)
+		}
+		if result.OK || !result.Installed || result.InstalledVersion != "1.4.0" || len(result.Services) != 4 ||
+			!result.Readiness.Guardian || len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, refusal) {
+			t.Fatalf("refused %s result %+v", action, result)
+		}
 	}
 }
 

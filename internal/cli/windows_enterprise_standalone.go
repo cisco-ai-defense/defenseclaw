@@ -238,7 +238,7 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
-	if action != "status" && action != "verify" {
+	if action != "status" {
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
@@ -251,8 +251,8 @@ func runWindowsEnterpriseStandaloneAction(
 // the action's own errors. Without it a refused repair reported installed
 // false, no services and readiness all false for a deployment that was
 // installed and running, and an MDM reading that result would treat the
-// host as uninstalled. A probe that cannot read the host leaves the report
-// as it was.
+// host as uninstalled; a failing verify did the same. A probe that cannot
+// read the host leaves the report as it was.
 func windowsEnterpriseFailureWithDeploymentState(
 	ctx context.Context,
 	cmd *cobra.Command,
