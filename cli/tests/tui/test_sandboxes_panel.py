@@ -2037,7 +2037,11 @@ async def test_on_a_microvm_gateway_the_copy_box_is_ticked_and_locked(tmp_path: 
         shown = screen.query_one("#sandbox-launch-copy-note", Static)
         assert str(shown.render()) == note
         screen.query_one("#sandbox-launch-dialog", VerticalScroll).scroll_to_widget(shown, animate=False)
-        await pilot.pause()
+        # The scroll lands after a screen refresh, which a slow runner may not reach in one pause.
+        for _ in range(20):
+            await pilot.pause()
+            if shown.region.bottom <= 24:
+                break
         assert shown.region.right <= 80 and 0 < shown.region.bottom <= 24
         screen.query_one("#sandbox-launch-folder", Input).value = str(project)
         box.value = False  # the box is locked: a run there always works on a copy
