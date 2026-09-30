@@ -19,7 +19,7 @@ silicon in OpenShell MicroVMs, where every run works on a copy (see
 Packs and organization limits are covered in
 [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
 the `openshell:` keys in
-[Configuration](/docs/reference/configuration#openshell-sandbox-settings).
+[Configuration](/docs/reference/configuration#sandbox-keys).
 
 The flag tables are generated from the `defenseclaw-gateway sandbox` command
 tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
@@ -257,13 +257,9 @@ for the docker driver as superseded, however new it is (images recorded before
 DefenseClaw built MicroVM images are such images). Such an image goes with its
 run images and aliases unless a sandbox runs it. A docker gateway's prune, or
 one that cannot tell which driver the gateway runs, keeps the newest image of
-both kinds. With that list it also removes the MicroVM disk OpenShell prepared from each
-image it removed (about 5 GB each, in the `images` folder of the MicroVM
-driver's state directory, `~/.local/state/openshell/vm-driver` by default) and
-says how much it freed. It removes a disk only when Docker no longer has its
-image and no sandbox is recorded with that image, and it never removes the
-driver's other state there. `--dry-run` says which disks it would remove. A
-start of an image whose disk is gone prepares it again (about a minute).
+both kinds. With that list it also removes the MicroVM disk prepared from each
+image it removed; see [MicroVM disk cleanup](#microvm-disk-cleanup).
+`--dry-run` says which images and disks it would remove.
 
 ```bash
 defenseclaw sandbox image prune --dry-run
@@ -281,12 +277,10 @@ Removes the images this data directory recorded for the named harnesses,
 current ones included, and forgets their records: the harness image and, on a
 MicroVM (vm) gateway, the run images and aliases made from it. For an image
 already removed from Docker (with `docker rmi`, say) only the record goes. On
-a Mac it also removes the MicroVM disks OpenShell prepared from these images
-(about 5 GB each), by the rules of `sandbox image prune`: only
-`sandbox-prepared-rootfs-*` directories of image IDs Docker no longer has, and
-only with the daemon's list of sandboxes. When the daemon does not answer and
-such disks exist, it refuses and removes nothing, so that no disk is left
-that no command would remove later. It also refuses, removing nothing, while a
+a Mac it also removes the MicroVM disks prepared from these images (see
+[MicroVM disk cleanup](#microvm-disk-cleanup)). When the daemon does not
+answer and such disks exist, it refuses and removes nothing, so that no disk
+is left that no command would remove later. It also refuses, removing nothing, while a
 sandbox uses one of the images (running, stopped, or only recorded), and names
 it: delete that sandbox first. A sandbox deleted with `--keep-snapshot` uses
 none. It shows what it removes and asks first; `--yes` does not ask, and
@@ -303,6 +297,27 @@ defenseclaw sandbox image rm kiro opencode --yes
 | `--dry-run` | switch |  | Only show what would be removed. |
 | `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
+
+### MicroVM disk cleanup
+
+On a Mac, the first start of each image prepares a MicroVM disk of about
+5 GB. The disks live in the `images` folder of the MicroVM driver's state
+directory, `~/.local/state/openshell/vm-driver` by default.
+`sandbox image prune`, `sandbox image rm` and `sandbox teardown` remove the
+disks of the images they remove, by the same rules:
+
+- They remove only `sandbox-prepared-rootfs-*` directories whose image Docker
+  no longer has.
+- They need a list of the sandboxes (from the daemon, or for teardown also
+  from the OpenShell gateway). They keep a disk while any sandbox that could
+  boot it is left.
+- They never remove the driver's other state.
+- They say how much space they freed. `--dry-run` names the disks first.
+
+The next start of an image whose disk is gone prepares it again, which takes
+about a minute. `defenseclaw sandbox doctor` shows the size of the prepared
+disks. If the space does not come back, an app that backs up or indexes your
+files may still hold a removed disk open: `lsof +L1` lists such files.
 
 ### `sandbox enable`
 
@@ -362,9 +377,8 @@ remaining provider uses: this data directory's ingress profiles, the legacy
 `defenseclaw-ingress` profile, and the shared model-credential and
 `--credential` profiles, including ones another DefenseClaw data directory
 imported. The daemons import them again when they need them. Another daemon's
-ingress profile is never removed. With the images it removes the MicroVM
-disks OpenShell prepared from them, once no sandbox that could boot one is
-left, as `sandbox image prune` does. Teardown restores the OpenShell gateway
+ingress profile is never removed. With the images it removes their MicroVM
+disks (see [MicroVM disk cleanup](#microvm-disk-cleanup)). Teardown restores the OpenShell gateway
 config that setup changed, unless the file changed since. It also removes the
 shell wrappers and sets `openshell.enabled: false`. OpenShell itself stays
 installed. `defenseclaw uninstall` runs teardown for you. It works without a
@@ -1315,7 +1329,7 @@ the host's OpenClaw networking, ownership, and config. It prints every step
 with its exact commands and asks once, unless you pass `--yes`. Progress is
 recorded in `<data_dir>/legacy-sandbox-cleanup.json`, so running it again only
 does what is left.
-[Detect a legacy install](/docs/setup/sandbox#detect-a-legacy-install) says
+[Detect a legacy install](/docs/setup/sandbox/legacy-cleanup#detect-a-legacy-install) says
 when you need it.
 
 ```bash
