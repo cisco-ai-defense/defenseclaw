@@ -17,10 +17,13 @@
 package image
 
 import (
+	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 )
 
 // A failed docker build is reported with the end of what docker printed:
@@ -30,6 +33,18 @@ import (
 const (
 	buildTailLines = 40
 	buildTailBytes = 8 << 10
+	// buildLineRunes is the most of one line the tail shows. Docker's
+	// last line repeats the whole failing RUN command (ERROR: failed to
+	// build: failed to solve: process "/bin/sh -c …"), 6.9 KB for Hermes'
+	// base64 shims, which would leave no room for the lines that say why
+	// the command failed.
+	buildLineRunes = 300
+	// buildLineBytes is the most of one line the tail keeps as docker
+	// wrote it: room for buildLineRunes once escapes are removed.
+	buildLineBytes = 4 << 10
+	// buildTailKeep is how many lines the tail keeps as written; the
+	// blank ones are left out when it is shown.
+	buildTailKeep = 4 * buildTailLines
 )
 
 // BuildError is a docker build that failed.
@@ -37,9 +52,9 @@ type BuildError struct {
 	// Err is docker's failure (a *CommandError when it exited non-zero).
 	Err error
 	// Output is the last lines docker printed (at most 40 lines and 8
-	// KiB), without control characters and with anything shaped like a
-	// credential redacted. The build has no secrets; the redaction is a
-	// guard all the same.
+	// KiB, each shortened to 300 characters), without control characters
+	// and with anything shaped like a credential redacted. The build has
+	// no secrets; the redaction is a guard all the same.
 	Output string
 }
 
@@ -52,25 +67,46 @@ func (e *BuildError) Error() string {
 
 func (e *BuildError) Unwrap() error { return e.Err }
 
-// outputTail keeps the last buildTailBytes written to it. It is safe for
-// concurrent writes (docker's stdout and stderr).
+// tailLine is one line written to an outputTail, without its newline:
+// its first buildLineBytes, and whether more were dropped.
+type tailLine struct {
+	text []byte
+	cut  bool
+}
+
+// outputTail keeps the last buildTailKeep lines written to it, each cut to
+// buildLineBytes, so one long line never pushes out the lines before it.
+// It is safe for concurrent writes (docker's stdout and stderr).
 type outputTail struct {
-	mu  sync.Mutex
-	buf []byte
-	// cut is set once earlier bytes were dropped.
-	cut bool
+	mu    sync.Mutex
+	lines []tailLine
+	// cur is the line being written.
+	cur tailLine
 }
 
 func (t *outputTail) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := len(p)
-	if len(p) > buildTailBytes {
-		p, t.buf, t.cut = p[len(p)-buildTailBytes:], t.buf[:0], true
-	}
-	t.buf = append(t.buf, p...)
-	if len(t.buf) > 2*buildTailBytes {
-		t.buf, t.cut = append(t.buf[:0], t.buf[len(t.buf)-buildTailBytes:]...), true
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		chunk := p
+		if i >= 0 {
+			chunk = p[:i]
+		}
+		if room := buildLineBytes - len(t.cur.text); len(chunk) > room {
+			chunk, t.cur.cut = chunk[:max(room, 0)], true
+		}
+		t.cur.text = append(t.cur.text, chunk...)
+		if i < 0 {
+			break
+		}
+		t.lines = append(t.lines, t.cur)
+		t.cur = tailLine{}
+		if len(t.lines) > 2*buildTailKeep {
+			t.lines = append(t.lines[:0], t.lines[len(t.lines)-buildTailKeep:]...)
+		}
+		p = p[i+1:]
 	}
 	return n, nil
 }
@@ -78,39 +114,69 @@ func (t *outputTail) Write(p []byte) (int, error) {
 // String is the safe tail (BuildError.Output).
 func (t *outputTail) String() string {
 	t.mu.Lock()
-	raw, cut := t.buf, t.cut
-	if len(raw) > buildTailBytes {
-		raw, cut = raw[len(raw)-buildTailBytes:], true
+	lines := slices.Clone(t.lines)
+	if len(t.cur.text) > 0 {
+		lines = append(lines, t.cur)
 	}
-	s := string(raw)
 	t.mu.Unlock()
-	if cut {
-		// The first line is a fragment (maybe of a UTF-8 sequence).
-		if i := strings.IndexByte(s, '\n'); i >= 0 {
-			s = s[i+1:]
-		}
+	var out []string
+	for _, l := range lines {
+		out = append(out, safeLines(string(l.text), l.cut)...)
 	}
-	return safeOutput(s, buildTailLines)
+	return tailOf(out, buildTailLines)
 }
 
-// safeOutput is the last maxLines non-blank lines of s, each without
-// terminal escape sequences, control or bidirectional-override
-// characters, and with credential-shaped strings redacted.
+// safeOutput is the last maxLines non-blank lines of s, at most
+// buildTailBytes in all, each without terminal escape sequences, control
+// or bidirectional-override characters, with credential-shaped strings
+// redacted, and shortened to buildLineRunes.
 func safeOutput(s string, maxLines int) string {
-	s = strings.ToValidUTF8(s, "?")
-	s = ansiEscapeRE.ReplaceAllString(s, "")
-	s = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(s)
-	var lines []string
+	var out []string
 	for _, line := range strings.Split(s, "\n") {
+		out = append(out, safeLines(line, false)...)
+	}
+	return tailOf(out, maxLines)
+}
+
+// safeLines are the non-blank lines of one line docker wrote (a carriage
+// return starts another), made safe to show as safeOutput says. cut says
+// docker's line went on past raw: its last line ends in "…" without its
+// last word, which may be part of one the redaction would have recognized.
+func safeLines(raw string, cut bool) []string {
+	raw = strings.ToValidUTF8(raw, "?")
+	raw = ansiEscapeRE.ReplaceAllString(raw, "")
+	parts := strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(raw), "\n")
+	var out []string
+	for i, line := range parts {
 		line = strings.TrimRightFunc(strings.Map(displayRune, line), unicode.IsSpace)
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, redactCredentials(line))
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
+		line = redactCredentials(line)
+		switch {
+		case utf8.RuneCountInString(line) > buildLineRunes:
+			line = string([]rune(line)[:buildLineRunes]) + "…"
+		case cut && i == len(parts)-1:
+			if j := strings.LastIndexFunc(line, unicode.IsSpace); j >= 0 {
+				line = strings.TrimRightFunc(line[:j], unicode.IsSpace) + " …"
+			} else {
+				line = "…"
+			}
+		}
+		out = append(out, line)
 	}
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+	return out
+}
+
+// tailOf joins the last maxLines of lines, as many as fit
+// buildTailBytes.
+func tailOf(lines []string, maxLines int) string {
+	first, size := len(lines), 0
+	for first > 0 && len(lines)-first < maxLines && size+len(lines[first-1]) <= buildTailBytes {
+		first--
+		size += len(lines[first]) + 1
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines[first:], "\n")
 }
 
 // ansiEscapeRE matches CSI and OSC sequences and the other two-byte ESC

@@ -1428,8 +1428,11 @@ legacy builder, before `docker build` runs. It reads `DOCKER_BUILDKIT` as
 docker does: any value that is set, spaces and all, must parse as a boolean,
 or `docker build` refuses to run, so the build is refused too. A failed build
 returns an `image.BuildError` whose message ends with the last 40 lines (at
-most 8 KiB) docker printed, terminal escapes and control characters removed
-and anything shaped like a credential redacted. It reaches the CLI's error,
+most 8 KiB) docker printed. Each line is shortened to 300 characters and
+ends in "…" when cut, because docker's last line repeats the whole failing
+`RUN` command (6.9 KB for Hermes) and would otherwise push out the lines that
+say why it failed. Terminal escapes and control characters are removed,
+and anything shaped like a credential is redacted. It reaches the CLI's error,
 the daemon's create error and its `OPENSHELL_IMAGE_BUILD_FAILED` log line,
 because the daemon builds without a build log. The create's
 `OPENSHELL_SANDBOX_FAILED` line and its failed sandbox-health record
