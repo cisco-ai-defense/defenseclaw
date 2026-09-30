@@ -2485,10 +2485,10 @@ func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
 func verifySetupImage(self string, payload *zip.Reader) (string, error) {
 	manifest, err := verifyEmbeddedPayloadArchive(payload)
 	if err != nil {
-		return "", fmt.Errorf("verify setup payload: %w", err)
+		return "", setupNotPublished(fmt.Errorf("verify setup payload: %w", err))
 	}
 	if err := verifySetupExecutablePolicyAt(self, manifest.Unsigned); err != nil {
-		return "", fmt.Errorf("verify setup Authenticode policy: %w", err)
+		return "", setupNotPublished(fmt.Errorf("verify setup Authenticode policy: %w", err))
 	}
 	if !manifest.Unsigned {
 		return "DefenseClaw Setup Authenticode verification succeeded", nil
@@ -2503,6 +2503,15 @@ func verifySetupImage(self string, payload *zip.Reader) (string, error) {
 			"checksums.txt verified with its Sigstore signature.",
 		manifest.Version, digest, setupArtifactName,
 	), nil
+}
+
+// setupNotPublished leads a /verify failure with what it means: the checks
+// alone ("zip: checksum error") did not tell the user the file was modified
+// or what to do.
+func setupNotPublished(err error) error {
+	return fmt.Errorf("this DefenseClaw Setup is not the published file: it was changed after it was built. "+
+		"Do not run it; download it again and compare its SHA-256 with the release checksums.txt "+
+		"verified with its Sigstore signature (%w)", err)
 }
 
 // verifyEmbeddedPayloadArchive reads the payload manifest from the embedded

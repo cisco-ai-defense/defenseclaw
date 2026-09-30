@@ -334,7 +334,8 @@ func TestVerifyPayloadManifestAcceptsSchemaTwoAuthenticodeAndYaraContract(t *tes
 	if !strings.Contains(report, "not Authenticode signed") || !strings.Contains(report, digestBytes(pe)) {
 		t.Fatalf("unsigned setup /verify report %q does not name its state and SHA-256", report)
 	}
-	if _, err := verifySetupImage(self, archive(manifest.Wheel)); err == nil || !strings.Contains(err.Error(), "payload hash mismatch") {
+	if _, err := verifySetupImage(self, archive(manifest.Wheel)); err == nil || !strings.Contains(err.Error(), "payload hash mismatch") ||
+		!strings.Contains(err.Error(), "not the published file") {
 		t.Fatalf("verify accepted a payload changed after the build: %v", err)
 	}
 }

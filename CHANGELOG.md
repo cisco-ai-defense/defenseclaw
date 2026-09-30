@@ -71,6 +71,11 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Setup `/verify` says what a failure means.** A per-user Windows Setup
+  whose payload or signature was changed failed `/verify` with internal text
+  such as `zip: checksum error`. The message now says the file is not the
+  published Setup, not to run it, and to download it again and compare its
+  SHA-256 with the Sigstore-verified `checksums.txt`.
 - **`defenseclaw setup` answers on a managed Windows computer.** The
   enterprise standalone payload has no per-user CLI, so
   `defenseclaw setup rotate-token` printed `unknown command "setup"` and
