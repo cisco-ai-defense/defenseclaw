@@ -379,6 +379,11 @@ type SnapshotInfo struct {
 	Ref       string    `json:"ref,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	UndoneAt  time.Time `json:"undone_at,omitzero"`
+	// AcceptedAt is when the user kept the changes made on top of this
+	// snapshot (POST /sandboxes/{name}/accept): the next start takes a new
+	// snapshot, so an accepted session is the base of the next one. Zero
+	// while nobody accepted them.
+	AcceptedAt time.Time `json:"accepted_at,omitzero"`
 }
 
 // Violation is a requested setting or action the sandbox policy refused or
@@ -417,14 +422,61 @@ type DeleteResponse struct {
 type StartRequest struct {
 	// NoSnapshot keeps the previous snapshot instead of taking a fresh one
 	// for the new session. Without it a start takes a fresh one only when
-	// nothing would be lost: no snapshot yet, the last one was undone, or
-	// the folder did not change since it; otherwise the snapshot of the
-	// earlier session is kept, so undo still reverts its changes.
+	// nothing would be lost: no snapshot yet, the last one was undone, the
+	// folder did not change since it, or the user accepted the changes on
+	// top of it (POST /sandboxes/{name}/accept); otherwise the snapshot of
+	// the earlier session is kept, so undo still reverts its changes.
 	NoSnapshot bool `json:"no_snapshot,omitempty"`
 	// NewSnapshot takes a fresh snapshot even though the folder still holds
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+}
+
+// AcceptRequest is POST /sandboxes/{name}/accept: the user kept the changes
+// a session made on top of a stopped mounted sandbox's snapshot (the
+// end-of-session "Keep changes?" answered yes, --yes, or on_exit: keep), so
+// the next start takes a new snapshot instead of keeping this one for undo.
+type AcceptRequest struct {
+	// Snapshot is the created_at of the snapshot the changes were reviewed
+	// against: the daemon refuses with 409 conflict when the sandbox's
+	// snapshot is another one by now. Zero accepts the current one.
+	Snapshot time.Time `json:"snapshot_created_at,omitzero"`
+}
+
+// Detached-run states of a kept run log (RunLog.State).
+const (
+	// RunExited: the run had ended on its own before the stop; RunLog.Exit
+	// is its exit status.
+	RunExited = "exited"
+	// RunInterrupted: the stop ended the run (or the sandbox had stopped
+	// under it before).
+	RunInterrupted = "interrupted"
+)
+
+// MaxRunLogBytes bounds the log of a detached run the daemon keeps at a
+// stop: the end of the run's output.
+const MaxRunLogBytes = 1 << 20
+
+// RunLog is GET /sandboxes/{name}/logs: the log of the sandbox's latest
+// detached run (`sandbox run --detach`), which the daemon keeps on this
+// machine whenever it stops the sandbox (`sandbox stop`, the TUI, the macOS
+// app, undo, a tamper stop), so it can be read while the sandbox is
+// stopped. 404 not_found when no log was kept.
+type RunLog struct {
+	Name string `json:"name"`
+	// State is RunExited or RunInterrupted.
+	State string `json:"state"`
+	// Exit is the exit status of an exited run.
+	Exit string `json:"exit,omitempty"`
+	// StartedAt is when the run started (zero: unknown), KeptAt when the
+	// stop kept its log.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	KeptAt    time.Time `json:"kept_at"`
+	// Log is the end of the run's output: at most MaxRunLogBytes, or its
+	// last ?lines=N lines when asked. Bytes that are not UTF-8 are
+	// replaced.
+	Log string `json:"log"`
 }
 
 // UndoRequest is POST /sandboxes/{name}/undo. Undo needs the sandbox

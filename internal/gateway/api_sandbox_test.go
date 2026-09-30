@@ -41,6 +41,8 @@ type fakeSandboxController struct {
 	unblock   sandboxapi.UnblockRequest
 	explain   sandboxapi.ExplainRequest
 	undo      sandboxapi.UndoRequest
+	accept    sandboxapi.AcceptRequest
+	lines     int
 	err       error
 	feed      chan sandboxapi.ActivityEvent
 	backlog   []sandboxapi.ActivityEvent
@@ -97,6 +99,15 @@ func (f *fakeSandboxController) Undo(_ context.Context, name string, req sandbox
 
 func (f *fakeSandboxController) Review(_ context.Context, name string, _ sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error) {
 	return answer(f, "review "+name, &sandboxapi.ReviewResponse{Name: name, Summary: "1 file changed (+1 −0)"})
+}
+
+func (f *fakeSandboxController) Accept(_ context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error) {
+	return answer(f, "accept "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"}, func() { f.accept = req })
+}
+
+func (f *fakeSandboxController) RunLog(_ context.Context, name string, lines int) (*sandboxapi.RunLog, error) {
+	return answer(f, "logs "+name, &sandboxapi.RunLog{Name: name, State: sandboxapi.RunInterrupted, Log: "partial\n"},
+		func() { f.lines = lines })
 }
 
 func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, r sandboxapi.WorkspaceReport) error {
@@ -235,6 +246,11 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"POST", sandboxapi.PathSandboxes + "/box/start", `{}`, 200, "start box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/undo", `{"stop":true}`, 200, "undo box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/review", "", 200, "review box"},
+		{"POST", sandboxapi.PathSandboxes + "/box/accept", `{"snapshot_created_at":"2026-09-30T10:00:00Z"}`, 200, "accept box"},
+		{"POST", sandboxapi.PathSandboxes + "/box/accept", `{"surprise":1}`, 400, ""},
+		{"GET", sandboxapi.PathSandboxes + "/box/logs?lines=5", "", 200, "logs box"},
+		{"GET", sandboxapi.PathSandboxes + "/box/logs?lines=-1", "", 400, ""},
+		{"GET", sandboxapi.PathSandboxes + "/box/explode", "", 404, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/workspace", `{"operation":"pull","pull_mode":"branch"}`, 200, "workspace box pull"},
 		{"POST", sandboxapi.PathSandboxes + "/box/workspace", "", 400, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/explode", "", 404, ""},
@@ -258,9 +274,10 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		}
 	}
 	if ctl.createReq.Name != "box" || len(ctl.createReq.HostPorts) != 1 || !ctl.decision.Always || ctl.unblock.Host != "webhook.site" ||
-		ctl.explain.Harness != "codex" || !ctl.explain.Copy || !ctl.undo.Stop {
-		t.Fatalf("decoded requests: create %+v decision %+v unblock %+v explain %+v undo %+v",
-			ctl.createReq, ctl.decision, ctl.unblock, ctl.explain, ctl.undo)
+		ctl.explain.Harness != "codex" || !ctl.explain.Copy || !ctl.undo.Stop ||
+		!ctl.accept.Snapshot.Equal(time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)) || ctl.lines != 5 {
+		t.Fatalf("decoded requests: create %+v decision %+v unblock %+v explain %+v undo %+v accept %+v lines %d",
+			ctl.createReq, ctl.decision, ctl.unblock, ctl.explain, ctl.undo, ctl.accept, ctl.lines)
 	}
 }
 
@@ -392,6 +409,12 @@ func TestSandboxAPIClientRoundTrip(t *testing.T) {
 	}
 	if _, err := c.Start(ctx, "box", sandboxapi.StartRequest{}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := c.Accept(ctx, "box", sandboxapi.AcceptRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if log, err := c.RunLog(ctx, "box", 0); err != nil || log.State != sandboxapi.RunInterrupted || log.Log != "partial\n" || ctl.lines != 0 {
+		t.Fatalf("run log = %+v, %v (lines %d)", log, err, ctl.lines)
 	}
 	if list, err := c.Approvals(ctx, ""); err != nil || list == nil {
 		t.Fatalf("approvals = %v, %v", list, err)
