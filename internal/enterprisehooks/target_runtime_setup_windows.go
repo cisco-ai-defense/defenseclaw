@@ -137,7 +137,20 @@ type windowsManagedRuntimeCleanupFileContract uint8
 const (
 	windowsManagedRuntimeCleanupCanonicalFile windowsManagedRuntimeCleanupFileContract = iota + 1
 	windowsManagedRuntimeCleanupGatewayFile
+	// windowsManagedRuntimeCleanupOwnedLockFile is a lock the connector code
+	// creates as the account (connector.withOwnedFileLock): owned by the
+	// account, with a protected DACL of full control for the account,
+	// LocalSystem and Administrators only. The canonical file DACL is also
+	// accepted, for a lock a later pass canonicalized.
+	windowsManagedRuntimeCleanupOwnedLockFile
 )
+
+// windowsManagedRuntimeCleanupOwnedLocks are the root leaves the connector
+// code creates with withOwnedFileLock's owner-only descriptor.
+var windowsManagedRuntimeCleanupOwnedLocks = map[string]struct{}{
+	".hermes-lifecycle.lock":       {},
+	".hook-api-token-publish.lock": {},
+}
 
 type windowsManagedRuntimeCleanupSpec struct {
 	rootFiles            map[string]windowsManagedRuntimeCleanupFileContract
@@ -493,6 +506,9 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 		}
 		for _, leaf := range files.root {
 			spec.rootFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+			if _, lock := windowsManagedRuntimeCleanupOwnedLocks[leaf]; lock {
+				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupOwnedLockFile
+			}
 		}
 		for _, leaf := range files.hooks {
 			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
@@ -2043,6 +2059,23 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: canonical cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
+	case windowsManagedRuntimeCleanupOwnedLockFile:
+		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
+			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file owner or DACL provenance is invalid")
+		}
+		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
+			if err := validateWindowsManagedRuntimeOwnedLockACL(label, descriptor, dacl, target.sid); err != nil {
+				return "", err
+			}
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
 	case windowsManagedRuntimeCleanupGatewayFile:
 		administrators, administratorsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 		if administratorsErr != nil || ownerDefaulted || (!owner.Equals(target.sid) && !owner.Equals(administrators)) {
@@ -2055,6 +2088,70 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: unknown cleanup file contract")
 	}
 	return identity, nil
+}
+
+// validateWindowsManagedRuntimeOwnedLockACL accepts exactly the descriptor
+// connector.withOwnedFileLock creates a lock with: a protected DACL of three
+// non-inherited full-control ACEs, one each for the account, LocalSystem and
+// Administrators.
+func validateWindowsManagedRuntimeOwnedLockACL(
+	label string,
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	target *windows.SID,
+) error {
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect owned lock DACL control for %s: %w", label, err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("enterprise hooks: owned lock DACL is not protected on %s", label)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return err
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	expected := []*windows.SID{target, system, administrators}
+	if int(dacl.AceCount) != len(expected) {
+		return fmt.Errorf(
+			"enterprise hooks: owned lock DACL on %s has %d ACEs, expected %d",
+			label,
+			dacl.AceCount,
+			len(expected),
+		)
+	}
+	seen := make([]bool, len(expected))
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect owned lock ACE %d for %s: %w", index, label, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
+			mapWindowsUserPathGenericMask(ace.Mask) != windows.ACCESS_MASK(0x001f01ff) {
+			return fmt.Errorf("enterprise hooks: owned lock DACL on %s contains a non-canonical ACE at index %d", label, index)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		match := -1
+		for candidate, want := range expected {
+			if !seen[candidate] && sid.Equals(want) {
+				match = candidate
+				break
+			}
+		}
+		if match < 0 {
+			return fmt.Errorf(
+				"enterprise hooks: owned lock DACL on %s contains unexpected or duplicate ACE for principal %s",
+				label,
+				windowsSIDString(sid),
+			)
+		}
+		seen[match] = true
+	}
+	return nil
 }
 
 func requireWindowsManagedRuntimePinnedNames(handle windows.Handle, expected map[string]struct{}, label string) error {

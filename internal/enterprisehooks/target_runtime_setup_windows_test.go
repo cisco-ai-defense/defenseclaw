@@ -1152,12 +1152,16 @@ func writeWindowsManagedRuntimeCleanupFixture(
 		t.Fatalf("create exact managed hooks fixture: %v", err)
 	}
 	var paths []string
-	for name := range spec.rootFiles {
+	for name, contract := range spec.rootFiles {
 		path := filepath.Join(root.DataDir, name)
 		if err := os.WriteFile(path, []byte("managed root artifact"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		if contract == windowsManagedRuntimeCleanupOwnedLockFile {
+			setWindowsManagedRuntimeCleanupFileOwnedLock(t, path, target)
+		} else {
+			setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		}
 		paths = append(paths, path)
 	}
 	for name := range spec.hookFiles {
@@ -1233,6 +1237,39 @@ func setWindowsManagedRuntimeCleanupFileCanonical(t *testing.T, path string, tar
 	}
 	if err := setWindowsUserPathProtection(path, target, false); err != nil {
 		t.Fatalf("install exact cleanup fixture DACL on %s: %v", path, err)
+	}
+}
+
+// setWindowsManagedRuntimeCleanupFileOwnedLock gives a fixture lock the
+// descriptor connector.withOwnedFileLock creates real locks with (seen on
+// dc-win for .hermes-lifecycle.lock and .hook-api-token-publish.lock).
+func setWindowsManagedRuntimeCleanupFileOwnedLock(t *testing.T, path string, target *windows.SID) {
+	t.Helper()
+	sid := target.String()
+	descriptor, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSetupPrivilege(func() error {
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			target,
+			nil,
+			dacl,
+			nil,
+		)
+	}); err != nil {
+		t.Fatalf("install owned lock fixture descriptor on %s: %v", path, err)
 	}
 }
 
