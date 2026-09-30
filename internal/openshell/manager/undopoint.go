@@ -124,16 +124,6 @@ func (m *Manager) Accept(ctx context.Context, name string, req sandboxapi.Accept
 	return &v, nil
 }
 
-// acceptedNow reports whether the user accepted the changes on top of the
-// sandbox's current pre-session snapshot.
-func (m *Manager) acceptedNow(rec record) bool {
-	if rec.Accepted == nil {
-		return false
-	}
-	snap, err := m.ws.LoadSnapshot(m.opts.DataDir, rec.Name)
-	return err == nil && rec.Accepted.acceptedFor(snap)
-}
-
 // dropAcceptance forgets an acceptance once a start used it: what the new
 // session changes on top was not accepted (a --no-snapshot start keeps the
 // accepted snapshot, and the next start must keep it again). It returns the

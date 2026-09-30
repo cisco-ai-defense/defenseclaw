@@ -438,7 +438,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
 		// Changes the user kept at the end of a session (Accept) are the
 		// base of the next one, as with --new-snapshot.
-		if kept, why := m.keepSnapshot(ctx, rec.Name, req.NewSnapshot || m.acceptedNow(rec)); kept {
+		snap, err := m.ws.LoadSnapshot(m.opts.DataDir, rec.Name)
+		if err != nil {
+			snap = nil
+		}
+		if kept, why := m.keepSnapshot(ctx, rec.Name, snap, req.NewSnapshot || rec.Accepted.acceptedFor(snap)); kept {
 			// Replacing it would take the earlier session's changes into the
 			// new baseline, and undo could never revert them.
 			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
@@ -522,17 +526,14 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 }
 
 // keepSnapshot reports whether a start must keep the sandbox's pre-session
-// snapshot instead of taking a fresh one, and why: the folder still holds
-// changes an earlier session made that were neither undone nor accepted
-// (newSnapshot). A fresh snapshot would make them part of the new
-// baseline, out of undo's reach. When the folder cannot be compared with
-// the snapshot, it is kept too: replacing it could lose the only way back.
-func (m *Manager) keepSnapshot(ctx context.Context, name string, newSnapshot bool) (bool, string) {
-	if newSnapshot {
-		return false, ""
-	}
-	snap, err := m.ws.LoadSnapshot(m.opts.DataDir, name)
-	if err != nil || snap == nil || snap.UndoneAt != nil {
+// snapshot snap (nil: none could be loaded) instead of taking a fresh one,
+// and why: the folder still holds changes an earlier session made that were
+// neither undone nor accepted (newSnapshot). A fresh snapshot would make
+// them part of the new baseline, out of undo's reach. When the folder
+// cannot be compared with the snapshot, it is kept too: replacing it could
+// lose the only way back.
+func (m *Manager) keepSnapshot(ctx context.Context, name string, snap *workspace.SnapshotRecord, newSnapshot bool) (bool, string) {
+	if newSnapshot || snap == nil || snap.UndoneAt != nil {
 		return false, ""
 	}
 	// Only whether anything changed matters here: no content scanners.
