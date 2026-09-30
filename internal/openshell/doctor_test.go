@@ -896,7 +896,11 @@ func (keepOpen) Close() error { return nil }
 // the one that CLI's install runs: the fix says which release answers and
 // restarts the gateway service, automatically only where the service
 // runs the gateway, and checks the restarted one runs the CLI's release.
-// A CLI the install upgrades keeps the install.
+// When it does not, the service runs another OpenShell's gateway: the fix
+// says so, once, and the doctor does not restart it again for the same
+// releases (it did on every `--fix`, stopping every sandbox, and a restart
+// back on 0.0.40 failed the wait, pointing at the install again). A CLI
+// the install upgrades keeps the install.
 func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 	const (
 		install = "defenseclaw sandbox setup --install-openshell"
@@ -904,16 +908,32 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 		unit    = "the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing OpenShell would change nothing: " +
 			"restart the openshell-gateway user service so it runs the gateway installed with the CLI"
 	)
-	// restartTo has the restart bring up a gateway of version. The fake
-	// gateway stays open for the fix, after the doctor closed its client.
-	restartTo := func(f *doctorFixture, command, version string) {
+	// restartTo has the restart bring up a gateway of version, and counts
+	// the restarts. The fake gateway stays open for the fix, after the
+	// doctor closed its client. The restart waits for the gateway as
+	// WaitForGateway does: it fails at once on an unsupported release.
+	restartTo := func(f *doctorFixture, command, version string) *int {
+		restarts := 0
 		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
 			return keepOpen{f.fake.Client(openshell.ClientOptions{})}, nil
 		}
 		f.runner.OnFunc(command, func(context.Context, openshell.Command) ([]byte, error) {
+			restarts++
 			f.fake.SetHealth(true, version)
 			return nil, nil
 		})
+		f.doctor.Gateway.VerifyGateway = func(ctx context.Context) error {
+			f.verified++
+			h, err := f.fake.Client(openshell.ClientOptions{}).Health(ctx)
+			switch {
+			case err != nil:
+				return err
+			case !h.Healthy:
+				return errors.New("gateway reports unhealthy")
+			}
+			return h.CheckVersion()
+		}
+		return &restarts
 	}
 	fixIs := func(t *testing.T, c *openshell.Check, summary, command string, auto bool) {
 		t.Helper()
@@ -922,30 +942,89 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 			t.Fatalf("%s fix = %+v\nwant summary %q, command %q, automatic %v", c.ID, c.Fix, summary, command, auto)
 		}
 	}
+	// gatewayFix applies the Gateway fix alone, as `doctor --fix --yes`
+	// would, and returns its outcome (nil: none was offered).
+	gatewayFix := func(t *testing.T, r *openshell.DoctorReport) *openshell.FixOutcome {
+		t.Helper()
+		outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDGatewayVersion, nil })
+		if err != nil || len(outcomes) > 1 {
+			t.Fatalf("ApplyFixes = %+v, %v", outcomes, err)
+		}
+		if len(outcomes) == 0 {
+			return nil
+		}
+		return &outcomes[0]
+	}
 
 	t.Run("older gateway, unit running", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		f.fake.SetHealth(true, "0.0.40")
-		restartTo(f, restart, "0.1.1")
+		restarts := restartTo(f, restart, "0.1.1")
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1")
 		fixIs(t, c, unit, restart, true)
 		applyFixes(t, r, openshell.CheckIDGatewayVersion)
-		if !f.runner.Called(restart) {
-			t.Fatalf("the fix did not restart the unit: %v", f.runner.Calls())
+		if *restarts != 1 {
+			t.Fatalf("the fix restarted the unit %d times: %v", *restarts, f.runner.Calls())
 		}
+		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
 	})
 	// The unit's own gateway is of another release than the CLI: the
-	// restart does not help, and the fix says so.
-	t.Run("the unit runs another OpenShell", func(t *testing.T) {
+	// restart brings it back, and the fix says what to do, once.
+	for _, tc := range []struct {
+		name, gateway string
+		status        openshell.CheckStatus
+		detail        string
+	}{
+		// Restart's wait fails at once on it.
+		{"the unit runs an older OpenShell", "0.0.40", openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1"},
+		// Supported: the restart succeeds, and stopped every sandbox on
+		// each --fix --yes.
+		{"the unit runs a newer OpenShell", "0.1.2", openshell.StatusWarn, "gateway 0.1.2 but CLI 0.1.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := "the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell " + tc.gateway +
+				", not the OpenShell 0.1.1 of the CLI at /usr/bin/openshell. Remove that other OpenShell, then install OpenShell 0.1.1"
+			f := newDoctorFixture(t)
+			f.fake.SetHealth(true, tc.gateway)
+			restarts := restartTo(f, restart, tc.gateway)
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDGatewayVersion, tc.status, tc.detail)
+			fixIs(t, c, strings.Replace(unit, "0.0.40", tc.gateway, 1), restart, true)
+			if o := gatewayFix(t, r); o == nil || o.Applied || o.Error != other+" with `"+install+"`" {
+				t.Fatalf("Gateway fix = %+v", o)
+			}
+			// The next doctor names the way on and restarts nothing.
+			for range 2 {
+				r = f.run()
+				c = expectCheck(t, r, openshell.CheckIDGatewayVersion, tc.status, tc.detail)
+				fixIs(t, c, other, install, false)
+				if o := gatewayFix(t, r); o != nil {
+					t.Fatalf("the doctor offered the restart again: %+v", o)
+				}
+			}
+			if *restarts != 1 {
+				t.Fatalf("the unit was restarted %d times", *restarts)
+			}
+			// Another release is another mismatch, whose restart the doctor
+			// offers again.
+			f.fake.SetHealth(true, "0.1.3")
+			c = expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.3 but CLI 0.1.1")
+			fixIs(t, c, strings.Replace(unit, "0.0.40", "0.1.3", 1), restart, true)
+		})
+	}
+	t.Run("Homebrew's service runs another OpenShell", func(t *testing.T) {
 		f := newDoctorFixture(t)
+		f.onBrew()
 		f.fake.SetHealth(true, "0.0.40")
-		restartTo(f, restart, "0.1.2")
-		r := f.run()
-		outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDGatewayVersion, nil })
-		if err != nil || len(outcomes) != 1 || outcomes[0].Applied ||
-			outcomes[0].Error != `the restarted gateway runs OpenShell "0.1.2", still not the 0.1.1 of the CLI at /usr/bin/openshell: the gateway service runs another OpenShell install than that CLI` {
-			t.Fatalf("ApplyFixes = %+v, %v", outcomes, err)
+		restartTo(f, "brew services restart nvidia/openshell/openshell", "0.0.40")
+		if o := gatewayFix(t, f.run()); o == nil || !strings.HasPrefix(o.Error,
+			"Homebrew's nvidia/openshell/openshell service runs another OpenShell's gateway: restarted, it still answers with OpenShell 0.0.40") {
+			t.Fatalf("Gateway fix = %+v", o)
+		}
+		c := expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1")
+		if c.Fix == nil || c.Fix.Apply != nil || !strings.HasPrefix(c.Fix.Summary, "Homebrew's nvidia/openshell/openshell service runs another OpenShell's gateway") {
+			t.Fatalf("gateway fix = %+v", c.Fix)
 		}
 	})
 	t.Run("newer gateway, unit running", func(t *testing.T) {

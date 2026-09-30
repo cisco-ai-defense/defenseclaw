@@ -1000,27 +1000,25 @@ func (r *doctorRun) cliWithoutUnit() {
 // step finds, and installs nothing (Installer.Install), so the gateway
 // that answers is not the one that CLI's install runs: the gateway service
 // is restarted, so that it runs the gateway installed with the CLI, which
-// is automatic only where that service runs the gateway. Without the
-// service, the OpenShell installed another way comes first.
+// is automatic only where that service runs the gateway, and only once for
+// these releases: after a restart that left them (releaseRestarted), the
+// service runs another OpenShell's gateway (otherOpenShellFix). Without
+// the service, the OpenShell installed another way comes first.
 func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
 	if r.cli == (Version{}) || CheckSupported(r.cli) != nil {
 		return install
 	}
-	answers := "an unrecognized OpenShell release (" + strconv.Quote(r.gateway.RawVersion) + ")"
-	if r.gateway.Version != (Version{}) {
-		answers = "OpenShell " + r.gateway.Version.String()
-	}
-	answers = "the gateway that answers runs " + answers + ", not the OpenShell " + r.cli.String() +
+	release := gatewayRelease(r.gateway)
+	answers := "the gateway that answers runs " + describeRelease(release) + ", not the OpenShell " + r.cli.String() +
 		" installed here, so installing OpenShell would change nothing"
-	service := "the " + GatewayService + " user service"
-	if r.GOOS == "darwin" {
-		service = "Homebrew's " + GatewayFormula + " service"
-	}
+	service := r.serviceName()
 	switch {
 	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
 		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
 	case r.serviceMissing() && r.report.OpenShellOutsideUnit():
 		return r.outsideUnitFix()
+	case r.service != nil && r.service.Installed && r.service.Active && r.releaseRestarted(release):
+		return r.otherOpenShellFix(release)
 	case r.service != nil && r.service.Installed && r.service.Active:
 		return &Fix{Summary: answers + ": restart " + service + " so it runs the gateway installed with the CLI",
 			Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.restartOnCLIRelease}
@@ -1033,27 +1031,141 @@ func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
 	return &Fix{Summary: answers + ": stop that gateway, then start the OpenShell " + r.cli.String() + " gateway"}
 }
 
+// serviceName names the gateway service DefenseClaw starts and restarts
+// the gateway through.
+func (r *doctorRun) serviceName() string {
+	if r.GOOS == "darwin" {
+		return "Homebrew's " + GatewayFormula + " service"
+	}
+	return "the " + GatewayService + " user service"
+}
+
+// gatewayRelease is the release a gateway answers with: its version, else
+// the raw one it reported.
+func gatewayRelease(h *GatewayHealth) string {
+	if h.Version != (Version{}) {
+		return h.Version.String()
+	}
+	return h.RawVersion
+}
+
+// describeRelease names a gatewayRelease: "OpenShell 0.0.40", or an
+// unrecognized one quoted.
+func describeRelease(release string) string {
+	if v, err := ParseVersion(release); err == nil {
+		return "OpenShell " + v.String()
+	}
+	return "an unrecognized OpenShell release (" + strconv.Quote(release) + ")"
+}
+
+// otherOpenShellFix is the way on once a restart of the gateway service
+// left a gateway of release, another than the supported CLI's: the service
+// runs another OpenShell's gateway, which another restart would not
+// change, and the install does not replace while the CLI is found
+// (Installer.Install). That other OpenShell goes first; without it setup
+// says what comes next.
+func (r *doctorRun) otherOpenShellFix(release string) *Fix {
+	return &Fix{Summary: r.serviceName() + " runs another OpenShell's gateway: restarted, it still answers with " + describeRelease(release) +
+		", not the OpenShell " + r.cli.String() + " of the CLI at " + r.report.CLIPath +
+		". Remove that other OpenShell, then install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+}
+
 // restartOnCLIRelease restarts the gateway service (gatewayVersionFix) and
-// says so when the gateway it runs is still of another release than the
-// CLI: the service runs another OpenShell install than that CLI.
+// asks the restarted gateway its release. When it is still not the CLI's,
+// the service runs another OpenShell's gateway: the error is that way on
+// (otherOpenShellFix), and the restart is recorded so the doctor does not
+// offer it again for these releases (releaseRestarted). The restart's
+// wait (WaitForGateway) fails at once on an unsupported release, which is
+// that answer too; one that could not restart the gateway (the service
+// manager refused, or the sandboxes could not be flushed) tells nothing.
 func (r *doctorRun) restartOnCLIRelease(ctx context.Context) error {
-	if err := r.Gateway.Restart(ctx); err != nil {
+	err := r.Gateway.Restart(ctx)
+	if errors.Is(err, errRestartCommand) || errors.Is(err, ErrUnflushed) {
 		return err
 	}
+	var release string
+	var unsupported *ErrUnsupportedVersion
+	if errors.As(err, &unsupported) {
+		release = unsupported.Found.String()
+	} else {
+		h, herr := r.healthNow(ctx)
+		switch {
+		case herr != nil && err == nil:
+			return herr
+		case herr != nil || !h.Healthy:
+			return err
+		case h.Version.Compare(r.cli) == 0:
+			if err == nil {
+				r.forgetReleaseRestart()
+			}
+			return err
+		}
+		release = gatewayRelease(h)
+	}
+	r.recordReleaseRestart(release)
+	fix := r.otherOpenShellFix(release)
+	return fmt.Errorf("%s with `%s`", fix.Summary, fix.Command)
+}
+
+// healthNow asks the gateway of the registration the doctor checked.
+func (r *doctorRun) healthNow(ctx context.Context) (*GatewayHealth, error) {
 	client, err := r.Dial(r.reg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer client.Close()
-	h, err := client.Health(ctx)
+	return client.Health(ctx)
+}
+
+// releaseRestart is a restart of the gateway service that left a gateway
+// of Gateway's release, not the CLI's (restartOnCLIRelease), recorded in
+// the gateway's configuration directory (releaseRestartFile).
+type releaseRestart struct {
+	Gateway string `json:"gateway"`
+	CLI     string `json:"cli"`
+	CLIPath string `json:"cli_path"`
+}
+
+func (r *doctorRun) releaseRestartPath() (string, error) {
+	if err := r.Gateway.defaults(); err != nil {
+		return "", err
+	}
+	return filepath.Join(r.Gateway.Dir, releaseRestartFile), nil
+}
+
+// releaseRestarted reports a restart recorded for a gateway of release
+// and this CLI: restarting again would bring the same gateway back. A
+// release or CLI that changed since (an OpenShell removed or installed)
+// is another mismatch, whose restart is offered again.
+func (r *doctorRun) releaseRestarted(release string) bool {
+	path, err := r.releaseRestartPath()
 	if err != nil {
-		return err
+		return false
 	}
-	if h.Version.Compare(r.cli) != 0 {
-		return fmt.Errorf("the restarted gateway runs OpenShell %q, still not the %s of the CLI at %s: the gateway service runs another OpenShell install than that CLI",
-			h.RawVersion, r.cli, r.report.CLIPath)
+	data, err := safefile.ReadRegularFileBounded(path, 4<<10)
+	var got releaseRestart
+	if err != nil || json.Unmarshal(data, &got) != nil {
+		return false
 	}
-	return nil
+	return got == releaseRestart{Gateway: release, CLI: r.cli.String(), CLIPath: r.report.CLIPath}
+}
+
+func (r *doctorRun) recordReleaseRestart(release string) {
+	path, err := r.releaseRestartPath()
+	if err != nil {
+		return
+	}
+	data, err := json.Marshal(releaseRestart{Gateway: release, CLI: r.cli.String(), CLIPath: r.report.CLIPath})
+	if err != nil || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	_ = safefile.Write(path, append(data, '\n'))
+}
+
+func (r *doctorRun) forgetReleaseRestart() {
+	if path, err := r.releaseRestartPath(); err == nil {
+		_ = os.Remove(path)
+	}
 }
 
 // nothingToRestart reports no gateway service and no gateway answering:

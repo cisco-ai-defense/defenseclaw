@@ -1384,10 +1384,16 @@ than a supported CLI (``the gateway that answers runs OpenShell 0.0.40, not
 the OpenShell 0.1.1 installed here``): that gateway is not the one the
 CLI's install runs, so the **Gateway** check restarts the gateway service
 (the `openshell-gateway` unit, or Homebrew's `nvidia/openshell/openshell`
-service), which `--fix` does where that service runs the gateway, and
-says so when the restarted gateway is still of another release. With the
-service stopped, something else runs that gateway: stop it, then start
-the service.
+service), which `--fix` does where that service runs the gateway. When the
+restarted gateway still answers with another release, the service runs
+another OpenShell's gateway, and `--fix` says so
+(``the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell 0.0.40``).
+From then on the check's fix is to remove that other OpenShell, then run
+`defenseclaw sandbox setup --install-openshell`, and the doctor does not
+restart the gateway again for the same releases (it records the restart
+in `.defenseclaw-release-restart` in the gateway's configuration
+directory). With the service stopped, something else runs that gateway:
+stop it, then start the service.
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway
