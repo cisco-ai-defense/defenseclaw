@@ -443,6 +443,9 @@ func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
 // makes .NET pass the agent's own stdin and stdout to the launcher (a
 // GUI-subsystem child gets no standard handles otherwise); the script copies
 // the launcher's stderr, where the block reason is, to its own unchanged.
+// Constrained Language mode (WDAC or AppLocker script enforcement) refuses
+// the .NET calls, which would exit 1 on every call, so there the script keeps
+// Start-Process -Wait, which works in that mode.
 // The arguments are fixed tokens without spaces or quotes. Kiro is not part
 // of any enterprise profile on Windows, so only per-user setup writes this.
 func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
@@ -450,9 +453,15 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
 	if surface != "" {
 		arguments += " --hook-surface " + surface
 	}
+	quoted := strings.Fields(arguments)
+	for i, argument := range quoted {
+		quoted[i] = powershellQuoteLiteral(argument)
+	}
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " +
+			powershellQuoteLiteral(hookBinary) + " -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode }",
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," + powershellQuoteLiteral(arguments) + ")",
 		"$hookStart.UseShellExecute=$false",
 		"$hookStart.RedirectStandardError=$true",

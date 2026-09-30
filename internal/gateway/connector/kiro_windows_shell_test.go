@@ -184,6 +184,19 @@ func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 			t.Fatalf("%d of %d runs did not return Kiro's block; first: %s", len(lost), runs, lost[0])
 		}
 	})
+
+	// WDAC or AppLocker script enforcement runs the command in Constrained
+	// Language mode, which refuses the .NET calls. Setting that mode before
+	// Invoke-Expression evaluates the script the same way; the block must
+	// still come back as 2.
+	t.Run("constrained language", func(t *testing.T) {
+		script := decodeKiroWindowsBridge(t, conn.hookCommandForV3Surface(opts))
+		wrapper := "$ExecutionContext.SessionState.LanguageMode='ConstrainedLanguage'; Invoke-Expression " + powershellQuoteLiteral(script)
+		command := exec.Command(windowsSystemPowerShellExe(), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", powershellEncodedCommand(wrapper))
+		if code := run(t, KiroHookSurfaceV3, command); code != 2 {
+			t.Fatalf("Constrained Language mode: exit %d, want 2 (Kiro's block)", code)
+		}
+	})
 }
 
 // Earlier builds wrote the `& '<launcher>' hook --connector kiro` command
