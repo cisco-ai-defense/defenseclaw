@@ -86,7 +86,12 @@ administrator can deploy through their own policy source:
               requiredMinimumVersion drop-in, 00-defenseclaw-version-floor.json)
   cursor      json (enterprise hooks.json)
   copilot     json (policy.d drop-in)
-  opencode    json (managed config)`,
+  opencode    json (managed config)
+  wsl         reg (default), json, intune (Windows: the Claude Desktop
+              disableWslSessions gate and, with platform: disable, AllowWSL=0)
+
+On Windows, show and verify also report a wsl row: agent sessions inside WSL,
+which Windows machine policy does not reach.`,
 	Args: cobra.NoArgs,
 	RunE: runEnterprisePolicyExport,
 }
@@ -142,7 +147,16 @@ var standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) 
 func (c enterprisePolicyContext) selected() ([]string, error) {
 	name := strings.ToLower(strings.TrimSpace(enterprisePolicyConnector))
 	if name == "" {
+		if c.opts.GOOS == "windows" {
+			return append(append([]string{}, c.connectors...), enterprisepolicy.ConnectorWSL), nil
+		}
 		return c.connectors, nil
+	}
+	if name == enterprisepolicy.ConnectorWSL {
+		if c.opts.GOOS != "windows" {
+			return nil, errors.New("the wsl row (agent sessions inside WSL) applies only to Windows")
+		}
+		return []string{name}, nil
 	}
 	if enterprisepolicy.RouteFor(name, c.opts.GOOS) == enterprisepolicy.RouteUnsupported {
 		if _, ok := enterprisepolicy.TargetFor(name); !ok {
@@ -181,7 +195,26 @@ type enterprisePolicyReport struct {
 }
 
 func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []string, project string) (enterprisePolicyReport, error) {
-	result, err := enterprisepolicy.VerifyAll(ctx.opts, connectors)
+	includeWSL, requested := false, len(connectors)
+	kept := []string{}
+	for _, name := range connectors {
+		if name == enterprisepolicy.ConnectorWSL {
+			includeWSL = true
+		} else {
+			kept = append(kept, name)
+		}
+	}
+	connectors = kept
+	var result enterprisepolicy.Result
+	var err error
+	if len(connectors) > 0 || requested == 0 {
+		result, err = enterprisepolicy.VerifyAll(ctx.opts, connectors)
+	}
+	if includeWSL {
+		state, wslErr := enterprisePolicyWSLState(ctx)
+		result.States = append(result.States, state)
+		err = errors.Join(err, wslErr)
+	}
 	summary := enterprisepolicy.BuildPublicPolicy(ctx.opts, connectors)
 	report := enterprisePolicyReport{
 		Profile:    managed.ProfileStandalone,
@@ -358,7 +391,13 @@ func runEnterprisePolicyExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	data, err := enterprisepolicy.Export(ctx.opts, strings.ToLower(strings.TrimSpace(enterprisePolicyConnector)), strings.ToLower(strings.TrimSpace(enterprisePolicyFormat)))
+	connector, format := strings.ToLower(strings.TrimSpace(enterprisePolicyConnector)), strings.ToLower(strings.TrimSpace(enterprisePolicyFormat))
+	var data []byte
+	if connector == enterprisepolicy.ConnectorWSL {
+		data, err = enterprisepolicy.ExportWSL(ctx.opts, format)
+	} else {
+		data, err = enterprisepolicy.Export(ctx.opts, connector, format)
+	}
 	if err != nil {
 		return err
 	}

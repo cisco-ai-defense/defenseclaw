@@ -92,6 +92,9 @@ type Options struct {
 	// ClaudeVersionFloor is enterprise.machine_policy.connectors.claudecode.version_floor
 	// (enforce, report or off); "" means the default, enforce.
 	ClaudeVersionFloor string
+	// WSL is enterprise.machine_policy.windows_wsl (Windows only); empty
+	// knobs take their defaults.
+	WSL config.EnterpriseWindowsWSLPolicy
 	// Now is injectable for tests.
 	Now func() time.Time
 	// OpenCodePluginPath is the absolute path of the administrator-owned

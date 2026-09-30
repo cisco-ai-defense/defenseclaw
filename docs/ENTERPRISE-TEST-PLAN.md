@@ -186,7 +186,7 @@ Service accounts the lifecycle creates: `defenseclaw` (Linux), `_defenseclaw`
 
 | Item | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Service manager | systemd 239 or later as PID 1. Containers and WSL without systemd as PID 1 are refused (`service_manager_unavailable`); WSL with systemd is unsupported (L-29) but passes this check. Check `systemctl --version` and `ps -p 1 -o comm=` | launchd | Service Control Manager |
+| Service manager | systemd 239 or later as PID 1. Containers and WSL without systemd as PID 1 are refused (`service_manager_unavailable`); WSL with systemd passes this check, and the lifecycle then refuses a new install (`wsl_distribution`, L-29). Check `systemctl --version` and `ps -p 1 -o comm=` | launchd | Service Control Manager |
 | Privileges | Root for everything except `enterprise linux status` | Root for everything except `enterprise macos status` | An elevated administrator token or LocalSystem. Setup exits `1603` without elevation |
 | Platform | amd64 or arm64; SELinux enforcing is supported (the lifecycle relabels after each change) | macOS 13 or later, Apple silicon | Native x64 |
 | PowerShell | - | - | Stable PowerShell 7 x64 from Microsoft's MSI, registered under `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, installed under Program Files, with a valid Microsoft signature on `pwsh.exe` (PATH is ignored; preview builds are refused). Use 7.4 or later: the MDM wrapper and Intune packager require it. FullLanguage mode (under WDAC or AppLocker, allow the DefenseClaw signer). Check with `Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions\*' \| Select-Object SemanticVersion, InstallLocation` and `$ExecutionContext.SessionState.LanguageMode` |
@@ -2552,7 +2552,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R24 | Antigravity, OpenHands, OmniGent (and Hermes on Windows) have no lock and no foreign-hook guard; Hermes gaps on Linux/macOS: hooks re-read on plugin reload, Python plugins, a session that never loads DefenseClaw's hook | Those connectors |
 | R25, W-57, L-27, M-18 | Desktop-app or editor-extension-only users are not enrolled (#912) | Every OS |
 | R26, W-58, L-28, M-19 | Copilot in VS Code (Local harness) is not governed (#913) | Every OS |
-| R27, W-59, L-29 | Agent sessions in WSL are outside Windows machine policy (#914); a Linux install inside WSL is unsupported | Windows |
+| R27, W-59, L-29 | Agent sessions in WSL are partly covered (#914): CLIs inside the distribution, Remote - WSL windows and the Codex app's agent environment stay open; a Linux install inside WSL is refused | Windows |
 | R28, W-60, L-30, M-20 | Devin Desktop not enrolled; Cascade in builds 3.0.12 to before 3.9.19 not covered (#915) | Every OS |
 | R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Windows hook shell under `powershell -Command` reports exit 1 (#916) | Every OS |
 | R30, L-33, M-23 | A project `.openhands/hooks.json` replaces the user's, so none of DefenseClaw's OpenHands hooks run in that project (OpenHands shows "1 hook" instead of six) | OpenHands |

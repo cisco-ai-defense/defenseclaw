@@ -680,6 +680,59 @@ format and cannot be passed here. Later `repair`, `verify` and `uninstall`
 runs re-trust the installed files from the digests the deployment recorded,
 so they need no manifest.
 
+## Agent sessions in WSL
+
+An agent that runs inside a WSL 2 distribution is outside every policy
+DefenseClaw publishes on Windows. The distribution has its own
+`/etc/claude-code` and `~/.codex`, the user can open it as root
+(`wsl -u root`), and Windows endpoint sensors do not see the WSL VM. The
+standalone profile keeps these sessions off where a vendor documents a
+control, and `enterprise policy show` and `verify` report the rest in a `wsl`
+row. Set the behavior under `enterprise.machine_policy.windows_wsl` (see
+[Configuration](/docs/enterprise/configuration)).
+
+| Surface | What DefenseClaw does | Vendor source |
+| --- | --- | --- |
+| Claude Desktop WSL sessions | The guardian adds `disableWslSessions` (REG_SZ `true`) to `HKLM\SOFTWARE\Policies\Claude` when the key already holds machine policy. It never changes an administrator's value: an administrator `false` or `0` turns WSL sessions on and fails `verify` unless `agent_sessions: allow` is set. | [Claude Code admin setup](https://code.claude.com/docs/en/admin-setup), [Claude Desktop MDM](https://claude.com/docs/third-party/claude-desktop/mdm) |
+| `wslInheritsWindowsSettings` | Detected, never written, in `HKLM` or `HKCU` `SOFTWARE\Policies\ClaudeCode\Settings` and the Program Files managed settings. While WSL sessions are allowed it fails `verify`: a WSL session would load DefenseClaw's Windows hook command, which cannot start inside Linux. | [Claude Code admin setup](https://code.claude.com/docs/en/admin-setup) |
+| Codex IDE extension | Every guardian pass, as each enrolled user, the guardian resets `chatgpt.runCodexInWindowsSubsystemForLinux: true` to `false` in VS Code, VS Code Insiders and Cursor user settings, profiles included, keeping every other byte. After 3 repairs for one account within an hour it only reports. `chatgpt.cliExecutable` is reported, not changed. | [Codex IDE settings](https://learn.chatgpt.com/docs/ide/settings) |
+| Codex app | Reported only. The agent environment (Windows native or WSL) is an in-app setting with no documented managed control or storage. | [Codex app on Windows](https://learn.chatgpt.com/docs/windows/windows-app) |
+| WSL itself | With `platform: disable`, the guardian sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account. It never replaces an administrator value. | [WSL settings for enterprise](https://learn.microsoft.com/en-us/windows/wsl/intune) |
+
+Claude Desktop's hive rule decides where the gate may go. Any REG_SZ,
+REG_EXPAND_SZ or REG_DWORD value directly under `HKLM\SOFTWARE\Policies\Claude`
+makes Desktop ignore `HKCU\SOFTWARE\Policies\Claude` entirely, and a managed
+key other than Desktop's app-behavior keys makes Desktop ignore local
+third-party configuration in `%LOCALAPPDATA%\Claude-3p\configLibrary`. So by
+default DefenseClaw only joins machine policy that is already there. With an
+empty key it reports the gap and offers the value through
+`enterprise policy export --connector wsl` (`reg`, `json` or `intune`), so you
+can add it to the Claude Desktop policy you already deploy. With
+`claude_desktop_key: create` it writes the value to an empty key, but still
+not while a signed-in account has HKCU Claude Desktop policy or any account
+has local third-party configuration. It never writes the gate when the key
+grants write access to anyone other than Administrators, SYSTEM and
+TrustedInstaller. Uninstall removes only the values DefenseClaw wrote that
+are still unchanged.
+
+Limits:
+
+- Whether REG_SZ `true` forces Claude Desktop's WSL gate off is not
+  documented; the vendor documents only `false` and `0`, which turn WSL
+  sessions on. Desktop also turns WSL sessions off by default on devices it
+  treats as managed. Check Desktop's `main.log` for `[wslPolicyGate]` lines
+  after you deploy.
+- A Claude Desktop WSL session that is already running continues. Desktop
+  checks the value at each WSL session start.
+- A user can turn the Codex extension setting back on. The window lasts until
+  the next guardian pass. Workspace settings (`.vscode/settings.json`) and
+  VS Code Remote - WSL windows are not checked.
+- Agent CLIs that a user runs inside the distribution, and editor or SSH
+  sessions into it, are not covered. Only `platform: disable` (`AllowWSL=0`)
+  closes WSL as a whole.
+- A Linux standalone install inside the distribution is refused. See
+  [Linux requirements](/docs/enterprise/linux#requirements).
+
 ## Connectors on Windows
 
 | Connector | Route on Windows | Notes |
