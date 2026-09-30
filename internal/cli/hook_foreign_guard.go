@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // hookForeignGuardPayloadLimit bounds how much of the hook payload the
@@ -59,6 +60,10 @@ var hookForeignGuardRecordEnv = enterprisepolicy.RecordEnvRedirect
 // hookForeignGuardAgentProcess names the agent process that runs the hook,
 // which keeps the hooks it loaded for its lifetime (replaceable in tests).
 var hookForeignGuardAgentProcess = agentprocess.Identity
+
+// hookAgentHost names the process that started the agent (replaceable in
+// tests).
+var hookAgentHost = agentprocess.Host
 
 // hookForeignGuardExchange is replaceable in tests. Production reaches the
 // standalone gateway over its authenticated hook transport.
@@ -101,6 +106,13 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 		return
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.Connector))
+	// A standalone host: the managed hook tags the audit with the agent's
+	// host process, so Devin Local under Devin Desktop is told apart from
+	// the Devin CLI.
+	host := hookAgentHost()
+	if opts.ManagedEnterprise {
+		opts.AgentHost = host
+	}
 	policy, ok := summary.Connectors[name]
 	if !ok || !policy.Guard {
 		return
@@ -118,6 +130,7 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	}
 	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, deadline)
 	if decision.Deny {
+		decision.Reason = withDesktopRestartNote(name, host, decision.Reason)
 		opts.ManagedEnterprise = true
 		opts.ManagedRuntimeFailure = decision.Reason
 		// The block never reaches the gateway, and the managed hook's own
@@ -496,4 +509,22 @@ func appendDistinctAbs(list []string, value string) []string {
 		}
 	}
 	return append(list, value)
+}
+
+// devinDesktopRestartNote explains restarting the agent to a Devin Desktop
+// user: one Devin Local process (devin acp) serves every Desktop tab, so a
+// session block keyed to that process holds in every tab until Desktop
+// restarts.
+const devinDesktopRestartNote = "Devin Desktop runs every tab in one Devin Local process, so closing a tab does not restart the agent: quit and reopen Devin Desktop."
+
+// withDesktopRestartNote adds devinDesktopRestartNote to a Devin block that
+// asks for a restart when the agent runs under Devin Desktop (or the
+// Desktop's legacy process name).
+func withDesktopRestartNote(name, host, reason string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	desktop := strings.HasPrefix(host, "devin") || strings.HasPrefix(host, legacyconnector.ProcessName)
+	if name != "devin" || !desktop || !strings.Contains(reason, "restart") {
+		return reason
+	}
+	return reason + " " + devinDesktopRestartNote
 }

@@ -350,6 +350,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
+		ctx = withAgentHost(ctx, r.Header)
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {

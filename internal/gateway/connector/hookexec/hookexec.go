@@ -80,6 +80,39 @@ const (
 // which the gateway still reads.
 const HookDialectHeader = "X-DefenseClaw-Hook-Dialect"
 
+// AgentHostHeader carries the name of the process that started the agent
+// (agentprocess.Host), sent only by a managed enterprise hook. The gateway
+// records it in the hook audit so a desktop app's embedded agent (Devin
+// Local under Devin Desktop) is told apart from the same agent run in a
+// terminal. The user can influence it: it is attribution, never policy.
+const AgentHostHeader = "X-DefenseClaw-Agent-Host"
+
+// maxAgentHostLength bounds AgentHostHeaderValue.
+const maxAgentHostLength = 64
+
+// AgentHostHeaderValue reduces a process name to a bounded header token:
+// lowercase [a-z0-9._-], any other character becoming "-". It returns ""
+// when nothing but separators is left.
+func AgentHostHeaderValue(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range name {
+		if b.Len() >= maxAgentHostLength {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	if strings.Trim(b.String(), "-._") == "" {
+		return ""
+	}
+	return b.String()
+}
+
 // hookDialects lists, per connector, the values --hook-surface may carry:
 // the hook dialects that connector's installed configuration speaks. Kiro
 // marks the .kiro/hooks configuration that Kiro IDE and `kiro-cli --v3` read
@@ -172,6 +205,9 @@ type Options struct {
 	// deletion of Home or creation of Home\.disabled is tampering, not an
 	// operator-requested no-op, and must therefore fail closed.
 	ManagedEnterprise bool
+	// AgentHost is the name of the process that started the agent; it is
+	// sent (AgentHostHeader) only with ManagedEnterprise.
+	AgentHost string
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
@@ -617,6 +653,11 @@ func sendHookRequest(
 		// CLI 2.x agent configuration honor different vetoes, and the
 		// release cannot tell them apart. The marker on the command can.
 		req.Header.Set(HookDialectHeader, dialect)
+	}
+	if opts.ManagedEnterprise {
+		if host := AgentHostHeaderValue(opts.AgentHost); host != "" {
+			req.Header.Set(AgentHostHeader, host)
+		}
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

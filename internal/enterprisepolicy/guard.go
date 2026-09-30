@@ -435,6 +435,9 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 		project(formatGrouped, ".devin", "config.json")
 		project(formatGrouped, ".devin", "config.local.json")
 		claudeFormat(true)
+		for _, store := range devinPluginStores(req, home) {
+			user(formatDevinPlugins, store)
+		}
 	case ConnectorClaudeCode:
 		claudeDir := req.getenv("CLAUDE_CONFIG_DIR")
 		if claudeDir == "" {
@@ -1138,6 +1141,8 @@ func (s *guardScan) scan(stopAtBlocking bool) []Finding {
 			found = s.scanPluginDir(source)
 		case source.format == formatClaudePlugins:
 			found = s.scanClaudePlugins(source)
+		case source.format == formatDevinPlugins:
+			found = s.scanDevinPlugins(source)
 		default:
 			found = s.scanFile(source)
 		}
