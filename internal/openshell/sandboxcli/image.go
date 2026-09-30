@@ -427,7 +427,10 @@ func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
 func (a *App) gatewayDriverKnown(ctx context.Context) (openshell.Driver, bool) {
 	if api, err := a.api(); err == nil {
 		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
-			return gatewayDriver(st), true
+			// A driver DefenseClaw does not drive (podman, say) is not
+			// known: nothing says which images it boots.
+			d, ok := openshell.LookupDriver(st.Gateway.Driver)
+			return d, ok
 		}
 	}
 	if st, err := a.Gateway.State(); err == nil && st != nil {

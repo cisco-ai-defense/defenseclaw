@@ -405,6 +405,9 @@ func TestImageListSaysWhichImagesTheGatewayBoots(t *testing.T) {
 		{name: "docker gateway", daemon: "docker", want: "this gateway runs sandboxes on the docker driver and boots only the docker images: " +
 			"it does not use the 1 image for MicroVMs"},
 		{name: "driver not known", noGateway: true},
+		// A driver DefenseClaw does not drive says nothing of which images
+		// its gateway boots (it used to be taken for docker).
+		{name: "driver DefenseClaw does not drive", daemon: "podman"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
