@@ -263,8 +263,8 @@ func TestKiroV3CommandIsMarkedAndV2CommandIsBare(t *testing.T) {
 	bare := c.hookCommand(opts)
 	marked := c.hookCommandForV3Surface(opts)
 	if runtime.GOOS == "windows" {
-		// Both are the encoded PowerShell bridge; the marker is inside it.
-		if !strings.Contains(decodeKiroWindowsBridge(t, marked), "'--hook-surface','v3'") || strings.Contains(decodeKiroWindowsBridge(t, bare), "--hook-surface") {
+		// Both are the encoded PowerShell script; the marker is inside it.
+		if !strings.Contains(decodeKiroWindowsBridge(t, marked), "'hook --connector kiro --hook-surface v3'") || strings.Contains(decodeKiroWindowsBridge(t, bare), "--hook-surface") {
 			t.Fatalf("windows commands: marked %q bare %q", marked, bare)
 		}
 	} else {
@@ -509,14 +509,14 @@ func decodeKiroWindowsBridge(t *testing.T, command string) string {
 // `& '<launcher>' hook --connector kiro ...`: cmd.exe rejects the call
 // operator (exit 1) and PowerShell does not wait for the GUI-subsystem
 // release launcher (exit 0), so Kiro went ahead after a block. Both Kiro
-// commands are now the encoded system PowerShell bridge, which starts the
-// launcher without a window, waits for it and exits with its status.
+// commands are now an encoded system PowerShell script, which starts the
+// launcher, waits for it and exits with its status.
 func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 	launcher := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	t.Cleanup(PinNativeHookExecutableForTest(launcher))
 	for surface, want := range map[string]string{
-		"":                "-ArgumentList @('hook','--connector','kiro') -NoNewWindow -Wait -PassThru",
-		KiroHookSurfaceV3: "-ArgumentList @('hook','--connector','kiro','--hook-surface','v3') -NoNewWindow -Wait -PassThru",
+		"":                "[System.Diagnostics.ProcessStartInfo]::new('" + launcher + "','hook --connector kiro')",
+		KiroHookSurfaceV3: "[System.Diagnostics.ProcessStartInfo]::new('" + launcher + "','hook --connector kiro --hook-surface v3')",
 	} {
 		command := hookInvocationCommandFor("windows", "kiro", "")
 		if surface != "" {
@@ -526,7 +526,7 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 			t.Fatalf("surface %q: the call-operator form loses exit 2: %q", surface, command)
 		}
 		script := decodeKiroWindowsBridge(t, command)
-		if !strings.Contains(script, "Start-Process -FilePath '"+launcher+"' "+want) || !strings.HasSuffix(script, "exit $hookProcess.ExitCode") {
+		if !strings.Contains(script, want) || !strings.HasSuffix(script, "exit $hookProcess.ExitCode") {
 			t.Fatalf("surface %q: script %q", surface, script)
 		}
 		if runtime.GOOS == "windows" && !kiroCommandOwned(command, hookInvocationCommandFor("windows", "kiro", "")) {

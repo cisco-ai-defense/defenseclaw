@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -33,8 +34,8 @@ const (
 
 // init makes this test binary stand in for the release hook launcher when
 // the Kiro shell test runs it through a rendered command. It exits 2, Kiro's
-// block, only when the payload arrived on stdin and the arguments are the
-// ones Setup renders; 3 and 4 name what went missing.
+// block, with a reason on stderr, only when the payload arrived on stdin and
+// the arguments are the ones Setup renders; 3 and 4 name what went missing.
 func init() {
 	surface := os.Getenv(kiroShellChildEnv)
 	if surface == "" {
@@ -51,6 +52,7 @@ func init() {
 	case strings.Join(os.Args[1:], " ") != want:
 		os.Exit(3)
 	default:
+		os.Stderr.WriteString("blocked: " + kiroShellMarker + "\n")
 		os.Exit(2)
 	}
 }
@@ -138,6 +140,50 @@ func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 			}
 		})
 	}
+
+	// The launcher above exits as soon as it has read its input. Start-Process
+	// -Wait opened its handle to the launcher only after starting it, so a
+	// launcher that had already exited came back as 1 ("the process has
+	// exited") and Kiro went ahead. Run it many times, several at once, so a
+	// busy host gives the fast exit its chance to win; every run must return
+	// the block and its reason on stderr.
+	t.Run("fast exit", func(t *testing.T) {
+		rendered := conn.hookCommandForV3Surface(opts)
+		const runs, parallel = 48, 8
+		results := make(chan string, runs)
+		slots := make(chan struct{}, parallel)
+		for i := 0; i < runs; i++ {
+			slots <- struct{}{}
+			go func() {
+				defer func() { <-slots }()
+				command := exec.Command(cmdExe, "/C", rendered)
+				command.Stdin = strings.NewReader(payload)
+				command.Env = append(os.Environ(), kiroShellChildEnv+"="+KiroHookSurfaceV3)
+				var stderr strings.Builder
+				command.Stderr = &stderr
+				_ = command.Run()
+				switch {
+				case command.ProcessState == nil:
+					results <- "not started"
+				case command.ProcessState.ExitCode() != 2:
+					results <- "exit " + strconv.Itoa(command.ProcessState.ExitCode()) + ": " + strings.TrimSpace(stderr.String())
+				case !strings.Contains(stderr.String(), kiroShellMarker):
+					results <- "exit 2 without the reason on stderr: " + strings.TrimSpace(stderr.String())
+				default:
+					results <- ""
+				}
+			}()
+		}
+		var lost []string
+		for i := 0; i < runs; i++ {
+			if result := <-results; result != "" {
+				lost = append(lost, result)
+			}
+		}
+		if len(lost) > 0 {
+			t.Fatalf("%d of %d runs did not return Kiro's block; first: %s", len(lost), runs, lost[0])
+		}
+	})
 }
 
 // Earlier builds wrote the `& '<launcher>' hook --connector kiro` command
