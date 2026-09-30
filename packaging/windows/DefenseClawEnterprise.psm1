@@ -166,6 +166,10 @@ $script:DefenseClawQuarantinedRoots = @()
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
 $script:DefenseClawRecoveryGatewayRefusal = $null
+# Standalone: what the rollback of a failed first install could not remove
+# (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
+# run.
+$script:DefenseClawRollbackLeftovers = @()
 # Standalone pending-transaction recovery that may leave the restored release
 # stopped when it cannot be reactivated (Test-DefenseClawRecoveryActivationDeferral),
 # and whether this run did. Set per recovery; reset per lifecycle run.
@@ -14665,6 +14669,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayCandidate = $null
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
+    $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
     if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -15079,10 +15084,12 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     }
     $stagedFailure = $null
     try {
-        return (Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+        $report = Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -Action $Action)
+            -Action $Action
+        Add-DefenseClawRollbackLeftovers -Report $report
+        return $report
     }
     catch {
         $stagedFailure = $_
@@ -15166,7 +15173,38 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
         )
     }
     $run.outcome = 'succeeded'
+    Add-DefenseClawRollbackLeftovers -Report $report
     return $report
+}
+
+function Add-DefenseClawRollbackLeftovers {
+    <#
+        Standalone only. Keeps each leftover a managed-hook lifecycle retire
+        names (what the rollback of a failed first install could not remove)
+        for the result document. Never throws: a malformed report only loses
+        the leftovers.
+    #>
+    param([AllowNull()][psobject]$Report)
+    try {
+        $property = $Report.PSObject.Properties['leftovers']
+        if ($null -eq $property) {
+            return
+        }
+        $kept = [Collections.Generic.List[string]]::new()
+        foreach ($item in @($script:DefenseClawRollbackLeftovers)) {
+            $kept.Add([string]$item)
+        }
+        foreach ($item in @($property.Value)) {
+            $text = ([string]$item).Trim()
+            if ($text.Length -gt 0 -and $kept.Count -lt 256) {
+                $kept.Add($text)
+            }
+        }
+        $script:DefenseClawRollbackLeftovers = @($kept)
+    }
+    catch {
+        return
+    }
 }
 
 function Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep {
@@ -15282,8 +15320,9 @@ function Add-DefenseClawRecoveryEvidenceToError {
     <#
         Standalone only. Attaches what a failed lifecycle knows about recovery
         to its exception, for the installer's failure document: whether the
-        transaction is still pending, each fallback to the Setup gateway, and
-        why a fallback was declined. Best effort: it never replaces the
+        transaction is still pending, each fallback to the Setup gateway, why
+        a fallback was declined, and what the rollback of a failed first
+        install could not remove. Best effort: it never replaces the
         lifecycle error.
     #>
     param(
@@ -15307,6 +15346,11 @@ function Add-DefenseClawRecoveryEvidenceToError {
         if ($null -ne $script:DefenseClawRecoveryGatewayRefusal) {
             $data['DefenseClaw.RecoveryGatewayRefusal'] = [pscustomobject](
                 $script:DefenseClawRecoveryGatewayRefusal
+            )
+        }
+        if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
+            $data['DefenseClaw.RollbackLeftovers'] = [string[]]@(
+                $script:DefenseClawRollbackLeftovers
             )
         }
     }
@@ -18019,6 +18063,12 @@ function Get-DefenseClawLifecycleStatus {
         if ($null -ne $script:DefenseClawRecoveryGatewayRefusal) {
             $status['recovery_gateway_refusal'] = [pscustomobject](
                 $script:DefenseClawRecoveryGatewayRefusal
+            )
+        }
+        # What a recovered failed first install's rollback left.
+        if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
+            $status['rollback_leftovers'] = [string[]]@(
+                $script:DefenseClawRollbackLeftovers
             )
         }
         $status['claude_effective_policy_stale_reason'] = $(

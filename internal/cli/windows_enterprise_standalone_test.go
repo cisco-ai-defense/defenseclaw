@@ -1344,6 +1344,10 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 			"sha256": strings.Repeat("c", 64), "trust": "hash_pinned", "identity": `NT AUTHORITY\SYSTEM`,
 			"staged_error": failure, "outcome": "succeeded",
 		}},
+		"rollback_leftovers": []string{
+			"bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in",
+			`bob (S-1-5-21-1-2-3-1019) [codex, cursor]: C:\Users\bob\.codex\hooks.json, which changed after DefenseClaw wrote it`,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1367,6 +1371,17 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	}
 	if fallbacks != 1 || len(result.Errors) != 0 {
 		t.Fatalf("result = %+v", result)
+	}
+	var leftovers []string
+	for _, warning := range result.Warnings {
+		if warning.Code == "rollback_leftover" {
+			leftovers = append(leftovers, warning.Message)
+		}
+	}
+	if len(leftovers) != 2 ||
+		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run DefenseClaw Setup /ensure and then /uninstall") ||
+		!strings.HasSuffix(leftovers[1], `hooks.json, which changed after DefenseClaw wrote it; remove DefenseClaw's entries from that file by hand`) {
+		t.Fatalf("rollback leftovers = %q", leftovers)
 	}
 
 	// Status and verify keep their full detail and get no recovery step.

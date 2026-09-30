@@ -94,6 +94,10 @@ type windowsEnterpriseInstallerReport struct {
 	// one. Decoded leniently, like the registration lists.
 	RecoveryGatewayRuns    json.RawMessage `json:"recovery_gateway_runs"`
 	RecoveryGatewayRefusal json.RawMessage `json:"recovery_gateway_refusal"`
+	// RollbackLeftovers names what the rollback of a failed first install
+	// could not remove ("user (SID) [connectors]: item", or a machine item).
+	// Decoded leniently, like the registration lists.
+	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -524,17 +528,20 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 }
 
 // addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a
-// pending-transaction recovery ran and why. Ensure can apply the same
-// installer report twice (once when a repair recovers, again as the final
-// result), so an identical warning is recorded once.
+// pending-transaction recovery ran and why, and what the rollback of a failed
+// first install left. Ensure can apply the same installer report twice (once
+// when a repair recovers, again as the final result), so an identical warning
+// is recorded once.
 func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	if result == nil || report == nil {
 		return
 	}
-	for _, warning := range windowsEnterpriseRecoveryGatewayWarnings(
+	warnings := windowsEnterpriseRecoveryGatewayWarnings(
 		decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
-	) {
+	)
+	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	for _, warning := range warnings {
 		duplicate := false
 		for _, existing := range result.Warnings {
 			if existing == warning {
@@ -546,6 +553,27 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			result.AddWarning(warning.Code, warning.Message)
 		}
 	}
+}
+
+// windowsEnterpriseRollbackLeftoverWarnings names each item the rollback of
+// a failed first install could not remove, with what removes it. A file the
+// account changed after DefenseClaw wrote it is kept whole, so only a manual
+// edit removes DefenseClaw's entries from it. Everything else is removed by a
+// successful install followed by an uninstall, both as LocalSystem while the
+// accounts are signed in (an uninstall acts only for signed-in accounts).
+func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
+	var warnings []enterprisestatus.Message
+	for _, leftover := range windowsEnterpriseReportStrings(raw) {
+		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem while the accounts are signed in"
+		if strings.HasSuffix(leftover, ", which changed after DefenseClaw wrote it") {
+			remedy = "remove DefenseClaw's entries from that file by hand"
+		}
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    "rollback_leftover",
+			Message: fmt.Sprintf("the rollback of the failed first install could not remove %s; %s", leftover, remedy),
+		})
+	}
+	return warnings
 }
 
 func windowsEnterpriseBoundedDiagnostic(message string) string {
