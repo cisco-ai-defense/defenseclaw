@@ -139,6 +139,11 @@ func windowsEnterpriseMutationAction(action string) bool {
 // uninstall. Failed runs leave the previous registration unchanged.
 func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
 	if !result.OK {
+		if windowsEnterpriseRolledBackFirstInstall(result) {
+			// The failed install created C:\Program Files\Cisco; its
+			// rollback emptied it.
+			removeEmptyWindowsEnterpriseInstallParent()
+		}
 		return nil
 	}
 	switch {
@@ -562,7 +567,8 @@ func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) *windowsEnterp
 	}
 	message := windowsEnterpriseEventMessage(result) + "\r\nrecord " + record
 	logs := []string{windowsEnterpriseEventLog, windowsEnterpriseApplicationLog}
-	if windowsEnterpriseUninstalled(result) {
+	if windowsEnterpriseUninstalled(result) || windowsEnterpriseRolledBackFirstInstall(result) {
+		// Nothing is installed: do not register the DefenseClaw log for it.
 		logs = logs[1:]
 	}
 	event := &windowsEnterpriseEventRecord{ID: id, Record: record, SHA256: windowsEnterpriseEventDigest(message)}
@@ -579,6 +585,23 @@ func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) *windowsEnterp
 
 func windowsEnterpriseUninstalled(result *enterprisestatus.Result) bool {
 	return result.OK && result.Action == "uninstall" && !result.Installed
+}
+
+// windowsEnterpriseRolledBackFirstInstall reports a failed install, upgrade,
+// repair or ensure that left no deployment: the standalone install root is
+// gone, as after the rollback of a failed first install. Its failure event
+// registered the DefenseClaw event log, and C:\Program Files\Cisco stayed
+// empty, on a computer with nothing installed.
+func windowsEnterpriseRolledBackFirstInstall(result *enterprisestatus.Result) bool {
+	if result == nil || result.OK || result.Installed || !windowsEnterpriseMutationAction(result.Action) {
+		return false
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
+		return false
+	}
+	_, err = os.Lstat(filepath.Clean(roots.InstallRoot))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // writeWindowsEnterpriseLogEvent writes one event to the DefenseClaw log,

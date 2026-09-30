@@ -79,6 +79,10 @@ rest also reach per-user installs.
   and verify now re-read those records for up to two seconds until they
   describe one pass, and verify waits up to 30 seconds for the guardian to
   activate a `targets.yaml` the enumerator has just republished.
+- **A rolled-back first Windows install leaves no event log or empty
+  folder.** Its failure event registered the DefenseClaw event log and
+  `C:\Program Files\Cisco` stayed empty; the event now goes to the
+  Application log, as after an uninstall, and the empty folder is removed.
 - **A failing Windows `verify --json` no longer reads as uninstalled.** It
   reported `installed: false`, no services and 0 targets for a running
   deployment, as a refused repair did before; it now carries the state a

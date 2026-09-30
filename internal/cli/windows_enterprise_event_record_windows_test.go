@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A DefenseClaw Application-log event carries a record id that the
@@ -59,6 +61,17 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	if strings.Join(logs, ",") != "DefenseClaw,Application" || strings.Join(event.Logs, ",") != "DefenseClaw,Application" {
 		t.Fatalf("event written to %v, record logs %v", logs, event.Logs)
 	}
+	// A failed install whose rollback left nothing installed does not
+	// register the DefenseClaw log for its event.
+	if !windowsEnterpriseFootprintPresent(t) {
+		failed := enterprisestatus.New("install", "standalone", "windows", "1.0.51")
+		failed.AddError("lifecycle_failed", "enterprise readiness timed out")
+		failed.Finish("windows", 1603)
+		written, logs = "", nil
+		if rolledBack := writeWindowsEnterpriseEvent(failed); rolledBack == nil || strings.Join(logs, ",") != "Application" {
+			t.Fatalf("rolled-back install event written to %v", logs)
+		}
+	}
 
 	directory := t.TempDir()
 	if _, err := writeWindowsEnterpriseLifecycleLog(directory, result, event); err != nil {
@@ -77,6 +90,18 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	if line.Event == nil || !reflect.DeepEqual(*line.Event, *event) {
 		t.Fatalf("lifecycle log event = %+v, want %+v", line.Event, event)
 	}
+}
+
+// windowsEnterpriseFootprintPresent reports a standalone install root on this
+// computer, which changes where a failed install's event goes.
+func windowsEnterpriseFootprintPresent(t *testing.T) bool {
+	t.Helper()
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = os.Lstat(roots.InstallRoot)
+	return err == nil
 }
 
 // The event check starts from the administrator-only
