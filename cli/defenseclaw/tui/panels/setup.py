@@ -4713,6 +4713,12 @@ def _sandbox_credential_summary(
             parts.append(
                 f"{label}: none found (openshell.llm {choice}: runs are refused until you set {chosen[0][1]})"
             )
+        elif choice != "auto":
+            # A provider the harness has no credential for gives way to auto.
+            parts.append(
+                f"{label}: none found (openshell.llm {choice} does not apply to {label}, so auto; "
+                "log in inside the sandbox)"
+            )
         else:
             parts.append(f"{label}: none found (log in inside the sandbox)")
     return " · ".join(parts)

@@ -943,3 +943,15 @@ async def test_long_hints_wrap_instead_of_running_off_the_screen(monkeypatch) ->
         assert all(len(line) < width for line in mount.split("\n"))
         table = app.query_one("#panel-table", DataTable)
         assert any(row.height > 1 for row in table.rows.values())
+
+
+def test_credential_summary_says_a_provider_that_does_not_apply_gives_way_to_auto(tmp_path: Path) -> None:
+    # openshell.llm gemini names no credential Claude Code or Codex has, so
+    # both run as auto, which here finds nothing: the summary says why.
+    summary = _sandbox_credential_summary({}, str(tmp_path / "nothing"), llm="gemini")
+    assert summary == (
+        "Claude Code: none found (openshell.llm gemini does not apply to Claude Code, so auto; log in inside the sandbox)"
+        " · Codex: none found (openshell.llm gemini does not apply to Codex, so auto; log in inside the sandbox)"
+    )
+    # auto itself keeps the plain wording.
+    assert _sandbox_credential_summary({}, str(tmp_path / "nothing")).count("(log in inside the sandbox)") == 2
