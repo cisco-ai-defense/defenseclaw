@@ -93,23 +93,37 @@ func TestOutputTailShortensLongLines(t *testing.T) {
 				t.Fatalf("tail (%d bytes):\n%s", len(got), got)
 			}
 			for _, line := range strings.Split(got, "\n") {
-				if n := utf8.RuneCountInString(line); n > buildLineRunes+1 {
+				if n := utf8.RuneCountInString(line); n > buildLineRunes+3 {
 					t.Fatalf("a line of %d characters: %q", n, line)
 				}
 			}
+			// The long ERROR lines are shortened to their start and their
+			// end, which keeps the exit code docker ends them with.
 			if !strings.Contains(got, "\nERROR: failed to build: failed to solve: process \"/bin/sh -c set -eu; printf '%s' 'IyEv") ||
-				!strings.Contains(got, "…\nView build details") {
-				t.Fatalf("the last ERROR line is not shortened:\n%s", got)
+				!strings.Contains(got, " … ") ||
+				!strings.Contains(got, "did not complete successfully: exit code: 1\nView build details") ||
+				!strings.Contains(got, "did not complete successfully: exit code: 1\n------") {
+				t.Fatalf("the ERROR lines lost their start or their exit code:\n%s", got)
 			}
 		})
 	}
 
-	// Past what the tail keeps of a line, which escapes can fill, the
-	// word cut short is left out.
+	// A line a little past the start the tail keeps, which escapes can
+	// fill, is kept whole in its end, so a credential in it is redacted
+	// whole.
 	cut := &outputTail{}
 	_, _ = cut.Write([]byte(strings.Repeat("\x1b[0m", (buildLineBytes-12)/4) + "ok, key sk-ant-api03-" + strings.Repeat("Ab9_", 10) + " end\nnext\n"))
-	if got := cut.String(); got != "ok, key …\nnext" {
-		t.Fatalf("a line past the kept bytes = %q", got)
+	if got := cut.String(); got != "ok, key [redacted] end\nnext" {
+		t.Fatalf("a line past the kept start = %q", got)
+	}
+	// Past the start and the end both, the middle is dropped: each side
+	// leaves out the word the gap cuts, and the end keeps the exit code
+	// of a step that printed nothing else (an out-of-memory kill).
+	gap := &outputTail{}
+	_, _ = gap.Write([]byte(strings.Repeat("\x1b[0m", (buildLineBytes-12)/4) + "ok, key sk-ant-api03-" + strings.Repeat("Ab9_", buildLineEndBytes) +
+		" did not complete successfully: exit code: 137\nnext\n"))
+	if got := gap.String(); got != "ok, key …\n… did not complete successfully: exit code: 137\nnext" {
+		t.Fatalf("a line past the kept start and end = %q", got)
 	}
 }
 

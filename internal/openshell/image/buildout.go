@@ -39,9 +39,14 @@ const (
 	// base64 shims, which would leave no room for the lines that say why
 	// the command failed.
 	buildLineRunes = 300
-	// buildLineBytes is the most of one line the tail keeps as docker
-	// wrote it: room for buildLineRunes once escapes are removed.
+	// buildLineBytes is the most of the start of one line the tail keeps
+	// as docker wrote it: room for buildLineRunes once escapes are removed.
 	buildLineBytes = 4 << 10
+	// buildLineEndBytes is how much of the end of a longer line the tail
+	// keeps as well: docker ends its error lines with the exit code
+	// ("… did not complete successfully: exit code: 137"), the only cause
+	// a step that prints nothing (an out-of-memory kill) leaves.
+	buildLineEndBytes = 512
 	// buildTailKeep is how many lines the tail keeps as written; the
 	// blank ones are left out when it is shown.
 	buildTailKeep = 4 * buildTailLines
@@ -52,7 +57,8 @@ type BuildError struct {
 	// Err is docker's failure (a *CommandError when it exited non-zero).
 	Err error
 	// Output is the last lines docker printed (at most 40 lines and 8
-	// KiB, each shortened to 300 characters), without control characters
+	// KiB, a longer line shown as its start and its end, about 300
+	// characters), without control characters
 	// and with anything shaped like a credential redacted. The build has
 	// no secrets; the redaction is a guard all the same.
 	Output string
@@ -68,9 +74,11 @@ func (e *BuildError) Error() string {
 func (e *BuildError) Unwrap() error { return e.Err }
 
 // tailLine is one line written to an outputTail, without its newline:
-// its first buildLineBytes, and whether more were dropped.
+// its first buildLineBytes (text), the last buildLineEndBytes written
+// after those (end), and whether bytes between the two were dropped.
 type tailLine struct {
 	text []byte
+	end  []byte
 	cut  bool
 }
 
@@ -94,10 +102,16 @@ func (t *outputTail) Write(p []byte) (int, error) {
 		if i >= 0 {
 			chunk = p[:i]
 		}
-		if room := buildLineBytes - len(t.cur.text); len(chunk) > room {
-			chunk, t.cur.cut = chunk[:max(room, 0)], true
+		if room := buildLineBytes - len(t.cur.text); room > 0 {
+			take := min(room, len(chunk))
+			t.cur.text, chunk = append(t.cur.text, chunk[:take]...), chunk[take:]
 		}
-		t.cur.text = append(t.cur.text, chunk...)
+		if len(chunk) > 0 {
+			t.cur.end = append(t.cur.end, chunk...)
+			if over := len(t.cur.end) - buildLineEndBytes; over > 0 {
+				t.cur.end, t.cur.cut = append(t.cur.end[:0], t.cur.end[over:]...), true
+			}
+		}
 		if i < 0 {
 			break
 		}
@@ -121,7 +135,14 @@ func (t *outputTail) String() string {
 	t.mu.Unlock()
 	var out []string
 	for _, l := range lines {
-		out = append(out, safeLines(string(l.text), l.cut)...)
+		if !l.cut {
+			out = append(out, safeLines(string(l.text)+string(l.end), false)...)
+			continue
+		}
+		// Bytes between the start and the end were dropped: both show,
+		// each without the word the gap cuts.
+		out = append(out, safeLines(string(l.text), true)...)
+		out = append(out, safeEndLines(string(l.end))...)
 	}
 	return tailOf(out, buildTailLines)
 }
@@ -155,7 +176,7 @@ func safeLines(raw string, cut bool) []string {
 		line = redactCredentials(line)
 		switch {
 		case utf8.RuneCountInString(line) > buildLineRunes:
-			line = string([]rune(line)[:buildLineRunes]) + "…"
+			line = headAndEnd(line)
 		case cut && i == len(parts)-1:
 			if j := strings.LastIndexFunc(line, unicode.IsSpace); j >= 0 {
 				line = strings.TrimRightFunc(line[:j], unicode.IsSpace) + " …"
@@ -166,6 +187,39 @@ func safeLines(raw string, cut bool) []string {
 		out = append(out, line)
 	}
 	return out
+}
+
+// safeEndLines are safeLines of the end of a line whose middle was
+// dropped: the first word, which the gap cut, is left out, and "…" starts
+// the first line.
+func safeEndLines(raw string) []string {
+	raw = strings.ToValidUTF8(raw, "?")
+	j := strings.IndexFunc(raw, unicode.IsSpace)
+	if j < 0 {
+		return []string{"…"}
+	}
+	lines := safeLines(raw[j:], false)
+	if len(lines) == 0 {
+		return []string{"…"}
+	}
+	lines[0] = "… " + strings.TrimLeftFunc(lines[0], unicode.IsSpace)
+	return lines
+}
+
+// headAndEnd shortens a line to about buildLineRunes: its start and its
+// end, which is where docker puts the exit code, with " … " between, each
+// part cut at a word boundary near the cut when there is one.
+func headAndEnd(line string) string {
+	r := []rune(line)
+	half := buildLineRunes / 2
+	head, end := string(r[:half]), string(r[len(r)-half:])
+	if j := strings.LastIndexFunc(head, unicode.IsSpace); j >= len(head)-40 && j > 0 {
+		head = head[:j]
+	}
+	if j := strings.IndexFunc(end, unicode.IsSpace); j >= 0 && j <= 40 {
+		end = end[j:]
+	}
+	return strings.TrimRightFunc(head, unicode.IsSpace) + " … " + strings.TrimLeftFunc(end, unicode.IsSpace)
 }
 
 // tailOf joins the last maxLines of lines, as many as fit
