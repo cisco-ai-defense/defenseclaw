@@ -143,8 +143,8 @@ const codeGuardianReportPending = "guardian_report_pending"
 // version without a verified hook contract in the new guardrail mode.
 // Without manifest targets it still waits: the guardian writes that report
 // after its authorization ledger, and until the ledger exists the result
-// reads the guardian as not ready.
-func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) {
+// reads the guardian as not ready. It reports whether the report arrived.
+func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) bool {
 	env, r := l.env, l.result
 	targets := 0
 	if manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath)); err == nil {
@@ -153,7 +153,7 @@ func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) {
 	deadline := env.Now().Add(env.GuardianReportTimeout)
 	for {
 		if updated, ok := l.guardianReportedAt(); ok && !updated.Before(since) {
-			return
+			return true
 		}
 		if !env.Now().Before(deadline) {
 			if targets > 0 {
@@ -161,13 +161,43 @@ func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) {
 					"the hook guardian has not reported on its %d manifest targets since this change, so their protection is not confirmed yet; run `%s` in a minute to see it",
 					targets, env.lifecycleCommand("status")))
 			}
-			return
+			return false
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(env.PollInterval):
 		}
+	}
+}
+
+// guardianRepairsFile is the guardian's record of the targets its last
+// reconcile rewrote (hookGuardianRepairsFile in internal/cli).
+const guardianRepairsFile = "hook_guardian_repairs.json"
+
+// noteRepairedTargets lists, as changes, the per-account targets whose
+// hooks the guardian rewrote at or after since because they no longer
+// matched (a hook script or config entry changed or removed).
+func (l *lifecycle) noteRepairedTargets(since time.Time) {
+	data, err := readBounded(l.env.P(filepath.Join(l.env.Layout.DataDir, guardianRepairsFile)), 4<<20)
+	if err != nil {
+		return
+	}
+	var record struct {
+		UpdatedAt string `json:"updated_at"`
+		Repaired  []struct {
+			User      string `json:"user"`
+			Connector string `json:"connector"`
+		} `json:"repaired"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return
+	}
+	if updated, err := time.Parse(time.RFC3339Nano, record.UpdatedAt); err != nil || updated.Before(since) {
+		return
+	}
+	for _, target := range record.Repaired {
+		l.noteChange("rewrote the %s hooks of user %s", target.Connector, target.User)
 	}
 }
 
@@ -188,13 +218,39 @@ func (l *lifecycle) guardianReportedAt() (time.Time, bool) {
 	return updated, err == nil
 }
 
+// guardianActivationFile is the guardian's activation receipt in
+// GuardianAuthDir (hookGuardianActivationFile in internal/cli): the last
+// file a guardian reconcile writes, after its target report.
+const guardianActivationFile = "activation.json"
+
+// guardianTargetFailedSince reports whether a guardian reconcile finished
+// writing its report at or after since and could not protect a target.
+func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
+	env := l.env
+	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, guardianActivationFile)), 4<<20)
+	if err != nil {
+		return false
+	}
+	var activation struct {
+		UpdatedAt    string `json:"updated_at"`
+		FailureCount int    `json:"failure_count"`
+	}
+	if json.Unmarshal(data, &activation) != nil {
+		return false
+	}
+	updated, err := time.Parse(time.RFC3339Nano, activation.UpdatedAt)
+	return err == nil && !updated.Before(since) && activation.FailureCount > 0
+}
+
 // codeAgentUnprotected names an agent the enumerator found installed for an
 // eligible user but could not enroll; it runs without DefenseClaw hooks.
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
 // describeUnprotectedAgents reports the agents the enumerator found
 // installed but could not enroll (its unprotected-agents record next to the
-// manifest) and marks the deployment security-incomplete.
+// manifest) and marks the deployment security-incomplete. Each is one
+// account's agent, so it is a warning for that account, verify included; an
+// unreadable record hides which agents they are, so verify fails on it.
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
@@ -203,7 +259,12 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
 	if err != nil {
-		r.AddWarning(codeAgentUnprotected, "the enumerator's unprotected-agents record is unreadable: "+err.Error())
+		message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(codeVerify, message)
+		} else {
+			r.AddWarning(codeAgentUnprotected, message)
+		}
 		r.SecurityComplete = false
 		return
 	}

@@ -10,7 +10,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func stubWindowsHookRuntimeRoot(t *testing.T) string {
@@ -130,5 +134,89 @@ func TestRemoveWindowsStandaloneMachinePolicySelectorLocks(t *testing.T) {
 	}
 	if _, err := os.Lstat(codexLock); err != nil {
 		t.Fatalf("the lock of a selector that still exists must be kept: %v", err)
+	}
+}
+
+// A standalone uninstall drops the runtime selector entries of a local
+// account deleted with its profile, which the teardown manifest no longer
+// names, and keeps every other entry. A selector left with no entry goes, and
+// its lock with it.
+func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
+	stubWindowsHookRuntimeRoot(t)
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("resolve test SID: %v", err)
+	}
+	owner := user.User.Sid
+	const deleted = "S-1-5-21-1111111111-2222222222-3333333333-1021"
+	base := t.TempDir()
+	previousPath, previousOwner := windowsManagedRuntimeSelectorPathResolver, windowsManagedPolicyOwnerSID
+	previousDirTrust, previousAncestorTrust := windowsManagedPolicyDirTrustCheck, windowsManagedPolicyAncestorTrustCheck
+	previousFileTrust, previousMutation := windowsManagedPolicyFileTrustCheck, windowsManagedRuntimeSelectorMutationAuthorize
+	previousRemoved := windowsSelectorTargetAccountRemoved
+	windowsManagedRuntimeSelectorPathResolver = func(name string) (string, error) {
+		return filepath.Join(base, name, windowsManagedRuntimeSelectorFile), nil
+	}
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return owner, nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	windowsSelectorTargetAccountRemoved = func(entry windowsManagedRuntimeSelectorTarget) bool {
+		return entry.SID == deleted
+	}
+	t.Cleanup(func() {
+		windowsManagedRuntimeSelectorPathResolver, windowsManagedPolicyOwnerSID = previousPath, previousOwner
+		windowsManagedPolicyDirTrustCheck, windowsManagedPolicyAncestorTrustCheck = previousDirTrust, previousAncestorTrust
+		windowsManagedPolicyFileTrustCheck, windowsManagedRuntimeSelectorMutationAuthorize = previousFileTrust, previousMutation
+		windowsSelectorTargetAccountRemoved = previousRemoved
+	})
+	entries := func(connector string, sids ...string) []windowsManagedRuntimeSelectorTarget {
+		sort.Strings(sids)
+		var targets []windowsManagedRuntimeSelectorTarget
+		for _, sid := range sids {
+			targets = append(targets, windowsManagedRuntimeSelectorTarget{
+				Connector:          connector,
+				SID:                sid,
+				DataDir:            filepath.Join(base, "profiles", sid, ".defenseclaw"),
+				HookExecutable:     filepath.Join(base, "defenseclaw-hook.exe"),
+				GatewayAddr:        "127.0.0.1:18970",
+				GatewayServiceName: "DefenseClawGateway",
+				GenerationID:       strings.Repeat("a", 32),
+				BundleSHA256:       "sha256:" + strings.Repeat("b", 64),
+			})
+		}
+		return targets
+	}
+	for connector, targets := range map[string][]windowsManagedRuntimeSelectorTarget{
+		"claudecode": entries("claudecode", deleted, owner.String()),
+		"codex":      entries("codex", deleted),
+	} {
+		if err := ensureWindowsManagedPolicyDirectory(filepath.Join(base, connector)); err != nil {
+			t.Fatal(err)
+		}
+		if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+			SchemaVersion: windowsManagedRuntimeGenerationSchema,
+			Connector:     connector,
+			Targets:       targets,
+		}); err != nil {
+			t.Fatalf("publish %s selector: %v", connector, err)
+		}
+	}
+
+	if err := RemoveWindowsStandaloneDeletedAccountSelectorTargets(); err != nil {
+		t.Fatalf("drop deleted accounts: %v", err)
+	}
+	if err := RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
+		t.Fatalf("drop selector locks: %v", err)
+	}
+	claude, _, exists, err := readWindowsManagedRuntimeSelector("claudecode", true)
+	if err != nil || !exists || len(claude.Targets) != 1 || claude.Targets[0].SID != owner.String() {
+		t.Fatalf("the Claude Code selector must keep only the live entry: exists=%v targets=%+v err=%v", exists, claude.Targets, err)
+	}
+	for _, leaf := range []string{windowsManagedRuntimeSelectorFile, windowsManagedRuntimeSelectorLockFile} {
+		if _, err := os.Lstat(filepath.Join(base, "codex", leaf)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("codex %s must be gone once its only entry was a deleted account's: %v", leaf, err)
+		}
 	}
 }

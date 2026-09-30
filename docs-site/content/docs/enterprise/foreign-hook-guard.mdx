@@ -82,7 +82,17 @@ Codex's on Windows, which DefenseClaw always sets; see
    is full, the gateway removes the oldest records that hold no block, and it
    refuses a new session (denying its calls) only while live blocks alone
    fill the store. If the gateway cannot read or write a snapshot, the call
-   is denied.
+   is denied. When the guardian removes an unapproved hook, it also records
+   the removal (account, connector, file and time) in its protected
+   directory, `foreign-hook-removals.json` next to its authorization ledger.
+   The gateway then denies the calls of that account's agent processes for
+   that connector, and for any other connector that loads the same file
+   (Cursor and Devin load `~/.claude/settings.json`), that started before
+   the removal, naming the file: they may have loaded the hook, and an agent
+   that sends its session-start event only with the first prompt (Hermes)
+   takes its snapshot after the file was cleaned. Restart the agent to clear
+   it. Agents started after the removal, other accounts and other connectors
+   are not affected, and the record lasts 7 days.
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
    `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`,
@@ -112,7 +122,9 @@ stays the per-user `~/.defenseclaw/hooks/hermes-hook.sh` in
 `~/.hermes/config.yaml`. On Linux and macOS that hook asks
 `defenseclaw-hook` for the guard's decision before each tool call
 (`pre_tool_call`) and at `on_session_start`, where the session's snapshot is
-taken; Hermes loads its shell hooks when the process starts. A denied tool
+taken; Hermes loads its shell hooks when the process starts but sends
+`on_session_start` with the first prompt, so a hook the guardian removes in
+between is held by the removal record (item 4 above). A denied tool
 call is blocked with the message below, and the call never reaches the
 gateway. If the check gives no clear answer, the tool call is blocked too.
 Hermes lets a shell hook block only `pre_tool_call`, so other Hermes events
@@ -335,7 +347,9 @@ with `enterprise_machine_policy_summary_untrusted`.
   block does not hold a hook that removes itself before DefenseClaw's
   session-start check reads the files, a hook added after the session
   started, or a session still running 7 days after its block was recorded.
-  The per-call check still denies while a foreign hook is present. For
+  A guardian removal holds only agent processes DefenseClaw can name (see
+  the next item). The per-call check still denies while a foreign hook is
+  present. For
   Claude Code and Codex, the vendor lock (`managed_hooks_only: enforce`,
   the default) is the complete control.
 - The session block follows the agent process when DefenseClaw can name it

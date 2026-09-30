@@ -39,6 +39,40 @@ func validateEnterpriseHookUserTokenKeyLocation(dataDir string) error {
 	return validateEnterpriseHookTokenPathLocation(dataDir, keyPath, "per-user credential key")
 }
 
+// loadEnterpriseHookPendingUserTokenKey reads the key a credential rotation
+// staged (connector.PendingUserScopedTokenKeyPath), with the committed key's
+// location and trust checks; "" when no rotation is in progress.
+func loadEnterpriseHookPendingUserTokenKey(dataDir string) (string, error) {
+	path, err := connector.PendingUserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return "", err
+	}
+	if err := validateEnterpriseHookTokenPathLocation(dataDir, path, "staged per-user credential key"); err != nil {
+		return "", err
+	}
+	key, err := connector.LoadPendingUserScopedTokenKey(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: %w", err)
+	}
+	return key, nil
+}
+
+// currentEnterpriseHookUserTokenKeyID is the fingerprint of the key targets
+// are rendered from right now: a rotation's staged key, else the committed
+// one; "" when neither exists yet.
+func currentEnterpriseHookUserTokenKeyID(dataDir string) (string, error) {
+	key, err := loadEnterpriseHookPendingUserTokenKey(dataDir)
+	if err == nil && key == "" {
+		if err = validateEnterpriseHookUserTokenKeyLocation(dataDir); err == nil {
+			key, err = connector.LoadUserScopedTokenKey(dataDir)
+		}
+	}
+	if err != nil || key == "" {
+		return "", err
+	}
+	return connector.UserScopedTokenKeyFingerprint(key), nil
+}
+
 func alignEnterpriseHookUserTokenKeyOwner(dataDir string) error {
 	keyPath, err := connector.UserScopedTokenKeyPath(dataDir)
 	if err != nil {

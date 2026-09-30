@@ -70,24 +70,27 @@ a POSIX command is a redirect target the shell expands at run time and that
 can only name a file (`> ~/out.txt`, `> "$HOME/out.txt"`, `> out-*.txt`), CEL
 rules also run on the analysis of the same command with a static stand-in
 target, wrapped commands included, without the stand-in's redirect and path.
-A match there is complete proof for a rule that has no code-owned
-prerequisite and cannot depend on the dropped redirect and path (no `!`,
-`==`, `!=`, `in` or `all()` over `redirects`, `paths`, `artifacts` or
-`archive_lineages`, and no `parse` or lineage `authoritative` read; a
-command's `c.argv_complete` may be read). A non-match proves nothing, so the
-regex fallback still sees the whole command. Nearly all built-in rules have a
-code-owned prerequisite, so for them such a command still falls back to the
-regex.
+A match there is complete proof for a rule that cannot depend on the dropped
+redirect and path (no `!`, `==`, `!=`, `in` or `all()` over `redirects`,
+`paths`, `artifacts` or `archive_lineages`, and no `parse` or lineage
+`authoritative` read; a command's `c.argv_complete` may be read). A built-in
+owner's code-owned prerequisite must hold both on that analysis and on the
+one with the stand-in target. A non-match proves nothing, so the regex
+fallback still sees the whole command.
 
-Second, for a POSIX command with `&&` or `||` lists (`<cmd> && ...`,
-`<cmd> || true`), CEL rules also run on the analysis of the commands certain
-to run: every statement of the top-level sequence, and of each list only its
-first command. A match there is complete proof for a rule that has no
-code-owned prerequisite and cannot depend on the left-out commands (no `!`,
-`==`, `!=`, `in` or `all()` over `commands`, `paths`, `network`, `data_flows`,
-`artifacts` or `archive_lineages`, and no `parse` or lineage `authoritative`
-read; a command's `c.argv_complete` may be read). A command after `&&` or
-`||` might not run, so a match on it alone stays detection-only.
+Second, a POSIX command with `&&` or `||` lists (`cd <dir> && <cmd>`,
+`<cmd> || true`) is judged as if every command of each list runs: a block
+stops the whole call before any of it runs. CEL rules, code-owned
+prerequisites and the context checks for content and sensitive-path findings
+run on the analysis of the command with each list read as the sequence of its
+commands, so a rule that blocks `a; b` also blocks `a && b` and `a || b`.
+For a rule with no `parse` or lineage `authoritative` read (a command's
+`c.argv_complete` may be read), a match or non-match there counts as it does
+for `a; b`; other rules keep the regex fallback, and a fallback finding
+blocks when that analysis proves it, as for `a; b`. A list with a
+runtime-expanded redirect target gets both treatments. A negated,
+background or coprocess statement in a list, a function definition or a
+here-document keeps the regex fallback, and its matches stay detection-only.
 
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only

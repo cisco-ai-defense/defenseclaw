@@ -809,6 +809,15 @@ func restoreWindowsManagedRuntimeSelectorCASPlatform(
 				return err
 			}
 			if _, _, _, err := loadWindowsManagedRuntimeBundle(entry, target); err != nil {
+				// A snapshot entry whose bundle no longer exists, such as a
+				// deleted account's, was already unusable before the
+				// transaction: restoring it exactly keeps that account failing
+				// closed, while refusing would leave the whole rollback pending
+				// with the services stopped. A bundle that exists but fails its
+				// checks is still refused.
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				return fmt.Errorf(
 					"enterprise hooks: refusing full selector restore with invalid %s bundle: %w",
 					entry.SID,
@@ -1517,7 +1526,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "opencode"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue

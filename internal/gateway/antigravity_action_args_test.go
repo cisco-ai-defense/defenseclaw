@@ -108,3 +108,25 @@ func TestAgentHookTrustedActionArgsGivesLiveKiroCommandsCompleteFacts(t *testing
 		}
 	}
 }
+
+// Amp's Bash tool sends its command as "cmd"; with a harmless marker command.
+func TestAgentHookTrustedActionArgsGivesAmpBashCommandsCompleteFacts(t *testing.T) {
+	status := func(args json.RawMessage) actionfacts.ParseStatus {
+		return actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Args: args, CWD: "/home/alice/proj"}).Parse.Status
+	}
+	raw := json.RawMessage(`{"cmd":"echo dc-marker","cwd":"/home/alice/proj"}`)
+	if got := status(raw); got == actionfacts.StatusComplete {
+		t.Fatalf("fixture must reproduce the incomplete parse of the arguments as sent, got %s", got)
+	}
+	projected, dir := agentHookTrustedActionArgs("amp", "Bash", raw)
+	if dir != "/home/alice/proj" {
+		t.Fatalf("projected working directory = %q, want the call's cwd", dir)
+	}
+	if got := status(projected); got != actionfacts.StatusComplete {
+		t.Fatalf("projected Amp Bash arguments %s parse as %s, want complete command facts", projected, got)
+	}
+	unknown := json.RawMessage(`{"cmd":"echo dc-marker","extra":true}`)
+	if got, dir := agentHookTrustedActionArgs("amp", "Bash", unknown); string(got) != string(unknown) || dir != "" {
+		t.Fatalf("an unreviewed Amp argument changed to %s (working directory %q)", got, dir)
+	}
+}

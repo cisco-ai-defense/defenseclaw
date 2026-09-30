@@ -52,6 +52,15 @@ type secretResolver struct {
 	mu     sync.Mutex
 	values map[string]string
 	calls  map[string]int
+	// credentials are standalone enterprise protected credentials.
+	credentials map[string]string
+}
+
+func (resolver *secretResolver) ResolveObservabilityCredential(name string) (string, bool) {
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	value, ok := resolver.credentials[name]
+	return value, ok
 }
 
 func (resolver *secretResolver) ResolveObservabilitySecret(name string) (string, bool) {
@@ -630,6 +639,51 @@ func TestFactoryObservesSecretRotationOnlyAtPrepareBoundary(t *testing.T) {
 		if err := cleanup(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// Header and bearer credential references resolve only from protected
+// credentials, never as environment names.
+func TestFactoryResolvesProtectedCredentialReferences(t *testing.T) {
+	var mu sync.Mutex
+	var authorization, apiKey string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		mu.Lock()
+		authorization, apiKey = request.Header.Get("Authorization"), request.Header.Get("X-Api-Key")
+		mu.Unlock()
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
+		Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
+		Endpoint: server.URL, BearerCredential: "archive-token",
+		Headers: map[string]config.ObservabilityV8HeaderValue{
+			"X-Api-Key": config.ObservabilityV8CredentialHeader("archive-key"),
+		},
+		NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
+	})
+	secrets := &secretResolver{
+		values: map[string]string{"archive-token": "env-token", "archive-key": "env-key"}, calls: map[string]int{},
+	}
+	factory := newTestFactory(t, io.Discard, secrets, nil, net.Dialer{}, nil)
+	if adapter, _, err := factory.PrepareDestination(context.Background(), destination, telemetry.V8ResourceContext{}); adapter != nil || !IsError(err, ErrorSecretUnavailable) {
+		t.Fatalf("credential references resolved without a stored credential: adapter=%T error=%v", adapter, err)
+	}
+
+	secrets.credentials = map[string]string{"archive-token": "stored-token", "archive-key": "stored-key"}
+	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, telemetry.V8ResourceContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+	if counters := deliverOne(t, "archive", adapter, `{"record_id":"record"}`); counters.Delivered != 1 {
+		t.Fatalf("counters=%+v", counters)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if authorization != "Bearer stored-token" || apiKey != "stored-key" {
+		t.Fatalf("authorization=%q X-Api-Key=%q", authorization, apiKey)
 	}
 }
 

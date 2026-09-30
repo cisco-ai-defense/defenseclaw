@@ -109,7 +109,7 @@ def test_reference_source_validates_against_canonical_schema(tmp_path: Path) -> 
     validated = load_validate_v8(source, source_name=str(reference))
 
     assert validated.source["config_version"] == 8
-    assert len(validated.source["observability"]["destinations"]) == 7
+    assert len(validated.source["observability"]["destinations"]) == 9
 
 
 @pytest.mark.parametrize("enabled", [False, True])

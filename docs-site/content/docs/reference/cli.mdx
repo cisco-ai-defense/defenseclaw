@@ -40,7 +40,7 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
 | `defenseclaw doctor` | Health and repair check. Run this first whenever something feels off; see [Doctor](#doctor) below. |
 | `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
-| `defenseclaw version [--json] [--no-drift-exit]` | Versions of the CLI, the gateway binary and, when OpenClaw is an active connector, the OpenClaw plugin. Exits `1` when their versions differ (not with `--json` or `--no-drift-exit`) or a component fails to report. |
+| `defenseclaw version [--json] [--no-drift-exit]` | Versions of the CLI, the gateway binary and the OpenClaw plugin, which reads `(not used)` unless OpenClaw is an active connector. Exits `1` when their versions differ (not with `--json` or `--no-drift-exit`) or a component fails to report. |
 
 ## Doctor
 
@@ -529,6 +529,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `repair` | Re-apply the installed deployment's files, modes, and services |
 | `ensure` | Install, upgrade, or repair as needed. Does nothing when nothing changed |
 | `reconcile` | Run one immediate hook guardian reconcile |
+| `rotate-credentials` | Replace the key every user's per-user credentials derive from. Every user moves to the new key before it takes effect. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
 | `status` | Report the deployment state. Read-only |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
 | `uninstall` | Stop and remove the deployment. `--purge` also removes config and state |
@@ -543,7 +544,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--allow-downgrade` | install, upgrade, repair, ensure | Allow a payload older than the installed release (a deliberate rollback). Without it the lifecycle refuses with `downgrade_refused` |
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
 | `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
-| `--lock-wait <duration>` | install, upgrade, repair, reconcile, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
+| `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
 | `--purge` | uninstall | Also remove config, credentials, state, and logs |
 | `--remove-service-account` | uninstall | With `--purge`, also delete the gateway service account |
 | `--json` | all | Print the lifecycle result as JSON |

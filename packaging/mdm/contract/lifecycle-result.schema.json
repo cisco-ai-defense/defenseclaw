@@ -66,6 +66,8 @@
     "security_complete": { "type": "boolean" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "changes": { "type": "array", "items": { "type": "string" } },
+    "api_port_holders": { "type": "array", "items": { "$ref": "#/$defs/portHolder" }, "description": "With error api_port_held: the processes other than the DefenseClaw gateway that listen where the gateway API binds." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -114,6 +116,17 @@
         "higher_precedence": { "type": "array", "items": { "type": "string" } },
         "conflicts": { "type": "array", "items": { "type": "string" } },
         "live_verified_at": { "type": "string" }
+      }
+    },
+    "portHolder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "pid"],
+      "properties": {
+        "address": { "type": "string", "minLength": 1 },
+        "pid": { "type": "integer", "minimum": 0 },
+        "image": { "type": "string", "description": "Empty when the reporting account cannot identify the process." },
+        "account": { "type": "string" }
       }
     },
     "message": {

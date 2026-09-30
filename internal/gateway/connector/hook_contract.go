@@ -870,7 +870,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ResponseFieldName:       "hook_output",
 		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
 		// bridge plugin wires tool.execute.before (block) and
-		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.31 also exposes
+		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.33 also exposes
 		// permission.ask and chat/context mutation hooks; this focused bridge
 		// intentionally does not implement those surfaces.
 		Events: []string{
@@ -896,8 +896,8 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
-			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.31 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.31. The v1.18.31 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
+			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
 		},
 	}},
 	"amp": {{

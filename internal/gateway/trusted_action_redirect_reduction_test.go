@@ -117,19 +117,32 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
-			// A command after && might not run, so a match on it stays
-			// detection-only.
+			// A list is judged as if every command runs; its runtime-expanded
+			// target is left out as for a single command.
 			name:    "chained command",
 			command: "cd /tmp && echo " + redirectReductionMarker + " > ~/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// The first command of an && or || list always runs, so rules
-			// decide on the list's unconditional commands. A rule that
-			// negates over commands does not: a left-out command might run.
-			name:    "first command of an && list",
-			command: "echo " + redirectReductionMarker + " && echo done",
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+			// A block stops the whole call, so a command after && or || is
+			// judged as if it runs.
+			name:    "command after && and ||",
+			command: "cd /tmp && echo " + redirectReductionMarker + " || true",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// A rule that negates over commands decides on every command of
+			// the list, as for the same commands joined by ";": a later
+			// command's redirect turns it off.
+			name:    "negation over a later command",
+			command: "echo " + redirectReductionMarker + " && echo done > /tmp/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": absent, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// A list in the background is not reduced.
+			name:    "background list",
+			command: "cd /tmp && echo " + redirectReductionMarker + " &",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 	}
 	for _, test := range tests {

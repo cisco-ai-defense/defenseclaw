@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -46,6 +47,22 @@ var errDarwinProcessOutputLimit = errors.New("darwin process snapshot exceeded b
 type darwinProcessOutputLimits struct {
 	totalBytes int
 	lineBytes  int
+}
+
+// processOwnerUID is the uid that owns /proc/<pid> (the process's effective
+// uid) on Linux, and empty elsewhere or once the process has exited.
+func processOwnerUID(pid int) string {
+	if runtime.GOOS != "linux" || pid <= 0 {
+		return ""
+	}
+	info, err := os.Stat("/proc/" + strconv.Itoa(pid))
+	if err != nil {
+		return ""
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return strconv.FormatUint(uint64(stat.Uid), 10)
+	}
+	return ""
 }
 
 // platformProcessSnapshot preserves the existing macOS/Linux ps path.

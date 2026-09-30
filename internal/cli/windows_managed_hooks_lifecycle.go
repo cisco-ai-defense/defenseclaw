@@ -66,7 +66,10 @@ type windowsManagedHooksLifecycleReport struct {
 	Adopted               bool   `json:"adopted,omitempty"`
 	LegacyActivationState string `json:"legacy_activation_state,omitempty"`
 	Phase                 string `json:"phase,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	// Leftovers names what the rollback of a first standalone install
+	// could not remove (rollbackWindowsStandaloneFirstInstallFootprint).
+	Leftovers []string `json:"leftovers,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 type windowsManagedHooksLifecycleContext struct {
@@ -438,6 +441,16 @@ func runWindowsManagedHooksLifecycle(
 			return fail(fmt.Errorf("verify managed-hook lifecycle journal retirement: %w", err))
 		}
 		report.Phase = "retired"
+		// A pending retirement is a rollback (the journal is restored). A
+		// rolled-back first standalone install also takes back what the
+		// guardian registered and published for it (FUB-WIN-F76).
+		if pendingExists && enterprisehooks.WindowsStandaloneProcess() &&
+			windowsManagedHooksLifecycleFirstInstall(ctx, pending) {
+			report.Leftovers = windowsFirstInstallRollbackFootprintRemover(ctx)
+			for _, leftover := range report.Leftovers {
+				fmt.Fprintf(os.Stderr, "warning: the rollback could not remove %s\n", leftover)
+			}
+		}
 	}
 	report.OK = true
 	return report, nil

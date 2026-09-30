@@ -264,6 +264,11 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawAIDiscoverySource:     aiDiscoveryV8Optional(summary.Source),
 			DefenseClawAIComponentVendor:     aiDiscoveryV8OptionalText(signal.Vendor),
 			DefenseClawAIComponentProduct:    aiDiscoveryV8OptionalText(signal.Product),
+			// A per-user scan's signal names the account it ran as, so the
+			// lifecycle records can be split by user like the observations.
+			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
+			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
+			DefenseClawUserName:   aiDiscoveryV8OptionalText(signal.UserName),
 		}
 		if signal.Category == inventory.SignalLocalModel && signal.Model != nil && signal.Model.Provenance != nil {
 			provenance := signal.Model.Provenance
@@ -304,6 +309,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIDiscoverySource:             base.DefenseClawAIDiscoverySource,
 				DefenseClawAIComponentVendor:             base.DefenseClawAIComponentVendor,
 				DefenseClawAIComponentProduct:            base.DefenseClawAIComponentProduct,
+				UserID:                                   base.UserID,
+				DefenseClawUserIDKind:                    base.DefenseClawUserIDKind,
+				DefenseClawUserName:                      base.DefenseClawUserName,
 				DefenseClawAIModelProvenancePublisher:    base.DefenseClawAIModelProvenancePublisher,
 				DefenseClawAIModelProvenanceCountryCode:  base.DefenseClawAIModelProvenanceCountryCode,
 				DefenseClawAIModelProvenanceRootModel:    base.DefenseClawAIModelProvenanceRootModel,

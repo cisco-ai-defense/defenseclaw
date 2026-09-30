@@ -20,3 +20,5 @@ func newLookup() (func(int) (Process, error), func()) {
 		return Process{}, errors.New("process lookup is not supported on this platform")
 	}, func() {}
 }
+
+func currentClock() (string, int64, bool) { return "", 0, false }

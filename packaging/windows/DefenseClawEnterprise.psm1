@@ -128,6 +128,12 @@ $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-18532926
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
 $script:ServiceFailureRestartQuiescenceSeconds = 65
+# Standalone: how long verify gives the hook guardian to activate a
+# targets.yaml the enumerator republished (it does within seconds), and how
+# recent the file must be for that wait (the gateway's catch-up window).
+$script:ManifestCatchUpWaitSeconds = 30
+$script:ManifestCatchUpPollMilliseconds = 3000
+$script:ManifestCatchUpWindowSeconds = 120
 $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
@@ -165,6 +171,10 @@ $script:DefenseClawRecoveryGatewayRefusal = $null
 # and whether this run did. Set per recovery; reset per lifecycle run.
 $script:DefenseClawRecoveryActivationDeferrable = $false
 $script:DefenseClawRecoveryActivationDeferred = $false
+# A standalone uninstall with purge also removes each enrolled account's
+# per-user DefenseClaw folder when the managed-hook teardown finalizes
+# (Invoke-DefenseClawGatewayCommand tells the helper). Set per lifecycle run.
+$script:DefenseClawUninstallPurgeUserState = $false
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -12751,6 +12761,7 @@ function Invoke-DefenseClawGatewayCommand {
         'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED',
         'DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED',
         'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
+        'DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE',
         'DEFENSECLAW_ENTERPRISE_PROFILE',
         'CODEX_HOME'
     )
@@ -12781,6 +12792,14 @@ function Invoke-DefenseClawGatewayCommand {
         [Environment]::SetEnvironmentVariable(
             'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
             $(if ([bool]$Layout.ClaudeEffectivePolicyVerified) { '1' } else { $null }),
+            'Process'
+        )
+        # Set only for a standalone uninstall with purge, whose finalize then
+        # removes the enrolled accounts' per-user folders; a caller's value
+        # never reaches a helper.
+        [Environment]::SetEnvironmentVariable(
+            'DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE',
+            $(if ([bool]$script:DefenseClawUninstallPurgeUserState) { '1' } else { $null }),
             'Process'
         )
         # Lifecycle helpers resolve the same profile the services are pinned
@@ -16474,9 +16493,30 @@ function Get-DefenseClawStandaloneManifestAdoption {
             'prove the republished manifest'
         ) -1
     }
-    $report = Get-DefenseClawGuardianStatusReport `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName
+    # The guardian activates a targets.yaml the enumerator republished within
+    # seconds. A verify (an MDM detection run) that came in between failed on
+    # that moment; while the file is that recent, give the guardian the time.
+    $manifestChangedAt = (Microsoft.PowerShell.Management\Get-Item -LiteralPath $Layout.ManifestPath).LastWriteTimeUtc
+    $catchUpDeadline = [DateTime]::UtcNow.AddSeconds($script:ManifestCatchUpWaitSeconds)
+    while ($true) {
+        $report = Get-DefenseClawGuardianStatusReport `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+        $activatedSHA256 = ''
+        if ($null -ne $report -and
+            $null -ne $report.PSObject.Properties['activation'] -and
+            $null -ne $report.activation -and
+            $null -ne $report.activation.PSObject.Properties['manifest_sha256']) {
+            $activatedSHA256 = [string]$report.activation.manifest_sha256
+        }
+        $now = [DateTime]::UtcNow
+        if ($activatedSHA256 -ceq $InstalledManifestSHA256 -or
+            $now -ge $catchUpDeadline -or
+            ($now - $manifestChangedAt).TotalSeconds -ge $script:ManifestCatchUpWindowSeconds) {
+            break
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:ManifestCatchUpPollMilliseconds
+    }
     $retry = 'wait for the guardian''s next pass (about a minute) and retry'
     $diagnostic = 'guardian status reported no records'
     if ($null -ne $report -and
@@ -16541,6 +16581,60 @@ function Get-DefenseClawStandaloneManifestAdoption {
             "$InstalledManifestSHA256; $retry"
         ) -1
     }
+    # The rows of a deleted account whose profile folder was removed fail
+    # every reconcile until the enumerator drops them at its next pass. The
+    # guardian status counts them when every failed row is one, and the
+    # adoption accepts exactly those failures, as verify and status do.
+    $excused = & $count $report 'removed_account_failures'
+    if ($excused -lt 0) {
+        $excused = [int64]0
+    }
+    # A reconcile that fails only because each failed target's account is
+    # signed out stays failed until that account signs in, so a retry cannot
+    # help: name the accounts, and say what to do first.
+    $signedOut = [Collections.Generic.List[string]]::new()
+    $otherFailure = $false
+    foreach ($row in @(& $field $records.state 'results')) {
+        if ($null -eq $row -or
+            [bool](& $field $row 'ok') -or
+            [bool](& $field $row 'pending')) {
+            continue
+        }
+        if ([string](& $field $row 'error') -notmatch
+            'exact active Windows session is unavailable|no active interactive session token matches') {
+            $otherFailure = $true
+            continue
+        }
+        $account = [string](& $field $row 'user')
+        $sid = [string](& $field $row 'sid')
+        if ([string]::IsNullOrWhiteSpace($account) -and -not [string]::IsNullOrWhiteSpace($sid)) {
+            # The guardian's row may carry only the SID; name the account.
+            try {
+                $account = ([Security.Principal.SecurityIdentifier]::new($sid)).Translate(
+                    [Security.Principal.NTAccount]).Value
+            }
+            catch {
+                $account = ''
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($account)) {
+            $account = $sid
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($sid)) {
+            $account = "$account ($sid)"
+        }
+        if (-not $signedOut.Contains($account)) {
+            $signedOut.Add($account)
+        }
+    }
+    $nextStep = ''
+    if ($signedOut.Count -gt 0 -and -not $otherFailure) {
+        $nextStep = (
+            'have each of these signed-out accounts sign in, or remove it with its profile, then run ' +
+            'this command again: ' + ($signedOut -join ', ') + '. The guardian repairs their ' +
+            'DefenseClaw hooks only in their own Windows session'
+        )
+    }
     $targetCount = & $count $records.activation 'target_count'
     $activationStamp = & $stamp $records.activation
     foreach ($name in @('activation', 'state', 'authorization')) {
@@ -16548,18 +16642,26 @@ function Get-DefenseClawStandaloneManifestAdoption {
         $success = & $count $record 'success_count'
         $failure = & $count $record 'failure_count'
         $pending = & $count $record 'pending_count'
-        if (-not [bool](& $field $record 'ok') -or
-            $failure -ne 0 -or
+        $complete = if ($excused -gt 0) {
+            $failure -eq $excused -and $success + $pending + $failure -eq $targetCount
+        }
+        else {
+            [bool](& $field $record 'ok') -and $failure -eq 0 -and $success + $pending -eq $targetCount
+        }
+        if (-not $complete -or
             $success -lt 0 -or
             $pending -lt 0 -or
             (& $count $record 'target_count') -ne $targetCount -or
-            $success + $pending -ne $targetCount -or
             [string]::IsNullOrWhiteSpace($activationStamp) -or
             (& $stamp $record) -cne $activationStamp) {
-            return & $result $false (
+            $incomplete = (
                 'the hook guardian has not completed one failure-free reconcile ' +
-                "of the republished targets.yaml ($name record; $diagnostic); $retry"
-            ) -1
+                "of the republished targets.yaml ($name record; $diagnostic)"
+            )
+            if (-not [string]::IsNullOrEmpty($nextStep)) {
+                return & $result $false "$nextStep ($incomplete)" -1
+            }
+            return & $result $false "$incomplete; $retry" -1
         }
     }
     if ($targetCount -lt 0 -or $targetCount -gt 384) {
@@ -20163,6 +20265,29 @@ function Add-DefenseClawUserRegistrationCleanupResult {
                 -Value $lists[$name] `
                 -Force
     }
+    # The standalone finalize names each enrolled account's per-user folder
+    # that stays: with purge, each one it could not remove and why. Only a
+    # purge reports it.
+    $remaining = $null
+    if ($null -ne $report) {
+        $remaining = $report.PSObject.Properties['user_state_remaining']
+    }
+    if ($null -ne $remaining -and $null -ne $remaining.Value) {
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name user_state_remaining `
+                -Value ([string[]]@(
+                    @($remaining.Value) |
+                        Microsoft.PowerShell.Utility\Select-Object -First 4096 |
+                        Microsoft.PowerShell.Core\ForEach-Object {
+                            ConvertTo-DefenseClawBoundedDiagnostic `
+                                -Value ([string]$_) `
+                                -MaxLength 1024
+                        }
+                )) `
+                -Force
+    }
     return $Result
 }
 
@@ -23702,6 +23827,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$ProductVersion
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
+    $script:DefenseClawUninstallPurgeUserState = (
+        $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
+    )
     $entryProfileRoots = Get-DefenseClawProfileRoots
     if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
         $InstallRoot = [string]$entryProfileRoots.InstallRoot

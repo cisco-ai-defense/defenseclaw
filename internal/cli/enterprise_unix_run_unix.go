@@ -20,7 +20,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -55,6 +57,9 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
 	}
+	if action == enterpriseunix.ActionRotateCredentials {
+		defer noteInterruptedRotation(cmd.ErrOrStderr(), platform)()
+	}
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{
 		Action:               action,
 		PayloadDir:           opts.payload,
@@ -72,6 +77,32 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		return err
 	}
 	return lifecycleFailure(result, opts.json)
+}
+
+// noteInterruptedRotation says what an interrupted rotate-credentials left
+// behind. The interrupt still ends the run at once, as before; the gateway
+// then accepts both keys until the next lifecycle action completes or rolls
+// back the rotation, and Ctrl+C used to exit 130 without a word.
+func noteInterruptedRotation(w io.Writer, platform string) (stop func()) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-signals:
+			fmt.Fprintf(w, "\nrotate-credentials was interrupted before it finished. Until the rotation is settled the gateway may accept the old and the new key; run `enterprise %s reconcile` as root now to complete it or roll it back.\n", platform)
+			code := 130
+			if sig == syscall.SIGTERM {
+				code = 143
+			}
+			os.Exit(code)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(signals)
+		close(done)
+	}
 }
 
 // lifecycleFailure is the command error of a failed result. The human
@@ -120,6 +151,13 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		warns = append(warns, warning.Code+": "+warning.Message)
 	}
 	writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
+	// repair (and an ensure that re-applied) says what it changed.
+	for _, change := range result.Changes {
+		fmt.Fprintf(w, "  - %s\n", change)
+	}
+	if result.Action == enterpriseunix.ActionRepair && result.OK && len(result.Changes) == 0 {
+		fmt.Fprintln(w, "  nothing to repair")
+	}
 	if result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify {
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -196,8 +197,20 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			Request: request,
 		})
 	}
+	// Each account's removals are recorded for the gateway as soon as its
+	// worker ends, so its agent processes that started before them stay
+	// denied (recordEnterpriseForeignHookRemovals). Only the connectors the
+	// job asked for count: the worker runs as the user.
+	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
+		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
+			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
+				recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
+					cleanup.Connector, boundedStrings(report.Removed, 32))
+			}
+		}
+	}
 	removed := 0
-	for _, outcome := range runEnterpriseHookWorkerPool(ctx, jobs, enterpriseHookWorkerParallelism) {
+	for _, outcome := range runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals) {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
 			clean = false

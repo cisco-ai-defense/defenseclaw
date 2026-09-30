@@ -240,6 +240,37 @@ func TestEnterpriseHookVerifyDispositionIssuesRejectsStalePendingEvidence(t *tes
 			t.Fatalf("canonical authorization was rejected: %v", issues)
 		}
 	})
+
+	// The guardian carries a deleted account's prior protected rows forward
+	// while its reconcile fails them; verify leaves out exactly those rows.
+	t.Run("deleted account rows excused", func(t *testing.T) {
+		active := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", OK: true}
+		removed := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1022", Connector: "codex", Error: "inspect user home: not found"}
+		prior := removed
+		prior.OK, prior.Error = true, ""
+		run := enterpriseHookVerifyRun{Rows: []enterpriseHookReconcileRow{active, removed}, Failures: 1}
+		authorization := enterpriseHookGuardianAuthorization{
+			TargetCount: 2, SuccessCount: 1, FailureCount: 1,
+			ProtectedTargets: []enterpriseHookReconcileRow{active, prior},
+		}
+		activation := enterpriseHookGuardianActivation{
+			TargetCount: 2, SuccessCount: 1, FailureCount: 1,
+			ProtectedTargets: authorization.ProtectedTargets,
+		}
+		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) == 0 {
+			t.Fatal("a failed row that is not excused passed against its carried-forward prior row")
+		}
+		run.Excused = []enterpriseHookReconcileRow{removed}
+		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) != 0 {
+			t.Fatalf("excused deleted-account row: issues = %v", issues)
+		}
+		stale := prior
+		stale.SID = "S-1-5-21-1-2-3-1099"
+		activation.ProtectedTargets = append(append([]enterpriseHookReconcileRow(nil), activation.ProtectedTargets...), stale)
+		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); !strings.Contains(strings.Join(issues, "; "), "extra or stale") {
+			t.Fatalf("stale target next to an excused row: issues = %v", issues)
+		}
+	})
 }
 
 func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *testing.T) {
@@ -281,7 +312,7 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 	}
 
 	proof, err := enterpriseHookAuthenticatedPendingTargets(
-		manifest, state, authorization, activation, manifestPath, digest,
+		manifest, state, authorization, activation, manifestPath, digest, 0,
 	)
 	if err != nil {
 		t.Fatalf("authenticate pending proof: %v", err)
@@ -293,7 +324,7 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 
 	manifest.Targets[1].Deferred = false
 	if _, err := enterpriseHookAuthenticatedPendingTargets(
-		manifest, state, authorization, activation, manifestPath, digest,
+		manifest, state, authorization, activation, manifestPath, digest, 0,
 	); err == nil || !strings.Contains(err.Error(), "noncanonical pending target") {
 		t.Fatalf("non-deferred pending proof error = %v, want fail closed", err)
 	}
@@ -301,7 +332,7 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 	manifest.Targets[1].Deferred = true
 	state.Results[1].UserHome = filepath.Join(string(filepath.Separator), "Users", "other")
 	if _, err := enterpriseHookAuthenticatedPendingTargets(
-		manifest, state, authorization, activation, manifestPath, digest,
+		manifest, state, authorization, activation, manifestPath, digest, 0,
 	); err == nil || !strings.Contains(err.Error(), "identity differs") {
 		t.Fatalf("wrong-home pending proof error = %v, want fail closed", err)
 	}
@@ -542,6 +573,35 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	if err := runEnterpriseHooksStatus(cmd, nil); err == nil {
 		t.Fatal("status accepted Guardian coverage for replaced manifest bytes")
 	}
+	// Standalone: a manifest the enumerator republished in the last two
+	// minutes is the guardian catching up, which status reports as a
+	// warning, also when it was republished while the reconcile it last
+	// activated ran (before that activation's stamp); older bytes still fail.
+	previousCatchUp := enterpriseHookManifestCatchUpAllowed
+	t.Cleanup(func() { enterpriseHookManifestCatchUpAllowed = previousCatchUp })
+	enterpriseHookManifestCatchUpAllowed = func() bool { return true }
+	activatedAt, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, modTime := range []time.Time{time.Now(), activatedAt.Add(-time.Second), time.Now().Add(-time.Hour)} {
+		republished := time.Since(modTime) < time.Minute
+		if err := os.Chtimes(manifest, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+		stdout.Reset()
+		err := runEnterpriseHooksStatus(cmd, nil)
+		report = enterpriseHookStatusReport{}
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &report); decodeErr != nil {
+			t.Fatalf("decode status report: %v", decodeErr)
+		}
+		waiting := err == nil && report.OK && len(report.Warnings) == 1 &&
+			strings.Contains(report.Warnings[0], "has not activated it yet")
+		if waiting != republished {
+			t.Fatalf("republished=%t: status err=%v report=%+v", republished, err, report)
+		}
+	}
+	enterpriseHookManifestCatchUpAllowed = previousCatchUp
 	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -666,6 +726,33 @@ func TestCompareEnterpriseHookGuardianRecordsRejectsStaleOrFutureReconcile(t *te
 				t.Fatalf("issues = %v, want %q", issues, tc.want)
 			}
 		})
+	}
+}
+
+// The guardian rewrites its three records every pass; a status or verify that
+// read in the middle of one met two passes' records and failed although the
+// guardian was healthy, so MDM detection on Windows flapped.
+func TestLoadEnterpriseHookGuardianRecordsRereadsAPassInProgress(t *testing.T) {
+	previousRead, previousDelay := readEnterpriseHookGuardianRecordsOnce, enterpriseHookGuardianRecordRetryDelay
+	t.Cleanup(func() {
+		readEnterpriseHookGuardianRecordsOnce, enterpriseHookGuardianRecordRetryDelay = previousRead, previousDelay
+	})
+	enterpriseHookGuardianRecordRetryDelay = 0
+	reads := 0
+	readEnterpriseHookGuardianRecordsOnce = func(string) enterpriseHookGuardianRecords {
+		reads++
+		stamp := "2026-09-30T12:30:33Z"
+		records := enterpriseHookGuardianRecords{StateExists: true, AuthorizationExists: true, ActivationExists: true}
+		records.State.UpdatedAt, records.Authorization.UpdatedAt, records.Activation.UpdatedAt = stamp, stamp, stamp
+		if reads == 1 {
+			records.Activation.UpdatedAt = "2026-09-30T12:29:33Z"
+		}
+		return records
+	}
+
+	records := loadEnterpriseHookGuardianRecords(t.TempDir())
+	if reads != 2 || records.Activation.UpdatedAt != records.State.UpdatedAt {
+		t.Fatalf("reads = %d, activation stamp %q: want one re-read of the finished pass", reads, records.Activation.UpdatedAt)
 	}
 }
 

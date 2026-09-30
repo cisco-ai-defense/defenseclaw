@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -55,6 +56,9 @@ const (
 	enterpriseHookWorkerOpApply          = "apply"
 	enterpriseHookWorkerOpDiscover       = "discover"
 	enterpriseHookWorkerOpForeignCleanup = "foreign_cleanup"
+	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
+	// of the user's own home (standalone profile).
+	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
@@ -69,6 +73,11 @@ const (
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
 	enterpriseHookWorkerModeRemoveLeftover = "remove_leftover"
+	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
+	// state (standalone uninstall --purge). It runs after the request's
+	// removals and only when every one of them succeeded: the state holds
+	// the backups a failed removal needs when it is retried.
+	enterpriseHookWorkerModePurge = "purge"
 )
 
 // enterpriseHookWorkerTimeout bounds one worker process.
@@ -136,6 +145,14 @@ type enterpriseHookWorkerRequest struct {
 	// and the presence of the agent CLIs, executing nothing: the parent
 	// asks for it in a home other users may have written to.
 	StaticDiscovery bool `json:"static_discovery,omitempty"`
+	// AIDiscovery carries the settings and signature catalog of the
+	// ai_discovery operation; the worker cannot read the managed config.
+	AIDiscovery *enterpriseHookWorkerAIDiscovery `json:"ai_discovery,omitempty"`
+}
+
+type enterpriseHookWorkerAIDiscovery struct {
+	Options inventory.UserScanOptions `json:"options"`
+	Catalog []inventory.AISignature   `json:"catalog"`
 }
 
 // enterpriseHookWorkerForeignCleanup is one connector's foreign-hook
@@ -178,7 +195,10 @@ type enterpriseHookWorkerResponse struct {
 	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
 	BlocksDropped int                             `json:"blocks_dropped,omitempty"`
 	BlocksError   string                          `json:"blocks_error,omitempty"`
-	Error         string                          `json:"error,omitempty"`
+	// AIDiscovery is the user's scan report (user-influenced; the guardian
+	// validates it before the gateway reads it).
+	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
+	Error       string                       `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -285,6 +305,16 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			response.BlocksError = err.Error()
 		}
 		return respond(response, 0)
+	case enterpriseHookWorkerOpAIDiscovery:
+		if request.AIDiscovery == nil {
+			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
+		}
+		// End with a partial report rather than be killed at the timeout.
+		scanCtx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerTimeout*3/4)
+		defer cancel()
+		report := inventory.ScanUserHome(scanCtx, filepath.Clean(request.Home), request.User, request.UID,
+			request.AIDiscovery.Options, request.AIDiscovery.Catalog)
+		return respond(enterpriseHookWorkerResponse{AIDiscovery: &report}, 0)
 	default:
 		return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("unknown operation %q", request.Operation)}, 3)
 	}
@@ -349,6 +379,7 @@ var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
+	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
 )
 
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
@@ -362,6 +393,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			return enterpriseHookWorkerResponse{Targets: results}
 		}
 	}
+	removalFailed := false
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -390,6 +422,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = enterpriseHookWorkerRemover(ctx, opts)
 				outcome.Removed = err == nil
 			}
+		case enterpriseHookWorkerModePurge:
+			if removalFailed {
+				err = errors.New("not removed, because a DefenseClaw hook registration of this account was not removed")
+				break
+			}
+			err = enterpriseHookWorkerPurger(ctx, opts)
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}
@@ -401,9 +439,10 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if !outcome.Pending {
 				outcome.Error = err.Error()
 			}
+			removalFailed = removalFailed || target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
 				outcome.Result = &result
 			}
 		}
@@ -753,6 +792,13 @@ var enterpriseHookWorkerRunner = runEnterpriseHookWorker
 // runEnterpriseHookWorkerPool runs one worker per job with bounded
 // parallelism and returns outcomes in job order.
 func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int) []enterpriseHookWorkerOutcome {
+	return runEnterpriseHookWorkerPoolReporting(ctx, jobs, parallelism, nil)
+}
+
+// runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
+// also hands each outcome to done, when set, as soon as its worker ends
+// (concurrently with the other workers).
+func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
 	if parallelism <= 0 {
 		parallelism = enterpriseHookWorkerParallelism
 	}
@@ -767,6 +813,9 @@ func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorke
 			defer func() { <-semaphore }()
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
+			if done != nil {
+				done(outcomes[i])
+			}
 		}(i)
 	}
 	wg.Wait()

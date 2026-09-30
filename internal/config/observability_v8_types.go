@@ -208,7 +208,9 @@ type ObservabilityV8DestinationSource struct {
 	Method              string                                                       `json:"method,omitempty" mapstructure:"method" yaml:"method,omitempty"`
 	Headers             map[string]ObservabilityV8HeaderValue                        `json:"headers,omitempty" mapstructure:"headers" yaml:"headers,omitempty"`
 	TokenEnv            string                                                       `json:"token_env,omitempty" mapstructure:"token_env" yaml:"token_env,omitempty"`
+	TokenCredential     string                                                       `json:"token_credential,omitempty" mapstructure:"token_credential" yaml:"token_credential,omitempty"`
 	BearerEnv           string                                                       `json:"bearer_env,omitempty" mapstructure:"bearer_env" yaml:"bearer_env,omitempty"`
+	BearerCredential    string                                                       `json:"bearer_credential,omitempty" mapstructure:"bearer_credential" yaml:"bearer_credential,omitempty"`
 	Index               string                                                       `json:"index,omitempty" mapstructure:"index" yaml:"index,omitempty"`
 	Source              string                                                       `json:"source,omitempty" mapstructure:"source" yaml:"source,omitempty"`
 	SourceType          string                                                       `json:"sourcetype,omitempty" mapstructure:"sourcetype" yaml:"sourcetype,omitempty"`
@@ -222,9 +224,12 @@ type ObservabilityV8DestinationSource struct {
 }
 
 // ObservabilityV8SecretRef is source-declared secret identity only. Resolution
-// is deliberately outside the pure compiler.
+// is deliberately outside the pure compiler. Exactly one field is set: Env
+// names a key-store entry or environment variable; Credential names a
+// protected credential of a standalone enterprise deployment.
 type ObservabilityV8SecretRef struct {
-	Env string `json:"env" mapstructure:"env" yaml:"env"`
+	Env        string `json:"env,omitempty" mapstructure:"env" yaml:"env,omitempty"`
+	Credential string `json:"credential,omitempty" mapstructure:"credential" yaml:"credential,omitempty"`
 }
 
 // ObservabilityV8HeaderValue is a scalar-or-secret-reference source union.
@@ -250,7 +255,7 @@ func (value *ObservabilityV8HeaderValue) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("header value target is nil")
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return fmt.Errorf("header value must be a string or an object containing only nonempty env")
+		return fmt.Errorf("header value must be a string or an object containing only nonempty env or credential")
 	}
 	var static string
 	if err := json.Unmarshal(data, &static); err == nil {
@@ -260,13 +265,13 @@ func (value *ObservabilityV8HeaderValue) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var secret ObservabilityV8SecretRef
-	if err := decoder.Decode(&secret); err != nil || secret.Env == "" {
-		return fmt.Errorf("header value must be a string or an object containing only nonempty env")
+	if err := decoder.Decode(&secret); err != nil || (secret.Env == "") == (secret.Credential == "") {
+		return fmt.Errorf("header value must be a string or an object containing only nonempty env or credential")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return fmt.Errorf("header value must contain exactly one JSON value")
 	}
-	*value = ObservabilityV8EnvironmentHeader(secret.Env)
+	*value = ObservabilityV8HeaderValue{Secret: &secret}
 	return nil
 }
 
@@ -279,10 +284,15 @@ func (value *ObservabilityV8HeaderValue) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	if node.Kind != yaml.MappingNode || len(node.Content) != 2 ||
-		node.Content[0].Kind != yaml.ScalarNode || node.Content[0].Value != "env" ||
+		node.Content[0].Kind != yaml.ScalarNode ||
+		(node.Content[0].Value != "env" && node.Content[0].Value != "credential") ||
 		node.Content[1].Kind != yaml.ScalarNode || node.Content[1].ShortTag() != "!!str" ||
 		node.Content[1].Value == "" {
-		return fmt.Errorf("header value must be a string or an object containing only nonempty env")
+		return fmt.Errorf("header value must be a string or an object containing only nonempty env or credential")
+	}
+	if node.Content[0].Value == "credential" {
+		*value = ObservabilityV8CredentialHeader(node.Content[1].Value)
+		return nil
 	}
 	*value = ObservabilityV8EnvironmentHeader(node.Content[1].Value)
 	return nil
@@ -294,6 +304,12 @@ func ObservabilityV8StaticHeader(value string) ObservabilityV8HeaderValue {
 
 func ObservabilityV8EnvironmentHeader(name string) ObservabilityV8HeaderValue {
 	return ObservabilityV8HeaderValue{Secret: &ObservabilityV8SecretRef{Env: name}}
+}
+
+// ObservabilityV8CredentialHeader references a protected credential stored
+// with `enterprise secret set`.
+func ObservabilityV8CredentialHeader(name string) ObservabilityV8HeaderValue {
+	return ObservabilityV8HeaderValue{Secret: &ObservabilityV8SecretRef{Credential: name}}
 }
 
 type ObservabilityV8RotationSource struct {

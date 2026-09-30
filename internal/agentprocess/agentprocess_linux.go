@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -38,6 +40,20 @@ func currentBootID() string {
 }
 
 func newLookup() (func(int) (Process, error), func()) { return lookupProc, func() {} }
+
+// linuxClockTicks is USER_HZ, the unit of the start time in /proc/<pid>/stat.
+const linuxClockTicks = 100
+
+// currentClock reads the boot-based clock that /proc/<pid>/stat start times
+// count, in the same ticks.
+func currentClock() (string, int64, bool) {
+	boot := currentBootID()
+	var now unix.Timespec
+	if boot == "" || unix.ClockGettime(unix.CLOCK_BOOTTIME, &now) != nil {
+		return "", 0, false
+	}
+	return boot, now.Nano() / (1_000_000_000 / linuxClockTicks), true
+}
 
 // lookupProc reads /proc/<pid>/stat. The name comes from the executable
 // link, not the command name: the kernel names a process started from a

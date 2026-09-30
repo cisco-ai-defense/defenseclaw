@@ -46,6 +46,12 @@ func validateEnterpriseHookUserTokenKeyLocation(dataDir string) error {
 	return validateEnterpriseWindowsTokenLocation(dataDir, path, "per-user credential key")
 }
 
+// loadEnterpriseHookPendingUserTokenKey: the Windows lifecycle does not
+// rotate the per-user credential key, so no key is ever staged there.
+func loadEnterpriseHookPendingUserTokenKey(string) (string, error) {
+	return "", nil
+}
+
 func alignEnterpriseHookUserTokenKeyOwner(dataDir string) error {
 	path, err := connector.UserScopedTokenKeyPath(dataDir)
 	if err != nil {

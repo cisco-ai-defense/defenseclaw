@@ -254,6 +254,13 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 & 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
 ```
 
+- **What changed (Linux and macOS).** The result lists what `repair`
+  changed: the files it rewrote or whose mode or owner it restored, the
+  services it started because they were not running, DefenseClaw's machine
+  policy entries it rewrote, and the users and agents whose hooks the
+  guardian rewrote. On a healthy deployment it says `nothing to repair`. The
+  `--json` result carries the list as `changes`, and an `ensure` that
+  re-applies the deployment lists its changes the same way.
 - **Linux and macOS, payload installs.** `repair` keeps the installed binaries.
   If they no longer match the deployment record, it stops with
   `payload_invalid`. Run `repair --payload <dir>` with the same release's
@@ -264,8 +271,8 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 - **Deleted accounts (Linux and macOS).** `repair` also removes the guardian
   targets of accounts that no longer exist. Otherwise they stay until the
   enumerator removes them, 10 to 15 minutes after the account is deleted:
-  meanwhile `status` and `verify` show the warning
-  `guardian_target_account_removed` and `reconcile` fails. See
+  meanwhile `status`, `verify` and `reconcile` show the warning
+  `guardian_target_account_removed` and do not fail on it. See
   [New, changed and removed users](/docs/enterprise/enrollment#new-changed-and-removed-users).
 - **Windows.** Use the Setup of the release that is installed. `/ensure` also
   repairs a deployment whose `verify` fails.
@@ -340,6 +347,22 @@ Config, credentials, state, and logs stay unless you purge.
   before you remove the package.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
+- **Registrations left (Linux and macOS).** Each user's registrations are
+  removed as that user. If one cannot be removed, the result has the error
+  `per_user_hooks_remaining` for that user and agent, with the reason, and
+  the uninstall stops before it removes the binaries those registrations run:
+  the deployment record and state stay. Fix the cause, or remove
+  DefenseClaw's entries from that user's agent config, and run the same
+  uninstall again. `ensure` restores the deployment instead.
+- **Per-user state (Linux and macOS).** `--purge` also removes each enrolled
+  user's DefenseClaw folder (`~/.defenseclaw`, with its hook credentials), as
+  that user. It first restores the files of any agent that DefenseClaw
+  changed and still has backups for there, for example one set up by an
+  earlier release. Two things stay: `~/.defenseclaw/foreign-hooks-backup`
+  (the user's own hooks that the foreign-hook policy moved aside) and the
+  hook scripts in `~/.defenseclaw/hooks`, each replaced by a stub that exits
+  0, because an agent that is still running may call it. Delete the folder
+  once the user's agents have restarted.
 - **MDM.** Use `uninstall.sh [--purge]` on Linux and macOS, or `uninstall.ps1`
   on Windows. See [Install with an MDM](/docs/enterprise/mdm).
 - **Windows per-user registrations.** Acting as a user needs that user's
@@ -351,6 +374,11 @@ Config, credentials, state, and logs stay unless you purge.
   who are signed out keep theirs. The result lists them in the
   `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
+- **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem,
+  also removes each enrolled account's `%USERPROFILE%\.defenseclaw`, whether
+  or not the account is signed in. The same two things stay as on Linux and
+  macOS. The `per_user_state_remaining` warning names each folder it could
+  not remove, with the reason.
 
 ```bash title="Linux: remove everything"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json
@@ -370,7 +398,8 @@ it restarts.
    scheduled `ensure` installs DefenseClaw again.
 2. **Keep what you need.** A purge deletes the config, the data directory
    (with the audit database), the guardian state, the lifecycle state and
-   DefenseClaw's log directory. Copy them first. The systemd journal, the
+   DefenseClaw's log directory. Copy them first. On Windows, uninstall also
+   unregisters the `DefenseClaw` event log. The systemd journal, the
    Windows Application event log and `%WINDIR%\Logs\DefenseClaw` (where the
    uninstall run itself is logged) are not removed. See [Logs and events](/docs/enterprise/operations#logs-and-events).
 3. **Uninstall with purge**, as shown in [Uninstall](#uninstall).
@@ -396,6 +425,9 @@ it restarts.
   authorization ledger protects that user, so they stop working on the
   guardian's next pass after the removal. They never reach management
   routes, other connectors, or another user's identity.
+- **Rotate the per-user credentials** on Linux and macOS when a user's
+  credentials may have been copied to another account or host. See
+  [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials).
 - **Keep the evidence.** Copy the audit database and the logs before you
   uninstall or purge anything.
 - **Revoke ACP credentials.** If the user has an ACP enrollment, revoke it

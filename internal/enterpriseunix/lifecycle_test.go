@@ -340,6 +340,52 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// An observability header naming a protected credential is refused before
+// any change until `enterprise secret set` has stored that credential.
+func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
+	h := newTestHost(t, "linux")
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	raw := string(DefaultConfig(h.env.Layout)) + `observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      preset: galileo
+      endpoint: https://api.galileo.ai/otel/traces
+      headers:
+        Galileo-API-Key: {credential: galileo-api-key}
+`
+	if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
+	requireError(t, r, codeConfig)
+	if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, "enterprise secret set --name galileo-api-key") {
+		t.Fatalf("errors = %+v, want the command that stores the credential", r.Errors)
+	}
+	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Fatal("binaries installed despite an unresolved credential reference")
+	}
+
+	// While the installed config references it, the credential is not
+	// removed: the gateway could not start without it.
+	referenced := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "galileo-api-key"))
+	unused := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "unused-key"))
+	for path, body := range map[string]string{h.env.P(h.env.Layout.ConfigPath): raw, referenced: "key", unused: "key"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.env.RemoveSecret("galileo-api-key"); err == nil || !exists(referenced) {
+		t.Fatalf("RemoveSecret of a referenced credential = %v, want a refusal that keeps it", err)
+	}
+	if err := h.env.RemoveSecret("unused-key"); err != nil || exists(unused) {
+		t.Fatalf("RemoveSecret of an unreferenced credential = %v, want it removed", err)
+	}
+}
+
 // A refused ensure (invalid config, or a payload it will not install)
 // changes nothing, so its result reports the running deployment's services
 // and readiness. It printed services [] and readiness all false, which an
@@ -498,6 +544,20 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	requireError(t, r, codeBusy)
 	if r.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("busy exit %d, want %d", r.ExitCode, enterprisestatus.UnixExitBusy)
+	}
+	// A daily verify started during another run reports busy, which its
+	// unit accepts, instead of failing on the half-changed deployment.
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeBusy)
+	if verify.ExitCode != enterprisestatus.UnixExitBusy {
+		t.Fatalf("verify busy exit %d, want %d", verify.ExitCode, enterprisestatus.UnixExitBusy)
+	}
+	unit, err := systemdunits.ReadFile(unitVerifyService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "\nSuccessExitStatus=75\n") {
+		t.Fatalf("a busy verify leaves its unit failed:\n%s", unit)
 	}
 }
 
@@ -781,6 +841,15 @@ func TestStatusAndVerify(t *testing.T) {
 	repair := h.run(Options{Action: ActionRepair})
 	requireOK(t, repair)
 	requireOK(t, h.run(Options{Action: ActionVerify}))
+	// repair says what it repaired, and that there was nothing to repair
+	// on a healthy deployment.
+	changes := strings.Join(repair.Changes, "\n")
+	if !strings.Contains(changes, "rewrote /etc/systemd/system/"+unitGateway) || !strings.Contains(changes, "started "+unitEnumerator+", which was not running") {
+		t.Fatalf("repair does not list what it changed: %q", repair.Changes)
+	}
+	if again := h.run(Options{Action: ActionRepair}); len(again.Changes) != 0 {
+		t.Fatalf("a repair of a healthy deployment lists changes: %q", again.Changes)
+	}
 }
 
 func TestReadSecretValue(t *testing.T) {
@@ -884,7 +953,8 @@ func TestAgentPrefixesReachDiscovery(t *testing.T) {
 
 // A guardian target refused for an agent version without a verified hook
 // contract runs with no DefenseClaw hooks. Status names it and reports the
-// deployment security-incomplete; verify fails.
+// deployment security-incomplete; verify keeps it a warning for that account
+// and fails only for the other failed target.
 func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -928,6 +998,9 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	requireError(t, verify, codeVerify)
 	if verify.SecurityComplete {
 		t.Fatal("verify reports security_complete with an unprotected agent")
+	}
+	if errs := messagesOf(verify.Errors, codeVerify); strings.Contains(errs, "user bob") || !strings.Contains(errs, "user carol") {
+		t.Fatalf("verify errors = %q, want only carol's failed target", errs)
 	}
 }
 

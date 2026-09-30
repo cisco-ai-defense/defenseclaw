@@ -23,6 +23,11 @@ type ObservabilityV8CompileOptions struct {
 	DefaultDataDir      string
 	ConfiguredFilePaths []string
 	Secrets             ObservabilityV8SecretResolver
+	// CredentialsDir is where the default resolver reads protected
+	// credential references. When empty, a standalone enterprise source
+	// uses the secrets directory next to it and any other source resolves
+	// none.
+	CredentialsDir string
 }
 
 type ObservabilityV8CompiledConfig struct {
@@ -95,7 +100,15 @@ func ParseCompileObservabilityV8(
 	if err := normalizeObservabilityV8EffectiveFilePaths(&source); err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
-	if err := validateObservabilityV8Secrets(&source, options.Secrets); err != nil {
+	secrets := options.Secrets
+	if secrets == nil {
+		credentialsDir := options.CredentialsDir
+		if credentialsDir == "" {
+			credentialsDir = standaloneCredentialsDir(sourceName, document.Document)
+		}
+		secrets = observabilityV8RuntimeSecretResolver{credentialsDir: credentialsDir}
+	}
+	if err := validateObservabilityV8Secrets(&source, secrets); err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
 	plan, err := CompileObservabilityV8(&source)

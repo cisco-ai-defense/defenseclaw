@@ -166,6 +166,24 @@ master-token rotation uses `defenseclaw setup rotate-token --yes`, reconciles
 all active connectors, and requires each agent to be restarted afterward.
 Never diagnose auth by printing or comparing token values.
 
+Doctor sends the gateway token only on a connection that the verified gateway
+process accepted. It connects, checks that the operating system attributes the
+accepted socket to the gateway's recorded process and start time, and only then
+writes the request, so a process that takes over the API port after the check
+receives nothing.
+
+Gateway start, restart and stop run the `defenseclaw-gateway` file whose custody
+Doctor checked: only an administrator or your account can change it or its
+directory (on Linux and macOS, every directory above it). Linux runs that file
+through Doctor's open handle to it, Windows keeps it locked against changes,
+renames and replacement until the command finishes, and macOS stops the launch
+if the file or a directory above it changed after the check. The command then
+starts the long-running gateway from that same path, which on Linux and macOS
+relies on the custody above. On Linux and macOS the config and rule-pack
+checks that Doctor and other commands run through `defenseclaw-gateway` need
+the same custody for a binary found on `PATH` or in `~/.local/bin`, and refuse
+one that fails it; `DEFENSECLAW_GATEWAY_BIN` is used as set.
+
 When `.env` was readable by another local principal, Doctor does not simply
 tighten permissions around the exposed value. It crosses a verified
 stop-A/commit-B/start-B boundary and authenticates B before reporting the

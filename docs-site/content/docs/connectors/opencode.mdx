@@ -85,7 +85,7 @@ and judge configuration.
 #### Version contract
 
 The current contract is `opencode-hooks-v1` / bridge `v7`, source-reviewed for
-`>=1.18.10,<1.19.0` with current pin `1.18.31`. The 1.18.31 plugin hook
+`>=1.18.10,<1.19.0` with current pin `1.18.33`. The 1.18.33 plugin hook
 signatures used by this contract (`config`, `event`, `tool.execute.before`,
 `tool.execute.after`) match the 1.18.19 types; a thrown `Error` from
 `tool.execute.before` remains the block surface. A detected OpenCode version outside that bounded
@@ -94,7 +94,7 @@ publication in both observe and action mode unless the explicit exploratory
 drift override is set. Unversioned builds retain the general observe-warning /
 action-fail-closed policy and are not promoted to source-reviewed compatibility.
 The review pins the official
-[`v1.18.31` release](https://github.com/anomalyco/opencode/releases/tag/v1.18.31)
+[`v1.18.33` release](https://github.com/anomalyco/opencode/releases/tag/v1.18.33)
 and its plugin/config/MCP source. This is source
 compatibility evidence only: packaged Setup and authentic official-client
 Windows validation remain unrecorded and `live` remains `false`; supported
@@ -107,7 +107,7 @@ availability does not alter those evidence fields.
 | `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) executes | Inspect tool args; intercept risky commands | `block` → gateway returns `{decision: "deny", reason}`; the bridge shows the block as an error notice in the TUI and `throw`s an `Error`, aborting the tool. The error is the reason itself when it already comes from DefenseClaw (for example "DefenseClaw policy blocked this action (rule …)"); otherwise it says DefenseClaw blocked the tool call under policy and that it did not run, followed by the reason |
 | `tool.execute.after` | Immediately after a tool returns | Capture the official `title`, `output`, and `metadata` result fields for exact-call outcome attribution. **Cannot block or undo the tool** — it already ran. | Awaited observe-only delivery; transport and fail-mode results are advisory and ignored |
 
-OpenCode 1.18.10-v1.18.31 expose `permission.ask`, `chat.params`, `chat.headers`,
+OpenCode 1.18.10-v1.18.33 expose `permission.ask`, `chat.params`, `chat.headers`,
 and experimental chat message/system transformation hooks. DefenseClaw
 intentionally does not implement or claim those ask/context surfaces in this
 focused bridge; `confirm` therefore has no native resumable approval path:
@@ -120,7 +120,7 @@ blocking or reliable delivery for lifecycle events.
 OpenCode runs external plugin hooks sequentially. Its global plugin directory
 is loaded before project plugin directories, so a project plugin can mutate the
 shared `output.args` object after DefenseClaw's global pre-tool hook. Bridge v7
-uses the official v1.18.10-v1.18.31 `plugin_origins` order to detect this condition. It
+uses the official v1.18.10-v1.18.33 `plugin_origins` order to detect this condition. It
 still observes the pre-mutation arguments, but in action mode it refuses to
 return an authoritative allow when any later plugin exists. This is a bounded
 correction, not a plugin-order redesign.
@@ -169,7 +169,7 @@ reported as runtime health.
   </Folder>
 </Files>
 
-DefenseClaw resolves the non-enterprise v1.18.10-v1.18.31 config layers in effective
+DefenseClaw resolves the non-enterprise v1.18.10-v1.18.33 config layers in effective
 order: authenticated remote `.well-known` provenance (typed unverified; never
 fetched offline), global `config.json`/`opencode.json`/`opencode.jsonc`,
 `OPENCODE_CONFIG`, an explicitly pinned project's JSON/JSONC files and
@@ -197,7 +197,7 @@ operator plugin. DefenseClaw excludes that exact managed file from ordinary
 plugin inventory, scans, and blocking. Operator and third-party assets remain
 eligible for their normal inventory and policy flows.
 
-Local discovery follows OpenCode's bounded v1.18.10-v1.18.31 surfaces on
+Local discovery follows OpenCode's bounded v1.18.10-v1.18.33 surfaces on
 Windows, macOS, and Linux:
 
 | Asset | Local sources |

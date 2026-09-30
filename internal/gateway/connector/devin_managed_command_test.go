@@ -106,6 +106,25 @@ func TestDevinUnixStandaloneRegistersTheAdministratorHookCommand(t *testing.T) {
 	if body, err := os.ReadFile(config); err == nil && strings.Contains(string(body), "defenseclaw-hook") {
 		t.Fatalf("teardown left the managed command: %s", body)
 	}
+
+	// A backup captured while the config already held DefenseClaw's
+	// per-user script hooks (an earlier route whose own backup is gone)
+	// put those hooks back on restore; teardown removes them too.
+	if err := conn.Setup(context.Background(), earlier); err != nil {
+		t.Fatalf("earlier Setup again: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(earlier.DataDir, "connector_backups")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), current); err != nil {
+		t.Fatalf("Setup over the earlier hooks: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), current); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if commands := devinConfigCommands(t, config); len(commands) != 0 {
+		t.Fatalf("restoring the backup brought DefenseClaw's hooks back: %v", commands)
+	}
 }
 
 // Every other install keeps its command: per-user, and Windows (which

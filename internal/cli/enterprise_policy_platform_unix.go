@@ -78,6 +78,10 @@ func pinStandaloneManagedEnv() error {
 // or as the target user.
 func enterprisePolicyLiveAvailable() error { return nil }
 
+// enterprisePolicyUnprotectedAgents is the Windows unprotected-agents
+// listing of policy show; Linux and macOS status and verify report them.
+var enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.UnprotectedAgent { return nil }
+
 func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, error) {
 	account, err := user.Lookup(name)
 	if err != nil {

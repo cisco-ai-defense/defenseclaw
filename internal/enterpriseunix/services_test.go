@@ -16,9 +16,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -71,6 +73,68 @@ func (r launchctlPrintRunner) Run(_ context.Context, name string, args ...string
 		}
 	}
 	return CommandResult{ExitCode: 113}, errors.New("launchctl print: exit 113: Could not find service")
+}
+
+// teardownRunner is launchd finishing a bootout after bootout returned: the
+// job stays listed (SIGTERMed) for a few prints, and bootstrap or kickstart
+// fails with EALREADY until it is gone.
+type teardownRunner struct {
+	printsLeft int
+	calls      []string
+}
+
+func (r *teardownRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	r.calls = append(r.calls, args[0])
+	switch args[0] {
+	case "print":
+		if r.printsLeft > 0 {
+			r.printsLeft--
+			return CommandResult{Stdout: []byte("state = SIGTERMed\n")}, nil
+		}
+		return CommandResult{ExitCode: 113}, errors.New("launchctl print: exit 113: Could not find service")
+	case "bootstrap", "kickstart":
+		if r.printsLeft > 0 {
+			return CommandResult{ExitCode: 37}, errors.New("launchctl " + args[0] + ": exit 37: ")
+		}
+	}
+	return CommandResult{}, nil
+}
+
+// A config change on macOS left the gateway unloaded: bootout returned while
+// launchd was still terminating the gateway, and the bootstrap and the
+// kickstart -k fallback both failed with exit 37.
+func TestLaunchdStopWaitsForTeardownBeforeStart(t *testing.T) {
+	gateway := Unit{Name: labelGateway, Kind: "gateway"}
+	restore := launchdTeardownWait
+	defer func() { launchdTeardownWait = restore }()
+
+	runner := &teardownRunner{printsLeft: 3}
+	manager := &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+	if err := manager.Stop(context.Background(), gateway); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background(), gateway); err != nil || contains(runner.calls, "kickstart") {
+		t.Fatalf("start after stop: %v (calls %v), want a bootstrap once the job is gone", err, runner.calls)
+	}
+
+	// Stop gave up waiting: Start waits for its own bootout to finish.
+	launchdTeardownWait = 0
+	runner = &teardownRunner{printsLeft: 2}
+	manager = &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+	_ = manager.Stop(context.Background(), gateway)
+	launchdTeardownWait = time.Minute
+	if err := manager.Start(context.Background(), gateway); err != nil || contains(runner.calls, "kickstart") {
+		t.Fatalf("start after an unfinished stop: %v (calls %v)", err, runner.calls)
+	}
+
+	// A job this manager did not boot out keeps the kickstart fallback, with
+	// no wait.
+	runner = &teardownRunner{printsLeft: 1}
+	manager = &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+	_ = manager.Start(context.Background(), gateway)
+	if !slices.Equal(runner.calls, []string{"bootstrap", "kickstart"}) {
+		t.Fatalf("start of a job it did not stop: calls %v", runner.calls)
+	}
 }
 
 // `enterprise macos status` printed the on-demand apply and verify jobs as

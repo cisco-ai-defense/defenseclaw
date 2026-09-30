@@ -93,12 +93,34 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
 		return
 	}
-	if _, err := enterprisepolicy.PublishWindowsGoOwned(opts, connectors); err != nil {
+	windowsStandaloneGoOwnedPolicyMu.Lock()
+	_, err = enterprisepolicy.PublishWindowsGoOwned(opts, connectors)
+	windowsStandaloneGoOwnedPolicyMu.Unlock()
+	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
 	}
+}
+
+// windowsStandaloneGoOwnedPolicyMu serializes the guardian's writers of the
+// Go-owned machine policy: the reconcile's publish and the OpenCode plugin
+// watch.
+var windowsStandaloneGoOwnedPolicyMu sync.Mutex
+
+// enterpriseHookStandalonePlatformWatch starts, for the life of the watch
+// loop, the guardian's managed OpenCode plugin watch, which restores the
+// plugin right after a standard account changes its attributes instead of
+// at the next pass.
+func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
+	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
+	if !standalone || err != nil || strings.TrimSpace(opts.OpenCodePluginPath) == "" {
+		return
+	}
+	go enterprisepolicy.WatchOpenCodeManagedPlugin(ctx, opts, &windowsStandaloneGoOwnedPolicyMu, func(format string, args ...any) {
+		fmt.Fprintf(stderr, "[hook-guardian] "+format+"\n", args...)
+	})
 }
 
 // enterpriseHookWindowsClaudeVersionFloor is replaceable in tests.
@@ -370,6 +392,7 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 			}
+			recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
 			if err != nil {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
 			}

@@ -301,7 +301,7 @@ for await (const _ of lines) {
   }
 }
 `
-	processCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	processCtx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(processCtx, node, "--input-type=module", "-e", harness, pluginPath)
 	stdin, err := cmd.StdinPipe()

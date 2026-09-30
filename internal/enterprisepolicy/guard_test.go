@@ -920,6 +920,12 @@ func TestGuardScansClaudeFormatFilesOtherAgentsLoad(t *testing.T) {
 	if decision := EvaluateForeignHooks(cursor); !decision.Deny || decision.Findings[0].Scope != ScopeUser {
 		t.Fatalf("cursor loads ~/.claude/settings.json: %+v", decision)
 	}
+	// The Claude Code cleanup removes such a hook first, so its removal is
+	// recorded for every agent that loads the file.
+	settings := filepath.Join(cursor.Home, ".claude", "settings.json")
+	if got := ForeignHookRemovalConnectors(cursor.Home, settings, "claudecode", []string{"claudecode", "codex", "copilot", "cursor", "devin"}); strings.Join(got, ",") != "claudecode,cursor,devin" {
+		t.Fatalf("a removal from ~/.claude/settings.json holds %v", got)
+	}
 
 	copilot := guardRequest(t, "copilot", config.ForeignHooksRemove)
 	writeFile(t, filepath.Join(copilot.Home, ".claude", "settings.json"), foreignClaudeSettings)

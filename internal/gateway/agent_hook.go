@@ -332,6 +332,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
 		ctx = enrichAgentHookContext(ctx, req)
+		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
 			a.hookJudge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
 		}
@@ -646,6 +647,9 @@ func (a *APIServer) finalizeAgentHook(
 	if !req.SuppressCorrelationEmit {
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			if !panicked {
+				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
+			}
 		})
 	}
 	// Every verdict has its audit row, save the exact replay of a delivery
@@ -2122,7 +2126,8 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // sees. OpenHands' terminal tool and agy's run_command report execution
 // controls and model labels next to the command;
 // connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
-// project them onto the plain shell shape when that is exact, and
+// project them onto the plain shell shape when that is exact (as
+// connector.AmpBashTrustedShellArgs does for Amp's Bash "cmd"), and
 // connector.TrustedShellArgs takes the working directory and control
 // arguments out of the other harnesses' shell tools. Text a tool sends to a
 // running process (OpenHands terminal input, agy send_command_input, Hermes
@@ -2148,6 +2153,10 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	case "hermes":
 		if out, ok := connector.HermesTrustedShellArgs(toolName, args); ok {
 			return out, ""
+		}
+	case "amp":
+		if out, dir, ok := connector.AmpBashTrustedShellArgs(toolName, args); ok {
+			return out, dir
 		}
 	}
 	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
@@ -2492,7 +2501,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		verdictAction = agentReviewAction
 	}
 	safeReason = agentVerdictReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
-	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
+	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
 	}
@@ -2621,19 +2630,26 @@ func copilotHookOutput(event, action, rawAction, reason, additional string) map[
 	return nil
 }
 
-func genericHookAdditionalContext(connectorName, rawAction, severity, reason string, wouldBlock bool) string {
+func genericHookAdditionalContext(connectorName, event, mode, rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	// Both branches keep the "a <SEVERITY> <connector> hook finding"
+	// Every branch keeps the "a <SEVERITY> <connector> hook finding"
 	// phrase so telemetry consumers that grep on that prefix (T5.9
 	// finding: earlier revision dropped the "a" from the block path
 	// and consumers keyed on "a HIGH" / "a CRITICAL" stopped matching)
-	// continue to match either shape. The lead clause differs to keep
+	// continue to match any shape. The lead clause differs to keep
 	// the block-mode intent unambiguous ("would block ..." reads
 	// distinctly from "observed ...").
 	lead := "DefenseClaw observed"
-	if wouldBlock {
+	switch {
+	case wouldBlock && mode == "action" && connectorName == "amp" && canonicalEvent(event) == "agentstart":
+		// Amp cannot block a prompt, so in action mode this hidden notice
+		// is what DefenseClaw does about a blocking rule. Saying it "would
+		// block this in action mode" read as observe mode; tell the model
+		// the request must not be carried out instead.
+		lead = "This request matched a DefenseClaw blocking rule and must not be carried out:"
+	case wouldBlock:
 		lead = "DefenseClaw would block this in action mode:"
 	}
 	finding := fmt.Sprintf("a %s %s hook finding", severity, connectorName)

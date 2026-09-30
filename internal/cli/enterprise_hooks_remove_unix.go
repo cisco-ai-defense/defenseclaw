@@ -19,8 +19,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -34,9 +36,16 @@ import (
 // connectors edit only DefenseClaw-owned entries, so the user's own hooks
 // and settings stay. The eligible accounts are checked too, for per-user
 // registrations of machine-policy connectors that no manifest row names
-// any more (ones an earlier route left).
+// any more (ones an earlier route left), and the guardian's pending per-user
+// cleanups (targets the manifest stopped enrolling) are finished. With
+// --purge (uninstall --purge) each enrolled user's worker then removes that
+// user's DefenseClaw per-user state, once every removal for the user
+// succeeded.
 
-var enterpriseHooksRemoveAllManifest string
+var (
+	enterpriseHooksRemoveAllManifest string
+	enterpriseHooksRemoveAllPurge    bool
+)
 
 var enterpriseHooksRemoveAllCmd = &cobra.Command{
 	Use:    "remove-all",
@@ -49,6 +58,8 @@ var enterpriseHooksRemoveAllCmd = &cobra.Command{
 func init() {
 	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
 		"YAML manifest of per-user hook targets")
+	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
+		"Also remove each enrolled user's DefenseClaw per-user state")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
 	enterpriseHooksCmd.AddCommand(enterpriseHooksRemoveAllCmd)
 }
@@ -59,6 +70,10 @@ type enterpriseHooksRemoveAllReport struct {
 	Removed int      `json:"removed"`
 	Pending []string `json:"pending,omitempty"`
 	Failed  []string `json:"failed,omitempty"`
+	// Purged names the users whose per-user state --purge removed, and
+	// StateFailed ("user: reason") the ones whose state stayed.
+	Purged      []string `json:"purged,omitempty"`
+	StateFailed []string `json:"state_failed,omitempty"`
 }
 
 func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
@@ -104,6 +119,10 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		report.Failed = append(report.Failed, "eligible accounts: "+boundedString(err.Error(), 256))
 	}
 	addEnterpriseHookLeftoverRemovals(jobs, manifest, accounts)
+	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
+	if enterpriseHooksRemoveAllPurge {
+		addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)
+	}
 	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
 		for _, result := range run.Response.Targets {
@@ -112,15 +131,30 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		for _, target := range run.Job.Request.Targets {
 			label := run.Job.Account.User + "/" + target.Options.ConnectorName
 			result, ok := answered[target.Index]
+			if target.Mode == enterpriseHookWorkerModePurge {
+				switch {
+				case ok && result.OK:
+					report.Purged = append(report.Purged, run.Job.Account.User)
+				case ok && result.Pending:
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": the home is not available")
+				case ok:
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedWorkerError(result.Error))
+				case run.Err != nil:
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedWorkerError(run.Err.Error()))
+				default:
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": the worker did not answer")
+				}
+				continue
+			}
 			switch {
 			case !ok && run.Err != nil:
-				report.Failed = append(report.Failed, label+": "+boundedString(run.Err.Error(), 256))
+				report.Failed = append(report.Failed, label+": "+boundedWorkerError(run.Err.Error()))
 			case !ok:
 				report.Failed = append(report.Failed, label+": the worker did not answer")
 			case result.Pending:
 				report.Pending = append(report.Pending, label)
 			case !result.OK:
-				report.Failed = append(report.Failed, label+": "+boundedString(result.Error, 256))
+				report.Failed = append(report.Failed, label+": "+boundedWorkerError(result.Error))
 			case target.Mode == enterpriseHookWorkerModeRemoveLeftover && !result.Removed:
 				// Nothing of DefenseClaw's was registered there.
 			default:
@@ -130,6 +164,8 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	sort.Strings(report.Pending)
 	sort.Strings(report.Failed)
+	sort.Strings(report.Purged)
+	sort.Strings(report.StateFailed)
 	report.OK = len(report.Failed) == 0
 	return report, nil
 }
@@ -238,4 +274,126 @@ func addEnterpriseHookLeftoverRemovals(jobs map[int]*enterpriseHookWorkerJob, ma
 			index++
 		}
 	}
+}
+
+// runEnterpriseHookPendingCleanups finishes the guardian's pending per-user
+// cleanups (registrations of targets the manifest no longer enrolls, which
+// the guardian retries while it runs; the uninstall stopped it), as each
+// user, and returns the uids whose cleanup failed.
+func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob) map[int]bool {
+	failed := map[int]bool{}
+	if cfg == nil {
+		return failed
+	}
+	pending, err := loadEnterpriseHookUserCleanups(cfg.DataDir)
+	if err != nil {
+		report.Failed = append(report.Failed, "pending per-user cleanups: "+boundedString(err.Error(), 256))
+		return failed
+	}
+	resolver := enterprisehooks.StandaloneResolver()
+	for _, entry := range pending {
+		name := strings.ToLower(strings.TrimSpace(entry.Connector))
+		if job := jobs[entry.UID]; job != nil && enterpriseHookJobRemoves(job, name) {
+			continue // a manifest row still names it
+		}
+		label := strings.TrimSpace(entry.User) + "/" + name
+		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
+		switch outcome {
+		case enterpriseHookUserCleanupDone:
+			report.Removed++
+		case enterpriseHookUserCleanupPending:
+			report.Pending = append(report.Pending, label)
+		default:
+			reason := "the cleanup failed"
+			if err != nil {
+				reason = boundedString(err.Error(), 256)
+			}
+			report.Failed = append(report.Failed, label+": "+reason)
+			failed[entry.UID] = true
+		}
+	}
+	return failed
+}
+
+// enterpriseHookJobRemoves reports whether job already removes connector.
+func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bool {
+	for _, target := range job.Request.Targets {
+		if target.Mode == enterpriseHookWorkerModeRemove && target.Options.ConnectorName == connector {
+			return true
+		}
+	}
+	return false
+}
+
+// addEnterpriseHookStatePurges ends the job of every account the manifest
+// enrolls with the purge of that account's DefenseClaw per-user state (each
+// data directory its rows name), except for the accounts in skip, whose
+// pending cleanup failed.
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) {
+	dataDirs := map[int][]string{}
+	for _, target := range manifest.Targets {
+		if target.UID == nil {
+			continue
+		}
+		job := jobs[*target.UID]
+		if job == nil {
+			continue
+		}
+		dataDir := strings.TrimSpace(target.DataDir)
+		if dataDir == "" {
+			dataDir = filepath.Join(job.Account.Home, ".defenseclaw")
+		}
+		if !slices.Contains(dataDirs[*target.UID], dataDir) {
+			dataDirs[*target.UID] = append(dataDirs[*target.UID], dataDir)
+		}
+	}
+	index := 0
+	for _, job := range jobs {
+		for _, target := range job.Request.Targets {
+			index = max(index, target.Index+1)
+		}
+	}
+	for uid, dirs := range dataDirs {
+		if skip[uid] {
+			continue
+		}
+		job := jobs[uid]
+		for _, dataDir := range dirs {
+			job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+				Index: index,
+				Mode:  enterpriseHookWorkerModePurge,
+				Options: enterpriseHookWorkerOptions{
+					UserHome: job.Account.Home,
+					OwnerUID: job.Account.UID,
+					OwnerGID: job.Account.GID,
+					DataDir:  dataDir,
+				},
+			})
+			index++
+		}
+	}
+}
+
+// workerErrorMaxBytes bounds one worker error in the remove-all report.
+const workerErrorMaxBytes = 512
+
+// boundedWorkerError bounds a worker's error for the report. A wrapped error
+// ends with its cause (the OS error), so an oversized one keeps its start and
+// its end, cut at rune boundaries, instead of stopping in the middle of a
+// path before the cause.
+func boundedWorkerError(value string) string {
+	value = boundedString(value, len(value))
+	if len(value) <= workerErrorMaxBytes {
+		return value
+	}
+	const gap = " ... "
+	head := (workerErrorMaxBytes - len(gap)) / 3
+	tail := len(value) - (workerErrorMaxBytes - len(gap) - head)
+	for head > 0 && !utf8.RuneStart(value[head]) {
+		head--
+	}
+	for tail < len(value) && !utf8.RuneStart(value[tail]) {
+		tail++
+	}
+	return value[:head] + gap + value[tail:]
 }

@@ -356,18 +356,18 @@ func TestWindowsEnterpriseStandaloneActionReportsSchemaTwo(t *testing.T) {
 		return nil
 	}
 	var gotArgs []string
+	statusBody, _ := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "status", "installed": true,
+		"gateway_service": "DefenseClawGateway", "gateway_service_state": "running",
+		"guardian_service": "DefenseClawHookGuardian", "guardian_service_state": "running",
+		"enumerator_service": "DefenseClawHookEnumerator", "enumerator_service_state": "running",
+		"sensor_helper_service": "DefenseClawSensorHelper", "sensor_helper_service_state": "running",
+		"gateway_ready": true, "guardian_ready": true, "security_complete": true,
+		"installed_version": "1.4.0", "errors": []string{},
+	})
 	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
 		gotArgs = args
-		body, _ := json.Marshal(map[string]any{
-			"schema_version": 1, "ok": true, "action": "status", "installed": true,
-			"gateway_service": "DefenseClawGateway", "gateway_service_state": "running",
-			"guardian_service": "DefenseClawHookGuardian", "guardian_service_state": "running",
-			"enumerator_service": "DefenseClawHookEnumerator", "enumerator_service_state": "running",
-			"sensor_helper_service": "DefenseClawSensorHelper", "sensor_helper_service_state": "running",
-			"gateway_ready": true, "guardian_ready": true, "security_complete": true,
-			"installed_version": "1.4.0", "errors": []string{},
-		})
-		return windowsEnterpriseStandaloneRun{Output: append([]byte("WARNING: noise\n"), body...)}, nil
+		return windowsEnterpriseStandaloneRun{Output: append([]byte("WARNING: noise\n"), statusBody...)}, nil
 	}
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string {
 		return `C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`
@@ -392,6 +392,38 @@ func TestWindowsEnterpriseStandaloneActionReportsSchemaTwo(t *testing.T) {
 		len(result.Services) != 4 || !result.Readiness.Enumerator || result.InstalledVersion != "1.4.0" ||
 		result.LogPath == "" {
 		t.Fatalf("result %+v", result)
+	}
+
+	// A repair refused, or a verify that failed, before it read the host
+	// reports the deployment as status reads it, with the failure as its
+	// error, not as uninstalled.
+	refusal := "deployment managed-hook activation evidence does not bind installed targets.yaml"
+	for _, action := range []string{"repair", "verify"} {
+		windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+			if containsString(args, "Status") {
+				return windowsEnterpriseStandaloneRun{Output: statusBody}, nil
+			}
+			body, _ := json.Marshal(map[string]any{"schema_version": 1, "ok": false, "action": action, "error": refusal})
+			return windowsEnterpriseStandaloneRun{Output: body, ExitCode: 1603}, nil
+		}
+		stdout.Reset()
+		if err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs(action, opts)); err == nil {
+			t.Fatalf("a refused %s succeeded", action)
+		}
+		result = enterprisestatus.Result{}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("decode %q: %v", stdout.String(), err)
+		}
+		// Verify also reports this computer's own findings (an Amp machine
+		// folder, for one), so look for the refusal among the errors.
+		refused := false
+		for _, message := range result.Errors {
+			refused = refused || strings.Contains(message.Message, refusal)
+		}
+		if result.OK || !result.Installed || result.InstalledVersion != "1.4.0" || len(result.Services) != 4 ||
+			!result.Readiness.Guardian || !refused {
+			t.Fatalf("refused %s result %+v", action, result)
+		}
 	}
 }
 
@@ -800,9 +832,16 @@ func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 }
 
 func TestParseWindowsEnterpriseInstallerReportMarksStatelessFailures(t *testing.T) {
-	failure, err := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`))
-	if err != nil || !failure.probeFailed {
-		t.Fatalf("failure document %+v, %v", failure, err)
+	for _, body := range []string{
+		`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`,
+		// A refused standalone repair carries its recovery evidence, not the
+		// deployment state.
+		`{"schema_version":1,"ok":false,"action":"repair","transaction_pending":false,"error":"x","errors":["x"]}`,
+	} {
+		failure, err := parseWindowsEnterpriseInstallerReport([]byte(body))
+		if err != nil || !failure.probeFailed {
+			t.Fatalf("failure document %s: %+v, %v", body, failure, err)
+		}
 	}
 	for _, body := range []string{
 		`{"schema_version":1,"ok":false,"action":"status","installed":false,"transaction_pending":false,"errors":[]}`,
@@ -855,17 +894,19 @@ func TestWindowsEnterpriseEnsureReplansAfterLosingAnInstallRace(t *testing.T) {
 		t.Fatalf("warnings %+v", result.Warnings)
 	}
 
-	// A second loss is reported, not retried forever.
+	// A second loss is reported, not retried forever; the result reads the
+	// deployment state with one status probe.
 	stub = &ensureStub{t: t, replies: []map[string]any{
 		absent,
 		{"schema_version": 1, "ok": false, "action": "install", "error": already, "errors": []string{already}},
 		absent,
 		{"schema_version": 1, "ok": false, "action": "install", "error": already, "errors": []string{already}},
+		installedStatus("status"),
 	}}
 	stub.install(t)
 	stdout.Reset()
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
-	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 4 {
+	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 5 || stub.calls[4][1] != "Status" {
 		t.Fatalf("exit %d after %d runs (%v)", got, len(stub.calls), err)
 	}
 }
@@ -1213,6 +1254,17 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 
 	if got := warnings(base + `,"user_registrations_removed":2,"user_registrations_pending":[],"user_registrations_failed":[]}`); len(got) != 0 {
 		t.Fatalf("a complete cleanup warned: %+v", got)
+	}
+	// A purge names the per-user folder each enrolled account keeps.
+	purged, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_remaining":["alice (` + sid + `): C:\\Users\\alice\\.defenseclaw"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	purge := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(purge, &windowsEnterpriseLifecycleOptions{purge: true}, purged, windowsEnterpriseStandaloneRun{})
+	if len(purge.Warnings) != 1 || purge.Warnings[0].Code != "per_user_state_remaining" ||
+		!strings.Contains(purge.Warnings[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
+		t.Fatalf("purge warnings = %+v", purge.Warnings)
 	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)

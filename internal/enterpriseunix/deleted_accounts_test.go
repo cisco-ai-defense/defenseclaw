@@ -86,6 +86,11 @@ func TestRepairRemovesTheTargetsOfDeletedAccounts(t *testing.T) {
 			if !strings.Contains(removed, "no longer exist: carol/amp") || !strings.HasPrefix(kept, "bob: account not found") {
 				t.Fatalf("repair warnings = %+v", repair.Warnings)
 			}
+			// It is one of the changes, so the repair does not also say
+			// there was nothing to repair.
+			if !strings.Contains(strings.Join(repair.Changes, "\n"), "deleted accounts: carol/amp") {
+				t.Fatalf("repair changes = %q", repair.Changes)
+			}
 			for _, unit := range units {
 				if !h.services.isActive(unit) {
 					t.Fatalf("%s was not started again after repair", unit)

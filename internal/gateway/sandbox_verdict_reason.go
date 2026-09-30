@@ -384,7 +384,7 @@ func (a *APIServer) renderSandboxVerdict(
 	case "codex":
 		resp.AdditionalContext = codexAdditionalContext(resp.RawAction, resp.Severity, plain, resp.Mode, resp.WouldBlock)
 	default:
-		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
+		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, req.HookEventName, resp.Mode, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
 	}
 	resp.HookOutput = sandboxHookOutput(ctx, profile, req, rawBody, payload, cc, resp)
 	return resp

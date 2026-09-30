@@ -173,54 +173,62 @@ func analyzeWithRedirectTargets(input Input, twinCommand string) (Facts, redirec
 // DynamicRedirectTargetReduction returns a complete view of a partial POSIX
 // action whose only uncertainty is a redirect target the shell expands at
 // run time ("> ~/out.txt", "> $HOME/out.txt", "> out-*.txt"), with those
-// redirects left out. facts must be Analyze(input).
+// redirects left out, and twin, the complete analysis the view was cut from.
+// && and || lists in the action are read as sequences, as
+// ShortCircuitListReduction reads them. facts must be Analyze(input).
 //
-// The view is the analysis of a twin of the command in which every such
-// target is a static placeholder path, without the placeholders' redirect
-// and path facts. It carries everything a complete analysis derives,
-// including the child commands of wrappers such as sudo, env and sh -c and
-// the write operations and data flows of each redirect. It differs from the
-// action in the dropped redirect and path facts (the action has more), and
-// in facts that only the target's real path could produce. A caller may
-// count a semantic match on it only for an expression whose match more
-// redirects and paths cannot undo (semantic.Program.RedirectReductionSafe),
-// and a non-match on it proves nothing about the action.
+// twin is the analysis of a twin of the command in which every such target
+// is a static placeholder path; the view is twin without the placeholders'
+// redirect and path facts. The view carries everything a complete analysis
+// derives, including the child commands of wrappers such as sudo, env and
+// sh -c and the write operations and data flows of each redirect. It differs
+// from the action in the dropped redirect and path facts (the action has
+// more), and in facts that only the target's real path could produce. A
+// caller may count a semantic match on it only for an expression whose match
+// more redirects and paths cannot undo (semantic.Program.RedirectReductionSafe),
+// and a non-match on it proves nothing about the action. A Go check written
+// for complete facts may read redirects and paths in any way, so a caller
+// counts it only when it holds on both the view and twin.
 //
 // The view is unavailable unless every runtime-expanded target is a file
 // path (it starts with ~ or $HOME/, or it expands only as a filename
-// pattern), the twin analysis is complete, every command in it is a plain
+// pattern), the twin analysis is complete (so the action's other parse
+// issues came from those targets alone), every command in it is a plain
 // POSIX process with a static argv and certain control flow, and no other
 // fact of the twin carries a placeholder.
-func DynamicRedirectTargetReduction(input Input, facts Facts) (view Facts, ok bool) {
+func DynamicRedirectTargetReduction(input Input, facts Facts) (view, twin Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
-			view, ok = Facts{}, false
+			view, twin, ok = Facts{}, Facts{}, false
 		}
 	}()
-	if facts.Parse.Status != StatusPartial || len(facts.Parse.Issues) != 1 ||
-		facts.Parse.Issues[0] != IssueDynamicWord || len(facts.Commands) == 0 {
-		return Facts{}, false
+	if facts.Parse.Status != StatusPartial || len(facts.Commands) == 0 ||
+		!containsIssue(facts.Parse.Issues, IssueDynamicWord) {
+		return Facts{}, Facts{}, false
 	}
 	original, capture := analyzeWithRedirectTargets(input, "")
 	if original.Parse.Status != StatusPartial {
-		return Facts{}, false
+		return Facts{}, Facts{}, false
+	}
+	if sequence, ok := shortCircuitListSequence(capture.source); ok {
+		_, capture = analyzeWithRedirectTargets(input, sequence)
 	}
 	twinSource, placeholders, ok := capture.twin()
 	if !ok {
-		return Facts{}, false
+		return Facts{}, Facts{}, false
 	}
 	twin, twinCapture := analyzeWithRedirectTargets(input, twinSource)
 	if !twin.Authoritative() || len(twin.Parse.Issues) != 0 ||
 		twin.Parse.Dialect != facts.Parse.Dialect || len(twin.Commands) == 0 ||
 		len(twinCapture.spans) != 0 || twinCapture.unsafe {
-		return Facts{}, false
+		return Facts{}, Facts{}, false
 	}
 	seen := make(map[string]bool, len(placeholders))
 	commands := cloneCommands(twin.Commands)
 	for index := range commands {
 		command := &commands[index]
 		if !plainPOSIXProcess(*command) {
-			return Facts{}, false
+			return Facts{}, Facts{}, false
 		}
 		kept := make([]RedirectFact, 0, len(command.Redirects))
 		for _, redirect := range command.Redirects {
@@ -233,7 +241,7 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view Facts, ok bo
 		command.Redirects = kept
 	}
 	if len(seen) != len(placeholders) {
-		return Facts{}, false
+		return Facts{}, Facts{}, false
 	}
 	paths := make([]PathFact, 0, len(twin.Paths))
 	for _, path := range twin.Paths {
@@ -245,9 +253,9 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view Facts, ok bo
 	view.Commands = commands
 	view.Paths = paths
 	if mentionsString(reflect.ValueOf(view), dynamicRedirectPlaceholderPrefix, 0) {
-		return Facts{}, false
+		return Facts{}, Facts{}, false
 	}
-	return view, true
+	return view, twin, true
 }
 
 // plainPOSIXProcess reports whether command is a POSIX process with a static

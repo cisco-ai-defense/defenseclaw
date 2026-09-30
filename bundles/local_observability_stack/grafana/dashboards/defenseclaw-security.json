@@ -906,7 +906,7 @@
           }
         },
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)|hook_decision\"",
           "refId": "B",
           "datasource": {
             "type": "loki",

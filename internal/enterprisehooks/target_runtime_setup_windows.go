@@ -137,12 +137,28 @@ type windowsManagedRuntimeCleanupFileContract uint8
 const (
 	windowsManagedRuntimeCleanupCanonicalFile windowsManagedRuntimeCleanupFileContract = iota + 1
 	windowsManagedRuntimeCleanupGatewayFile
+	// windowsManagedRuntimeCleanupOwnedLockFile is a lock the connector code
+	// creates as the account (connector.withOwnedFileLock): owned by the
+	// account, with a protected DACL of full control for the account,
+	// LocalSystem and Administrators only. The canonical file DACL is also
+	// accepted, for a lock a later pass canonicalized.
+	windowsManagedRuntimeCleanupOwnedLockFile
 )
+
+// windowsManagedRuntimeCleanupOwnedLocks are the root leaves the connector
+// code creates with withOwnedFileLock's owner-only descriptor.
+var windowsManagedRuntimeCleanupOwnedLocks = map[string]struct{}{
+	".hermes-lifecycle.lock":       {},
+	".hook-api-token-publish.lock": {},
+}
 
 type windowsManagedRuntimeCleanupSpec struct {
 	rootFiles            map[string]windowsManagedRuntimeCleanupFileContract
 	hookFiles            map[string]windowsManagedRuntimeCleanupFileContract
 	generationConnectors map[string]struct{}
+	// backupFiles holds, per connector, the leaves of its
+	// connector_backups\<connector> directory.
+	backupFiles map[string]map[string]windowsManagedRuntimeCleanupFileContract
 }
 
 var (
@@ -481,32 +497,133 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(row.Connector))
-		switch name {
-		case "codex", "cursor", "claudecode":
-			spec.hookFiles[".hookcfg."+name] = windowsManagedRuntimeCleanupCanonicalFile
-			spec.hookFiles[".hook-"+name+".token"] = windowsManagedRuntimeCleanupCanonicalFile
-			spec.generationConnectors[name] = struct{}{}
-		case "":
+		if name == "" {
 			return nil, fmt.Errorf("enterprise hooks: absent-baseline cleanup target %d has no connector", index)
-		default:
+		}
+		files, ok := windowsManagedRuntimeCleanupConnectors[name]
+		if !ok {
 			return nil, fmt.Errorf("enterprise hooks: no bounded absent-baseline cleanup contract for connector %q", row.Connector)
 		}
-		if name == "claudecode" {
-			for _, leaf := range []string{
-				"_hardening.sh",
-				"inspect-tool.sh",
-				"inspect-request.sh",
-				"inspect-response.sh",
-				"inspect-tool-response.sh",
-				"claude-code-hook.sh",
-			} {
-				spec.hookFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+		for _, leaf := range files.root {
+			spec.rootFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+			if _, lock := windowsManagedRuntimeCleanupOwnedLocks[leaf]; lock {
+				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupOwnedLockFile
 			}
+		}
+		for _, leaf := range files.hooks {
+			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+		}
+		if files.generation {
+			spec.generationConnectors[name] = struct{}{}
+		}
+		if len(files.backups) > 0 {
+			if spec.backupFiles == nil {
+				spec.backupFiles = make(map[string]map[string]windowsManagedRuntimeCleanupFileContract)
+			}
+			backups := make(map[string]windowsManagedRuntimeCleanupFileContract, len(files.backups))
+			for _, leaf := range files.backups {
+				backups[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+			}
+			spec.backupFiles[name] = backups
 		}
 		specs[key] = spec
 	}
 	return specs, nil
 }
+
+// windowsManagedRuntimeCleanupConnectorFiles is the bounded footprint one
+// connector's managed install writes into a ~\.defenseclaw that the same
+// transaction created (an absent baseline): leaves in the root, in hooks,
+// and in the connector's own connector_backups\<connector> records, and
+// whether it publishes immutable runtime generations. Rollback deletes
+// exactly these names, each only with the canonical target-owned owner,
+// DACL and single link; any other entry (an account's own file, the
+// foreign-hook backups of displaced user hooks, a noncanonical inode)
+// refuses the whole root.
+type windowsManagedRuntimeCleanupConnectorFiles struct {
+	root       []string
+	hooks      []string
+	backups    []string
+	generation bool
+}
+
+// windowsManagedRuntimeCleanupBackupDir holds the per-connector config
+// backup records (connector.managedFileBackupPath).
+const windowsManagedRuntimeCleanupBackupDir = "connector_backups"
+
+// windowsManagedRuntimeSharedHookScripts are the shell hook scripts and
+// helper every script-rendering connector writes into hooks.
+var windowsManagedRuntimeSharedHookScripts = []string{
+	"_hardening.sh",
+	"inspect-tool.sh",
+	"inspect-request.sh",
+	"inspect-response.sh",
+	"inspect-tool-response.sh",
+}
+
+func windowsManagedRuntimeRuntimeLeaves(name string, extra ...string) []string {
+	return append([]string{".hookcfg." + name, ".hook-" + name + ".token"}, extra...)
+}
+
+// windowsManagedRuntimeCleanupConnectors lists every connector a Windows
+// managed manifest can enroll. codex, cursor and claudecode are machine
+// policy rows; the rest are the standalone per-user connectors
+// (WindowsStandalonePerUserConnectorNames). Copilot, and OpenCode while its
+// machine policy is in force, write only the per-user runtime
+// (install_windows_runtime_only.go). The other per-user rows also render
+// their hook scripts or plugin token, record the guardian-selected
+// executable (agent_selection.json) and back up the agent file they patch.
+var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCleanupConnectorFiles{
+	"codex":  {hooks: windowsManagedRuntimeRuntimeLeaves("codex"), generation: true},
+	"cursor": {hooks: windowsManagedRuntimeRuntimeLeaves("cursor"), generation: true},
+	"claudecode": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("claudecode", append([]string{"claude-code-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		generation: true,
+	},
+	"copilot": {hooks: windowsManagedRuntimeRuntimeLeaves("copilot"), generation: true},
+	"antigravity": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("antigravity", append([]string{"antigravity-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"hooks.json.json"},
+		generation: true,
+	},
+	"devin": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("devin", append([]string{"devin-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"config.json"},
+		generation: true,
+	},
+	"hermes": {
+		root:       []string{".hermes-lifecycle.lock", "agent_selection.json", "agent_selection.json.lock"},
+		hooks:      windowsManagedRuntimeRuntimeLeaves("hermes", append([]string{"hermes-hook.sh", "hermes-direct-native-state.json"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"config.yaml.json", "shell-hooks-allowlist.json.json"},
+		generation: true,
+	},
+	"opencode": {
+		root:       []string{"agent_selection.json", "agent_selection.json.lock", ".hook-api-token-publish.lock"},
+		hooks:      windowsManagedRuntimeRuntimeLeaves("opencode"),
+		backups:    []string{"config.json"},
+		generation: true,
+	},
+	"amp": {
+		root:    []string{"agent_selection.json", "agent_selection.json.lock", ".hook-api-token-publish.lock"},
+		hooks:   []string{".hook-amp.token"},
+		backups: []string{"config.json"},
+	},
+}
+
+// windowsManagedRuntimeCleanupLeaves is every leaf name the cleanup
+// contracts can open below the root.
+var windowsManagedRuntimeCleanupLeaves = func() map[string]struct{} {
+	leaves := map[string]struct{}{windowsManagedRuntimeCleanupBackupDir: {}}
+	for name, files := range windowsManagedRuntimeCleanupConnectors {
+		leaves[name] = struct{}{}
+		for _, group := range [][]string{files.root, files.hooks, files.backups} {
+			for _, leaf := range group {
+				leaves[leaf] = struct{}{}
+			}
+		}
+	}
+	return leaves
+}()
 
 func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (windowsManagedRuntimeTarget, error) {
 	home, target, err := validateWindowsEnterpriseHome(userHome, rawSID)
@@ -1483,15 +1600,14 @@ func validateWindowsManagedRuntimeLeaf(value string) error {
 	if _, _, ok := parseWindowsManagedRuntimeBundleLeaf(value); ok {
 		return nil
 	}
+	if _, ok := windowsManagedRuntimeCleanupLeaves[value]; ok {
+		return nil
+	}
 	for _, leaf := range []string{
 		"hooks",
 		"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
 		"hook_contract_lock.json", "hook_contract_lock.json.lock",
 		".token", ".hookcfg", ".hookcfg.lock",
-		".hookcfg.codex", ".hookcfg.claudecode", ".hookcfg.cursor",
-		".hook-codex.token", ".hook-claudecode.token", ".hook-cursor.token",
-		"_hardening.sh", "inspect-tool.sh", "inspect-request.sh",
-		"inspect-response.sh", "inspect-tool-response.sh", "claude-code-hook.sh",
 	} {
 		if value == leaf {
 			return nil
@@ -1595,28 +1711,49 @@ type windowsManagedRuntimePinnedCleanupFile struct {
 	contract windowsManagedRuntimeCleanupFileContract
 }
 
+// windowsManagedRuntimePinnedCleanupDir is one pinned subdirectory below the
+// root: hooks, connector_backups, or one connector_backups\<connector>.
+type windowsManagedRuntimePinnedCleanupDir struct {
+	parent windows.Handle
+	name   string
+	path   string
+	label  string
+	handle windows.Handle
+	id     string
+	names  map[string]struct{}
+	files  []*windowsManagedRuntimePinnedCleanupFile
+}
+
 type windowsManagedRuntimePinnedCleanupTree struct {
 	rootNames map[string]struct{}
 	rootFiles []*windowsManagedRuntimePinnedCleanupFile
-	hook      windows.Handle
-	hookID    string
-	hookNames map[string]struct{}
-	hookFiles []*windowsManagedRuntimePinnedCleanupFile
+	// dirs lists every pinned subdirectory, each one after its parent.
+	dirs []*windowsManagedRuntimePinnedCleanupDir
+}
+
+func (tree *windowsManagedRuntimePinnedCleanupTree) files() []*windowsManagedRuntimePinnedCleanupFile {
+	files := append([]*windowsManagedRuntimePinnedCleanupFile(nil), tree.rootFiles...)
+	for _, dir := range tree.dirs {
+		files = append(files, dir.files...)
+	}
+	return files
 }
 
 func (tree *windowsManagedRuntimePinnedCleanupTree) close() {
 	if tree == nil {
 		return
 	}
-	for _, file := range append(tree.rootFiles, tree.hookFiles...) {
+	for _, file := range tree.files() {
 		if file != nil && file.handle != 0 {
 			_ = windows.CloseHandle(file.handle)
 			file.handle = 0
 		}
 	}
-	if tree.hook != 0 {
-		_ = windows.CloseHandle(tree.hook)
-		tree.hook = 0
+	for index := len(tree.dirs) - 1; index >= 0; index-- {
+		if dir := tree.dirs[index]; dir.handle != 0 {
+			_ = windows.CloseHandle(dir.handle)
+			dir.handle = 0
+		}
 	}
 }
 
@@ -1643,17 +1780,23 @@ func removeWindowsManagedRuntimeRootContents(
 	// deletion. Existing data writers conflict with read-only sharing. After
 	// preflight, the root namespace is changed through that same handle to the
 	// plan's unforgeable marker descriptor, closing the path-based create window
-	// before any known inode is deleted. The pinned hooks handle rejects a
-	// pre-existing or newly opened FILE_ADD/DELETE-capable directory handle.
-	if err := requireWindowsManagedRuntimePinnedNames(root, tree.rootNames, "managed runtime root"); err != nil {
-		return err
-	}
-	if tree.hook != 0 {
-		if err := requireWindowsManagedRuntimePinnedNames(tree.hook, tree.hookNames, "managed hooks directory"); err != nil {
+	// before any known inode is deleted. The pinned subdirectory handles reject
+	// a pre-existing or newly opened FILE_ADD/DELETE-capable directory handle.
+	requireNames := func() error {
+		if err := requireWindowsManagedRuntimePinnedNames(root, tree.rootNames, "managed runtime root"); err != nil {
 			return err
 		}
+		for _, dir := range tree.dirs {
+			if err := requireWindowsManagedRuntimePinnedNames(dir.handle, dir.names, dir.label); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	for _, file := range append(append([]*windowsManagedRuntimePinnedCleanupFile(nil), tree.rootFiles...), tree.hookFiles...) {
+	if err := requireNames(); err != nil {
+		return err
+	}
+	for _, file := range tree.files() {
 		identity, err := validateWindowsManagedRuntimeCleanupFileHandle(file.handle, target, file.contract, file.label)
 		if err != nil || identity != file.identity {
 			return fmt.Errorf("enterprise hooks: managed runtime cleanup file %q changed after preflight", file.name)
@@ -1662,13 +1805,12 @@ func removeWindowsManagedRuntimeRootContents(
 	if err := validateWindowsManagedRuntimeCleanupDirectoryHandle(root, target.data, target.sid, marker, rootMarker); err != nil {
 		return fmt.Errorf("enterprise hooks: managed runtime cleanup root changed after preflight: %w", err)
 	}
-	if tree.hook != 0 {
-		hookPath := filepath.Join(target.data, "hooks")
-		if err := validateWindowsTargetOwnedDirectoryHandle(tree.hook, hookPath, target.sid); err != nil {
-			return fmt.Errorf("enterprise hooks: managed hooks directory changed after preflight: %w", err)
+	for _, dir := range tree.dirs {
+		if err := validateWindowsTargetOwnedDirectoryHandle(dir.handle, dir.path, target.sid); err != nil {
+			return fmt.Errorf("enterprise hooks: %s changed after preflight: %w", dir.label, err)
 		}
-		if identity, err := windowsManagedRuntimeHandleIdentity(tree.hook, true); err != nil || identity != tree.hookID {
-			return fmt.Errorf("enterprise hooks: managed hooks directory identity changed after preflight")
+		if identity, err := windowsManagedRuntimeHandleIdentity(dir.handle, true); err != nil || identity != dir.id {
+			return fmt.Errorf("enterprise hooks: %s identity changed after preflight", dir.label)
 		}
 	}
 	if !rootMarker {
@@ -1688,38 +1830,35 @@ func removeWindowsManagedRuntimeRootContents(
 	// Re-enumeration detects anything that raced before marker quarantine. Once
 	// the root carries the marker descriptor, the enrolled target has no
 	// path-based traversal, create, or rename capability through deletion.
-	if err := requireWindowsManagedRuntimePinnedNames(root, tree.rootNames, "managed runtime root"); err != nil {
+	if err := requireNames(); err != nil {
 		return err
 	}
-	if tree.hook != 0 {
-		if err := requireWindowsManagedRuntimePinnedNames(tree.hook, tree.hookNames, "managed hooks directory"); err != nil {
-			return err
-		}
-	}
 
-	for _, file := range tree.hookFiles {
-		if err := deleteWindowsManagedRuntimePinnedFile(file, target); err != nil {
+	// Children are deleted before their parents.
+	for index := len(tree.dirs) - 1; index >= 0; index-- {
+		dir := tree.dirs[index]
+		for _, file := range dir.files {
+			if err := deleteWindowsManagedRuntimePinnedFile(file, target); err != nil {
+				return err
+			}
+		}
+		if err := requireWindowsManagedRuntimeDirectoryEmpty(dir.handle); err != nil {
 			return err
 		}
-	}
-	if tree.hook != 0 {
-		if err := requireWindowsManagedRuntimeDirectoryEmpty(tree.hook); err != nil {
-			return err
-		}
-		attributes, err := windowsQuarantineHandleAttributes(tree.hook)
+		attributes, err := windowsQuarantineHandleAttributes(dir.handle)
 		if err == nil {
-			err = markWindowsQuarantineHandleForDeletion(tree.hook, attributes)
+			err = markWindowsQuarantineHandleForDeletion(dir.handle, attributes)
 		}
-		closeErr := windows.CloseHandle(tree.hook)
-		tree.hook = 0
+		closeErr := windows.CloseHandle(dir.handle)
+		dir.handle = 0
 		if err != nil {
 			return err
 		}
 		if closeErr != nil {
-			return fmt.Errorf("enterprise hooks: close deleted managed hooks directory: %w", closeErr)
+			return fmt.Errorf("enterprise hooks: close deleted %s: %w", dir.label, closeErr)
 		}
-		if err := requireWindowsManagedRuntimeChildAbsent(root, "hooks"); err != nil {
-			return fmt.Errorf("enterprise hooks: managed hooks directory remains after cleanup: %w", err)
+		if err := requireWindowsManagedRuntimeChildAbsent(dir.parent, dir.name); err != nil {
+			return fmt.Errorf("enterprise hooks: %s remains after cleanup: %w", dir.label, err)
 		}
 	}
 	for _, file := range tree.rootFiles {
@@ -1747,22 +1886,55 @@ func pinWindowsManagedRuntimeCleanupTree(
 		tree.close()
 		return nil, err
 	}
+	// pinDir pins one subdirectory and records its names; the caller then
+	// admits each name.
+	pinDir := func(parent windows.Handle, name, path, label string) (*windowsManagedRuntimePinnedCleanupDir, []string, error) {
+		handle, err := openWindowsManagedRuntimeCleanupChild(parent, name, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("enterprise hooks: pin %s: %w", label, err)
+		}
+		dir := &windowsManagedRuntimePinnedCleanupDir{parent: parent, name: name, path: path, label: label, handle: handle, names: make(map[string]struct{})}
+		tree.dirs = append(tree.dirs, dir)
+		if err := validateWindowsTargetOwnedDirectoryHandle(handle, path, target.sid); err != nil {
+			return nil, nil, err
+		}
+		if dir.id, err = windowsManagedRuntimeHandleIdentity(handle, true); err != nil {
+			return nil, nil, err
+		}
+		names, err := windowsQuarantineDirectoryNames(handle)
+		if err != nil {
+			return nil, nil, fmt.Errorf("enterprise hooks: enumerate %s for cleanup: %w", label, err)
+		}
+		for _, child := range names {
+			dir.names[child] = struct{}{}
+		}
+		return dir, names, nil
+	}
+	pinFile := func(dir *windowsManagedRuntimePinnedCleanupDir, name string, contract windowsManagedRuntimeCleanupFileContract) error {
+		file, err := pinWindowsManagedRuntimeCleanupFile(dir.handle, name, target, contract, filepath.Join(dir.path, name))
+		if err != nil {
+			return err
+		}
+		dir.files = append(dir.files, file)
+		return nil
+	}
 	names, err := windowsQuarantineDirectoryNames(root)
 	if err != nil {
 		return fail(fmt.Errorf("enterprise hooks: enumerate managed runtime cleanup root: %w", err))
 	}
+	var hooks, backups []string
+	var hookDir, backupDir *windowsManagedRuntimePinnedCleanupDir
 	for _, name := range names {
 		tree.rootNames[name] = struct{}{}
-		if name == "hooks" {
-			handle, err := openWindowsManagedRuntimeCleanupChild(root, name, true)
+		switch {
+		case name == "hooks":
+			hookDir, hooks, err = pinDir(root, name, filepath.Join(target.data, name), "managed hooks directory")
 			if err != nil {
-				return fail(fmt.Errorf("enterprise hooks: pin managed hooks directory: %w", err))
-			}
-			tree.hook = handle
-			if err := validateWindowsTargetOwnedDirectoryHandle(handle, filepath.Join(target.data, "hooks"), target.sid); err != nil {
 				return fail(err)
 			}
-			tree.hookID, err = windowsManagedRuntimeHandleIdentity(handle, true)
+			continue
+		case name == windowsManagedRuntimeCleanupBackupDir && len(spec.backupFiles) > 0:
+			backupDir, backups, err = pinDir(root, name, filepath.Join(target.data, name), "managed connector backup directory")
 			if err != nil {
 				return fail(err)
 			}
@@ -1778,16 +1950,7 @@ func pinWindowsManagedRuntimeCleanupTree(
 		}
 		tree.rootFiles = append(tree.rootFiles, file)
 	}
-	if tree.hook == 0 {
-		return tree, nil
-	}
-	tree.hookNames = make(map[string]struct{})
-	hookNames, err := windowsQuarantineDirectoryNames(tree.hook)
-	if err != nil {
-		return fail(fmt.Errorf("enterprise hooks: enumerate managed hooks cleanup directory: %w", err))
-	}
-	for _, name := range hookNames {
-		tree.hookNames[name] = struct{}{}
+	for _, name := range hooks {
 		contract, allowed := spec.hookFiles[name]
 		if !allowed {
 			connectorName, _, parsed := parseWindowsManagedRuntimeBundleLeaf(name)
@@ -1801,11 +1964,28 @@ func pinWindowsManagedRuntimeCleanupTree(
 		if !allowed {
 			return fail(fmt.Errorf("enterprise hooks: refuse managed hooks cleanup with unexpected entry %q", name))
 		}
-		file, err := pinWindowsManagedRuntimeCleanupFile(tree.hook, name, target, contract, filepath.Join(target.data, "hooks", name))
+		if err := pinFile(hookDir, name, contract); err != nil {
+			return fail(err)
+		}
+	}
+	for _, connectorName := range backups {
+		records, allowed := spec.backupFiles[connectorName]
+		if !allowed {
+			return fail(fmt.Errorf("enterprise hooks: refuse managed connector backup cleanup with unexpected entry %q", connectorName))
+		}
+		dir, leaves, err := pinDir(backupDir.handle, connectorName, filepath.Join(backupDir.path, connectorName), "managed "+connectorName+" backup directory")
 		if err != nil {
 			return fail(err)
 		}
-		tree.hookFiles = append(tree.hookFiles, file)
+		for _, leaf := range leaves {
+			contract, allowed := records[leaf]
+			if !allowed {
+				return fail(fmt.Errorf("enterprise hooks: refuse managed %s backup cleanup with unexpected entry %q", connectorName, leaf))
+			}
+			if err := pinFile(dir, leaf, contract); err != nil {
+				return fail(err)
+			}
+		}
 	}
 	return tree, nil
 }
@@ -1879,6 +2059,23 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: canonical cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
+	case windowsManagedRuntimeCleanupOwnedLockFile:
+		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
+			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file owner or DACL provenance is invalid")
+		}
+		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
+			if err := validateWindowsManagedRuntimeOwnedLockACL(label, descriptor, dacl, target.sid); err != nil {
+				return "", err
+			}
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
 	case windowsManagedRuntimeCleanupGatewayFile:
 		administrators, administratorsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 		if administratorsErr != nil || ownerDefaulted || (!owner.Equals(target.sid) && !owner.Equals(administrators)) {
@@ -1891,6 +2088,70 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: unknown cleanup file contract")
 	}
 	return identity, nil
+}
+
+// validateWindowsManagedRuntimeOwnedLockACL accepts exactly the descriptor
+// connector.withOwnedFileLock creates a lock with: a protected DACL of three
+// non-inherited full-control ACEs, one each for the account, LocalSystem and
+// Administrators.
+func validateWindowsManagedRuntimeOwnedLockACL(
+	label string,
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	target *windows.SID,
+) error {
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect owned lock DACL control for %s: %w", label, err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("enterprise hooks: owned lock DACL is not protected on %s", label)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return err
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	expected := []*windows.SID{target, system, administrators}
+	if int(dacl.AceCount) != len(expected) {
+		return fmt.Errorf(
+			"enterprise hooks: owned lock DACL on %s has %d ACEs, expected %d",
+			label,
+			dacl.AceCount,
+			len(expected),
+		)
+	}
+	seen := make([]bool, len(expected))
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect owned lock ACE %d for %s: %w", index, label, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
+			mapWindowsUserPathGenericMask(ace.Mask) != windows.ACCESS_MASK(0x001f01ff) {
+			return fmt.Errorf("enterprise hooks: owned lock DACL on %s contains a non-canonical ACE at index %d", label, index)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		match := -1
+		for candidate, want := range expected {
+			if !seen[candidate] && sid.Equals(want) {
+				match = candidate
+				break
+			}
+		}
+		if match < 0 {
+			return fmt.Errorf(
+				"enterprise hooks: owned lock DACL on %s contains unexpected or duplicate ACE for principal %s",
+				label,
+				windowsSIDString(sid),
+			)
+		}
+		seen[match] = true
+	}
+	return nil
 }
 
 func requireWindowsManagedRuntimePinnedNames(handle windows.Handle, expected map[string]struct{}, label string) error {

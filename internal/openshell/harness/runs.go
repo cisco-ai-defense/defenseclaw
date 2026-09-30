@@ -77,11 +77,18 @@ rs_read() {
 // the pid in latest.pid is a live process whose command line names
 // latest.exit, its runner's (a pid reused after the sandbox restarted is
 // not the run's; a process table that hides command lines trusts the pid).
+// A zombie is not alive. An empty command line is a runner caught mid-exec
+// (setsid, nohup and sh exec one another as it starts), so it counts as
+// alive rather than as a run that ended without recording its status.
 const RunAliveFunc = RunReadFunc + `run_alive() {
   rs_pid=$(rs_read "$1/latest.pid" 32 | tr -d '\n')
   case "$rs_pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$rs_pid" 2>/dev/null || return 1
-  [ ! -r "/proc/$rs_pid/cmdline" ] || tr '\0' ' ' <"/proc/$rs_pid/cmdline" 2>/dev/null | grep -q latest.exit
+  [ -r "/proc/$rs_pid/cmdline" ] || return 0
+  [ "$(sed 's/^.*) //' "/proc/$rs_pid/stat" 2>/dev/null | cut -c1)" != Z ] || return 1
+  rs_cmd=$(tr '\0' ' ' <"/proc/$rs_pid/cmdline" 2>/dev/null)
+  [ -n "$rs_cmd" ] || return 0
+  printf '%s\n' "$rs_cmd" | grep -q latest.exit
 }
 `
 

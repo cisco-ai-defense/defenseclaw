@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"os"
 	"os/user"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +44,15 @@ import (
 // before per-user credentials existed every user of a connector held the
 // same one.
 
+// A credential rotation (the standalone Unix lifecycle's
+// rotate-credentials) stages the next key beside the committed one. While
+// the staged key exists the index holds the credentials of both keys, so a
+// user whose hooks the guardian has already moved to the new key and a user
+// it has not reached yet both authenticate; committing the rotation renames
+// the staged key over the committed one and the old key's credentials stop
+// authenticating on the next refresh. A staged key that fails its trust
+// checks is ignored. Windows does not stage keys.
+
 // userScopedCredentialRefreshInterval bounds how often the key and ledger
 // are revalidated on the request path.
 const userScopedCredentialRefreshInterval = time.Second
@@ -52,29 +63,35 @@ type userScopedCredential struct {
 	kind     string
 	scope    string
 	identity string
+	// key indexes the store's keys: the key the credential derives from.
+	key int
 }
 
 // userScopedCredentialStore caches the credential index derived from the
 // key and the ledger. The index is keyed by the SHA-256 of each credential,
 // so a lookup never compares a presented value against a secret.
 type userScopedCredentialStore struct {
-	dataDir   func() string
-	loadKey   func(dataDir string) (string, error)
-	newLedger func(path string) func() (managedHookLedger, uint64, error)
-	now       func() time.Time
+	dataDir func() string
+	loadKey func(dataDir string) (string, error)
+	// loadPendingKey reads the key a rotation staged; nil where keys are
+	// never staged.
+	loadPendingKey func(dataDir string) (string, error)
+	newLedger      func(path string) func() (managedHookLedger, uint64, error)
+	now            func() time.Time
 
-	mu         sync.Mutex
-	checkedAt  time.Time
-	dir        string
-	ledger     func() (managedHookLedger, uint64, error)
-	key        string
+	mu        sync.Mutex
+	checkedAt time.Time
+	dir       string
+	ledger    func() (managedHookLedger, uint64, error)
+	// keys are the committed key and, during a rotation, the staged one.
+	keys       []string
 	generation uint64
 	built      bool
 	index      map[[sha256.Size]byte]userScopedCredential
 }
 
 func newUserScopedCredentialStore(dataDir func() string) *userScopedCredentialStore {
-	return &userScopedCredentialStore{
+	store := &userScopedCredentialStore{
 		dataDir: dataDir,
 		loadKey: connector.LoadUserScopedTokenKey,
 		newLedger: func(path string) func() (managedHookLedger, uint64, error) {
@@ -82,6 +99,10 @@ func newUserScopedCredentialStore(dataDir func() string) *userScopedCredentialSt
 		},
 		now: time.Now,
 	}
+	if runtime.GOOS != "windows" {
+		store.loadPendingKey = connector.LoadPendingUserScopedTokenKey
+	}
+	return store
 }
 
 // lookup returns the identity presented is bound to for kind and scope.
@@ -124,7 +145,10 @@ func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) 
 	if !ok || credential.kind != connector.UserScopedHookCredential || credential.scope != scope {
 		return "", false
 	}
-	token, err := connector.UserScopedHookAPIToken(s.key, scope, credential.identity)
+	if credential.key < 0 || credential.key >= len(s.keys) {
+		return "", false
+	}
+	token, err := connector.UserScopedHookAPIToken(s.keys[credential.key], scope, credential.identity)
 	if err != nil || sha256.Sum256([]byte(token)) != digest {
 		return "", false
 	}
@@ -147,7 +171,7 @@ func (s *userScopedCredentialStore) refreshLocked() {
 		}
 	}
 	fail := func() {
-		s.index, s.key, s.built = nil, "", false
+		s.index, s.keys, s.built = nil, nil, false
 	}
 	if dir == "" || s.ledger == nil {
 		fail()
@@ -160,22 +184,46 @@ func (s *userScopedCredentialStore) refreshLocked() {
 		fail()
 		return
 	}
+	keys := []string{key}
+	if s.loadPendingKey != nil {
+		if pending, err := s.loadPendingKey(dir); err == nil && pending != "" && pending != key {
+			keys = append(keys, pending)
+		}
+	}
 	ledger, generation, err := s.ledger()
 	if err != nil {
 		fail()
 		return
 	}
-	if s.built && key == s.key && generation == s.generation {
+	if s.built && slices.Equal(keys, s.keys) && generation == s.generation {
 		return
 	}
-	s.index = buildUserScopedCredentialIndex(key, ledger)
-	s.key, s.generation, s.built = key, generation, true
+	s.index = buildUserScopedCredentialIndex(keys, ledger)
+	s.keys, s.generation, s.built = keys, generation, true
 }
 
-func buildUserScopedCredentialIndex(key string, ledger managedHookLedger) map[[sha256.Size]byte]userScopedCredential {
+// keyFingerprints names the keys whose credentials authenticate right now:
+// the committed key, then a staged one. The standalone lifecycle reads them
+// from /health to prove a rotation's key is live before any user is moved
+// to it, and that the old key is retired after the commit.
+func (s *userScopedCredentialStore) keyFingerprints() []string {
+	fingerprints := []string{}
+	if s == nil {
+		return fingerprints
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked()
+	for _, key := range s.keys {
+		fingerprints = append(fingerprints, connector.UserScopedTokenKeyFingerprint(key))
+	}
+	return fingerprints
+}
+
+func buildUserScopedCredentialIndex(keys []string, ledger managedHookLedger) map[[sha256.Size]byte]userScopedCredential {
 	index := map[[sha256.Size]byte]userScopedCredential{}
-	add := func(kind, scope, identity, token string) {
-		index[sha256.Sum256([]byte(token))] = userScopedCredential{kind: kind, scope: scope, identity: identity}
+	add := func(kind, scope, identity, token string, key int) {
+		index[sha256.Sum256([]byte(token))] = userScopedCredential{kind: kind, scope: scope, identity: identity, key: key}
 	}
 	for _, target := range ledger.Targets {
 		if !target.OK {
@@ -186,12 +234,15 @@ func buildUserScopedCredentialIndex(key string, ledger managedHookLedger) map[[s
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(target.Connector))
-		if token, err := connector.UserScopedHookAPIToken(key, name, identity); err == nil {
-			add(connector.UserScopedHookCredential, name, identity, token)
-		}
-		if scope, ok := connector.OTLPPathTokenScopeForConnector(name); ok {
-			if token, err := connector.UserScopedOTLPPathToken(key, scope, identity); err == nil {
-				add(connector.UserScopedOTLPCredential, string(scope), identity, token)
+		otlpScope, hasOTLP := connector.OTLPPathTokenScopeForConnector(name)
+		for keyIndex, key := range keys {
+			if token, err := connector.UserScopedHookAPIToken(key, name, identity); err == nil {
+				add(connector.UserScopedHookCredential, name, identity, token, keyIndex)
+			}
+			if hasOTLP {
+				if token, err := connector.UserScopedOTLPPathToken(key, otlpScope, identity); err == nil {
+					add(connector.UserScopedOTLPCredential, string(otlpScope), identity, token, keyIndex)
+				}
 			}
 		}
 	}

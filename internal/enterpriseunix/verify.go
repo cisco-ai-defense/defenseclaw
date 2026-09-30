@@ -37,6 +37,19 @@ const codeUnitFailed = "unit_failed"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	if l.opts.Action == ActionVerify {
+		// The daily verify can start while another run changes the
+		// deployment: ensure restarts the timer, and a Persistent timer past
+		// its daily time fires at once. verify waits for that run like any
+		// lifecycle action, then releases the lock so it never holds up a
+		// change; a run that outlasts the wait is busy, not a failed check.
+		lock, err := env.acquireLock(ctx)
+		if errors.Is(err, errLockBusy) {
+			r.AddError(codeBusy, err.Error())
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		lock.release()
+	}
 	record, err := env.loadDeployment()
 	if err != nil {
 		r.AddError(codeState, err.Error())
@@ -65,8 +78,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		l.warnUnprivilegedUserNamespaces()
 	}
 	if strict {
+		// An agent the guardian or the enumerator could not protect for one
+		// account (an unverified hook contract, an agent it could not enroll)
+		// stays a warning for that account: the rest of the host is
+		// compliant, as on Windows.
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeHookContractUnverified || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected || warning.Code == codeAgentUnprotected {
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -321,6 +338,11 @@ func (e *Env) leftoversNextStep(ctx context.Context) string {
 		remove := ""
 		if _, err := e.Runner.Run(ctx, "dpkg", "-S", gateway); err == nil {
 			remove = "apt remove defenseclaw-enterprise"
+			if !exists(e.P(e.Layout.ConfigDir)) {
+				// After uninstall --purge, purge the package too: it also
+				// forgets the package's configuration files.
+				remove = "apt purge defenseclaw-enterprise"
+			}
 		} else if _, err := e.Runner.Run(ctx, "rpm", "-qf", "--quiet", gateway); err == nil {
 			remove = "dnf remove defenseclaw-enterprise"
 		}
@@ -430,6 +452,9 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
+	if exists(env.rotationIntentPath()) {
+		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
+	}
 	if r.Inspection.Local == "" {
 		r.Inspection.Local = "unknown"
 	}

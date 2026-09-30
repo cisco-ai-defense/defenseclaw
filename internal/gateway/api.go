@@ -71,6 +71,9 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
+	// foreignHookRemovals caches the hook guardian foreign-hook removal
+	// ledger the session exchanges check.
+	foreignHookRemovals foreignHookRemovalCache
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -1297,6 +1300,11 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
+			// Non-secret fingerprints of the per-user credential keys that
+			// authenticate right now (a rotation's staged key included).
+			body["user_scoped_credentials"] = map[string]interface{}{
+				"key_ids": a.userScopedCredentialStore().keyFingerprints(),
+			}
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)

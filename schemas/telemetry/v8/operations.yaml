@@ -6107,6 +6107,12 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
     requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   log:
     event_name: ai_component.changed
   x-defenseclaw:
@@ -6172,6 +6178,12 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
     requirement_level: recommended
   log:
     event_name: ai_component.discovered
@@ -6258,6 +6270,12 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
     requirement_level: recommended
   log:
     event_name: ai_component.removed

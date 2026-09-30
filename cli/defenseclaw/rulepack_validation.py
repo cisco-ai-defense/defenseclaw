@@ -31,7 +31,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.gateway import resolve_trusted_gateway_binary
 
 RULEPACK_WIRE_VERSION: Final = 1
 RULEPACK_HELPER_TIMEOUT_SECONDS: Final = 15
@@ -106,7 +107,13 @@ def validate_rule_pack(
     protocol drift raise :class:`RulePackValidationBridgeError`; callers must
     not reinterpret those states as successful validation.
     """
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise RulePackValidationBridgeError(
+            f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw",
+            code="gateway_untrusted",
+        ) from exc
     if not binary:
         raise RulePackValidationBridgeError(
             "defenseclaw-gateway is required for authoritative rule-pack validation; "

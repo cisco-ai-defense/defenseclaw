@@ -19,7 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-func TestOriginMainDeletedExecutableUsesAuthenticatedMigrationOnly(t *testing.T) {
+func TestDeletedExecutableStopsOnlyThroughAuthenticatedShutdown(t *testing.T) {
 	t.Setenv(EnvDaemon, "")
 	source, err := os.Executable()
 	if err != nil {
@@ -115,6 +115,25 @@ func TestOriginMainDeletedExecutableUsesAuthenticatedMigrationOnly(t *testing.T)
 	}
 	if !processExists(cmd.Process.Pid) {
 		t.Fatal("direct stop signalled the deleted executable generation")
+	}
+
+	// A current record whose file was replaced while the gateway ran: status
+	// called it stopped and dropped its record, so stop printed "not
+	// running". It stays running, and a direct signal is still refused.
+	current := originMain
+	current.DataDir = dataDir
+	currentRaw, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, currentRaw); err != nil {
+		t.Fatal(err)
+	}
+	if running, pid := d.IsRunning(); !running || pid != cmd.Process.Pid {
+		t.Fatalf("replaced executable liveness = (%v, %d), want PID %d", running, pid, cmd.Process.Pid)
+	}
+	if err := d.Stop(50 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("direct stop of a replaced executable = %v, want ErrUnsafeProcessIdentity", err)
 	}
 
 	if err := d.StopGracefully(3*time.Second, func(int) error {

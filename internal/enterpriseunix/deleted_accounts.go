@@ -69,6 +69,7 @@ func (l *lifecycle) revokeDeletedAccounts(ctx context.Context) {
 	}
 	if len(report.Revoked) > 0 {
 		r.AddWarning(codeDeletedAccountsRevoked, "removed the guardian targets of accounts that no longer exist: "+strings.Join(report.Revoked, ", "))
+		l.noteChange("removed the guardian targets of deleted accounts: %s", strings.Join(report.Revoked, ", "))
 	}
 	for _, kept := range report.Kept {
 		r.AddWarning(codeDeletedAccountsKept, kept)

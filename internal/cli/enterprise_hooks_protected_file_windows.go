@@ -7,12 +7,22 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+// enterpriseHookGuardianRecordBusy reports a read that met a guardian record
+// while the guardian was replacing it or setting its ACL: Windows answers
+// with a sharing or lock violation for that moment.
+func enterpriseHookGuardianRecordBusy(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+}
 
 // writeEnterpriseHookProtectedFile publishes machine-owned guardian records
 // without safefile's current-user ownership assumption. Production records

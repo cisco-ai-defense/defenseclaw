@@ -223,11 +223,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// Kiro honors only exit 2 as a block. Release launchers use the GUI
 	// subsystem, which PowerShell's call operator does not await (the hook's
 	// status is lost and Kiro proceeds), and cmd.exe rejects the call operator
-	// outright. Use the encoded system PowerShell bridge, which awaits the
+	// outright. Use Kiro's encoded system PowerShell command, which awaits the
 	// launcher and returns its exit status to cmd.exe and to any launcher that
-	// runs the command line directly (kiroHookInvocationCommandFor).
+	// runs the command line directly (windowsKiroHookCommandForBinary).
 	if connector == "kiro" {
-		return windowsNativePowerShellHookCommand(connector)
+		return windowsKiroHookCommandForBinary(defenseclawHookBinary(), "")
 	}
 	// Claude Code evaluates hook command strings with PowerShell on Windows.
 	// A quoted executable path alone is only a string expression there; the

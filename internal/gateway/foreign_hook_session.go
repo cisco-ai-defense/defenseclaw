@@ -7,15 +7,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type verifiedUserScopedIdentityContextKey struct{}
@@ -69,6 +75,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := foreignHookSessionStateDir(dataDir, identity)
+	removals, removalsErr := a.foreignHookRemovals.forIdentity(managed.HookGuardianAuthorizationDir(dataDir), identity)
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
@@ -77,6 +84,8 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Key:          exchange.Key,
 		SessionStart: exchange.SessionStart,
 		Decision:     exchange.Decision,
+		Removals:     removals,
+		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
 	})
 	unlock()
@@ -168,6 +177,73 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		Enforced:   true,
 		Extra:      extra,
 	})
+}
+
+// foreignHookRemovalCache holds the guardian's foreign-hook removal ledger
+// (enterprisepolicy.ForeignHookRemovalsFile), read again when the file
+// changes and at least every foreignHookRemovalRecheck.
+type foreignHookRemovalCache struct {
+	mu        sync.Mutex
+	path      string
+	modTime   time.Time
+	size      int64
+	checkedAt time.Time
+	removals  []enterprisepolicy.ForeignHookRemoval
+	err       error
+}
+
+const foreignHookRemovalRecheck = 2 * time.Second
+
+// forIdentity returns the removals the guardian recorded for one caller
+// identity. A missing ledger records none; one that fails its trust check
+// or does not parse is an error, which denies the call.
+func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterprisepolicy.ForeignHookRemoval, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		c.path, c.removals, c.err = "", nil, nil
+		return nil, nil
+	}
+	now := time.Now()
+	// A failed read is not cached: the guardian sets the file's group only
+	// after it replaces the file, and a read in between must not deny every
+	// account's calls until the next recheck.
+	if err == nil && (c.err != nil || path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
+		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck) {
+		c.path, c.modTime, c.size, c.checkedAt = path, info.ModTime(), info.Size(), now
+		c.removals, c.err = readForeignHookRemovals(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	var out []enterprisepolicy.ForeignHookRemoval
+	for _, removal := range c.removals {
+		if canonical, ok := connector.CanonicalUserScopedIdentity(removal.Identity); ok && canonical == identity {
+			out = append(out, removal)
+		}
+	}
+	return out, nil
+}
+
+func readForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
+	if err := validateManagedGuardianAuthorization(path, "hook guardian foreign-hook removals"); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, enterprisepolicy.ForeignHookRemovalsMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	return enterprisepolicy.ParseForeignHookRemovals(data)
 }
 
 // foreignHookSessionStateDir is the session store of one caller identity.

@@ -18,7 +18,7 @@
 
 The installer runs ``defenseclaw migrate`` from the version it just installed,
 after stopping the gateway, so migrations always execute the new release's
-code. Two kinds of steps exist:
+code. Three kinds of steps exist:
 
 * ``CONFIG_MIGRATIONS`` moves ``config.yaml`` from ``config_version`` N to
   N+1. New keys need only the schema entry and loader defaults; renames and
@@ -26,6 +26,10 @@ code. Two kinds of steps exist:
   docs/RELEASE_RUNBOOK.md for everything a version bump touches).
 * ``MIGRATIONS`` is the frozen 0.x chain. It imports installs older than the
   0.8.5 schema-v8 hard cut and never grows.
+* The connector roster step (``_migrate_connector_roster``) moves the retired
+  Desktop connector ID to ``devin`` and drops connectors this release does not
+  ship. It has no ``config_version``: it runs whenever ``config.yaml`` still
+  names such a connector.
 
 Every step is idempotent and writes through temp-file-and-rename.
 """

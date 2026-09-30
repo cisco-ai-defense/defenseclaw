@@ -42,8 +42,9 @@ import (
 // attributes the request to the identity the credential is bound to.
 
 const (
-	userScopedTokenKeyFileName = ".user-scoped-token.key"
-	userScopedTokenDomain      = "defenseclaw.user-scoped-credential.v1"
+	userScopedTokenKeyFileName        = ".user-scoped-token.key"
+	userScopedTokenPendingKeyFileName = ".user-scoped-token.key.next"
+	userScopedTokenDomain             = "defenseclaw.user-scoped-credential.v1"
 
 	// UserScopedHookCredential authenticates a connector's hook, notify and
 	// inspect routes.
@@ -60,6 +61,27 @@ func UserScopedTokenKeyPath(dataDir string) (string, error) {
 		return "", fmt.Errorf("UserScopedTokenKeyPath: empty dataDir")
 	}
 	return filepath.Join(dataDir, "hooks", userScopedTokenKeyFileName), nil
+}
+
+// PendingUserScopedTokenKeyPath is where a credential rotation stages the
+// next key (the standalone Unix lifecycle's rotate-credentials), beside the
+// committed key and with the same custody. While it exists the gateway
+// accepts credentials derived from either key and the guardian renders
+// credentials from the staged one, so every user moves to the new key
+// before the rotation commits it by renaming it over the committed key.
+func PendingUserScopedTokenKeyPath(dataDir string) (string, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		return "", fmt.Errorf("PendingUserScopedTokenKeyPath: empty dataDir")
+	}
+	return filepath.Join(dataDir, "hooks", userScopedTokenPendingKeyFileName), nil
+}
+
+// UserScopedTokenKeyFingerprint is the non-secret name of one key
+// generation: the lowercase hex SHA-256 of the key, the format rotation
+// uses for every scoped credential. The gateway's health document and the
+// guardian's credential attestation name keys by it.
+func UserScopedTokenKeyFingerprint(key string) string {
+	return UserScopedCredentialKeyID(key)
 }
 
 // EnsureUserScopedTokenKey returns the per-user credential key, minting it
@@ -87,6 +109,20 @@ func LoadUserScopedTokenKey(dataDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return loadUserScopedTokenKeyAt(dataDir, path)
+}
+
+// LoadPendingUserScopedTokenKey reads the key a rotation staged, with the
+// same trust checks. No staged key returns "" and no error.
+func LoadPendingUserScopedTokenKey(dataDir string) (string, error) {
+	path, err := PendingUserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return loadUserScopedTokenKeyAt(dataDir, path)
+}
+
+func loadUserScopedTokenKeyAt(dataDir, path string) (string, error) {
 	if _, err := os.Lstat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", nil

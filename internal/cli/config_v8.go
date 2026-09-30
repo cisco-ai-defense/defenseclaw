@@ -118,6 +118,13 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	case errors.As(err, &secretError):
 		result.Path = "$." + secretError.Path
 		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"
+		if secretError.Credential {
+			result.Reason = fmt.Sprintf(
+				"[secret_reference_unresolved] protected credential %q is not stored or not trusted; "+
+					"credential references resolve only in a standalone enterprise deployment, after `enterprise secret set --name %s`",
+				secretError.Reference, secretError.Reference,
+			)
+		}
 	case errors.As(err, &yamlError):
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
@@ -312,6 +319,13 @@ type loadedConfigV8File struct {
 }
 
 func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8FileWithCredentials(path, defaultDataDir, "")
+}
+
+// loadConfigV8FileWithCredentials is loadConfigV8File resolving protected
+// credential references from credentialsDir; empty derives it from a
+// standalone source's own path.
+func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -351,7 +365,7 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 	compiled, err := config.ParseCompileObservabilityV8(
 		absPath,
 		raw,
-		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir},
+		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir, CredentialsDir: credentialsDir},
 	)
 	if err != nil {
 		return nil, err

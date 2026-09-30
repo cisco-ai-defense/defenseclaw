@@ -1486,6 +1486,40 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 	}
 }
 
+// The OpenCode teardown uninstall runs removes the folders the install
+// watcher created while they are still empty; one with content stays.
+func TestConnectorTeardownRemovesEmptyOpenCodeWatcherFolders(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "opencode")()
+	configRoot := filepath.Join(testenv.PrivateTempDir(t), "opencode")
+	previous := connector.OpenCodePluginPathOverride
+	connector.OpenCodePluginPathOverride = filepath.Join(configRoot, "plugins", "defenseclaw.js")
+	t.Cleanup(func() { connector.OpenCodePluginPathOverride = previous })
+	emptyDir, usedDir := filepath.Join(configRoot, "skills"), filepath.Join(configRoot, "skill")
+	for _, created := range []string{emptyDir, usedDir} {
+		if err := os.MkdirAll(created, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(usedDir, "SKILL.md"), []byte("skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.RecordWatcherCreatedDirs(dir, []string{emptyDir, usedDir}); err != nil {
+		t.Fatalf("record watcher-created folders: %v", err)
+	}
+
+	stdout, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "opencode")
+	if exitCode != 0 || !strings.Contains(stdout, "teardown complete") {
+		t.Fatalf("teardown failed: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	if _, err := os.Lstat(emptyDir); !os.IsNotExist(err) {
+		t.Fatalf("empty watcher-created folder survived teardown (err=%v)", err)
+	}
+	if _, err := os.Lstat(usedDir); err != nil {
+		t.Fatalf("watcher-created folder with content was removed: %v", err)
+	}
+}
+
 func TestConnectorTeardownFailureRestoresActiveState(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "cursor")()

@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -316,6 +318,11 @@ var darwinUnits = []Unit{
 
 type launchdManager struct {
 	env *Env
+
+	mu sync.Mutex
+	// bootedOut are the jobs this manager booted out; only their EALREADY
+	// is a teardown still in progress.
+	bootedOut map[string]bool
 }
 
 func (m *launchdManager) Units() []Unit { return append([]Unit{}, darwinUnits...) }
@@ -331,19 +338,79 @@ func (m *launchdManager) Check(context.Context) error { return nil }
 func (m *launchdManager) Reload(context.Context) error { return nil }
 
 func (m *launchdManager) Start(ctx context.Context, unit Unit) error {
-	_, err := m.env.Runner.Run(ctx, "launchctl", "bootstrap", "system", m.env.P(m.DefinitionPath(unit, "")))
+	bootstrap := func() error {
+		_, err := m.env.Runner.Run(ctx, "launchctl", "bootstrap", "system", m.env.P(m.DefinitionPath(unit, "")))
+		return err
+	}
+	err := bootstrap()
+	if err != nil && launchdBusy(err) && m.wasBootedOut(unit) && m.waitUnloaded(ctx, unit) {
+		// This manager's bootout of the job was still finishing.
+		err = bootstrap()
+	}
 	if err != nil && launchdAlreadyLoaded(err) {
 		_, err = m.env.Runner.Run(ctx, "launchctl", "kickstart", "-k", "system/"+unit.Name)
 	}
 	return err
 }
 
+// Stop boots the job out and waits until launchd has removed it. bootout
+// can return while launchd is still terminating the job; a bootstrap or
+// kickstart in that window fails with EALREADY (exit 37), which left a
+// config change on macOS with the gateway unloaded.
 func (m *launchdManager) Stop(ctx context.Context, unit Unit) error {
 	_, err := m.env.Runner.Run(ctx, "launchctl", "bootout", "system/"+unit.Name)
 	if err != nil && launchdNotLoaded(err) {
 		return nil
 	}
+	if err == nil || launchdBusy(err) {
+		m.mu.Lock()
+		if m.bootedOut == nil {
+			m.bootedOut = map[string]bool{}
+		}
+		m.bootedOut[unit.Name] = true
+		m.mu.Unlock()
+		if m.waitUnloaded(ctx, unit) {
+			return nil
+		}
+	}
 	return err
+}
+
+func (m *launchdManager) wasBootedOut(unit Unit) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bootedOut[unit.Name]
+}
+
+// launchdTeardownWait bounds the wait for launchd to remove a job it is
+// booting out. launchd kills a job that ignores SIGTERM after its exit
+// timeout (20 seconds by default).
+var launchdTeardownWait = 30 * time.Second
+
+// waitUnloaded reports whether launchd stopped knowing the job within
+// launchdTeardownWait.
+func (m *launchdManager) waitUnloaded(ctx context.Context, unit Unit) bool {
+	now, poll := m.env.Now, m.env.PollInterval
+	if now == nil {
+		now = time.Now
+	}
+	if poll <= 0 {
+		poll = 500 * time.Millisecond
+	}
+	deadline := now().Add(launchdTeardownWait)
+	for {
+		if _, err := m.env.Runner.Run(ctx, "launchctl", "print", "system/"+unit.Name); err != nil {
+			return true
+		}
+		if !now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(poll):
+		}
+	}
 }
 
 func (m *launchdManager) Enable(ctx context.Context, unit Unit) error {
@@ -432,6 +499,11 @@ func launchdAlreadyLoaded(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "already loaded") || strings.Contains(text, "service already bootstrapped") ||
 		strings.Contains(text, "exit 17") || strings.Contains(text, "exit 37") || strings.Contains(text, "Bootstrap failed: 5")
+}
+
+// launchdBusy is EALREADY: launchd is still booting the job out.
+func launchdBusy(err error) bool {
+	return strings.Contains(err.Error(), "exit 37")
 }
 
 func launchdNotLoaded(err error) bool {

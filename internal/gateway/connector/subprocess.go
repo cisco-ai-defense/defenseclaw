@@ -28,6 +28,8 @@ import (
 	"runtime"
 	"strings"
 	"text/template"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 //go:embed shims/*.sh
@@ -538,6 +540,40 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode strin
 		return err
 	}
 
+	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard)
+	if err != nil {
+		return err
+	}
+	for _, script := range scripts {
+		if err := writeFile(filepath.Join(hookDir, script.name), script.body, 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", script.name, err)
+		}
+	}
+	if err := writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		connectorName,
+		normalizeHookFailMode(failMode),
+		managed,
+		writeFile,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// renderedHookScript is one generated hook script: its basename in the hook
+// directory and its rendered bytes.
+type renderedHookScript struct {
+	name string
+	body []byte
+}
+
+// renderHookScripts renders, without writing anything, the shared inspect-*
+// scripts and the connector-owned lifecycle scripts named in extras, in the
+// order writeHookScriptsCommonWithTransport writes them. tokenFile is the
+// basename of the token file the connector scripts read.
+func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) ([]renderedHookScript, error) {
 	connectorData := templateData{
 		APIAddr:              apiAddr,
 		APIToken:             "",
@@ -560,26 +596,107 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode strin
 	// identity and scoped credential selection happen at invocation time.  The
 	// connector-owned lifecycle scripts retain the selected connector data.
 	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
-	scripts, err := renderHookScriptSet(connectorData, sharedData, extras)
+	// renderHookScriptSet is the one renderer the host and sandbox hook
+	// files share (hook_render.go).
+	set, err := renderHookScriptSet(connectorData, sharedData, extras)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, script := range scripts {
-		if err := writeFile(filepath.Join(hookDir, script.Name), script.Data, 0o700); err != nil {
-			return fmt.Errorf("write hook %s: %w", script.Name, err)
+	scripts := make([]renderedHookScript, 0, len(set))
+	for _, file := range set {
+		scripts = append(scripts, renderedHookScript{name: file.Name, body: file.Data})
+	}
+	return scripts, nil
+}
+
+// hookRuntimeRenderMaxBytes bounds each installed hook runtime file
+// HookScriptRenderDrift reads.
+const hookRuntimeRenderMaxBytes = 4 << 20
+
+// renderedHookRuntimeFile is a per-user hook runtime file Setup writes: its
+// path and the bytes this release renders for it.
+type renderedHookRuntimeFile struct {
+	path string
+	body []byte
+}
+
+// HookScriptRenderDrift compares the hook runtime files conn's managed Setup
+// writes into opts.DataDir/hooks with the bytes this release renders for
+// opts, and returns the first file that is missing or differs, or "" when
+// every file matches. For a shell hook connector these are its own hook
+// scripts, the shared inspect-* scripts and the _hardening.sh helper they
+// source; for OmniGent, its policy module. A connector whose Setup publishes
+// a managed in-agent plugin (Amp, OpenCode) writes none of them:
+// ManagedPluginArtifactDrift covers the plugin. The standalone Unix guardian
+// relies on this rather than on the digests recorded at the last write: after
+// a package upgrade the files still match those digests but carry the
+// previous release's render, and the user can edit a file together with its
+// recorded digest. Files are read with the caller's credentials, bounded and
+// without following a link.
+func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
+	files, err := renderedHookRuntimeFiles(conn, opts)
+	if err != nil {
+		return filepath.Join(opts.DataDir, "hooks"), err
+	}
+	for _, file := range files {
+		installed, err := safefile.ReadRegularFileBounded(file.path, hookRuntimeRenderMaxBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			return file.path, nil
+		}
+		if err != nil {
+			return file.path, err
+		}
+		if !bytes.Equal(installed, file.body) {
+			return file.path, nil
 		}
 	}
-	if err := writeHookConfigSidecarUsing(
-		hookDir,
-		apiAddr,
-		connectorName,
-		normalizeHookFailMode(failMode),
-		managed,
-		writeFile,
-	); err != nil {
-		return err
+	return "", nil
+}
+
+// renderedHookRuntimeFiles renders the files HookScriptRenderDrift compares,
+// as a managed install writes them.
+func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRuntimeFile, error) {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" {
+		return nil, nil
 	}
-	return nil
+	if omnigent, ok := conn.(*OmnigentConnector); ok {
+		body, err := omnigent.renderPolicyModule(opts)
+		if err != nil {
+			return nil, err
+		}
+		return []renderedHookRuntimeFile{{path: omnigentPolicyModulePath(opts), body: body}}, nil
+	}
+	if _, ok := conn.(HookScriptOwner); !ok || len(ManagedPluginArtifacts(conn, opts)) > 0 {
+		return nil, nil
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	render := resolveConnectorHookRender(opts, conn)
+	tokenFile := ".token"
+	if render.scopedToken {
+		path, err := HookTokenFilePath(hookDir, conn.Name())
+		if err != nil {
+			return nil, err
+		}
+		tokenFile = filepath.Base(path)
+	}
+	scripts, err := renderHookScripts(opts.APIAddr, render.failMode, tokenFile, render.extras, opts.ManagedEnterprise,
+		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]renderedHookRuntimeFile, 0, len(hookHelperScripts)+len(scripts))
+	// A managed install writes the embedded helpers as they are.
+	for _, name := range hookHelperScripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return nil, fmt.Errorf("read hook helper %s: %w", name, err)
+		}
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, name), body: content})
+	}
+	for _, script := range scripts {
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, script.name), body: script.body})
+	}
+	return files, nil
 }
 
 // hookRuntimeFileWriter selects the final-descriptor publication primitive for
@@ -1363,41 +1480,56 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
 // force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
-	var extras []string
+	render := resolveConnectorHookRender(opts, c)
+	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.extras, opts.ManagedEnterprise,
+		c.Name(), render.scopedToken, render.socketTransport, render.foreignGuard)
+}
+
+// connectorHookRender is what WriteHookScriptsForConnectorObjectWithOpts
+// renders a connector's hook scripts with.
+type connectorHookRender struct {
+	extras          []string
+	failMode        string
+	token           string
+	scopedToken     bool
+	socketTransport string
+	foreignGuard    string
+}
+
+func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender {
+	var render connectorHookRender
 	if owner, ok := c.(HookScriptOwner); ok {
-		extras = owner.HookScriptNames(opts)
+		render.extras = owner.HookScriptNames(opts)
 	}
-	failMode := resolveHookFailMode(opts, c)
+	render.failMode = resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
-		if failMode == "closed" && !caps.SupportsFailClosed {
-			failMode = "open"
+		if render.failMode == "closed" && !caps.SupportsFailClosed {
+			render.failMode = "open"
 		}
 	}
-	hookToken := opts.HookAPIToken
-	scopedToken := opts.HookAPITokenScoped
-	if strings.TrimSpace(hookToken) == "" {
-		hookToken = opts.APIToken
+	render.token = opts.HookAPIToken
+	render.scopedToken = opts.HookAPITokenScoped
+	if strings.TrimSpace(render.token) == "" {
+		render.token = opts.APIToken
 		// Backward-compatible direct callers predate HookAPIToken. Preserve
 		// scoped sidecars for hook-native connectors, but never disguise a
 		// proxy connector's master token as connector-scoped.
-		scopedToken = !IsProxyConnector(c.Name())
+		render.scopedToken = !IsProxyConnector(c.Name())
 	}
 	// A managed standalone install on a unix host sends connector shell hooks
 	// through the gateway's peer-authorized unix hook socket, as it already
 	// does for in-agent plugins. Every other install (per-user, Secure
 	// Client, Windows) has no socket here and keeps the TCP transport.
-	socketTransport := ""
 	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
-		socketTransport = shellHookSocketTransport(socket, serviceUID)
+		render.socketTransport = shellHookSocketTransport(socket, serviceUID)
 	}
 	// The standalone Hermes hook also runs the foreign-hook guard first
 	// (shellHookForeignGuardBinary); no other hook or install does.
-	foreignGuard := ""
 	if binary := shellHookForeignGuardBinary(opts, c.Name()); binary != "" {
-		foreignGuard = shellHookForeignGuard(binary)
+		render.foreignGuard = shellHookForeignGuard(binary)
 	}
-	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken, socketTransport, foreignGuard)
+	return render
 }
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
@@ -1565,16 +1697,20 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("ensure hook dir: %w", err)
 	}
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
+}
+
+// disabledHookTombstone is the body writeDisabledHookTombstone writes.
+func disabledHookTombstone(vendorLabel string) string {
 	if vendorLabel == "" {
 		vendorLabel = "DefenseClaw connector"
 	}
-	body := "#!/bin/sh\n" +
+	return "#!/bin/sh\n" +
 		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
 		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
 		"exit 0\n"
-	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }
 
 // ShimBinaries returns the list of binary names that are shimmed.

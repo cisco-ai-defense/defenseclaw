@@ -43,12 +43,12 @@ func writeStandaloneGatewayCheckConfig(t *testing.T, body string) string {
 func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 	dataDir := t.TempDir()
 	valid := writeStandaloneGatewayCheckConfig(t, standaloneGatewayCheckConfig)
-	if err := validateStandaloneGatewayConfig(valid, dataDir); err != nil {
+	if err := validateStandaloneGatewayConfig(valid, dataDir, ""); err != nil {
 		t.Fatalf("valid standalone config refused: %v", err)
 	}
 
 	noVersion := writeStandaloneGatewayCheckConfig(t, strings.TrimPrefix(standaloneGatewayCheckConfig, "config_version: 8\n"))
-	err := validateStandaloneGatewayConfig(noVersion, dataDir)
+	err := validateStandaloneGatewayConfig(noVersion, dataDir, "")
 	if err == nil || !strings.Contains(err.Error(), noVersion) || !strings.Contains(err.Error(), "config_version_required") {
 		t.Fatalf("config without config_version = %v, want its path and config_version_required", err)
 	}
@@ -58,12 +58,12 @@ func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 	// still fails the gateway's compiler.
 	emptyTrust := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
 		"  profile: standalone\n", "  profile: standalone\n  trust:\n    mode: \"\"\n", 1))
-	if err := validateStandaloneGatewayConfig(emptyTrust, dataDir); err != nil {
+	if err := validateStandaloneGatewayConfig(emptyTrust, dataDir, ""); err != nil {
 		t.Fatalf("config with trust.mode \"\" (unset) refused: %v", err)
 	}
 	unknownTrust := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
 		"  profile: standalone\n", "  profile: standalone\n  trust:\n    mode: AUTHENTICODE\n", 1))
-	err = validateStandaloneGatewayConfig(unknownTrust, dataDir)
+	err = validateStandaloneGatewayConfig(unknownTrust, dataDir, "")
 	if err == nil || !strings.Contains(err.Error(), "$.enterprise.trust.mode") || !strings.Contains(err.Error(), "config_schema_invalid") {
 		t.Fatalf("config with trust.mode AUTHENTICODE = %v, want the schema location", err)
 	}
@@ -71,7 +71,7 @@ func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 	missingPack := filepath.Join(t.TempDir(), "missing-pack")
 	noPack := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
 		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+missingPack+"'", 1))
-	err = validateStandaloneGatewayConfig(noPack, dataDir)
+	err = validateStandaloneGatewayConfig(noPack, dataDir, "")
 	if err == nil || !strings.Contains(err.Error(), missingPack) || !strings.Contains(err.Error(), "directory_not_found") {
 		t.Fatalf("config naming a missing rule pack = %v, want the directory and directory_not_found", err)
 	}

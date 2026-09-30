@@ -125,13 +125,16 @@ func removeKiroV3Hooks(path, hookScript string) error {
 		}
 		kept = append(kept, item)
 	}
+	// Judge ownership on what is left: with DefenseClaw's entries out, a
+	// file that holds nothing else is DefenseClaw's own and goes, instead
+	// of staying behind as an empty {"hooks": []}.
+	cfg["hooks"] = kept
 	if len(kept) == 0 && kiroFileIsDefenseClawOwned(cfg, hookScript) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
-	cfg["hooks"] = kept
 	return writeJSONObject(path, cfg)
 }
 
@@ -392,8 +395,13 @@ func kiroFileIsDefenseClawOwned(cfg map[string]interface{}, hookScript string) b
 	if len(hooks) != 0 {
 		return false
 	}
-	if version := strings.TrimSpace(fmt.Sprint(cfg["version"])); version != "" && version != "v1" {
-		return false
+	// A file without a version (Kiro can drop the key when it rewrites the
+	// file) is still DefenseClaw's; fmt.Sprint of the missing key is "<nil>",
+	// which kept every such file.
+	if raw, present := cfg["version"]; present {
+		if version := strings.TrimSpace(fmt.Sprint(raw)); version != "" && version != "v1" {
+			return false
+		}
 	}
 	for key := range cfg {
 		if key != "version" && key != "hooks" {
