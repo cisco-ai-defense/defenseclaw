@@ -53,13 +53,13 @@ outer EXE bytes, so its hash and size can be finalized only after outer signing.
 The build-kit producer is:
 
 ```bash
-make packaging-windows-avc-buildkit VERSION=0.9.0-rc1
+make packaging-windows-avc-buildkit VERSION=<version>
 ```
 
 The local unsigned developer path is:
 
 ```bash
-make packaging-windows-enterprise-installer VERSION=0.9.0-rc1
+make packaging-windows-enterprise-installer VERSION=<version>
 ```
 
 Assembler defaults are `./payload`, `./source`, and `./out`. Both variants

@@ -1,5 +1,7 @@
 # Spec 006 — Windows Cursor managed-enterprise lifecycle
 
+**Status:** Proposed. This design has not shipped.
+
 > **Scope/status:** This is an engineering specification for the separate
 > machine-wide managed-enterprise path. PR #655 shipped ordinary per-user
 > [native Windows Cursor support](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/cursor/)

@@ -19,7 +19,7 @@ The consumer-facing endpoint contract is maintained on the
 | Connector contracts | `connector/` |
 | Inspection and judge lanes | `inspect.go`, `inspector.go`, `llm_judge.go`, focused companion files |
 | Application protection | `application_protection.go` |
-| WebSocket integration | `client.go`, `router.go`, `gateway_ws*.go` |
+| WebSocket integration | `client.go`, `router.go`, `router_*.go`, `frames.go`, `rpc.go`, `events.go` |
 | Canonical telemetry production | `*_observability_v8.go` and generated builders in `internal/observability/` |
 
 Route registration in `api.go`, configuration in `internal/config`, and the

@@ -17,7 +17,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make ts-test` | OpenClaw plugin Vitest suite |
 | `make rego-test` | OPA tests for `policies/rego/` |
 | `make check` | v7 parity, observability-v8, dashboard, provider, model-catalog, and guardrail-catalog gates |
-| `make lint` | Ruff, Go formatting/linting, and Python compile check |
+| `make lint` | Ruff, Go formatting/linting, the go.mod no-toolchain check, the repro-flags and assemble parity checks, and a Python compile check |
 
 ## Focused Tests
 

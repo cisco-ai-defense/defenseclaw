@@ -2621,30 +2621,17 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 
 ### Issue #910 (enterprise standalone follow-ups) and its sub-issues
 
-| Issue | Topic | Tester note |
-| --- | --- | --- |
-| #910 | Parent: standalone profile follow-ups | File new standalone follow-ups as sub-issues here |
-| #911 | Project-hook session record in gateway-held state | Fixed on the branch; closes when #924 merges. Regression checks in [Foreign-hook guard](#foreign-hook-guard-standalone-profile) |
-| #912 | Enroll users who have only a desktop app or editor extension; unverified app versions | R25 |
-| #913 | Govern Copilot in VS Code (Local harness) | R26 |
-| #914 | WSL sessions (Claude Desktop, Codex app and extension) | R27 |
-| #915 | Devin Desktop (Devin Local under ACP, Cascade before 3.9.19) | R28 |
-| #916 | Kiro IDE (global hooks, discovery, floor, Windows hook command) | R29 |
-| #920 | Claude Code releases that do not read `managed-settings.d` run without DefenseClaw (also the 2.1.154 floor limit; old Copilot and OpenHands below their minimum are the same class) | R15 |
-| #921 | Attribute scan and inspect-route audit rows to the verified caller | Remainder: `scan-finding` and `scan` rows still have no user fields; connector-hook, inspect-tool and auth-failure rows are fixed |
-| #923 | Commands chained with `&&` or `\|\|`: later commands never block | First command now blocks; later ones stay detection-only |
-| #925 | Built-in rules with a code prerequisite still record a runtime-expanded redirect target as detection-only | Custom rules fixed |
-| #927 | Windows: roll back a failed first install cleanly for accounts with per-user agents (Amp, Antigravity, Copilot, Devin, Hermes, OpenCode) | Fixed on the branch (cleanup contracts for every per-user connector); forced first-install failure not exercised live |
-| #928 | Windows: dedicated DefenseClaw event log only admins can write | Fixed on the branch: `DefenseClaw` log, source `DefenseClaw Lifecycle`; legacy Application-log copies continue for one transition. See CLI-13, REG-1-9-10 |
-| #929 | Windows: status names the process holding the gateway API port | Fixed on the branch: `api_port_held` and `api_port_holders` |
-| #930 | Windows: restore the managed OpenCode plugin as soon as its attributes change | Fixed on the branch (folder watch restores within about a second); the write-attributes right stays until OpenCode's runtime stops asking for it. Windows residual 23 |
+Standalone profile follow-ups are tracked in
+[issue #910](https://github.com/cisco-ai-defense/defenseclaw/issues/910) and its sub-issues. File new
+standalone follow-ups as sub-issues there. The residual risks in this plan that map to open sub-issues are
+R15, R25, R26, R27, R28, R29 and Windows residual 23.
 
 ### Related open issues (outside #910, do not refile)
 
 | Issue | Topic |
 | --- | --- |
-| #922 | Rule engine: runtime-expanded redirect target turns a command rule detection-only (fixed on this branch; open for `main`) |
-| #917, #918 | Managed Windows Cursor (Secure Client): per-user DefenseClaw entries left in `~/.cursor/hooks.json` / `~/.claude/settings.json` deny every tool call (fixed on the Secure Client follow-up branch) |
+| #922 | Rule engine: runtime-expanded redirect target turns a command rule detection-only |
+| #917, #918 | Managed Windows Cursor (Secure Client): per-user DefenseClaw entries left in `~/.cursor/hooks.json` / `~/.claude/settings.json` deny every tool call |
 | #894 to #909 | Secure Client (`main`) follow-ups: Windows Codex machine-policy hook binding (#909), transaction recovery and sensor helper (#907, #908), uninstall refusals (#906), guardian freshness and state paths (#895, #896, #905), device identity (#904), enrollment of signed-out users (#894), Claude HKLM policy (#899), Codex requirements merge (#898), self-upgrade guard (#897), stale Windows docs (#900) |
 | #932 to #942 | Secure Client hardening (gateway authentication for Unix hooks, per-user gateway coexistence, GUI socket peer, payload publishers, Codex requirements on macOS, Cursor hooks, Claude managed-hooks-only, inspection health and `unavailable_action`) |
 | #901 | `managed_enterprise` on `main`: Windows sensor helper logs/home dirs, Claude floor below the contract |
@@ -2681,7 +2668,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
   desktop session.
 - **Versions and auto-update.** Agents self-update mid-test (Claude Code, OpenCode, Codex,
   kiro-cli). A version outside its hook contract becomes `hook_contract_unverified` and
-  `security_complete: false`. Pin or turn off auto-update. Verified ranges on this branch
+  `security_complete: false`. Pin or turn off auto-update. Verified ranges
   (`cli/defenseclaw/inventory/hook_contracts.json`): Claude Code 2.1.154 and later; Codex 0.124
   and later (0.145 and later is the default contract); Copilot CLI 1.0.18 and later; Cursor
   2.4.0 to before 4.0.0 (plus one exact CLI build); OpenCode 1.18.10 to before 1.19.0; Hermes
