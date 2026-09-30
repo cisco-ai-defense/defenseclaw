@@ -1614,6 +1614,19 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             f"OmniGent custom policy not found at {path}",
             "defenseclaw setup omnigent",
         )
+    if connector == "kiro":
+        # Kiro merges hooks from every scope; setup writes the global
+        # ~/.kiro/hooks/defenseclaw.json and, with claw.workspace_dir, the
+        # project's .kiro/hooks/defenseclaw.json. Either one is enough here.
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        candidates = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
+        if workspace:
+            candidates.append(os.path.join(workspace, ".kiro", "hooks", "defenseclaw.json"))
+        for path in candidates:
+            if os.path.isfile(path):
+                return StepResult("Connector", "pass", f"Kiro hooks found at {path}")
+        return StepResult("Connector", "warn", "Kiro hooks not found yet", "defenseclaw setup kiro")
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 

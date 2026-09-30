@@ -207,6 +207,22 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertIn("live action/fail-closed enforcement is unverified", result.detail)
         self.assertIn(config_home, result.detail)
 
+    def test_kiro_readiness_finds_global_hooks(self):
+        # Quickstart readiness said "unknown connector 'kiro'" while doctor passed.
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        hooks_dir = os.path.join(self._tmp.name, ".kiro", "hooks")
+        os.makedirs(hooks_dir)
+        with open(os.path.join(hooks_dir, "defenseclaw.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        with patch("defenseclaw.bootstrap.connector_home", return_value=os.path.join(self._tmp.name, ".kiro")):
+            found = _connector_readiness(cfg, "kiro")
+            os.remove(os.path.join(hooks_dir, "defenseclaw.json"))
+            missing = _connector_readiness(cfg, "kiro")
+
+        self.assertEqual(found.status, "pass")
+        self.assertIn("Kiro hooks found", found.detail)
+        self.assertEqual((missing.status, missing.next_command), ("warn", "defenseclaw setup kiro"))
+
     def test_omnigent_readiness_rejects_partial_registration(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "partial-omnigent-config")
