@@ -277,7 +277,13 @@ func TestRotateCredentialsSkipsTargetsWithoutACredential(t *testing.T) {
 		t.Fatalf("a failed target that holds a credential did not stop the rotation: %+v", result.Errors)
 	}
 
+	// The lookup no longer finds carol, but the guardian still resolves
+	// her (a directory account the lookup does not see), so she still
+	// holds a credential; once the guardian cannot resolve her either,
+	// her account is gone.
 	delete(h.accounts.accounts, "carol")
+	requireError(t, h.run(Options{Action: ActionRotateCredentials}), codeRotation)
+	h.failed[0].UID = -1
 	requireOK(t, h.run(Options{Action: ActionRotateCredentials}))
 	if h.committedKey() == keyB {
 		t.Fatal("the target of an account that no longer exists blocked the rotation")

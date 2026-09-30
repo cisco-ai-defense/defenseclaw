@@ -318,9 +318,11 @@ func credentialTargets(attestation enterprisehooks.CredentialAttestation) map[st
 // one while the guardian's authorization ledger carries its last success
 // forward: the gateway accepts the credentials of every target the ledger
 // protects, and the target's files keep the ones an earlier reconcile
-// rendered. One whose account no longer exists holds none that anyone can
-// use; the commit retires them with the old key. err is set when the ledger
-// cannot be read, so which of them hold a credential is unknown.
+// rendered. One whose account no longer exists (the guardian resolved no
+// account, and the account lookup answers that there is none) holds none
+// that anyone can use; the commit retires them with the old key. err is set
+// when the ledger cannot be read, so which of them hold a credential is
+// unknown.
 func (l *lifecycle) targetsNotMoved(ctx context.Context, attestation enterprisehooks.CredentialAttestation) (held, skipped []string, err error) {
 	var protected map[string]bool
 	for _, target := range attestation.Targets {
@@ -332,7 +334,10 @@ func (l *lifecycle) targetsNotMoved(ctx context.Context, attestation enterpriseh
 				return nil, nil, err
 			}
 		}
-		if protected[protectedTargetKey(target.Connector, target.User, target.UserHome)] && !l.accountAbsent(ctx, target.User) {
+		// The lookup alone does not prove an account gone: it does not see
+		// every directory account the guardian resolves (dscl reads only
+		// the local node on macOS), so the guardian must have resolved none.
+		if protected[protectedTargetKey(target.Connector, target.User, target.UserHome)] && (target.UID >= 0 || !l.accountAbsent(ctx, target.User)) {
 			held = append(held, target.Label())
 		} else {
 			skipped = append(skipped, target.Label())
