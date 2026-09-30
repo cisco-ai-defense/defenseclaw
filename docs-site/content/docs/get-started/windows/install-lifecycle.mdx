@@ -38,7 +38,7 @@ narrower requirement: Windows x64 Pro, Enterprise, or Education; Hyper-V;
 machine-installed Docker Desktop; Linux containers; a reachable daemon;
 Compose v2; and a real native `docker.exe`. Windows Home, per-user Docker
 Desktop, WSL2 engines, Windows containers, and command-wrapper shims are not in
-that optional feature's certified path. Core DefenseClaw does not require
+that optional feature's supported path. Core DefenseClaw does not require
 Docker.
 
 ## Install
@@ -60,8 +60,11 @@ To choose options, run the script block with parameters:
 | `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `-Rollback` | Restore the install that the last upgrade replaced |
 | `-Connector NAME` | First install only: the agent to guard |
+| `-NoOpenclaw` | Same as `-Connector none` |
 | `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
+| `-QuickstartMode observe\|action` | Mode for `-Quickstart`; implies `-Quickstart` |
 | `-NoPersistPath` | Do not add `%USERPROFILE%\.local\bin` to your user `PATH` |
+| `-CosignPath FILE` | Use this `cosign` binary to verify the release signature |
 
 The installer checks every download against the release's `checksums.txt`
 (and its Sigstore signature when `cosign` 2.0 or later is installed), prepares the new
@@ -119,25 +122,19 @@ defenseclaw setup `
   --yes
 ```
 
-Setup records validated `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`,
-`OMNIGENT_CONFIG_HOME`, and `OPENCODE_CONFIG_DIR` values when they are used,
-plus `HERMES_HOME` when Hermes is selected. Antigravity uses the
-`%USERPROFILE%\.gemini\config` home. A predecessor custom path is retained only as
-internal custody long enough to restore its exact file and migrate the managed
-registration to the official path. Setup writes only
-`%USERPROFILE%\.gemini\config\hooks.json` and records that home as its own
-ownership boundary for repair, rollback, and teardown.
-Cursor publishes no configuration-home
-environment variable, so Setup records its exact configuration home
-internally. Devin setup records `%APPDATA%\devin` and the exact admitted CLI
-path for lifecycle custody. Repair and upgrade preserve all other
-recorded homes instead of following later profile or environment drift. The transaction retains both the
-current and previous recorded Hermes home until reconciliation, rollback, or
-teardown has finished, so an environment change cannot strand an owned
-`config.yaml` registration. Restart OpenCode after lifecycle changes so the running
-client loads the reconciled plugin state. The data root is the current profile's
-`.defenseclaw` unless `DEFENSECLAW_HOME` is set; see
-[Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
+Setup follows the same rules for every connector:
+
+1. If you set a connector home variable (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+   `COPILOT_HOME`, `OMNIGENT_CONFIG_HOME`, `OPENCODE_CONFIG_DIR` or
+   `HERMES_HOME`), setup records that path. Otherwise it uses the default home.
+2. Antigravity uses `%USERPROFILE%\.gemini\config`, Cursor uses its default
+   configuration home, and Devin uses `%APPDATA%\devin`.
+3. Repair and upgrade keep using the recorded home, even if you later change the
+   environment variable. Run `defenseclaw setup <connector>` again to move it.
+4. Restart OpenCode after setup changes so it loads the new plugin state.
+
+The data root is `%USERPROFILE%\.defenseclaw` unless `DEFENSECLAW_HOME` is set;
+see [Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
 
 Amp has no connector-home override: its system plugin uses
 `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. Fully exit and relaunch Amp
@@ -170,7 +167,8 @@ To undo the last upgrade:
 defenseclaw rollback
 ```
 
-See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
+See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option and the
+[CLI reference](/docs/reference/cli#upgrade) for flags.
 
 When an administrator sets the `DisableSelfUpdate` policy (a nonzero DWORD
 under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw`), `install.ps1`,
@@ -192,17 +190,19 @@ keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
 old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
 Connector hooks are rewritten to the new paths when the gateway starts.
 
-You do not need to run the old Setup to move. The published 0.8.x
-`DefenseClawSetup-x64.exe` files are not Authenticode signed, so their
-`/verify` exits `1` with `release setup lacks the required Cisco RFC3161
-Authenticode identity`. That is their signing state, not a sign of
-tampering: authenticate such a file only by matching its SHA-256
-(`Get-FileHash -Algorithm SHA256`) with its entry in that release's
-`checksums.txt` after verifying the Sigstore signature of `checksums.txt`.
-A Setup built from the current source checks its embedded payload and
-reports an unsigned build as unsigned, with its SHA-256 for that comparison;
-its `/verify` fails only when the payload no longer matches its manifest or
-the file's signature does not match the signing state the manifest records.
+You do not need to run the old Setup to move.
+
+<Accordions>
+<Accordion title="Checking an old 0.8.x Setup file">
+
+The published 0.8.x `DefenseClawSetup-x64.exe` files are not Authenticode
+signed, so `/verify` on them exits `1`. That is their signing state, not a sign
+of tampering. To check such a file, verify the Sigstore signature of the
+release's `checksums.txt`, then compare the file's SHA-256
+(`Get-FileHash -Algorithm SHA256`) with its entry there.
+
+</Accordion>
+</Accordions>
 
 ## Repair
 
@@ -221,4 +221,5 @@ For a machine-wide deployment managed by Intune or another MDM, see
 [enterprise deployment](/docs/enterprise). The Cisco Secure Client profile is
 described in
 [Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
+All uninstall flags are in the [CLI reference](/docs/reference/cli#uninstall).
 

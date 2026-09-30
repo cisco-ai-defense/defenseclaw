@@ -149,7 +149,7 @@ or any other shell wrapper because Hermes uses `shlex.split` and
 
 DefenseClaw product executables are long-path-aware, and installer journal and
 process-identity tests cover paths beyond the legacy `MAX_PATH` limit. That
-does not certify arbitrary third-party agents, plugins, network filesystems,
+does not cover arbitrary third-party agents, plugins, network filesystems,
 or shell wrappers. Protected connector and transaction paths reject reparse
 redirection; remote Windows filesystems are not a supported transaction target.
 
@@ -308,50 +308,63 @@ residue automatically.
 
 ## Post-install checklist
 
-Complete this without real secrets or destructive tools:
+Use harmless prompts only. Do not use real secrets or destructive tools.
 
-- Open a new native PowerShell or cmd window and confirm `defenseclaw` and
-  `defenseclaw-gateway` resolve from `%USERPROFILE%\.local\bin`.
-- Run `defenseclaw version`; require the CLI and gateway generation to agree.
-- Run `defenseclaw-gateway status`, `defenseclaw status`, and
-  `defenseclaw guardrail status`; require every intended supported
-  connector row, mode, enabled state, and truthful failure posture. Hermes
-  failures must be reported open even if generic policy
-  provenance is `closed`.
-- Run `defenseclaw config validate` and `defenseclaw doctor`; resolve every
-  connector registration or authentication failure.
-- Restart each configured Codex or Claude Code agent; fully exit and relaunch
-  Amp. In an empty disposable directory, submit a non-sensitive prompt such as
-  “Reply with the word ready.” For `amp -x`, include
-  `--plugin-ready-timeout 30`. An authenticated Amp live turn additionally
-  requires `AMP_API_KEY`; do not paste it into the command or diagnostics. Do
-  not use customer data, credentials, or a destructive tool call.
-- Open `defenseclaw tui` or use `defenseclaw alerts` and confirm new activity is
-  attributed only to the agent you exercised.
-- If multiple connectors are installed, repeat the harmless prompt once in each;
-  one connector's success does not prove another's hooks or telemetry.
-  Hermes manual block visibility must use a harmless matched tool request and
-  confirm only a valid synchronous JSON block, never a timeout/nonzero test.
+1. Open a new PowerShell or cmd window. Check that both commands come from
+   `%USERPROFILE%\.local\bin`:
+
+   ```powershell
+   Get-Command defenseclaw, defenseclaw-gateway
+   ```
+
+2. Check the versions match and the gateway is running:
+
+   ```powershell
+   defenseclaw version
+   defenseclaw-gateway status
+   ```
+
+3. Check each connector you set up is listed with the mode you expect:
+
+   ```powershell
+   defenseclaw status
+   defenseclaw guardrail status
+   ```
+
+4. Fix anything these report:
+
+   ```powershell
+   defenseclaw config validate
+   defenseclaw doctor
+   ```
+
+5. Restart each agent. Fully exit and relaunch Amp. For `amp -x`, add
+   `--plugin-ready-timeout 30`.
+6. In an empty folder, send each agent a harmless prompt such as "Reply with
+   the word ready."
+7. Open `defenseclaw tui` or run `defenseclaw alerts` and check the new
+   activity shows under the right connector. Repeat for each connector.
 
 ## Post-upgrade checklist
 
-- Run `defenseclaw version`, `defenseclaw migrate --check`, and
-  `defenseclaw config validate`.
-- Require `defenseclaw-gateway status` and `defenseclaw doctor` to pass with the
-  exact upgraded generation.
-- Compare `defenseclaw guardrail status` with the pre-upgrade connector roster,
-  modes, fail modes, enabled state, and optional watchdog state.
-- Confirm the command path still resolves to `%USERPROFILE%\.local\bin`,
-  not a stale checkout or copied binary.
-- Confirm each configured connector has loaded its configuration, restarting
-  the official client where documented, then repeat the harmless per-connector
-  event check above. For Devin, use the admitted native CLI in the same Windows
-  user session; WSL or a shell substitute is not valid evidence.
-- Verify optional destinations with `defenseclaw observability plan` and the
-  destination-specific test command. A destination failure does not erase the
-  mandatory local audit, but it must be treated as degraded delivery.
-- Keep private receipts and backups untouched until the upgraded gateway and
-  every configured connector is healthy.
+1. Check the upgrade finished and the configuration is valid:
+
+   ```powershell
+   defenseclaw version
+   defenseclaw config validate
+   defenseclaw-gateway status
+   defenseclaw doctor
+   ```
+
+2. Run `defenseclaw guardrail status` and check the connectors and modes match
+   what you had before the upgrade.
+3. Check `Get-Command defenseclaw` still points to `%USERPROFILE%\.local\bin`.
+4. Restart each agent and repeat the harmless prompt from the post-install
+   checklist.
+5. If you use optional destinations, run `defenseclaw observability plan`. A
+   destination failure does not stop the local audit log.
+6. Keep the backups in `%USERPROFILE%\.defenseclaw\previous` until every
+   connector works. `defenseclaw rollback` needs them.
 
 For broader context, see [CLI reference](/docs/reference/cli),
 [configuration](/docs/reference/configuration), [upgrade](/docs/get-started/upgrade),
