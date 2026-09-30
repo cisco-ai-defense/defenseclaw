@@ -1246,6 +1246,17 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if got := warnings(base + `,"user_registrations_removed":2,"user_registrations_pending":[],"user_registrations_failed":[]}`); len(got) != 0 {
 		t.Fatalf("a complete cleanup warned: %+v", got)
 	}
+	// A purge names the per-user folder each enrolled account keeps.
+	purged, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_remaining":["alice (` + sid + `): C:\\Users\\alice\\.defenseclaw"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	purge := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(purge, &windowsEnterpriseLifecycleOptions{purge: true}, purged, windowsEnterpriseStandaloneRun{})
+	if len(purge.Warnings) != 1 || purge.Warnings[0].Code != "per_user_state_remaining" ||
+		!strings.Contains(purge.Warnings[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
+		t.Fatalf("purge warnings = %+v", purge.Warnings)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}

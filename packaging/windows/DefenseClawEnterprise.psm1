@@ -20225,6 +20225,28 @@ function Add-DefenseClawUserRegistrationCleanupResult {
                 -Value $lists[$name] `
                 -Force
     }
+    # The standalone finalize names each enrolled account's per-user folder,
+    # which the uninstall does not remove; a purge reports it.
+    $remaining = $null
+    if ($null -ne $report) {
+        $remaining = $report.PSObject.Properties['user_state_remaining']
+    }
+    if ($null -ne $remaining -and $null -ne $remaining.Value) {
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name user_state_remaining `
+                -Value ([string[]]@(
+                    @($remaining.Value) |
+                        Microsoft.PowerShell.Utility\Select-Object -First 4096 |
+                        Microsoft.PowerShell.Core\ForEach-Object {
+                            ConvertTo-DefenseClawBoundedDiagnostic `
+                                -Value ([string]$_) `
+                                -MaxLength 1024
+                        }
+                )) `
+                -Force
+    }
     return $Result
 }
 

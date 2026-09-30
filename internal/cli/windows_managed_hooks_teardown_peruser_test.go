@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -167,6 +168,10 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		}
 	}
 	manifest := perUserTeardownManifest("devin")
+	manifest.Targets[0].UserHome = t.TempDir()
+	if err := os.Mkdir(filepath.Join(manifest.Targets[0].UserHome, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv(managed.EnterpriseProfileEnv, "")
 	var report windowsManagedHooksTeardownReport
@@ -185,7 +190,11 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"user_registrations_removed":2`, `"user_registrations_pending":["hermes/`} {
+	// A purge names the per-user folder each enrolled account keeps.
+	if len(report.UserStateRemaining) != 1 || !strings.HasSuffix(report.UserStateRemaining[0], `\.defenseclaw`) {
+		t.Fatalf("remaining per-user state = %v", report.UserStateRemaining)
+	}
+	for _, field := range []string{`"user_registrations_removed":2`, `"user_registrations_pending":["hermes/`, `"user_state_remaining":[`} {
 		if !strings.Contains(string(body), field) {
 			t.Fatalf("report JSON %s lacks %s", body, field)
 		}

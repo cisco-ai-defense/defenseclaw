@@ -552,6 +552,13 @@ removal left in the user's agent configuration (the message names the file).
 To clean every user, run the uninstall as LocalSystem while they are signed
 in.
 
+`PURGE=1` removes the machine state only. Each enrolled account keeps its
+`%USERPROFILE%\.defenseclaw` folder, with inert hook scripts and that
+account's per-user hook tokens, which nothing accepts once the gateway is
+gone. A purge names each folder in its `per_user_state_remaining` warning.
+Some of its folders deny Administrators, so remove each one as LocalSystem
+once the account is signed out.
+
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The

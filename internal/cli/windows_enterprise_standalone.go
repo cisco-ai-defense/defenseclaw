@@ -85,6 +85,9 @@ type windowsEnterpriseInstallerReport struct {
 	// lifecycle's report.
 	UserRegistrationsPending json.RawMessage `json:"user_registrations_pending"`
 	UserRegistrationsFailed  json.RawMessage `json:"user_registrations_failed"`
+	// UserStateRemaining names each enrolled account's per-user folder the
+	// uninstall left ("user (SID): path").
+	UserStateRemaining json.RawMessage `json:"user_state_remaining"`
 	// Pending-transaction recovery reports each managed-hook lifecycle step
 	// it ran with the Setup's verified gateway, and why it kept the staged
 	// one. Decoded leniently, like the registration lists.
@@ -481,7 +484,24 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report)
+	if opts != nil && opts.purge {
+		addWindowsEnterpriseUserStateWarning(result, report)
+	}
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+}
+
+// addWindowsEnterpriseUserStateWarning names each enrolled account's
+// DefenseClaw per-user folder a purge left. The Windows uninstall removes
+// the machine state; those folders keep inert hook scripts and that
+// account's per-user hook tokens, which nothing accepts any more.
+func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if remaining := windowsEnterpriseReportStrings(report.UserStateRemaining); len(remaining) > 0 {
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge removed the machine state only; %d enrolled account(s) keep their DefenseClaw per-user folder, with inert hook scripts and per-user hook tokens that nothing accepts any more; remove each one as LocalSystem once the account is signed out: %s",
+			len(remaining),
+			windowsEnterpriseBoundedLabels(remaining),
+		))
+	}
 }
 
 // addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a

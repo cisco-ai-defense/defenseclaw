@@ -106,6 +106,7 @@ type windowsManagedHooksTeardownReport struct {
 	UserRegistrationsRemoved     int                                 `json:"user_registrations_removed"`
 	UserRegistrationsPending     []string                            `json:"user_registrations_pending,omitempty"`
 	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
+	UserStateRemaining           []string                            `json:"user_state_remaining,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -131,6 +132,38 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
+	report.UserStateRemaining = windowsManagedHooksStandaloneUserStateRemaining(manifest)
+}
+
+// windowsManagedHooksStandaloneUserStateRemaining lists the DefenseClaw
+// per-user folder of each enrolled account that exists ("user (SID): path"),
+// so a purge can name what it leaves: the uninstall removes DefenseClaw's
+// registrations from each account's agent configuration, not that folder.
+// Replaceable in tests.
+var windowsManagedHooksStandaloneUserStateRemaining = func(manifest enterprisehooks.Manifest) []string {
+	seen := map[string]bool{}
+	var remaining []string
+	for _, target := range manifest.Targets {
+		home, sid := strings.TrimSpace(target.UserHome), strings.TrimSpace(target.SID)
+		dataDir := strings.TrimSpace(target.DataDir)
+		if dataDir == "" && home != "" {
+			dataDir = filepath.Join(home, ".defenseclaw")
+		}
+		if dataDir == "" || seen[strings.ToLower(dataDir)] {
+			continue
+		}
+		seen[strings.ToLower(dataDir)] = true
+		if _, err := os.Lstat(dataDir); err != nil {
+			continue
+		}
+		label := sid
+		if user := strings.TrimSpace(target.User); user != "" {
+			label = user + " (" + sid + ")"
+		}
+		remaining = append(remaining, label+": "+dataDir)
+	}
+	sort.Strings(remaining)
+	return remaining
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {
