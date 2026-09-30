@@ -122,6 +122,11 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Amp keeps DefenseClaw's prompt notice apart from the prompt.** The
+  hidden notice DefenseClaw adds when a prompt matches a rule followed the
+  prompt text directly, so a prompt ending in a command could be read, and
+  run, as that command with the notice's words appended. The notice now
+  starts on its own lines and says it is not part of the request.
 - **Amp shell commands get the same rule checks as Claude Code and Codex.**
   Amp's Bash tool sends its command as `cmd`, which the command analysis did
   not read, so every Amp command was judged only by the text-pattern
