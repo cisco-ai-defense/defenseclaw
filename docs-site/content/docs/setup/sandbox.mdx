@@ -901,7 +901,9 @@ sandbox starts it to read its work and stops it again, unless the sandbox
 has not run since its last pull read it: that pull is used then, without
 starting anything. A branch that holds other work or a patch file that
 exists is refused before the sandbox starts, and a branch that already holds
-the work is reported as done.
+the work is reported as done. A branch that holds only the last pull is
+refused before the start too when the stopped sandbox has run since that pull
+(`--branch-name NAME` or `--force` goes on).
 
 A copy-mode sandbox changes your folder only through `pull --apply`, so for
 such a sandbox `undo` reverts its last apply, after a preview. Edits you

@@ -571,6 +571,26 @@ func TestCopyBranchThatHoldsThePull(t *testing.T) {
 	if held, err := check(nil); err != nil || !held {
 		t.Fatalf("check of the branch that holds the last pull: %v, %v", held, err)
 	}
+	// Before a pull that starts the stopped sandbox, which has run since
+	// that pull, the branch holds only earlier work: it is refused before
+	// the boot (it was refused after it, the #1019 retest), unless forced.
+	// A pull made from the last one takes that work again, and is done.
+	var earlier *EarlierPullError
+	if held, err := check(func(o *ApplyOptions) { o.Starts = true }); held || !errors.As(err, &earlier) || earlier.Branch != "dc/c1" ||
+		!earlier.PulledAt.Equal(first.PulledAt) || !strings.Contains(err.Error(), "branch dc/c1 already exists") {
+		t.Fatalf("check before a pull that starts the sandbox: %v, %v", held, err)
+	}
+	if held, err := check(func(o *ApplyOptions) { o.Starts, o.Reuse = true, strings.Repeat("0", 40) }); held || !errors.As(err, &earlier) {
+		t.Fatalf("check before a pull that cannot reuse the last one: %v, %v", held, err)
+	}
+	for name, mutate := range map[string]func(*ApplyOptions){
+		"reusing the last pull": func(o *ApplyOptions) { o.Starts, o.Reuse = true, first.Result },
+		"forced":                func(o *ApplyOptions) { o.Starts, o.Force = true, true },
+	} {
+		if held, err := check(mutate); err != nil || !held {
+			t.Fatalf("check before a pull %s: %v, %v", name, held, err)
+		}
+	}
 	// The same work, committed in the sandbox: another commit, the same
 	// tree.
 	fs.agent(remoteRepo, "add", "-A")

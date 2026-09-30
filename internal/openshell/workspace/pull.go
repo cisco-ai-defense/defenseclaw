@@ -206,7 +206,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	if opts.Reuse != "" {
 		// What the last pull read, whose objects base.git holds, taken as a
 		// capture with nothing to download.
-		if last == nil || last.Result != opts.Reuse || !isOID(last.Result) {
+		if !reusable(last, opts.Reuse) {
 			return nil, ErrNoReusablePull
 		}
 		kv = map[string]string{"head": last.SandboxHead, "result": last.Result, "tree": last.ResultTree, "bundle": "none"}
@@ -655,6 +655,13 @@ type ApplyOptions struct {
 	// Force overrides blocking gates, an existing branch, or an existing
 	// patch file.
 	Force bool
+	// Starts tells CheckApply that the pull it is made before starts a
+	// stopped sandbox to read its work, unless that pull can be made from
+	// the last one: Reuse names the pull it would reuse (PullOptions.Reuse;
+	// "" when the sandbox has run since, so none can be). Apply ignores
+	// both.
+	Starts bool
+	Reuse  string
 }
 
 // ApplyResult reports what Apply did.
@@ -851,6 +858,12 @@ func branchHolds(ctx context.Context, rec *CopyRecord, branch, effective string)
 	return err == nil && want == tip
 }
 
+// reusable reports whether a pull can be made from last, the copy's last
+// pull, as PullOptions.Reuse names it.
+func reusable(last *PullResult, reuse string) bool {
+	return last != nil && reuse != "" && last.Result == reuse && isOID(last.Result)
+}
+
 // CheckApply looks, before a pull, at what would stop Apply with opts from
 // landing the pull's result and can be told without the sandbox: the
 // project folder, a branch for a folder that is not a git repository
@@ -859,6 +872,13 @@ func branchHolds(ctx context.Context, rec *CopyRecord, branch, effective string)
 // exists (unless Force) or whose folder does not. It reports whether the
 // branch already holds that result, which Apply of a pull that took the same
 // state finds up to date.
+//
+// A branch that holds the last pull's result is refused too (unless Force:
+// an *EarlierPullError) before a pull that Starts a stopped sandbox that
+// has run since that pull: what it holds now takes a boot to read, the new
+// pull lands on that branch only if the sandbox changed nothing, and the
+// refusal would otherwise come after the boot. A pull made from the last
+// one (Reuse) takes that result again, and is done.
 func CheckApply(ctx context.Context, opts ApplyOptions) (bool, error) {
 	rec, err := LoadCopy(opts.DataDir, opts.Name)
 	if err != nil {
@@ -881,6 +901,9 @@ func CheckApply(ctx context.Context, opts ApplyOptions) (bool, error) {
 			return false, err
 		}
 		if last := lastPullOf(opts.DataDir, rec); last != nil && branchHolds(ctx, rec, branch, last.Effective) {
+			if opts.Starts && !opts.Force && !reusable(last, opts.Reuse) {
+				return false, &EarlierPullError{Branch: branch, PulledAt: last.PulledAt}
+			}
 			return true, nil
 		}
 		if !opts.Force {

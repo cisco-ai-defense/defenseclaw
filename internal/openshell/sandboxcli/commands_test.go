@@ -818,6 +818,45 @@ func TestPullChecksWhereTheWorkGoesFirst(t *testing.T) {
 	lacks(t, ta.output(), "--accept-sensitive", "Bring them back anyway?")
 }
 
+// A branch that holds only the sandbox's earlier pull is refused before the
+// boot when the stopped sandbox has run since (the #1019 retest: `pull
+// --branch` started it, pulled, stopped it and only then refused), naming
+// that pull. The check is told whether the pull starts the sandbox and
+// which pull it would reuse; a running sandbox starts nothing.
+func TestPullRefusesABranchOfEarlierWorkBeforeTheBoot(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.checkErr = &workspace.EarlierPullError{Branch: "dc/copybox", PulledAt: ta.Now().Add(-time.Hour)}
+	wantErr(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}),
+		"bring back copybox's changes: branch dc/copybox already exists: it holds copybox's pull at "+ta.clock(ta.Now().Add(-time.Hour))+
+			", and copybox has run since, so its work may have changed; pass --branch-name NAME for another branch, or --force to move this one")
+	ta.wantCalls(t, 0, "POST", "copybox/start")
+	lacks(t, ta.output(), "starting copybox")
+	if len(ta.copy.checks) != 1 || !ta.copy.checks[0].Starts || ta.copy.checks[0].Reuse != "" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+
+	// Stopped by a pull that read it: the next pull would reuse that one.
+	ta.copy.checkErr = nil
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),
+		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+	if len(ta.copy.checks) != 3 || !ta.copy.checks[2].Starts || ta.copy.checks[2].Reuse != "r1" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+
+	// A running sandbox is read as it is.
+	ta = newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	if len(ta.copy.checks) == 0 || ta.copy.checks[0].Starts || ta.copy.checks[0].Reuse != "" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+}
+
 // A pull of a stopped copy-mode sandbox that has not run since its last
 // pull read its copy is made from that pull: the second `pull --branch`
 // starts nothing and finds the branch done. A pull the workspace cannot

@@ -493,7 +493,10 @@ deleted.
   "starting … to read its work", instead of after the download and review. A
   branch that already holds the work is done (`nothing to do: branch dc/<name>
   already has these changes`), with no question about its sensitive
-  changes, at a session's end too. A stopped sandbox that has not run since
+  changes, at a session's end too. A branch that holds only the last pull is
+  refused before the start too when the stopped sandbox has run since that
+  pull (`… it holds <name>'s pull at 14:03, and <name> has run since, so its
+  work may have changed`). A stopped sandbox that has not run since
   its last pull read it is not started: `sandbox pull` and `review` use that
   pull again (`… has not run since its last pull at 14:03; using that pull
   instead of starting it`), which on a Mac saves booting the MicroVM (#965).
