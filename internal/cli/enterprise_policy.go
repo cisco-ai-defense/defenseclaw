@@ -195,6 +195,10 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		for _, name := range connectors {
 			if agent.Connector == name {
 				report.Unprotected = append(report.Unprotected, agent)
+				// unverified_versions: refuse that nothing enforces.
+				if agent.Refusal == enterprisehooks.RefusalMissing {
+					report.Complete = false
+				}
 				break
 			}
 		}

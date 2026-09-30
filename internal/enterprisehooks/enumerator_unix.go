@@ -72,6 +72,29 @@ const (
 // explains connectors without a version.
 type UnixDiscoverFunc func(ctx context.Context, account unixidentity.Account, connectors []string) (versions map[string]string, reasons map[string]string, err error)
 
+// UnixDiscovery is one account's discovery: connector → CLI version,
+// reasons for connectors without one, and the connector's app and
+// extension installs.
+type UnixDiscovery struct {
+	Versions map[string]string
+	Reasons  map[string]string
+	Surfaces map[string][]connector.AgentSurface
+}
+
+// UnixDiscoverSurfacesFunc is UnixDiscoverFunc plus the app and extension
+// surfaces.
+type UnixDiscoverSurfacesFunc func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error)
+
+// UnixRefusedSurface is a (user, connector) whose only installs are
+// surfaces refused under enterprise.enrollment.unverified_versions:
+// refuse. The gateway refuses that user's hook calls for the connector
+// (reason surface_unverified).
+type UnixRefusedSurface struct {
+	User      string `json:"user"`
+	UID       *int   `json:"uid,omitempty"`
+	Connector string `json:"connector"`
+}
+
 // UnixEnumerateOptions configures one enumeration cycle. Zero values pick
 // the platform defaults.
 type UnixEnumerateOptions struct {
@@ -106,6 +129,11 @@ type UnixEnumerateOptions struct {
 	// and who has no rows, so the agents they can run there are reported
 	// even though they are not enrolled.
 	DiscoverStatic UnixDiscoverFunc
+	// DiscoverSurfaces, when set, replaces Discover and also returns the
+	// account's app and extension installs; DiscoverStaticSurfaces
+	// likewise replaces DiscoverStatic.
+	DiscoverSurfaces       UnixDiscoverSurfacesFunc
+	DiscoverStaticSurfaces UnixDiscoverSurfacesFunc
 	// MachineVersion reads root-owned machine-scoped metadata.
 	MachineVersion func(connector string) string
 	State          *UnixEnumeratorState
@@ -128,6 +156,9 @@ type UnixEnumerationReport struct {
 	// could not be enrolled (their version could not be read). The
 	// lifecycle's status and verify report them.
 	Unprotected []UnprotectedAgent `json:"unprotected,omitempty"`
+	// RefusedSurfaces are the (user, connector) pairs the gateway refuses
+	// under unverified_versions: refuse.
+	RefusedSurfaces []UnixRefusedSurface `json:"refused_surfaces,omitempty"`
 	// EligibleAccounts are the accounts that passed every enrollment filter
 	// and whose home is available this cycle, including users with only
 	// machine-policy connectors (no manifest rows). The guardian runs the
@@ -242,6 +273,19 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		perUser = append(perUser, name)
 	}
 	report.Connectors = perUser
+	// Machine-policy connectors whose unenrolled users are inspected get no
+	// rows; with unverified_versions: refuse their surfaces are still
+	// discovered, so the gateway can refuse a user whose only installs are
+	// refused surfaces.
+	var surfaceOnly []string
+	for _, name := range connectors {
+		if _, off := ownershipOff[name]; off || connectorListed(perUser, name) {
+			continue
+		}
+		if _, isMachine := machinePolicy[name]; isMachine && enrollment.UnverifiedVersionsFor(name) == config.EnterpriseUnverifiedRefuse {
+			surfaceOnly = append(surfaceOnly, name)
+		}
+	}
 
 	previous, err := loadPreviousUnixRows(opts.ExistingManifestPath)
 	if err != nil {
@@ -452,11 +496,25 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			})
 		}
 		var versions, reasons map[string]string
-		if check.State == HomeAvailable && opts.Discover != nil {
+		var surfaces map[string][]connector.AgentSurface
+		if check.State == HomeAvailable && opts.DiscoverSurfaces != nil {
+			found, err := opts.DiscoverSurfaces(ctx, account, append(append([]string{}, perUser...), surfaceOnly...))
+			if err != nil {
+				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
+			}
+			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+		} else if check.State == HomeAvailable && opts.Discover != nil {
 			var err error
 			versions, reasons, err = opts.Discover(ctx, account, perUser)
 			if err != nil {
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
+			}
+		}
+		for _, conn := range surfaceOnly {
+			unprotected, refused := unixSurfaceOnlyRefusals(account, conn, versions[conn], surfaces[conn], enrollment.UnverifiedVersionsFor(conn))
+			report.Unprotected = append(report.Unprotected, unprotected...)
+			if refused {
+				report.RefusedSurfaces = append(report.RefusedSurfaces, UnixRefusedSurface{User: name, UID: intPointer(account.UID), Connector: conn})
 			}
 		}
 		// Only an available home's inode identifies it. A pending home's
@@ -471,6 +529,20 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		for _, conn := range perUser {
 			key := unixRowKey(name, conn)
+			_, isMachine := machinePolicy[conn]
+			admission := admitSurfaces(conn, enrollment.UnverifiedVersionsFor(conn), surfaces[conn])
+			cliVersion := versions[conn]
+			if rowVersion := admission.rowVersion(cliVersion); rowVersion != cliVersion {
+				if versions == nil {
+					versions = map[string]string{}
+				}
+				versions[conn] = rowVersion
+				logfSafely(opts.Logger, name, fmt.Sprintf("(%s, %s) follows its %s surface at engine version %s", name, conn, admission.surface, rowVersion))
+			}
+			if check.State == HomeAvailable {
+				_, known := previous[key]
+				report.Unprotected = append(report.Unprotected, unixRejectedSurfaces(account, conn, isMachine, known || versions[conn] != "", admission)...)
+			}
 			row := ManifestTarget{
 				User:      name,
 				UserHome:  home,
@@ -955,6 +1027,51 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 	return fmt.Sprintf("version %s is not verified against a known hook contract", strings.TrimSpace(to))
 }
 
+// unixRejectedSurfaces reports the surfaces of one (user, connector) that
+// were not admitted. With a row (enrolled) a surface the report policy did
+// not admit still runs the hooks rendered for the row, so it is reported
+// only when it is refused: its hook calls look like the enrolled
+// install's, so nothing refuses it.
+func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, enrolled bool, admission surfaceAdmission) []UnprotectedAgent {
+	var out []UnprotectedAgent
+	for _, rejected := range admission.rejected {
+		consequence, refusal := "it runs without DefenseClaw hooks", RefusalMissing
+		switch {
+		case enrolled && !rejected.refused:
+			continue
+		case enrolled:
+			consequence = "it shares the enrolled " + conn + " install's hooks and its hook calls do not name their surface, so nothing refuses it"
+		case isMachine:
+			consequence, refusal = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)", RefusalEnforced
+		}
+		out = append(out, rejected.unprotected(account.Name, "", intPointer(account.UID), conn, consequence, refusal))
+	}
+	return out
+}
+
+// unixSurfaceOnlyRefusals reports the surfaces of a machine-policy
+// connector whose unenrolled users are inspected, for a user under
+// unverified_versions: refuse. refused is true when the user's only
+// installs are refused surfaces: the gateway then refuses the user's hook
+// calls for the connector. A user with an admitted install keeps being
+// inspected, so a refused surface next to it is not refused.
+func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion string, surfaces []connector.AgentSurface, policy string) ([]UnprotectedAgent, bool) {
+	admission := admitSurfaces(conn, policy, surfaces)
+	if len(admission.rejected) == 0 {
+		return nil, false
+	}
+	admittedInstall := cliVersion != "" || len(admission.admitted) != 0
+	var out []UnprotectedAgent
+	for _, rejected := range admission.rejected {
+		consequence, refusal := "the gateway refuses this user's "+conn+" hook calls (surface_unverified)", RefusalEnforced
+		if admittedInstall {
+			consequence, refusal = "the user's admitted "+conn+" install shares its hooks and its hook calls do not name their surface, so nothing refuses it", RefusalMissing
+		}
+		out = append(out, rejected.unprotected(account.Name, "", intPointer(account.UID), conn, consequence, refusal))
+	}
+	return out, !admittedInstall
+}
+
 // unixUntrustedHomeAgents reports the agents an eligible user without rows
 // can run from a home the enumerator does not enroll because it is
 // untrusted (group/other writable, a symlink, owned by another account, or
@@ -962,10 +1079,19 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 // metadata and checks for the CLIs as the user, and executes nothing in a
 // home others may have written to.
 func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, account unixidentity.Account, perUser []string, machinePolicy map[string]struct{}, check HomeCheck) []UnprotectedAgent {
-	if opts.DiscoverStatic == nil || len(perUser) == 0 {
+	if (opts.DiscoverStatic == nil && opts.DiscoverStaticSurfaces == nil) || len(perUser) == 0 {
 		return nil
 	}
-	versions, reasons, err := opts.DiscoverStatic(ctx, account, perUser)
+	var versions, reasons map[string]string
+	var surfaces map[string][]connector.AgentSurface
+	var err error
+	if opts.DiscoverStaticSurfaces != nil {
+		var found UnixDiscovery
+		found, err = opts.DiscoverStaticSurfaces(ctx, account, perUser)
+		versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+	} else {
+		versions, reasons, err = opts.DiscoverStatic(ctx, account, perUser)
+	}
 	if err != nil {
 		logfSafely(opts.Logger, account.Name, fmt.Sprintf("agents in the untrusted home could not be listed: %v", err))
 		return nil
@@ -994,6 +1120,15 @@ func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, acc
 			Code:      UnprotectedCodeAgentUnprotected,
 			Reason:    check.Reason + "; DefenseClaw does not enroll agents in an untrusted home, so " + consequence + remedy,
 		})
+	}
+	for _, conn := range perUser {
+		for _, surface := range surfaces[conn] {
+			if surface.Surface == "" || surface.Surface == connector.HostSurfaceCLI {
+				continue
+			}
+			out = append(out, surfaceRejection{surface: surface, reason: check.Reason}.unprotected(
+				account.Name, "", intPointer(account.UID), conn, "DefenseClaw does not enroll agents in an untrusted home"+remedy, ""))
+		}
 	}
 	return out
 }

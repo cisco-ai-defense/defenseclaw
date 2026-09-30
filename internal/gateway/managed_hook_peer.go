@@ -37,6 +37,7 @@ const (
 	managedHookReasonRootDenied        = "enterprise_managed_root_denied"
 	managedHookReasonLedgerUnavailable = "enterprise_managed_ledger_unavailable"
 	managedHookReasonConnectorUnknown  = "enterprise_managed_connector_unknown"
+	managedHookReasonSurfaceUnverified = "enterprise_managed_surface_unverified"
 )
 
 // managedHookPeer is the kernel-verified identity of a caller on the
@@ -123,6 +124,23 @@ type managedHookLedgerTarget struct {
 
 type managedHookLedger struct {
 	Targets []managedHookLedgerTarget `json:"protected_targets"`
+	// Refused is read from the enumerator's refused-surfaces file: users
+	// whose only installs of a machine-policy connector are app or
+	// extension surfaces refused under unverified_versions: refuse.
+	Refused []managedHookLedgerTarget `json:"refused_surfaces,omitempty"`
+}
+
+// refused reports whether peer's connector installs are refused surfaces.
+func (l managedHookLedger) refused(peer managedHookPeer, connector string) bool {
+	for _, target := range l.Refused {
+		if !strings.EqualFold(strings.TrimSpace(target.Connector), connector) {
+			continue
+		}
+		if (target.UID != nil && *target.UID == peer.UID) || (target.UID == nil && peer.Name != "" && target.User == peer.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l managedHookLedger) matches(peer managedHookPeer, target managedHookLedgerTarget) bool {
@@ -189,6 +207,8 @@ type managedHookAuthorizer struct {
 	enrollment    config.EnterpriseEnrollmentConfig
 	machinePolicy map[string]bool
 	loadLedger    func() (managedHookLedger, error)
+	// loadRefused reads the refused surfaces; nil means none.
+	loadRefused func() (managedHookLedger, error)
 }
 
 func newManagedHookAuthorizer(
@@ -238,6 +258,15 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName strin
 	machine := z.machinePolicy[connectorName]
 	strict := strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
 	if machine && !strict {
+		if z.loadRefused != nil && z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse {
+			refused, err := z.loadRefused()
+			if err != nil {
+				return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
+			}
+			if refused.refused(peer, connectorName) {
+				return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
+			}
+		}
 		return allowManagedHook()
 	}
 	if z.loadLedger == nil {
@@ -266,6 +295,7 @@ type managedHookLedgerLoader struct {
 	path string
 	ttl  time.Duration
 	now  func() time.Time
+	read func(string) (managedHookLedger, error)
 
 	mu       sync.Mutex
 	loadedAt time.Time
@@ -279,7 +309,13 @@ type managedHookLedgerLoader struct {
 }
 
 func newManagedHookLedgerLoader(path string) *managedHookLedgerLoader {
-	return &managedHookLedgerLoader{path: path, ttl: 2 * time.Second, now: time.Now}
+	return &managedHookLedgerLoader{path: path, ttl: 2 * time.Second, now: time.Now, read: readManagedHookLedger}
+}
+
+// newManagedHookRefusedLoader caches the refused-surfaces file like the
+// ledger.
+func newManagedHookRefusedLoader(path string) *managedHookLedgerLoader {
+	return &managedHookLedgerLoader{path: path, ttl: 2 * time.Second, now: time.Now, read: readManagedHookRefusedSurfaces}
 }
 
 func (l *managedHookLedgerLoader) Load() (managedHookLedger, error) {
@@ -301,9 +337,22 @@ func (l *managedHookLedgerLoader) LoadGeneration() (managedHookLedger, uint64, e
 	if statErr == nil {
 		l.modTime, l.size = info.ModTime(), info.Size()
 	}
-	l.ledger, l.err = readManagedHookLedger(l.path)
+	read := l.read
+	if read == nil {
+		read = readManagedHookLedger
+	}
+	l.ledger, l.err = read(l.path)
 	l.generation++
 	return l.ledger, l.generation, l.err
+}
+
+// readManagedHookRefusedSurfaces reads the refused-surfaces file; a missing
+// file means nothing is refused.
+func readManagedHookRefusedSurfaces(path string) (managedHookLedger, error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return managedHookLedger{}, nil
+	}
+	return readManagedHookLedger(path)
 }
 
 func readManagedHookLedger(path string) (managedHookLedger, error) {

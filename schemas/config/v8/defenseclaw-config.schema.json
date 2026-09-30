@@ -4402,6 +4402,27 @@
                 "exempt"
               ]
             },
+            "unverified_versions": {
+              "type": "string",
+              "enum": [
+                "report",
+                "refuse"
+              ]
+            },
+            "unverified_versions_by_connector": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "enum": [
+                  "report",
+                  "refuse"
+                ]
+              }
+            },
             "uid_min": {
               "type": "integer",
               "minimum": 0,

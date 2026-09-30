@@ -73,17 +73,21 @@ type unixAgentProbe struct {
 }
 
 var unixAgentProbes = map[string]unixAgentProbe{
-	"codex":       {npmPackages: []string{"@openai/codex"}, binaries: []string{"codex"}},
-	"claudecode":  {npmPackages: []string{"@anthropic-ai/claude-code"}, versionDirs: []string{".local/share/claude/versions", "Library/Application Support/Claude/claude-code"}, binaries: []string{"claude"}},
-	"cursor":      {versionDirs: []string{".local/share/cursor-agent/versions"}, binaries: []string{"cursor-agent", "agent"}},
-	"copilot":     {npmPackages: []string{"@github/copilot"}, binaries: []string{"copilot"}},
-	"opencode":    {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
-	"amp":         {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
-	"devin":       {binaries: []string{"devin"}},
-	"hermes":      {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME"},
-	"openhands":   {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
-	"omnigent":    {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
-	"antigravity": {binaries: []string{"agy", "antigravity"}},
+	"codex": {npmPackages: []string{"@openai/codex"}, binaries: []string{"codex"}},
+	// Claude Desktop's embedded build is a desktop surface
+	// (DiscoverUnixAgentSurfaces), not the CLI.
+	"claudecode": {npmPackages: []string{"@anthropic-ai/claude-code"}, versionDirs: []string{".local/share/claude/versions"}, binaries: []string{"claude"}},
+	"cursor":     {versionDirs: []string{".local/share/cursor-agent/versions"}, binaries: []string{"cursor-agent", "agent"}},
+	"copilot":    {npmPackages: []string{"@github/copilot"}, binaries: []string{"copilot"}},
+	"opencode":   {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
+	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
+	"devin":      {binaries: []string{"devin"}},
+	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME"},
+	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
+	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
+	// "antigravity" is the IDE launcher, a desktop surface that is never
+	// run (DiscoverUnixAgentSurfaces).
+	"antigravity": {binaries: []string{"agy"}},
 	"kiro":        {binaries: []string{"kiro-cli"}},
 }
 

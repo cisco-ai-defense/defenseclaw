@@ -65,6 +65,14 @@ const (
 	EnterpriseRootInspect = "inspect"
 	EnterpriseRootDeny    = "deny"
 	EnterpriseRootExempt  = "exempt"
+
+	// enterprise.enrollment.unverified_versions: what enrollment does with
+	// an app or extension surface whose hook delivery has not been
+	// live-verified. report (the default) enrolls it when its engine
+	// version resolves a hook contract and reports it; refuse keeps it
+	// unenrolled and refuses its hook calls where the route allows.
+	EnterpriseUnverifiedReport = "report"
+	EnterpriseUnverifiedRefuse = "refuse"
 )
 
 // EnterpriseEnrollmentConfig controls which local users the enumerator
@@ -93,6 +101,26 @@ type EnterpriseEnrollmentConfig struct {
 	// enumerator and guardian discover agents only in known locations, so
 	// agents installed elsewhere are not enrolled without this.
 	AgentPrefixes []string `mapstructure:"agent_prefixes" yaml:"agent_prefixes,omitempty"`
+	// UnverifiedVersions is report (default) or refuse; see
+	// EnterpriseUnverifiedReport. UnverifiedVersionsByConnector overrides
+	// it per connector.
+	UnverifiedVersions            string            `mapstructure:"unverified_versions"              yaml:"unverified_versions,omitempty"`
+	UnverifiedVersionsByConnector map[string]string `mapstructure:"unverified_versions_by_connector" yaml:"unverified_versions_by_connector,omitempty"`
+}
+
+// UnverifiedVersionsFor is the unverified-version policy for connector:
+// its override, else unverified_versions, else report.
+func (e EnterpriseEnrollmentConfig) UnverifiedVersionsFor(connector string) string {
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	for name, value := range e.UnverifiedVersionsByConnector {
+		if strings.ToLower(strings.TrimSpace(name)) == connector && strings.TrimSpace(value) != "" {
+			return strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+	if value := strings.ToLower(strings.TrimSpace(e.UnverifiedVersions)); value != "" {
+		return value
+	}
+	return EnterpriseUnverifiedReport
 }
 
 // Machine policy knobs.
@@ -526,7 +554,8 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 	return strings.TrimSpace(e.Mode) == "" && len(e.IncludeUsers) == 0 && len(e.ExcludeUsers) == 0 &&
 		len(e.IncludeGroups) == 0 && len(e.ExcludeGroups) == 0 && len(e.ExemptUsers) == 0 &&
 		strings.TrimSpace(e.UnenrolledUsers) == "" && strings.TrimSpace(e.Root) == "" &&
-		e.UIDMin == 0 && e.UIDMax == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0
+		e.UIDMin == 0 && e.UIDMax == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0 &&
+		strings.TrimSpace(e.UnverifiedVersions) == "" && len(e.UnverifiedVersionsByConnector) == 0
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
@@ -575,6 +604,20 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	if err := oneOf("enterprise.enrollment.root", en.Root, EnterpriseRootInspect, EnterpriseRootDeny, EnterpriseRootExempt); err != nil {
 		return err
+	}
+	if err := oneOf("enterprise.enrollment.unverified_versions", en.UnverifiedVersions, EnterpriseUnverifiedReport, EnterpriseUnverifiedRefuse); err != nil {
+		return err
+	}
+	for name, value := range en.UnverifiedVersionsByConnector {
+		if !enterpriseConnectorNamePattern.MatchString(name) {
+			return fmt.Errorf("config: enterprise.enrollment.unverified_versions_by_connector key %q is not a connector name", name)
+		}
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("config: enterprise.enrollment.unverified_versions_by_connector.%s must be report or refuse", name)
+		}
+		if err := oneOf("enterprise.enrollment.unverified_versions_by_connector."+name, value, EnterpriseUnverifiedReport, EnterpriseUnverifiedRefuse); err != nil {
+			return err
+		}
 	}
 	if en.UIDMin < 0 {
 		return fmt.Errorf("config: enterprise.enrollment.uid_min must not be negative")

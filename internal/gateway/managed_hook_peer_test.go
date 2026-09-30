@@ -62,6 +62,8 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "exempt by name", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
 		{name: "exempt by uid", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"3001"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
 		{name: "unknown connector", peer: alice, connector: "", reason: managedHookReasonConnectorUnknown},
+		{name: "refuse denies a user whose only codex install is a refused surface", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: carol, connector: "codex", reason: managedHookReasonSurfaceUnverified},
+		{name: "refuse keeps inspecting other users", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: bob, connector: "codex", allow: true},
 		{name: "ledger failure fails closed", loader: func() (managedHookLedger, error) { return managedHookLedger{}, errors.New("untrusted") }, peer: alice, connector: "claudecode", reason: managedHookReasonLedgerUnavailable},
 	}
 	for _, tc := range cases {
@@ -71,6 +73,9 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 				loader = load
 			}
 			authorizer := newManagedHookAuthorizer(tc.enrollment, []string{"codex", " "}, loader)
+			authorizer.loadRefused = func() (managedHookLedger, error) {
+				return managedHookLedger{Refused: []managedHookLedgerTarget{{UID: uidPtr(3001), Connector: "codex"}}}, nil
+			}
 			decision := authorizer.decide(tc.peer, tc.connector)
 			if decision.Allow != tc.allow || decision.Reason != tc.reason || decision.Exempt != tc.exempt {
 				t.Fatalf("decision = %+v, want allow=%v reason=%q exempt=%v", decision, tc.allow, tc.reason, tc.exempt)
