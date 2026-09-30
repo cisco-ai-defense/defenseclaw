@@ -18,6 +18,8 @@ import (
 
 func enterpriseHookStandalonePlatformPrepare(io.Writer) {}
 
+func enterpriseHookStandalonePlatformWatch(context.Context, io.Writer) {}
+
 func enterpriseHookStandalonePlatformFinish(context.Context, io.Writer, []enterpriseHookReconcileRow, time.Time) {
 }
 

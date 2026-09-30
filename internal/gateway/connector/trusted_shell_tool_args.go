@@ -297,3 +297,48 @@ func CursorTrustedShellArgs(event string, payload json.RawMessage) (projected js
 	}
 	return out, cwd, true
 }
+
+// AmpBashTrustedShellArgs projects Amp's Bash tool call, {"cmd": ...,
+// "cwd": ...}, onto the {"command": ...} shell shape and returns its cwd, the
+// command's working directory. The trusted-action parser reads a shell
+// command only under "command", so under "cmd" an Amp command had no command
+// facts and was judged by the text-pattern fallback alone: a rule whose
+// decision needs those facts only detected a command that Claude Code and
+// Codex blocked.
+//
+// Refused (ok false, arguments unchanged) for any other tool, or unless the
+// arguments are a JSON object with unique keys, only cmd and cwd, a
+// non-blank string cmd and a string or null cwd.
+func AmpBashTrustedShellArgs(toolName string, args json.RawMessage) (projected json.RawMessage, cwd string, ok bool) {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "bash") || antigravityValidateUniqueJSON(args) != nil {
+		return args, "", false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
+		return args, "", false
+	}
+	var command string
+	if raw, present := fields["cmd"]; !present || json.Unmarshal(raw, &command) != nil || strings.TrimSpace(command) == "" {
+		return args, "", false
+	}
+	for key, raw := range fields {
+		switch key {
+		case "cmd":
+		case "cwd":
+			var dir *string
+			if json.Unmarshal(raw, &dir) != nil {
+				return args, "", false
+			}
+			if dir != nil {
+				cwd = *dir
+			}
+		default:
+			return args, "", false
+		}
+	}
+	out, err := encodeTrustedShellArgs(map[string]string{"command": command})
+	if err != nil {
+		return args, "", false
+	}
+	return out, cwd, true
+}

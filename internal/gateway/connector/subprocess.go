@@ -1697,16 +1697,20 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("ensure hook dir: %w", err)
 	}
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
+}
+
+// disabledHookTombstone is the body writeDisabledHookTombstone writes.
+func disabledHookTombstone(vendorLabel string) string {
 	if vendorLabel == "" {
 		vendorLabel = "DefenseClaw connector"
 	}
-	body := "#!/bin/sh\n" +
+	return "#!/bin/sh\n" +
 		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
 		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
 		"exit 0\n"
-	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }
 
 // ShimBinaries returns the list of binary names that are shimmed.

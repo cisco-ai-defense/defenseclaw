@@ -42,9 +42,10 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 	if err != nil {
 		return run, err
 	}
-	authorization, exists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
-	activation, activationExists, activationErr := loadEnterpriseHookGuardianActivation(cfg.DataDir)
-	guardianState, guardianStateExists, guardianStateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
+	records := loadEnterpriseHookGuardianRecords(cfg.DataDir)
+	authorization, exists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
+	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
+	guardianState, guardianStateExists, guardianStateErr := records.State, records.StateExists, records.StateErr
 	freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now())
 	switch {
 	case authorizationErr != nil:

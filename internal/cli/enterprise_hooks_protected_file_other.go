@@ -10,3 +10,7 @@ import "github.com/defenseclaw/defenseclaw/internal/safefile"
 func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	return safefile.Write(path, data)
 }
+
+// enterpriseHookGuardianRecordBusy is Windows-only: an atomic rename never
+// leaves a guardian record unopenable here.
+func enterpriseHookGuardianRecordBusy(error) bool { return false }

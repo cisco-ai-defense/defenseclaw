@@ -899,13 +899,13 @@
         "label": "Hook surface",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
-          "uid": "defenseclaw-prometheus"
+          "type": "loki",
+          "uid": "defenseclaw-loki"
         },
-        "definition": "label_values(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}, event_type)",
+        "definition": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_hook_event!=\"\", body_defenseclaw_hook_event)",
         "query": {
-          "query": "label_values(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}, event_type)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          "query": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_hook_event!=\"\", body_defenseclaw_hook_event)",
+          "refId": "hook-event-var"
         },
         "refresh": 2,
         "sort": 1,

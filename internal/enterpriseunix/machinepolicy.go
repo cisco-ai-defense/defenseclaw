@@ -30,6 +30,9 @@ const (
 	codeMachinePolicy           = "machine_policy_failed"
 	codeMachinePolicyIncomplete = "machine_policy_incomplete"
 	codePerUserHooks            = "per_user_hooks_remaining"
+	// codePerUserState names an enrolled account whose DefenseClaw
+	// per-user state an uninstall --purge could not remove.
+	codePerUserState = "per_user_state_remaining"
 	// codeClaudeVersionFloorMissing names DefenseClaw's Claude Code version
 	// floor drop-in as wanted but absent. It is a warning, not a verify
 	// failure: the hooks are in place, and the floor stops no build older
@@ -221,6 +224,11 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return err
 	}
 	reportMachinePolicy(r, p.intended, result, err)
+	for _, state := range result.States {
+		if state.Changed {
+			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
+		}
+	}
 	covered := coveredMachinePolicy(p.intended, result)
 	if sameStrings(covered, p.machinePolicy) {
 		return nil
@@ -241,6 +249,9 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		}
 		file.Data = data
 		file.SHA = sha256Bytes(data)
+		if !changed[file.Path] {
+			l.noteChange("rewrote %s", file.Path)
+		}
 		changed[file.Path] = true
 		return nil
 	}

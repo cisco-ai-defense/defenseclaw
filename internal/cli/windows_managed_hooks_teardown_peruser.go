@@ -124,6 +124,24 @@ func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHoo
 	return err
 }
 
+// windowsManagedHooksStandaloneFloorPurger is replaceable in tests.
+var windowsManagedHooksStandaloneFloorPurger = purgeWindowsManagedHooksUnrecordedClaudeFloor
+
+// purgeWindowsManagedHooksUnrecordedClaudeFloor is the purge step for a
+// Claude Code version floor drop-in that holds DefenseClaw's floor but whose
+// ownership record is gone (a rolled-back install left it), which the
+// teardown's recorded removal keeps.
+func purgeWindowsManagedHooksUnrecordedClaudeFloor() error {
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return err
+	}
+	_, err = enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
+		enterprisepolicy.LayoutOptions(layout, programFiles, programData),
+	)
+	return err
+}
+
 func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManagedHooksTeardownJournal) error {
 	var errs []error
 	for connectorName, targets := range windowsManagedHooksStandalonePerUserExpected(journal) {

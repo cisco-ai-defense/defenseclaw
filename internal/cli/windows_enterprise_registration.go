@@ -36,7 +36,7 @@ import (
 
 // Standalone deployment registration and observability. MDM detection rules
 // read the marker key or the Add/Remove Programs entry; administrators read
-// the Application event log and the lifecycle log. Only the standalone
+// the DefenseClaw event log and the lifecycle log. Only the standalone
 // profile writes any of these.
 const (
 	// WindowsEnterpriseMarkerKey is read by the per-user installers
@@ -61,7 +61,31 @@ const (
 	windowsEnterpriseLogSDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 )
 
-// Event IDs of the "DefenseClaw Enterprise" Application-log source.
+// The lifecycle events go to a dedicated classic event log whose CustomSD
+// lets only LocalSystem and Administrators write it (and clear it), while
+// the accounts that can read the Application log can still read it. Any
+// account can write Application-log entries under any source name, so the
+// Application-log copy under "DefenseClaw Enterprise" is kept only for
+// detection rules that have not moved yet (legacy; a later release drops
+// it). Each run that writes an event re-registers the log and resets its
+// descriptor; a successful uninstall unregisters it.
+var (
+	windowsEnterpriseEventLog       = "DefenseClaw"
+	windowsEnterpriseEventLogSource = "DefenseClaw Lifecycle"
+)
+
+const (
+	windowsEnterpriseEventLogParent = `SYSTEM\CurrentControlSet\Services\EventLog`
+	// windowsEnterpriseEventLogSDDL grants ELF_LOG_READ (0x1) to the
+	// principals the Application log admits and ELF_LOG_WRITE (0x2) and
+	// ELF_LOG_CLEAR (0x4) only to LocalSystem and Administrators.
+	windowsEnterpriseEventLogSDDL = "O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x1;;;SO)(A;;0x1;;;IU)(A;;0x1;;;SU)" +
+		"(A;;0x1;;;S-1-5-3)(A;;0x1;;;S-1-5-33)(A;;0x1;;;S-1-5-32-573)"
+	windowsEnterpriseEventLogMaxSize = 20 << 20
+	windowsEnterpriseApplicationLog  = "Application"
+)
+
+// Event IDs of the DefenseClaw lifecycle events, in both logs.
 const (
 	windowsEnterpriseEventInstalled   uint32 = 100
 	windowsEnterpriseEventUpgraded    uint32 = 101
@@ -115,11 +139,18 @@ func windowsEnterpriseMutationAction(action string) bool {
 // uninstall. Failed runs leave the previous registration unchanged.
 func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
 	if !result.OK {
+		if windowsEnterpriseRolledBackFirstInstall(result) {
+			// The failed install created C:\Program Files\Cisco; its
+			// rollback emptied it.
+			removeEmptyWindowsEnterpriseInstallParent()
+		}
 		return nil
 	}
 	switch {
 	case result.Action == "uninstall" && !result.Installed:
-		return removeWindowsEnterpriseRegistration()
+		err := removeWindowsEnterpriseRegistration()
+		removeEmptyWindowsEnterpriseInstallParent()
+		return err
 	case windowsEnterpriseMutationAction(result.Action) && result.Installed:
 		return writeWindowsEnterpriseRegistration(result, opts)
 	}
@@ -280,17 +311,81 @@ func releaseWindowsEnterpriseSelfUpdatePolicy() error {
 	if err != nil {
 		return nil
 	}
-	defer policy.Close()
 	if current, _, err := policy.GetIntegerValue("DisableSelfUpdate"); err == nil && current == 1 {
 		if err := policy.DeleteValue("DisableSelfUpdate"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			policy.Close()
 			return fmt.Errorf("remove the owned DisableSelfUpdate policy: %w", err)
 		}
+	}
+	policy.Close()
+	// The lifecycle created the key for the value it owned; with nothing
+	// else in it, it goes too.
+	return removeEmptyWindowsRegistryKey(windowsEnterprisePolicyKey)
+}
+
+// ensureWindowsEnterpriseEventLog registers the DefenseClaw event log and
+// its source, and resets the descriptor that keeps other accounts from
+// writing it. Only an administrator or LocalSystem can create or change the
+// key, so a descriptor another account relaxed cannot survive a lifecycle
+// run.
+func ensureWindowsEnterpriseEventLog() error {
+	key, _, err := registry.CreateKey(registry.LOCAL_MACHINE, windowsEnterpriseEventLogParent+`\`+windowsEnterpriseEventLog, registry.ALL_ACCESS)
+	if err != nil {
+		return fmt.Errorf("register the %s event log: %w", windowsEnterpriseEventLog, err)
+	}
+	defer key.Close()
+	if err := key.SetStringValue("CustomSD", windowsEnterpriseEventLogSDDL); err != nil {
+		return fmt.Errorf("protect the %s event log: %w", windowsEnterpriseEventLog, err)
+	}
+	for name, value := range map[string]uint32{"MaxSize": windowsEnterpriseEventLogMaxSize, "Retention": 0} {
+		if _, _, err := key.GetIntegerValue(name); errors.Is(err, registry.ErrNotExist) {
+			if err := key.SetDWordValue(name, value); err != nil {
+				return fmt.Errorf("register the %s event log: %w", windowsEnterpriseEventLog, err)
+			}
+		}
+	}
+	sources := []string{windowsEnterpriseEventLogSource, windowsEnterpriseEventLog}
+	if err := key.SetStringsValue("Sources", sources); err != nil {
+		return fmt.Errorf("register the %s event log: %w", windowsEnterpriseEventLog, err)
+	}
+	for _, name := range sources {
+		source, _, err := registry.CreateKey(key, name, registry.ALL_ACCESS)
+		if err == nil {
+			err = source.SetExpandStringValue("EventMessageFile", `%SystemRoot%\System32\EventCreate.exe`)
+			if err == nil {
+				err = source.SetDWordValue("TypesSupported", eventlog.Error|eventlog.Warning|eventlog.Info)
+			}
+			source.Close()
+		}
+		if err != nil {
+			return fmt.Errorf("register the %s event source: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// removeWindowsEnterpriseEventLog unregisters the DefenseClaw event log.
+func removeWindowsEnterpriseEventLog() error {
+	path := windowsEnterpriseEventLogParent + `\` + windowsEnterpriseEventLog
+	removed := func(err error) bool {
+		return err == nil || errors.Is(err, registry.ErrNotExist) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
+	}
+	for _, name := range []string{windowsEnterpriseEventLogSource, windowsEnterpriseEventLog} {
+		if err := registry.DeleteKey(registry.LOCAL_MACHINE, path+`\`+name); !removed(err) {
+			return fmt.Errorf("unregister the %s event source: %w", name, err)
+		}
+	}
+	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); !removed(err) {
+		return fmt.Errorf("unregister the %s event log: %w", windowsEnterpriseEventLog, err)
 	}
 	return nil
 }
 
 func removeWindowsEnterpriseRegistration() error {
 	var failures []error
+	if err := removeWindowsEnterpriseEventLog(); err != nil {
+		failures = append(failures, err)
+	}
 	if err := releaseWindowsEnterpriseSelfUpdatePolicy(); err != nil {
 		failures = append(failures, err)
 	}
@@ -300,7 +395,47 @@ func removeWindowsEnterpriseRegistration() error {
 			failures = append(failures, fmt.Errorf("remove %s: %w", key, err))
 		}
 	}
+	// The marker's parent, created with the marker, goes once empty.
+	if err := removeEmptyWindowsRegistryKey(filepath.Dir(WindowsEnterpriseMarkerKey)); err != nil {
+		failures = append(failures, err)
+	}
 	return errors.Join(failures...)
+}
+
+// removeEmptyWindowsRegistryKey deletes an HKLM key that has no subkeys and
+// no values. A key that holds anything, or cannot be read, stays.
+func removeEmptyWindowsRegistryKey(path string) error {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	if err != nil {
+		return nil
+	}
+	info, statErr := key.Stat()
+	key.Close()
+	if statErr != nil || info.SubKeyCount != 0 || info.ValueCount != 0 {
+		return nil
+	}
+	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); err != nil &&
+		!errors.Is(err, registry.ErrNotExist) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		return fmt.Errorf("remove empty %s: %w", path, err)
+	}
+	return nil
+}
+
+// removeEmptyWindowsEnterpriseInstallParent removes the folder the install
+// root sits in (C:\Program Files\Cisco), which the install created, once
+// an uninstall left it empty. A folder that holds anything stays: Remove
+// fails on it.
+func removeEmptyWindowsEnterpriseInstallParent() {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
+		return
+	}
+	root := filepath.Clean(roots.InstallRoot)
+	parent := filepath.Dir(root)
+	if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) || !strings.EqualFold(filepath.Base(parent), "Cisco") {
+		return
+	}
+	_ = os.Remove(parent)
 }
 
 // readWindowsEnterpriseSelfUpdateDisabled reads
@@ -399,6 +534,9 @@ type windowsEnterpriseEventRecord struct {
 	ID     uint32 `json:"id"`
 	Record string `json:"record"`
 	SHA256 string `json:"sha256"`
+	// Logs names the event logs that took the entry; a line an earlier
+	// release wrote has none and was only in the Application log.
+	Logs []string `json:"logs,omitempty"`
 }
 
 // Seams for the event writer; tests replace them.
@@ -410,11 +548,14 @@ var (
 		}
 		return hex.EncodeToString(value), nil
 	}
-	windowsEnterpriseEventWriter = writeWindowsEnterpriseApplicationEvent
+	windowsEnterpriseEventWriter = writeWindowsEnterpriseLogEvent
 )
 
-// writeWindowsEnterpriseEvent writes the run's Application-log event and
-// returns its record for the lifecycle log, or nil when no event was written.
+// writeWindowsEnterpriseEvent writes the run's event to the DefenseClaw
+// event log and its legacy copy to the Application log, and returns its
+// record for the lifecycle log, or nil when no log took it. A successful
+// uninstall has already unregistered the DefenseClaw log, so its event goes
+// only to the Application log.
 func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) *windowsEnterpriseEventRecord {
 	id, severity, ok := windowsEnterpriseEventFor(result)
 	if !ok {
@@ -425,17 +566,60 @@ func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) *windowsEnterp
 		return nil
 	}
 	message := windowsEnterpriseEventMessage(result) + "\r\nrecord " + record
-	if err := windowsEnterpriseEventWriter(id, severity, message); err != nil {
+	logs := []string{windowsEnterpriseEventLog, windowsEnterpriseApplicationLog}
+	if windowsEnterpriseUninstalled(result) || windowsEnterpriseRolledBackFirstInstall(result) {
+		// Nothing is installed: do not register the DefenseClaw log for it.
+		logs = logs[1:]
+	}
+	event := &windowsEnterpriseEventRecord{ID: id, Record: record, SHA256: windowsEnterpriseEventDigest(message)}
+	for _, log := range logs {
+		if err := windowsEnterpriseEventWriter(log, id, severity, message); err == nil {
+			event.Logs = append(event.Logs, log)
+		}
+	}
+	if len(event.Logs) == 0 {
 		return nil
 	}
-	return &windowsEnterpriseEventRecord{ID: id, Record: record, SHA256: windowsEnterpriseEventDigest(message)}
+	return event
 }
 
-func writeWindowsEnterpriseApplicationEvent(id uint32, severity, message string) error {
-	// An existing source is the normal case; any other install error just
-	// means the event is written without a registered message file.
-	_ = eventlog.InstallAsEventCreate(windowsEnterpriseEventSrc, eventlog.Error|eventlog.Warning|eventlog.Info)
-	log, err := eventlog.Open(windowsEnterpriseEventSrc)
+func windowsEnterpriseUninstalled(result *enterprisestatus.Result) bool {
+	return result.OK && result.Action == "uninstall" && !result.Installed
+}
+
+// windowsEnterpriseRolledBackFirstInstall reports a failed install, upgrade,
+// repair or ensure that left no deployment: the standalone install root is
+// gone, as after the rollback of a failed first install. Its failure event
+// registered the DefenseClaw event log, and C:\Program Files\Cisco stayed
+// empty, on a computer with nothing installed.
+func windowsEnterpriseRolledBackFirstInstall(result *enterprisestatus.Result) bool {
+	if result == nil || result.OK || result.Installed || !windowsEnterpriseMutationAction(result.Action) {
+		return false
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
+		return false
+	}
+	_, err = os.Lstat(filepath.Clean(roots.InstallRoot))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// writeWindowsEnterpriseLogEvent writes one event to the DefenseClaw log,
+// registering the log first, or to the Application log under the legacy
+// source.
+func writeWindowsEnterpriseLogEvent(logName string, id uint32, severity, message string) error {
+	source := windowsEnterpriseEventSrc
+	if logName == windowsEnterpriseEventLog {
+		if err := ensureWindowsEnterpriseEventLog(); err != nil {
+			return err
+		}
+		source = windowsEnterpriseEventLogSource
+	} else {
+		// An existing source is the normal case; any other install error just
+		// means the event is written without a registered message file.
+		_ = eventlog.InstallAsEventCreate(windowsEnterpriseEventSrc, eventlog.Error|eventlog.Warning|eventlog.Info)
+	}
+	log, err := eventlog.Open(source)
 	if err != nil {
 		return err
 	}

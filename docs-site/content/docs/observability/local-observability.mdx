@@ -193,7 +193,7 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
 | **Guardrail Evaluations / Security** (`defenseclaw-security`) | Verdict funnel by stage × action, severity breakdown, per-connector breakdown; connector-filterable. |
 | **Policy decisions** (`defenseclaw-policy-decisions`) | OPA verdicts by domain × verdict, egress branch, block-list hits. |
 | **HITL** (`defenseclaw-hitl`) | Chat HILT + exec approvals: approval/denial/timeout rates, pending gauge, MTTD. |
-| **Findings** (`defenseclaw-findings`) | Top rules, rule_id × time heatmap, finding-to-verdict correlation. |
+| **Findings** (`defenseclaw-findings`) | Top rules, per-rule activity over time, finding-to-verdict correlation. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | HTTP surface latency/status, OTel ingest rates, trace samples. |
 | **Scanners** (`defenseclaw-scanners`) | Sparse-safe scan throughput and duration, errors by type, findings, and quarantine actions. |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Process, SQLite, v8 destination/exporter, queue, and canonical gateway-error health. |
@@ -374,6 +374,24 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
     `defenseclaw setup local-observability logs --service otel-collector --follow`.
     Re-run `defenseclaw setup local-observability up` if the host-mounted bundle
     needs to be refreshed.
+  </Accordion>
+  <Accordion title="Counters stay at 0 after a few blocks or findings">
+    DefenseClaw exports counters with delta temporality by default, so a counter
+    reaches Prometheus only in an export interval where it changed. A rule that
+    fired once has a single sample, and `increase()` and `rate()` need two, so
+    rare events can read 0. The Findings and Blocked events tiles count the
+    `finding.observed` and `hook_decision` log records in Loki, which are exact.
+    For the Prometheus panels, send cumulative counters so every series is
+    re-exported each interval:
+
+    ```yaml title="config.yaml"
+    observability:
+      metric_policy:
+        temporality: cumulative
+    ```
+
+    The setting applies to every metric destination. On an enterprise
+    deployment an administrator sets it in `/etc/defenseclaw/config.yaml`.
   </Accordion>
   <Accordion title="Port already in use">
     Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.

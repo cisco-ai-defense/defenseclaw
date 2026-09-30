@@ -1300,6 +1300,11 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
+			// Non-secret fingerprints of the per-user credential keys that
+			// authenticate right now (a rotation's staged key included).
+			body["user_scoped_credentials"] = map[string]interface{}{
+				"key_ids": a.userScopedCredentialStore().keyFingerprints(),
+			}
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)

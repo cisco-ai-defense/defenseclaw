@@ -16,6 +16,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,7 +44,7 @@ const (
 )
 
 // Actions lists the lifecycle actions in documentation order.
-var Actions = []string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure, ActionReconcile, ActionStatus, ActionVerify, ActionUninstall}
+var Actions = []string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure, ActionReconcile, ActionRotateCredentials, ActionStatus, ActionVerify, ActionUninstall}
 
 // Options are one lifecycle invocation's inputs.
 type Options struct {
@@ -114,6 +115,17 @@ type lifecycle struct {
 	serviceUID int
 	// planned are the inputs the last transaction of this run applied.
 	planned *plannedInputs
+	// reportChanges is set while a repair or ensure re-applies an installed
+	// deployment: the result then lists what the transaction changed.
+	reportChanges bool
+}
+
+// noteChange records one change a repair or ensure made to an installed
+// deployment, so its result says what was repaired.
+func (l *lifecycle) noteChange(format string, args ...any) {
+	if l.reportChanges {
+		l.result.Changes = append(l.result.Changes, fmt.Sprintf(format, args...))
+	}
 }
 
 // plannedInputs are the administrator inputs one transaction planned from.
@@ -214,6 +226,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if record != nil {
 		r.Installed = true
 		r.InstalledVersion = record.ProductVersion
+		if l.opts.Action != ActionUninstall {
+			l.recoverInterruptedRotation(ctx, record)
+		}
 	}
 	if l.supersededApplyRun(record) {
 		// A transaction leaves a queued apply run alone. When that
@@ -287,6 +302,8 @@ func (l *lifecycle) run(ctx context.Context) int {
 			return 0
 		}
 		return l.reconcile(ctx, record)
+	case ActionRotateCredentials:
+		return l.rotateCredentials(ctx, record)
 	case ActionUninstall:
 		return l.uninstall(ctx, record)
 	}
@@ -751,6 +768,8 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	l.serviceUID = account.UID
 	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
+	l.reportChanges = record != nil && (l.opts.Action == ActionRepair || l.opts.Action == ActionEnsure)
+	changesBefore := len(r.Changes)
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
@@ -827,6 +846,8 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
+		// The rollback undoes this transaction's changes.
+		r.Changes = r.Changes[:changesBefore]
 		if record == nil {
 			// A failed first install leaves no DefenseClaw entries behind in
 			// vendor machine policy; an upgrade or repair keeps the previous
@@ -926,6 +947,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			}
 			return failAndRollback(codeActivate, err)
 		}
+		for _, unit := range units {
+			if unit.Activate && !contains(previouslyActive, unit.Name) && env.Services.Active(ctx, unit) {
+				l.noteChange("started %s, which was not running", unit.Name)
+			}
+		}
 	} else {
 		for _, unit := range units {
 			if unit.Activate {
@@ -990,7 +1016,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if !l.opts.NoStart {
 		// The result reports what the guardian found under the new state
 		// (an agent the change left without hooks), not its previous report.
-		l.awaitGuardianReport(ctx, activationStarted)
+		if l.awaitGuardianReport(ctx, activationStarted) {
+			l.noteRepairedTargets(activationStarted)
+		}
 	}
 	l.describe(ctx, newRecord, false)
 	return 0
@@ -1078,6 +1106,9 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
 		current, _ := sha256File(env.P(file.Path))
 		if current == file.SHA {
+			if l.reportChanges && env.metadataDiffers(env.P(file.Path), file.Mode, file.Owner) {
+				l.noteChange("restored the mode and owner of %s", file.Path)
+			}
 			if err := env.fixMetadata(env.P(file.Path), file.Mode, file.Owner); err != nil {
 				return nil, err
 			}
@@ -1104,17 +1135,30 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 			return nil, err
 		}
 		changed[file.Path] = true
+		l.noteChange("rewrote %s", file.Path)
 	}
 	for _, path := range p.stale {
 		if err := removeFile(env.P(path)); err != nil {
 			return nil, err
 		}
 		changed[path] = true
+		l.noteChange("removed %s, which the deployment no longer uses", path)
 		if ownedParent(filepath.Dir(path)) {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
 		}
 	}
 	return changed, nil
+}
+
+// metadataDiffers reports whether path's permission bits or owner differ
+// from the managed ones fixMetadata sets.
+func (e *Env) metadataDiffers(path string, mode os.FileMode, owner fileOwner) bool {
+	_, _, current, err := statOwnerMode(path)
+	if err != nil {
+		return false
+	}
+	uid, gid, err := e.OwnerOf(path)
+	return err == nil && (current.Perm() != mode.Perm() || uid != owner.UID || gid != owner.GID)
 }
 
 func (e *Env) fixMetadata(path string, mode os.FileMode, owner fileOwner) error {
@@ -1419,9 +1463,9 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	// target, after writing a report that names each one. describe reports
 	// those targets for their accounts, so the reconcile fails for them in
 	// the same words (not with the command line and its log output), and not
-	// at all for a path an account broke in its own home, which verify does
-	// not fail on either. The oneshot's failed state would only repeat the
-	// report.
+	// at all for a path an account broke in its own home or for the target
+	// of an account that no longer exists, which verify does not fail on
+	// either. The oneshot's failed state would only repeat the report.
 	targets := err != nil && l.guardianTargetFailedSince(since)
 	if targets && env.GOOS == "linux" {
 		_, _ = env.Runner.Run(ctx, "systemctl", "reset-failed", unitGuardianOneshot)
@@ -1434,10 +1478,10 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 		named := false
 		for _, warning := range r.Warnings {
 			switch warning.Code {
-			case codeHookContractUnverified, codeGuardianTargetFailed, codeGuardianTargetAccountRemoved:
+			case codeHookContractUnverified, codeGuardianTargetFailed:
 				r.AddError(codeReconcile, warning.Message)
 				named = true
-			case codeGuardianTargetUserPath:
+			case codeGuardianTargetUserPath, codeGuardianTargetAccountRemoved:
 				named = true
 			}
 		}
@@ -1483,11 +1527,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	var errs []error
 	// Per-user registrations go first, while the binaries they name still
-	// exist: each user's worker removes only DefenseClaw's own entries.
+	// exist: each user's worker removes only DefenseClaw's own entries (and,
+	// on purge, that user's DefenseClaw state).
+	perUserLeft := false
 	if record != nil && exists(filepath.Join(env.P(env.Layout.BinDir), binGateway)) {
-		if _, err := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json"); err != nil {
-			r.AddWarning(codePerUserHooks, "some per-user DefenseClaw hook registrations were not removed (they name a binary this uninstall removes): "+err.Error())
-		}
+		perUserLeft = l.removePerUserRegistrations(ctx)
 	}
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -1506,6 +1550,18 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if !repairsRegistrations(unit) {
 			stopUnit(unit)
 		}
+	}
+	if perUserLeft {
+		// Some users' agents still name the hook binary. Removing it now
+		// would leave those registrations calling a program that no longer
+		// exists, with nothing left to remove them: the binaries, the
+		// deployment record and the state stay, so a rerun of this uninstall
+		// removes the rest and ensure restores the deployment.
+		if err := errors.Join(errs...); err != nil {
+			r.AddError(codeUninstall, err.Error())
+		}
+		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		return 0
 	}
 	// On Linux the deb/rpm removes its own files. A macOS pkg has no
 	// uninstaller, so the lifecycle removes the binaries and the receipt.
@@ -1549,6 +1605,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		_, _ = env.Runner.Run(ctx, "systemctl", append([]string{"reset-failed"}, names...)...)
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	// Runtime leftovers of the stopped services: the sensor helper's socket
+	// directory and the gateway's plugin cache (its TempDir is /tmp: the
+	// service manager sets no TMPDIR).
+	_ = os.RemoveAll(env.P(env.Layout.SensorSocketDir))
+	if record != nil && record.ServiceUID > 0 {
+		_ = os.RemoveAll(env.P(fmt.Sprintf("/tmp/defenseclaw-plugin-cache-%d", record.ServiceUID)))
+	}
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
@@ -1619,6 +1682,73 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	r.Installed = false
 	return 0
+}
+
+// removePerUserRegistrations runs `enterprise hooks remove-all` (with
+// --purge on a purge) and reports what it could not do, one message per
+// account and connector: an error for a registration that is still in
+// place, a warning for an account whose home is unavailable or whose
+// per-user state stayed, and for a check that names no registration. It
+// returns whether any registration is left.
+func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
+	env, r := l.env, l.result
+	args := []string{"enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json"}
+	if l.opts.Purge {
+		args = append(args, "--purge")
+	}
+	out, err := env.runGatewayCLI(ctx, args...)
+	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
+		// An installed binary from before remove-all took --purge: remove
+		// the registrations, which is what the binaries are kept for.
+		out, err = env.runGatewayCLI(ctx, args[:len(args)-1]...)
+	}
+	var report struct {
+		Pending     []string `json:"pending"`
+		Failed      []string `json:"failed"`
+		StateFailed []string `json:"state_failed"`
+	}
+	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
+		return false
+	}
+	rerun := "`" + l.uninstallCommand() + "`"
+	left := false
+	for _, entry := range report.Failed {
+		label, reason, _ := strings.Cut(entry, ": ")
+		user, connector, ok := strings.Cut(label, "/")
+		if !ok {
+			// A check that names no registration (an unreadable eligible
+			// accounts file, say) does not hold up the uninstall.
+			r.AddWarning(codePerUserHooks, "some per-user hook registrations were not checked: "+entry)
+			continue
+		}
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))
+		left = true
+	}
+	if err != nil && len(report.Failed) == 0 {
+		r.AddError(codePerUserHooks, "the per-user hook registrations could not be removed: "+err.Error()+"; fix the cause and rerun "+rerun)
+		left = true
+	}
+	for _, entry := range report.Pending {
+		user, connector, _ := strings.Cut(entry, "/")
+		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
+	}
+	for _, entry := range report.StateFailed {
+		user, reason, _ := strings.Cut(entry, ": ")
+		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user state of user %s was not removed: %s", user, reason))
+	}
+	return left
+}
+
+// uninstallCommand is this run's uninstall command line, for a rerun.
+func (l *lifecycle) uninstallCommand() string {
+	command := l.env.lifecycleCommand(ActionUninstall)
+	if l.opts.Purge {
+		command += " --purge"
+	}
+	if l.opts.RemoveServiceAccount {
+		command += " --remove-service-account"
+	}
+	return command
 }
 
 func mergeUnique(values ...[]string) []string {

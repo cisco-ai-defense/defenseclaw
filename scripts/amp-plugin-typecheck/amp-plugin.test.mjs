@@ -72,21 +72,30 @@ test("refreshes agent identity when a thread changes mode between turns", async 
 	globalThis.Bun = {
 		file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }),
 	}
+	const notice = "DefenseClaw observed a HIGH amp hook finding: marker"
 	globalThis.fetch = async (_url, init) => {
-		posts.push(JSON.parse(init.body))
+		const payload = JSON.parse(init.body)
+		posts.push(payload)
 		return {
 			ok: true,
-			json: async () => ({ action: "allow" }),
+			json: async () => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1"
+				? { action: "allow", additional_context: notice }
+				: { action: "allow" },
 		}
 	}
 
 	try {
 		defenseclawAmpPlugin(amp)
 
-		await handlers.get("agent.start")(
+		const firstResult = await handlers.get("agent.start")(
 			{ thread: { id: "T-identity" }, id: "M-turn-1", message: "first" },
 			ctx,
 		)
+		// The hidden notice follows the prompt in Amp; it must start on its own
+		// lines, apart from the prompt, so it never reads as part of a command.
+		assert.equal(firstResult.message.display, false)
+		assert.ok(firstResult.message.content.startsWith("\n\n"), firstResult.message.content)
+		assert.ok(firstResult.message.content.endsWith(`\n${notice}`), firstResult.message.content)
 		await handlers.get("tool.call")(
 			{
 				thread: { id: "T-identity" },
@@ -137,6 +146,8 @@ test("refreshes agent identity when a thread changes mode between turns", async 
 		const secondTool = posts.find(payload => payload.tool_call_id === "TU-2")
 
 		assert.equal(firstStart.agent_mode, "medium")
+		assert.equal(firstStart.agent_type, "amp", "traces are named after agent_type, which must stay amp")
+		assert.equal(secondStart.agent_type, "amp")
 		assert.equal(firstTool.agent_mode, "medium")
 		assert.equal(secondStart.agent_name, "security-reviewer")
 		assert.equal(secondStart.agent_display_name, "Security Reviewer")

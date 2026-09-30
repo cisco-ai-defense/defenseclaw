@@ -99,6 +99,7 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
+    UnsafePathError,
     atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
@@ -117,6 +118,7 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.pinned_exec import run_pinned_executable
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
@@ -153,6 +155,9 @@ _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 _SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS = 300.0
+# How long Setup waits for a running OpenCode to report that it loaded the
+# managed plugin before it accepts the plugin as current but not yet loaded.
+_OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -3880,6 +3885,34 @@ def _rotate_token_transaction(
             _restore_rotate_token_environment(environment_before)
 
 
+def _refuse_rotate_token_on_managed_host() -> None:
+    """Refuse per-user rotation where the organization manages DefenseClaw.
+
+    The per-user gateway lifecycle is disabled on a standalone managed host,
+    so the transaction could only fail at its first stop. Secure Client
+    hosts publish no such marker and are unaffected.
+    """
+
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    if not deployment:
+        return
+    if os.name == "nt":
+        remedy = "rotating the credentials of a managed Windows deployment is not available yet"
+    else:
+        gateway = (
+            "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos"
+            if sys.platform == "darwin"
+            else "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
+        )
+        remedy = f"an administrator rotates its per-user credentials with `sudo {gateway} rotate-credentials`"
+    raise click.ClickException(
+        f"This computer's DefenseClaw is managed by your organization ({deployment}), so per-user "
+        f"token rotation is disabled; {remedy}. Nothing was changed."
+    )
+
+
 @setup.command("rotate-token")
 @click.option(
     "--connector",
@@ -3917,6 +3950,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     """
     import secrets
 
+    _refuse_rotate_token_on_managed_host()
     dotenv_path = _rotate_token_dotenv_path(app)
     if no_restart:
         raise click.ClickException(
@@ -9363,7 +9397,7 @@ def _setup_observability_alias(
     yes: bool,
     restart: bool,
     with_local_stack: bool,
-    mode: str = "observe",
+    mode: str | None = None,
     workspace_dir: str | None = None,
     replace: bool = False,
     rule_pack: str | None = None,
@@ -9381,7 +9415,8 @@ def _setup_observability_alias(
     the other) keeps the wiring linear: each Click command parses its
     own flags, then defers to this helper for the actual work.
 
-    *mode* defaults to ``observe`` (the safe one-line setup the alias
+    *mode* ``None`` keeps an already configured connector's mode and
+    starts a new one in ``observe`` (the safe one-line setup the alias
     was designed for). Pass ``action`` to provision hook-driven
     enforcement: the connector's pre-tool hook returns a deny
     verdict on policy hits and the agent blocks inside its own
@@ -9410,6 +9445,11 @@ def _setup_observability_alias(
             "Re-run without --workspace."
         )
 
+    if mode is None:
+        # Doctor's repair advice is `setup <connector> --yes`: leaving
+        # --mode out must not turn an action install into observe.
+        gc = app.cfg.guardrail
+        mode = gc.effective_mode(connector) if connector in _configured_connector_set(gc) else "observe"
     normalized_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
     interactive = not yes and _is_interactive()
 
@@ -10420,13 +10460,13 @@ def _hook_guardrail_options(fn):
 @click.option(
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
-    default="observe",
-    show_default=True,
+    default=None,
     help=(
         "Hook policy mode. observe records only; action returns a deny "
         "verdict from PreToolUse on policy hits so Codex blocks the "
         "tool call inside its own permission flow. No proxy is involved "
-        "in either mode."
+        "in either mode. Default: observe on first setup; a re-run keeps "
+        "the current mode."
     ),
 )
 @click.option(
@@ -10507,7 +10547,8 @@ def setup_codex(
       • Notify  — agent-turn-complete webhooks via the bundled
                   native notification bridge
 
-    Default mode is ``observe`` (record only). Pass ``--mode action``
+    Default mode is ``observe`` (record only); re-running setup keeps
+    the current mode. Pass ``--mode action``
     to provision hook-driven enforcement: the PreToolUse hook returns
     a deny verdict on policy hits and Codex blocks via its permission
     flow. No proxy listener binds in either mode — Codex talks
@@ -10571,13 +10612,13 @@ def setup_codex(
 @click.option(
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
-    default="observe",
-    show_default=True,
+    default=None,
     help=(
         "Hook policy mode. observe records only; action returns a deny "
         "verdict from PreToolUse on policy hits so Claude Code blocks "
         "the tool call inside its own permission flow. No proxy is "
-        "involved in either mode."
+        "involved in either mode. Default: observe on first setup; a "
+        "re-run keeps the current mode."
     ),
 )
 @click.option(
@@ -10654,7 +10695,8 @@ def setup_claude_code(
       • OTel  — native Claude Code OTel exporter (env-driven) pointing
                 at the gateway's /v1/logs and /v1/metrics
 
-    Default mode is ``observe`` (record only). Pass ``--mode action``
+    Default mode is ``observe`` (record only); re-running setup keeps
+    the current mode. Pass ``--mode action``
     to provision hook-driven enforcement: the PreToolUse hook returns
     a deny verdict on policy hits and Claude Code blocks via its
     native permission flow (including HITL when ``--human-approval``
@@ -10982,7 +11024,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             f"Configure DefenseClaw for {label} via its {surface_name}.\n\n"
             "Configures this connector in the hook connector set so CLI/TUI "
             "scanners read that agent's documented local surfaces. Default "
-            "mode is observe. Action may enable agent-native blocking/approval verdicts with "
+            "mode is observe on first setup; a re-run keeps the current mode. "
+            "Action may enable agent-native blocking/approval verdicts with "
             "--mode action on supported events. No proxy is involved in either mode."
             f"{product_note}"
             f"{platform_note}"
@@ -11024,12 +11067,12 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     @click.option(
         "--mode",
         type=click.Choice(["observe", "action"], case_sensitive=False),
-        default="observe",
-        show_default=True,
+        default=None,
         help=(
             "Lifecycle policy mode. observe records only; action requests the connector's "
             "native blocking or approval verdict on supported events. Cursor action uses "
-            "event-native deny and does not enable human approval."
+            "event-native deny and does not enable human approval. Default: observe on "
+            "first setup; a re-run keeps the current mode."
         ),
     )
     @click.option(
@@ -12738,7 +12781,7 @@ def _restart_services(
             if value
         )
         if readiness and getattr(readiness, "invariant", "") == "pending-reload":
-            connector_runtime_pending_reload = True
+            connector_runtime_pending_reload = getattr(readiness, "connector", "") or True
             click.echo(f" !{f' ({diagnostic})' if diagnostic else ''}")
         elif readiness:
             click.echo(" ✓")
@@ -12763,6 +12806,13 @@ def _restart_services(
                 "on the sidecar API port; OmniGent loaded policy generation "
                 "remains unverified pending reload/restart. No proxy listener — each talks directly "
                 "to its native upstream."
+            )
+        elif connector_runtime_pending_reload == "opencode":
+            ux.subhead(
+                f"{len(hook_multi)} hook connectors ({names}): protected registrations are current "
+                "on the sidecar API port; OpenCode loads the managed plugin when it starts, so restart "
+                "any OpenCode session that is open now. No proxy listener — each talks "
+                "directly to its native upstream."
             )
         elif connector_runtime_pending_reload:
             ux.subhead(
@@ -12804,6 +12854,12 @@ def _restart_services(
                 f"omnigent connector: {registration_state} on the sidecar API port; loaded policy "
                 "generation remains unverified pending OmniGent reload/restart. "
                 "No proxy listener — omnigent talks directly to its native upstream."
+            )
+        elif connector == "opencode" and connector_runtime_pending_reload:
+            ux.subhead(
+                "opencode connector: the managed plugin is current on the sidecar API port; OpenCode "
+                "loads it when it starts, so restart any OpenCode session that is open now. "
+                "No proxy listener — opencode talks directly to its native upstream."
             )
         elif connector == "hermes" and connector_runtime_pending_reload:
             ux.subhead(
@@ -13259,6 +13315,26 @@ def _partition_unconvergeable_peers(
         )
     return keep, frozenset(skipped)
 
+def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
+    """OpenCode's plugin is current, but no OpenCode has loaded it since the restart.
+
+    The managed plugin reports its load when OpenCode starts. A closed OpenCode
+    cannot report, and an open one does not report again after Setup restarts
+    the gateway, so waiting for the report made `setup opencode` fail every
+    time on Linux although the plugin was written and enforced.
+    """
+    detail = readiness.detail.casefold()
+    return (
+        readiness.connector == "opencode"
+        and readiness.invariant == "live-runtime"
+        and "digest current" in detail
+        and (
+            "no authenticated load heartbeat" in detail
+            or "load heartbeat predates the current gateway generation" in detail
+        )
+    )
+
+
 def _wait_for_connector_runtime(
     data_dir: str,
     connectors: list[str],
@@ -13360,7 +13436,7 @@ def _wait_for_connector_runtime(
             )
         return True, gateway_generation, _ConnectorRuntimeReadiness(True)
 
-    def validate_transaction(deadline: float) -> _ConnectorRuntimeReadiness:
+    def validate_transaction(deadline: float, *, accept_opencode_pending: bool = False) -> _ConnectorRuntimeReadiness:
         from defenseclaw.commands.cmd_doctor import connector_setup_readiness
 
         results: queue.Queue[_ConnectorRuntimeReadiness] = queue.Queue(maxsize=1)
@@ -13410,6 +13486,14 @@ def _wait_for_connector_runtime(
                                 failure.detail,
                             )
                             continue
+                        if accept_opencode_pending and _opencode_awaiting_restart(failure):
+                            pending_reload = pending_reload or _ConnectorRuntimeReadiness(
+                                True,
+                                "opencode",
+                                "pending-reload",
+                                failure.detail,
+                            )
+                            continue
                         if must_converge and failure.connector not in must_converge:
                             # A peer's own registration problem is not this
                             # connector's failure. Report it and keep going so
@@ -13449,6 +13533,7 @@ def _wait_for_connector_runtime(
                 "connector validation exceeded the readiness deadline",
             )
 
+    opencode_pending_since: float | None = None
     while True:
         now = time.monotonic()
         if now >= no_progress_deadline or now >= absolute_deadline:
@@ -13504,7 +13589,11 @@ def _wait_for_connector_runtime(
                     if health_failure.invariant == "gateway-state":
                         return health_failure
                 else:
-                    validation = validate_transaction(deadline)
+                    validation = validate_transaction(
+                        deadline,
+                        accept_opencode_pending=opencode_pending_since is not None
+                        and time.monotonic() - opencode_pending_since >= _OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS,
+                    )
                     if validation:
                         if time.monotonic() >= deadline:
                             return _ConnectorRuntimeReadiness(
@@ -13532,6 +13621,8 @@ def _wait_for_connector_runtime(
                         )
                     else:
                         last_failure = validation
+                        if opencode_pending_since is None and _opencode_awaiting_restart(validation):
+                            opencode_pending_since = time.monotonic()
                         if validation.invariant not in {
                             "deadline",
                             "gateway-health",
@@ -13784,7 +13875,8 @@ def _restart_defense_gateway(
     cmd = [executable, "restart"] if was_running else [executable, "start"]
     generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
-        result = subprocess.run(
+        # Run the object that passed custody, not whatever the path names now.
+        result = run_pinned_executable(
             cmd,
             capture_output=True,
             text=True,
@@ -13808,6 +13900,9 @@ def _restart_defense_gateway(
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
+        return False
+    except UnsafePathError:
+        click.echo(" ✗ (binary is not a verified executable file)")
         return False
     except FileNotFoundError:
         click.echo(" ✗ (binary not found)")
@@ -14065,7 +14160,7 @@ def _gateway_lifecycle_status(
     child_env: dict[str, str] | None = None,
 ) -> bool:
     try:
-        result = subprocess.run(
+        result = run_pinned_executable(
             [executable, "status"],
             capture_output=True,
             text=True,
@@ -14085,7 +14180,7 @@ def _cleanup_timed_out_gateway_start(
     child_env: dict[str, str] | None = None,
 ) -> None:
     try:
-        subprocess.run(
+        run_pinned_executable(
             [executable, "stop"],
             capture_output=True,
             text=True,

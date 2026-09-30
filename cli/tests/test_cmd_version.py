@@ -21,7 +21,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 
@@ -180,6 +180,30 @@ class VersionCommandTests(unittest.TestCase):
             payload = json.loads(result.output)
             gw = next(c for c in payload["components"] if c["name"] == "gateway")
             self.assertEqual(gw["status"], "missing")
+
+    def test_plugin_is_not_used_without_openclaw(self):
+        # A Hermes-only install has no OpenClaw plugin to be missing or stale.
+        runner = CliRunner()
+        cfg = Mock(active_connectors=lambda: ["hermes"])
+        with patch("defenseclaw.config.load", return_value=cfg), \
+             patch("defenseclaw.commands.cmd_version._gateway_component") as gw, \
+             patch("defenseclaw.commands.cmd_version._plugin_component") as pl:
+            gw.return_value = cmd_version.Component(
+                name="gateway", version=__version__, origin="/usr/bin",
+            )
+            result = runner.invoke(cmd_version.version_cmd, ["--json"])
+            payload = json.loads(result.output)
+            plugin = next(c for c in payload["components"] if c["name"] == "plugin")
+            self.assertEqual(plugin["status"], "skipped")
+            self.assertTrue(payload["ok"])
+            pl.assert_not_called()
+
+    def test_plugin_is_not_used_before_init(self):
+        # Before init the defaults name OpenClaw, but nothing is configured.
+        cfg = Mock(active_connectors=lambda: ["openclaw"], _source_config_version=0)
+        with patch("defenseclaw.config.load", return_value=cfg), \
+             patch("defenseclaw.config.config_path", return_value=Mock(exists=lambda: False)):
+            self.assertFalse(cmd_version._openclaw_configured())
 
 
 if __name__ == "__main__":

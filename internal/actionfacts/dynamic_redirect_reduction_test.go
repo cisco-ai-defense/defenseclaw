@@ -57,8 +57,9 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 		{name: "expanding argument", command: "echo $MARKER > /tmp/dc-x.txt"},
 		{name: "expanding argument and target", command: "echo dc-block-marker $SUFFIX > ~/dc-x.txt"},
 		{name: "expanding program", command: "$ECHO dc-block-marker > ~/dc-x.txt"},
-		{name: "chained with and", command: "cd /tmp && echo dc-block-marker > ~/dc-x.txt"},
-		{name: "chained with or", command: "echo dc-block-marker > ~/dc-x.txt || true"},
+		// && and || lists are read as sequences.
+		{name: "chained with and", command: "cd /tmp && echo dc-block-marker > ~/dc-x.txt", static: "cd /tmp; echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"cd", "echo"}},
+		{name: "chained with or", command: "echo dc-block-marker > ~/dc-x.txt || true", static: "echo dc-block-marker > " + staticRedirectTarget + "; true", reduced: true, programs: []string{"echo", "true"}},
 		{name: "background", command: "echo dc-block-marker > ~/dc-x.txt &"},
 		{name: "negated", command: "! echo dc-block-marker > ~/dc-x.txt"},
 		{name: "descriptor copy", command: "echo dc-block-marker 2>&1 > ~/dc-x.txt"},
@@ -80,7 +81,7 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 				}
 				facts := Analyze(input)
 				before := Analyze(input)
-				reduced, ok := DynamicRedirectTargetReduction(input, facts)
+				reduced, twin, ok := DynamicRedirectTargetReduction(input, facts)
 				if ok != test.reduced {
 					t.Fatalf("reduced = %t, want %t; parse=%+v commands=%+v",
 						ok, test.reduced, facts.Parse, facts.Commands)
@@ -89,8 +90,8 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 					t.Fatal("reduction changed its input")
 				}
 				if !ok {
-					if !reflect.DeepEqual(reduced, Facts{}) {
-						t.Fatalf("declined reduction returned facts: %+v", reduced)
+					if !reflect.DeepEqual(reduced, Facts{}) || !reflect.DeepEqual(twin, Facts{}) {
+						t.Fatalf("declined reduction returned facts: %+v %+v", reduced, twin)
 					}
 					return
 				}
@@ -126,6 +127,12 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 				if mentionsString(reflect.ValueOf(reduced), dynamicRedirectPlaceholderPrefix, 0) {
 					t.Fatalf("view carries a placeholder: %+v", reduced)
 				}
+				// The twin is the view with its placeholder targets.
+				if !twin.Authoritative() ||
+					!mentionsString(reflect.ValueOf(twin), dynamicRedirectPlaceholderPrefix, 0) ||
+					!reflect.DeepEqual(withoutRedirectTarget(twin, "").Commands, withoutRedirectTarget(reduced, "").Commands) {
+					t.Fatalf("twin is not the view with placeholder targets:\ntwin %+v\nview %+v", twin, reduced)
+				}
 
 				// The view is what a complete analysis of the same command
 				// with a static target derives, without that target.
@@ -148,14 +155,16 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 	}
 }
 
-// withoutRedirectTarget drops target's redirects and path facts.
+// withoutRedirectTarget drops target's redirects and path facts, and those
+// of the placeholder targets.
 func withoutRedirectTarget(facts Facts, target string) Facts {
 	out := facts
 	out.Commands = cloneCommands(facts.Commands)
 	for index := range out.Commands {
 		kept := []RedirectFact{}
 		for _, redirect := range out.Commands[index].Redirects {
-			if redirect.Target != target {
+			if redirect.Target != target &&
+				!strings.HasPrefix(redirect.Target, dynamicRedirectPlaceholderPrefix) {
 				kept = append(kept, redirect)
 			}
 		}

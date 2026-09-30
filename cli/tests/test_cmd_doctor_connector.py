@@ -96,6 +96,14 @@ from defenseclaw.file_permissions import (
 
 
 class TestCodexOtelAlignment(unittest.TestCase):
+    def setUp(self) -> None:
+        trusted = patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     def _cfg(self, environment: str = "windows") -> MagicMock:
         cfg = MagicMock()
         cfg.environment = environment
@@ -943,7 +951,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired):
             _run_cursor_windows_runtime_process(
-                ["powershell.exe"],
+                [sys.executable],
                 env={},
                 timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
             )
@@ -991,7 +999,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         job.terminate_sync.side_effect = terminate_sync
 
         result = _run_cursor_windows_runtime_process(
-            ["powershell.exe"],
+            [sys.executable],
             env={},
             timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )
@@ -1940,9 +1948,25 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_hook_health(cfg, "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
-        self.assertIn("does not revalidate the Windows DACL", r.checks[-1]["detail"])
+        # Windows wording only on Windows.
+        self.assertEqual("Windows DACL" in r.checks[-1]["detail"], os.name == "nt")
         self.assertIn("not tamper-proof", r.checks[-1]["detail"])
         self.assertIn("authenticated load heartbeat is fresh", r.checks[-1]["detail"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
+        # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
+        # gateway would not start and doctor only said the hook file is missing.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            plugins = Path(tmp) / ".config" / "opencode" / "plugins"
+            plugins.mkdir(parents=True)
+            plugins.chmod(0o775)
+            r = _DoctorResult()
+            cfg = self._cfg(tmp, "opencode", [str(plugins / "defenseclaw.js")])
+            _check_hook_health(cfg, "opencode", r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(f"chmod go-w {os.path.realpath(plugins)}", r.checks[-1]["detail"])
 
     def test_opencode_missing_load_heartbeat_is_unverified_without_guessing_pure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

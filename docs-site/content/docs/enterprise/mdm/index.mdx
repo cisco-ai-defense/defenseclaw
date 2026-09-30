@@ -420,8 +420,10 @@ Versions are dotted releases. A leading `v` and build metadata (`+...`) are
 ignored, and a prerelease sorts before its release (`1.4.0-rc1` is older than
 `1.4.0`).
 
-`verify`, and so the health checks above, fails when an installed agent runs
-without DefenseClaw hooks (`agent_unprotected`, `hook_contract_unverified`).
+When an installed agent runs without DefenseClaw hooks for one account
+(`agent_unprotected`, `hook_contract_unverified`), `verify`, and so the
+health checks above, reports it as a warning for that account and passes,
+with `security_complete: false`.
 It does not require the Windows Claude Code attestation: a host without it
 passes `verify` and reports `security_complete: false`. To collect
 `security_complete` across a fleet, read it from the last lifecycle result
@@ -453,7 +455,7 @@ those computers.
 
 | OS | Where |
 | --- | --- |
-| Windows | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`: one JSON result per lifecycle run, five generations of 5 MiB. `last-result.json` in the same folder: the latest full result. `mdm-wrapper.log` in the same folder: the wrapper's steps. Application event log, source "DefenseClaw Enterprise": `100` installed, `101` upgraded, `102` repaired, `110` uninstalled, `111` ensure no-op, `112` ensure applied, `120` unhealthy, `130` failed, `140` busy, `150` refused. Users can read these logs; only SYSTEM and Administrators can write them. |
+| Windows | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`: one JSON result per lifecycle run, five generations of 5 MiB. `last-result.json` in the same folder: the latest full result. `mdm-wrapper.log` in the same folder: the wrapper's steps. `DefenseClaw` event log, source "DefenseClaw Lifecycle": `100` installed, `101` upgraded, `102` repaired, `110` uninstalled (Application log only), `111` ensure no-op, `112` ensure applied, `120` unhealthy, `130` failed, `140` busy, `150` refused. A legacy copy of each event goes to the Application log, source "DefenseClaw Enterprise". Users can read the files and both event logs. Only SYSTEM and Administrators can write the files and the `DefenseClaw` log; any account can write Application-log entries under any source name, so detect from the `DefenseClaw` log. |
 | Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`): the wrapper's steps and results. `/var/lib/defenseclaw-enterprise/last-package-result.json` and `last-package-result.log`: the package's own `ensure`. `journalctl -u defenseclaw-enterprise-apply.service` and `-u defenseclaw-enterprise-verify.service`: config-change and daily verify runs. |
 | macOS | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, `0600`): the wrapper. `lifecycle.log` and `verify.log` in the same folder: config-change runs and the daily verify. `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`: the pkg's own `ensure`. |
 

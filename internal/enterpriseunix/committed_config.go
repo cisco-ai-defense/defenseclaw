@@ -142,7 +142,9 @@ func (e *Env) rejectedConfigProblem() string {
 	if err != nil || e.rejectionSuperseded(rejected) {
 		return ""
 	}
-	return fmt.Sprintf("the config.yaml edit rejected at %s is not applied; the last applied config is in place and the rejected file is kept at %s (push a corrected config.yaml; writing config.yaml again, even unchanged, clears this)",
+	// The run may have failed for a reason other than the file (a service
+	// that did not start), so the hint does not call the file invalid.
+	return fmt.Sprintf("the config.yaml edit rejected at %s is not applied: the run that applied it failed (the lifecycle log says why), the last applied config is in place and the rejected file is kept at %s. Write config.yaml again, even unchanged, to retry it, or push a corrected one",
 		rejected.ModTime().UTC().Format(time.RFC3339), filepath.Join(e.Layout.LifecycleDir, rejectedConfigName))
 }
 

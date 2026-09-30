@@ -192,6 +192,18 @@ keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
 old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
 Connector hooks are rewritten to the new paths when the gateway starts.
 
+You do not need to run the old Setup to move. The published 0.8.x
+`DefenseClawSetup-x64.exe` files are not Authenticode signed, so their
+`/verify` exits `1` with `release setup lacks the required Cisco RFC3161
+Authenticode identity`. That is their signing state, not a sign of
+tampering: authenticate such a file only by matching its SHA-256
+(`Get-FileHash -Algorithm SHA256`) with its entry in that release's
+`checksums.txt` after verifying the Sigstore signature of `checksums.txt`.
+A Setup built from the current source checks its embedded payload and
+reports an unsigned build as unsigned, with its SHA-256 for that comparison;
+its `/verify` fails only when the payload no longer matches its manifest or
+the file's signature does not match the signing state the manifest records.
+
 ## Repair
 
 Run the install command again. Reinstalling the same version rebuilds the

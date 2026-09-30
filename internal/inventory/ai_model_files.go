@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,6 +32,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode"
 )
 
@@ -234,6 +236,13 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 			// logical traversal. Do not let the same protected/vanished entry in
 			// that completed prefix poison every resumed page forever.
 			if resumed && path != root.path && path <= resumeAfter && walkErr != nil {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if walkErr != nil && macOSPrivacyDenied(runtime.GOOS, walkErr) {
+				// Skipped like ~/Library itself: not an error of the scan.
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -863,7 +872,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		path = filepath.Clean(path)
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			if !os.IsNotExist(err) {
+			if !os.IsNotExist(err) && !macOSPrivacyDenied(runtime.GOOS, err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
 			}
 			return
@@ -874,7 +883,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			if !os.IsNotExist(err) {
+			if !os.IsNotExist(err) && !macOSPrivacyDenied(runtime.GOOS, err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
 			}
 			return
@@ -1244,6 +1253,17 @@ func isMacOSApplicationModelScope(scope string) bool {
 	default:
 		return false
 	}
+}
+
+// macOSPrivacyDenied reports whether err is macOS privacy protection (TCC)
+// keeping an entry from a process without Full Disk Access. macOS answers
+// EPERM ("operation not permitted") there, while ordinary permissions answer
+// EACCES. The model scan skips those entries, as the docs say: counting each
+// one as a filesystem error made every scan on a Mac without a PPPC profile
+// partial, because ~/Library/Containers and the other Library roots always
+// hold some.
+func macOSPrivacyDenied(goos string, err error) bool {
+	return goos == "darwin" && errors.Is(err, syscall.EPERM)
 }
 
 func isMacOSHomeLibrary(path string, homes []string) bool {
@@ -2116,7 +2136,7 @@ func modelAggregatesToSignals(s *ContinuousDiscoveryService, aggregates map[stri
 		}
 		product, vendor := localModelArtifactProduct(candidate.provider)
 		signature := AISignature{
-			ID: "local-model-artifact", Name: product, Vendor: vendor,
+			ID: localModelArtifactSignatureID, Name: product, Vendor: vendor,
 			Category: SignalLocalModel, Confidence: 0.9, CuratorConfidence: 0.9, Specificity: 0.9,
 		}
 		signal := s.signalFromEvidence(signature, SignalLocalModel, "model_file", candidate.evidence)

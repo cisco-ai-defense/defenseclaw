@@ -376,10 +376,13 @@ observability:
     method: POST
     # Optional bearer token environment-variable name.
     bearer_env: ARCHIVE_BEARER_TOKEN
-    # Header values may be bounded literal metadata or {env: NAME} secrets.
+    # Header values may be bounded literal metadata, {env: NAME} secrets, or
+    # {credential: NAME} protected credentials (standalone enterprise only).
     headers:
       X-Tenant:
         env: ARCHIVE_TENANT
+      X-Archive-Key:
+        credential: archive-api-key
     # TLS verification defaults on. A CA path is read-only and may be shared.
     tls:
       insecure_skip_verify: false
@@ -406,6 +409,24 @@ observability:
       buckets:
       - compliance.activity
       redaction_profile: strict
+  # A standalone enterprise deployment can read tokens and header values from
+  # protected credentials stored with enterprise secret set.
+  - name: splunk-standalone
+    kind: splunk_hec
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    endpoint: https://splunk.example.test:8088/services/collector/event
+    # HEC token from a protected credential; use it instead of token_env.
+    token_credential: splunk-hec-token
+  - name: http-standalone
+    kind: http_jsonl
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    endpoint: https://archive.example.test/defenseclaw
+    # Bearer token from a protected credential; use it instead of bearer_env.
+    bearer_credential: archive-bearer-token
   # General OTLP: logs, traces, and metrics with per-signal endpoint overrides.
   - name: general-otel
     kind: otlp
@@ -416,7 +437,8 @@ observability:
     # never arbitrary JSON.
     protocol: http/protobuf
     endpoint: https://otel.example.test
-    # Header values may be bounded literal metadata or {env: NAME} secrets.
+    # Header values may be bounded literal metadata, {env: NAME} secrets, or
+    # {credential: NAME} protected credentials (standalone enterprise only).
     headers:
       Authorization:
         env: OTEL_AUTHORIZATION
@@ -490,7 +512,8 @@ observability:
     # never arbitrary JSON.
     protocol: http/protobuf
     endpoint: https://api.galileo.ai/otel/traces
-    # Header values may be bounded literal metadata or {env: NAME} secrets.
+    # Header values may be bounded literal metadata, {env: NAME} secrets, or
+    # {credential: NAME} protected credentials (standalone enterprise only).
     headers:
       Galileo-API-Key:
         env: GALILEO_API_KEY

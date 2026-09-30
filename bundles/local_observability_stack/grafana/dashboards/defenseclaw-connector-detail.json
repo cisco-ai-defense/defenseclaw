@@ -746,7 +746,8 @@
               "service_namespace": true
             },
             "renameByName": {
-              "Value": "calls/1h"
+              "Value": "calls/1h",
+              "Value #A": "calls/1h"
             }
           }
         }

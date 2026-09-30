@@ -2288,6 +2288,17 @@ func validLowerHexSHA256(value string) bool {
 type cachedAgentSignal struct {
 	Version    string `json:"version"`
 	BinaryPath string `json:"binary_path"`
+	Installed  *bool  `json:"installed"`
+}
+
+// CachedAgentNotFound reports whether the last agent discovery recorded in
+// agent_discovery.json looked for the connector's agent and found no binary.
+// A missing cache or entry, or a binary whose version could not be read,
+// returns false, so callers keep their default until discovery has positively
+// found nothing. init and every setup that picks a connector refresh the cache.
+func CachedAgentNotFound(dataDir, connectorName string) bool {
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	return ok && signal.Installed != nil && !*signal.Installed && strings.TrimSpace(signal.BinaryPath) == ""
 }
 
 func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {

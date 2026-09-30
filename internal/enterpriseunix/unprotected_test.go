@@ -15,8 +15,9 @@ import (
 )
 
 // An agent the enumerator found installed for a user but could not enroll
-// runs without DefenseClaw hooks. Status names it and reports the deployment
-// security-incomplete; verify fails.
+// runs without DefenseClaw hooks. Status and verify name it as a warning for
+// that account and report the deployment security-incomplete; verify does
+// not fail the host for it.
 func TestUnprotectedAgentsAreVisible(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -46,10 +47,11 @@ func TestUnprotectedAgentsAreVisible(t *testing.T) {
 	if !found {
 		t.Fatalf("status warnings do not name the unprotected agent: %+v", status.Warnings)
 	}
+	writeFreshLedger(t, h)
 	verify := h.run(Options{Action: ActionVerify})
-	requireError(t, verify, codeVerify)
-	if verify.SecurityComplete {
-		t.Fatal("verify reports security_complete with an unprotected agent")
+	requireOK(t, verify)
+	if verify.SecurityComplete || messagesOf(verify.Warnings, codeAgentUnprotected) == "" {
+		t.Fatalf("verify does not keep the unprotected agent as a warning: %+v", verify)
 	}
 
 	// An empty record (every agent enrolled again) clears the finding.

@@ -46,8 +46,10 @@ func TestKerberosS4ULifecyclePosture(t *testing.T) {
 		posture   string
 		wantBlock bool
 	}{
-		{posture: "default"},
-		{posture: "permissive"},
+		// The sink's own && list is judged as the sequence of its commands,
+		// which blocks in every profile without the chain.
+		{posture: "default", wantBlock: true},
+		{posture: "permissive", wantBlock: true},
 		{posture: "strict", wantBlock: true},
 	} {
 		t.Run(test.posture, func(t *testing.T) {
@@ -102,9 +104,11 @@ func TestKerberosS4ULifecycleRejectsIncompleteOrMismatchedLineage(t *testing.T) 
 				t, api, profile,
 				kerberosS4USecretsDumpPayload("s4u-negative", "sink", test.sinkCache),
 			)
+			// The sink's own command still blocks in strict; the chain must
+			// not add its finding.
 			assertRuleAbsent(t, sink, kerberosS4UChainID)
-			if sink.Action == guardrailActionBlock || sink.WouldBlock {
-				t.Fatalf("negative blocked: %+v", sink)
+			if sink.WouldBlock {
+				t.Fatalf("negative marked would-block: %+v", sink)
 			}
 		})
 	}

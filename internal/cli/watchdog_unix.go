@@ -72,7 +72,9 @@ func watchdogProcessExecutableMatches(info watchdogPIDInfo) bool {
 		// platforms. Linux callers with a live signalable process fail closed.
 		return true
 	}
-	return current == info.Executable
+	// A watchdog whose file was replaced or removed while it ran shows the
+	// recorded path plus Linux's " (deleted)" marker; it is still the owner.
+	return current == info.Executable || current == info.Executable+" (deleted)"
 }
 
 func watchdogCreateControl() (string, <-chan struct{}, func(), error) {

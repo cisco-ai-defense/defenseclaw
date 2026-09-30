@@ -157,6 +157,26 @@ def test_guardrail_subsystem_expectation_requires_global_and_connector_enablemen
     assert _subsystem_expected_enabled(cfg, "guardrail") is expected
 
 
+def test_gateway_subsystem_expectation_is_off_when_discovery_found_no_openclaw(tmp_path):
+    # init defaults the connector to OpenClaw; with no OpenClaw installed the
+    # gateway reports its fleet client off, so doctor must not call that stale.
+    (tmp_path / "agent_discovery.json").write_text(
+        json.dumps({"agents": {"openclaw": {"installed": False, "binary_path": "", "version": ""}}}),
+        encoding="utf-8",
+    )
+
+    def cfg(host: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            data_dir=str(tmp_path),
+            gateway=SimpleNamespace(host=host, fleet_mode=""),
+            active_connectors=lambda: ["openclaw"],
+            active_connector=lambda: "openclaw",
+        )
+
+    assert _subsystem_expected_enabled(cfg("127.0.0.1"), "gateway") is False
+    assert _subsystem_expected_enabled(cfg("gw.example.com"), "gateway") is True
+
+
 @pytest.mark.parametrize(
     ("enabled", "standalone", "platform", "deployment_mode", "expected"),
     [

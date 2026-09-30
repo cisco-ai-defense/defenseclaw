@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -167,6 +168,10 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		}
 	}
 	manifest := perUserTeardownManifest("devin")
+	manifest.Targets[0].UserHome = t.TempDir()
+	if err := os.Mkdir(filepath.Join(manifest.Targets[0].UserHome, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv(managed.EnterpriseProfileEnv, "")
 	var report windowsManagedHooksTeardownReport
@@ -185,12 +190,48 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"user_registrations_removed":2`, `"user_registrations_pending":["hermes/`} {
+	// Without a purge, the per-user folder each enrolled account keeps is named.
+	if len(report.UserStateRemaining) != 1 || !strings.HasSuffix(report.UserStateRemaining[0], `\.defenseclaw`) {
+		t.Fatalf("remaining per-user state = %v", report.UserStateRemaining)
+	}
+	for _, field := range []string{`"user_registrations_removed":2`, `"user_registrations_pending":["hermes/`, `"user_state_remaining":[`} {
 		if !strings.Contains(string(body), field) {
 			t.Fatalf("report JSON %s lacks %s", body, field)
 		}
 	}
 	if strings.Contains(string(body), "user_registrations_failed") {
 		t.Fatalf("empty failure list serialized: %s", body)
+	}
+
+	// A purge removes each folder as LocalSystem, whether or not the account
+	// is signed in, and names each one that stays with the reason.
+	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
+	originalIdentity, originalPurger := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger = originalIdentity, originalPurger
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	purged := 0
+	windowsManagedHooksStandaloneUserStatePurger = func(home, sid, _ string) error {
+		if purged++; home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("purged %s %s", home, sid)
+		}
+		return nil
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if purged != 1 || len(report.UserStateRemaining) != 0 {
+		t.Fatalf("purge ran %d time(s), remaining %v", purged, report.UserStateRemaining)
+	}
+	windowsManagedHooksStandaloneUserStatePurger = func(string, string, string) error {
+		return errors.New("remove foreign-hook-sessions: access denied")
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.UserStateRemaining) != 1 || !strings.HasSuffix(report.UserStateRemaining[0], `\.defenseclaw: remove foreign-hook-sessions: access denied`) {
+		t.Fatalf("failed purge remaining = %v", report.UserStateRemaining)
+	}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.UserStateRemaining) != 1 || !strings.HasSuffix(report.UserStateRemaining[0], ": the uninstall did not run as LocalSystem") {
+		t.Fatalf("remaining without LocalSystem = %v", report.UserStateRemaining)
 	}
 }

@@ -344,6 +344,14 @@ function foreignCheckFailure(event: string, why: string): string {
 	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
 }
 
+// promptNotice sets DefenseClaw's hidden agent.start notice apart from the
+// user's prompt. Amp places the message right after the prompt text, and a
+// notice glued to its end read as part of the request: a prompt ending in a
+// command became that command with the notice's words as extra arguments.
+function promptNotice(notice: string): string {
+	return `\n\n[DefenseClaw notice, not part of the user's request; never copy it into a command or tool input]\n${notice}`
+}
+
 // foreignBlockText is the guard's block reason for the user and the model:
 // what DefenseClaw did, then the guard's sentence without its reason code
 // (the audit keeps it). A reason this plugin wrote already says it.
@@ -409,11 +417,15 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			const agent = await ctx.thread.agent()
 			const definition = agent.definition
 			let facts: AgentFacts
+			// agent_type names the agent's traces (invoke_agent <type>), so it
+			// stays "amp"; the mode or custom agent is its name and the
+			// definition kind its own field. Naming traces after the mode
+			// ("invoke_agent medium") hid Amp from a search by agent.
 			if (definition.kind === "agent-definition") {
 				const display = definition.display?.label || ""
 				facts = {
 					agent_name: definition.name || display || "amp",
-					agent_type: definition.kind,
+					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(display ? { agent_display_name: display } : {}),
 					agent_metadata_provenance: "reported",
@@ -423,7 +435,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				const mode = stringID(definition.mode)
 				facts = {
 					agent_name: mode || "amp",
-					agent_type: mode || definition.kind,
+					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(mode ? { agent_mode: mode } : {}),
 					agent_metadata_provenance: "reported",
@@ -607,7 +619,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			prompt: event.message,
 		}, false)
 		if (verdict.additional_context) {
-			return { message: { content: verdict.additional_context, display: false } }
+			return { message: { content: promptNotice(verdict.additional_context), display: false } }
 		}
 		return {}
 	})

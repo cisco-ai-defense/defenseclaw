@@ -105,6 +105,54 @@ $failures = & $module {
             $failures.Add("Secure Client result changed: $after")
         }
     }
+
+    # Only a standalone uninstall with purge tells the finalize helper to
+    # remove the per-user folders. Every helper run sets or clears it, so a
+    # caller's value never reaches a helper.
+    $purgeVariable = 'DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE'
+    function script:Resolve-DefenseClawFullPath {
+        param([string]$Path, [switch]$MustExist, [switch]$Leaf)
+        return $Path
+    }
+    function script:Assert-DefenseClawNoReparsePath {
+        param([string]$Path)
+    }
+    function script:Invoke-DefenseClawProcess {
+        param([string]$File, [string[]]$Arguments)
+        return [pscustomobject]@{
+            exit_code = 0
+            output = @([string][Environment]::GetEnvironmentVariable(
+                'DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE',
+                'Process'
+            ))
+        }
+    }
+    $gatewayLayout = @{
+        BrokerEnabled = $false
+        AgentApplicationControlAttested = $false
+        ClaudeEffectivePolicyVerified = $false
+        GatewayPath = 'C:\harness\defenseclaw-gateway.exe'
+        RuntimeDirectory = 'C:\harness\runtime'
+        ConfigPath = 'C:\harness\config.yaml'
+        AuthorizationDirectory = 'C:\harness\authorization'
+    }
+    [Environment]::SetEnvironmentVariable($purgeVariable, '1', 'Process')
+    foreach ($case in @(
+        @{ purge = $true; want = '1' },
+        @{ purge = $false; want = '' }
+    )) {
+        $script:DefenseClawUninstallPurgeUserState = $case.purge
+        $probe = Invoke-DefenseClawGatewayCommand `
+            -Layout $gatewayLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -Arguments @('probe') `
+            -Capture
+        $seen = [string]@($probe.output)[0]
+        if ($seen -cne [string]$case.want) {
+            $failures.Add("purge=$($case.purge) gave the helper '$seen'")
+        }
+    }
+    [Environment]::SetEnvironmentVariable($purgeVariable, $null, 'Process')
     return , $failures
 }
 

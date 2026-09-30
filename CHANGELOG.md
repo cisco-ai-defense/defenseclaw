@@ -71,11 +71,299 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
+  on an agent span, and Amp names no model in its built-in modes (such as
+  `medium`), so those agent spans were left out of the Galileo export and
+  their traces never appeared, while the gateway reported every batch
+  delivered. The Galileo view now names the connector as the provider when
+  a span reports none, as other hook connectors already do; other
+  destinations are unchanged.
+- **Windows MDM detection no longer fails while the hook guardian writes
+  its records.** On the enterprise standalone profile, verify (and so
+  `detect.ps1` and `Remediate-Detect.ps1`) failed about one run in eight
+  with `... being used by another process` on the guardian's state files,
+  or with records from two guardian passes, while status stayed ok. Status
+  and verify now re-read those records for up to two seconds until they
+  describe one pass, and verify waits up to 30 seconds for the guardian to
+  activate a `targets.yaml` the enumerator has just republished.
+- **A rolled-back first Windows install takes back DefenseClaw's agent
+  registrations and machine policy.** On the enterprise standalone profile,
+  the rollback of a failed first install removed each account's
+  `~\.defenseclaw`, with the backups of the agent files the install had
+  changed, but left DefenseClaw's entries in them (the Amp plugin, the
+  Antigravity `hooks.json`, the Hermes `config.yaml` and
+  `shell-hooks-allowlist.json`) and left the Copilot and OpenCode machine
+  policy, the Claude Code version floor, the hook runtime folder and the
+  vendor lock files. The rollback now puts each agent file back to the bytes
+  the install found, as the account, or removes it when the install created
+  it, before it removes the folder, and then removes that machine policy. A
+  file changed after the install wrote it stays as it is, and so do the
+  files of an account that is not signed in.
+- **`/uninstall PURGE=1` removes what an earlier rolled-back install left.**
+  An Amp plugin or Antigravity `hooks.json` that such a rollback left was
+  captured as the user's own file by the next install and put back by the
+  uninstall; the uninstall now removes DefenseClaw's own plugin and hook
+  entries from the file it restores, and names an Antigravity file that
+  still has them. With purge, it also removes a Claude Code version floor
+  drop-in that holds exactly DefenseClaw's floor but that DefenseClaw no
+  longer records writing.
+- **A rolled-back first Windows install leaves no event log or empty
+  folder.** Its failure event registered the DefenseClaw event log and
+  `C:\Program Files\Cisco` stayed empty; the event now goes to the
+  Application log, as after an uninstall, and the empty folder is removed.
+- **A failing Windows `verify --json` no longer reads as uninstalled.** It
+  reported `installed: false`, no services and 0 targets for a running
+  deployment, as a refused repair did before; it now carries the state a
+  status probe reads.
+- **A Linux gateway whose file was replaced while it ran can be stopped.**
+  After `~/.local/bin/defenseclaw-gateway` was renamed or replaced under a
+  running gateway, `defenseclaw-gateway stop` said "Gateway sidecar is not
+  running" with exit 0 and dropped its PID record, `watchdog stop` refused
+  after 15 seconds, and `uninstall --all` failed on that timeout; only
+  `kill` recovered. Status now reports that gateway as running, `stop` asks
+  its authenticated control plane to shut down (it still never signals it
+  by PID), and the watchdog recognizes its own replaced file.
+- **Re-running `defenseclaw setup <connector>` keeps its mode.** `--mode`
+  defaulted to observe, so `defenseclaw setup opencode --yes`, which doctor
+  recommends to repair the OpenCode plugin, turned an action install into
+  observe without a prompt or a warning. Without `--mode`, a connector that
+  is already configured keeps its mode; a new one still starts in observe.
+- **Per-user AI discovery on macOS no longer reads `partial` with no
+  cause.** The package manifest scan counted each folder macOS privacy
+  protection keeps from the guardian's per-user worker (such as `~/.Trash`)
+  as an error, and only the process and model file scans named themselves,
+  so every scan ended `partial scan: `. That scan now skips those folders as
+  the model file scan does, and every failing scan is named.
+- **A Kiro hook on Windows that exits at once still blocks.** The Windows
+  Kiro command started the hook with `Start-Process -Wait`, which opens its
+  handle to the hook only after the hook is running; a hook that had already
+  exited came back as exit 1 ("the process has exited") instead of the block
+  code 2, and Kiro went ahead. The command now starts the hook with .NET
+  `Process.Start`, which keeps that handle. In Constrained Language mode,
+  which does not allow those calls, it runs the hook with the call operator
+  and pipes its output, so PowerShell waits on the handle it started the
+  hook with. Run `defenseclaw setup kiro` again to replace the older
+  command. Other connectors are unchanged.
+- **Uninstall removes the empty OpenCode folders DefenseClaw created.** The
+  gateway's install watcher creates missing `plugin`, `skill` and `skills`
+  folders under `~/.config/opencode`, and a per-user uninstall left them
+  behind, empty. The watcher now lists the OpenCode folders it creates in
+  the DefenseClaw data directory, and the uninstall's OpenCode teardown
+  removes each one that is still empty. Folders with content, folders outside the OpenCode
+  config folder and folders DefenseClaw did not create stay.
+- **A Windows uninstall drops a deleted account's runtime selector entry.**
+  On the enterprise standalone profile, an account deleted together with its
+  profile has left the enrollment manifest, so the teardown never removed its
+  Claude Code or Codex runtime selector entry, and even `/uninstall PURGE=1`
+  left `.defenseclaw-managed-runtime-selector.state` and its lock in the
+  vendor's machine-policy folder. Uninstall now drops the entries of local
+  accounts that no longer exist and whose profile folder is gone, and then
+  removes a selector left empty and its lock.
+- **Kiro's hook file goes when its version key is gone.** Teardown still
+  left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
+  file had lost its `version` key (as `uninstall --purge` on macOS found in
+  every Kiro-enrolled home): the ownership check read the missing key as
+  `<nil>`. A file with nothing but DefenseClaw's hooks is removed with or
+  without the key.
+- **Windows status and verify say how to recover a pending transaction.**
+  On the enterprise standalone profile, `status` showed only `not_ready`
+  and the installed version, and `verify` said `run Repair`, which cannot
+  recover it from an administrator shell. Both now say a transaction is
+  pending and name the Setup `/ensure` command to run as LocalSystem, as a
+  failed Setup does.
+- **A Windows install that fails on a held API port names the holder.** On
+  the enterprise standalone profile, a first install whose gateway could not
+  bind `127.0.0.1:18970` reported only `enterprise readiness timed out:
+  broker_ready=True gateway_ready=False ...`, and `status` could not run on
+  the rolled-back computer. The result now carries `api_port_held` and
+  `api_port_holders[]` with the PID, image and account of each holder.
+- **Setup `/verify` says what a failure means.** A per-user Windows Setup
+  whose payload or signature was changed failed `/verify` with internal text
+  such as `zip: checksum error`. The message now says the file is not the
+  published Setup, not to run it, and to download it again and compare its
+  SHA-256 with the Sigstore-verified `checksums.txt`.
+- **`defenseclaw setup` answers on a managed Windows computer.** The
+  enterprise standalone payload has no per-user CLI, so
+  `defenseclaw setup rotate-token` printed `unknown command "setup"` and
+  suggested `stop`. It now says the computer is managed and per-user setup
+  commands are not available. Other computers are unchanged.
+- **`uninstall --all --binaries` ends cleanly, and its plan lists only
+  what is there.** After removing everything, the command printed a
+  `ModuleNotFoundError` traceback and exited 1, because the update notice
+  it runs at exit had just been removed. The plan also listed launchers
+  that were never installed. `defenseclaw version` before `init` shows the
+  OpenClaw plugin as `(not used)` instead of `missing`.
+- **Doctor names more of what it finds on Linux.** A `Sidecar API` row no
+  longer passes when the process answering on the API port is not your
+  verified gateway; it warns and, on Linux, names the account holding the
+  port. An OpenCode plugin folder that other accounts can write (Ubuntu's
+  umask 002 leaves `~/.config/opencode/plugins` at 0775), which stops the
+  gateway, is named with the `chmod go-w` fix instead of `hook file not
+  found`; `defenseclaw init` names it too, with the same fix as its next
+  step, instead of suggesting `setup opencode`. `doctor --fix` no longer
+  warns "watchdog runtime - repair is
+  unavailable on platform 'linux'" on every run, the skill-scanner version
+  check allows 30 seconds for a first run after install, and the OpenCode
+  row mentions the Windows DACL only on Windows.
+- **`defenseclaw setup opencode` finishes when OpenCode is closed.** Setup
+  waited for OpenCode to report that it loaded the managed plugin after the
+  gateway restart. A closed OpenCode cannot report and an open one does not
+  report again, so on Linux every run failed after about two minutes with
+  `connector setup did not converge` and rolled back, which also undid the
+  requested mode. Setup now waits 10 seconds for the report, then finishes
+  with the plugin current and tells you to restart open OpenCode sessions.
+- **Config and rule-pack checks no longer run a gateway binary another
+  account can replace.** Doctor, `config validate` and the observability
+  and redaction commands run `defenseclaw-gateway config-v8` and
+  `rulepack validate` to check the config and rule packs. On Linux and
+  macOS a `defenseclaw-gateway` found on `PATH` or in `~/.local/bin` now
+  needs the custody the gateway lifecycle already required (held by root or
+  this account, no group- or world-writable file or parent folder); before,
+  a binary in a folder any account could write was run five times per
+  `doctor --fix`. `DEFENSECLAW_GATEWAY_BIN` is used as it is. The doctor
+  repair names such a binary instead of reporting `binary not found`.
+  These helpers and doctor's gateway version check now run the checked
+  file itself, as the lifecycle commands do, so a path swapped right after
+  the check is not run.
+- **Doctor's own audit record no longer goes to another account's
+  listener.** Doctor's checks refused to send the gateway token to a process
+  that is not the verified gateway, but the action record it writes at the
+  end still did: with another account's process on the API port, that
+  process received the token on every `defenseclaw doctor` run. The record
+  now goes only over a connection the verified gateway accepted, and is
+  skipped otherwise.
+- **`rotate-credentials` says what it did.** On the enterprise standalone
+  profile on Linux and macOS, a successful rotation printed only `done`. It
+  now lists the committed and the previous key by SHA-256 prefix, how many
+  targets and users moved, and the reminder to restart running agents. It
+  refuses at once when the gateway service is not running, instead of after
+  90 seconds of silence, and an interrupted run prints the `reconcile`
+  command that completes or rolls back the rotation.
+- **One unprotected account no longer blocks `rotate-credentials`.** On the
+  enterprise standalone profile on Linux and macOS, one account whose agent
+  the guardian could not protect, such as an agent version without a
+  verified hook contract, stopped the rotation for the whole host. The
+  rotation now moves every account that holds a per-user credential and
+  lists the targets that hold none as skipped: agents the guardian never
+  protected, accounts that no longer exist and homes that are not available
+  yet. A target that was protected before and now fails still stops the
+  rotation, because it holds the current key's credentials.
+- **A config change on macOS no longer leaves the gateway unloaded.** On the
+  enterprise standalone profile, launchd could still be stopping the gateway
+  when the lifecycle started it again; the start and its restart fallback
+  failed with exit 37, the rollback failed the same way, and hooks failed
+  closed until `enterprise macos repair`. The lifecycle now waits for
+  launchd to remove the job before starting it again.
+- **audit.db no longer corrupts beside a long-running CLI or TUI.** Opening
+  the audit store fixed its permissions by opening and closing audit.db,
+  which drops the process's SQLite lock. A CLI command that closed while the
+  gateway was stopped then deleted the WAL under the TUI or another open
+  command, and their later writes failed with "database disk image is
+  malformed" or corrupted the file. The permission fix now runs before
+  SQLite opens the file, and only while no other audit store in the same
+  process has it open. The gateway also checks audit.db when it starts: a
+  corrupt store is moved to `audit.db.corrupt-<time>` with its WAL and SHM
+  files, the block/allow list is copied into a new store, and the gateway
+  starts and logs a warning instead of failing. It refuses to move a store
+  another process still has open.
+- **Findings keep the ids of the shipped rules.** A finding from a bundled
+  rule tagged `credential` (for example `PATH-AWS-CREDS`, `C2-METADATA-AWS`
+  or `exfil.secret_read_and_egress_oneliner`) was stored and exported as
+  `redacted.secret.id-…`, so the findings dashboards and `rule_id` filters
+  could not name it. Every rule id in the default, strict and permissive
+  packs is now kept; ids that only a custom pack defines are still keyed.
+- **Finding and scan rows name the user.** `finding.observed` and the
+  `scan.*` records now carry `user.id`, `defenseclaw.user.id_kind` and
+  `defenseclaw.user.name` for the caller whose request was inspected, the
+  same identity the `hook_decision` rows carry, so findings can be filtered
+  by user without joining on `evaluation_id`. On the enterprise standalone
+  profile only the verified caller is recorded.
+- **Guardrail blocks show on spans.** A tool call a hook blocks now gets a
+  tool span that ends at the decision with status `ERROR`; before, a blocked
+  call left no span. Blocked, confirmed and alerted calls carry a
+  `defenseclaw.guardrail.block`, `.ask` or `.alert` span event (rule,
+  severity, connector, user, redacted reason) and the
+  `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id` and
+  `defenseclaw.guardrail.severity` attributes, on every trace destination
+  including Galileo. Other hook decisions, such as a blocked prompt, and the
+  `/api/v1/inspect/*` routes produce an `apply_guardrail` span with the same
+  status, event and attributes; that span no longer reports `OK` for a block.
+- **Local observability dashboards show the findings and blocks that
+  happened.** The Findings tiles, top rule and per-rule activity panel count
+  `finding.observed` records in Loki, because a Prometheus counter misses a
+  rule's first finding; the per-rule panel no longer fails with
+  `Cannot read properties of undefined (reading 'config')` on an empty
+  range, and the top rule and top target tiles show the name instead of
+  `Value #A`. The Blocked events **Hook surface** filter lists the hook
+  surfaces the panels filter on, the recent guardrail event panels include
+  `hook_decision` records, Agent360 opens on one agent instead of an **All**
+  that matched nothing once two agents existed, and the AI runtime tiles and
+  discovery error rate show data. The local observability guide explains
+  when to set `observability.metric_policy.temporality: cumulative`.
+- **OpenCode newer than 1.18.19 is supported.** OpenCode updates itself, and
+  setup refused 1.18.20 and later with `detected-but-unsupported-version`, so
+  enterprise deployments reported it unprotected. The reviewed range is now
+  `>=1.18.10,<1.19.0`, checked against OpenCode 1.18.33.
+- **The gateway reports the OpenClaw fleet client off when OpenClaw is not
+  installed.** OpenClaw is the default connector, so an install without
+  OpenClaw dialed `127.0.0.1:18789` without end and showed the gateway as
+  reconnecting. When agent discovery found no OpenClaw and `gateway.host` is a
+  loopback address, the gateway reports it disabled with "OpenClaw is not
+  installed", and doctor expects that. Any other `gateway.host`, or
+  `gateway.fleet_mode: enabled`, still dials.
+- **`defenseclaw version` skips the OpenClaw plugin when OpenClaw is not
+  configured.** On installs of other connectors the plugin row read
+  `(not installed)` and `missing`, and a plugin left from an earlier OpenClaw
+  setup counted as drift. The row now reads `(not used)` and `skipped`.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Galileo shows guardrail decisions.** Galileo ignores the OTLP span
+  status and custom attributes, so a blocked tool call appeared there with
+  status code `0` and no rule. The Galileo preset now also sends the decision
+  (action, rule, severity, user and `status: ERROR` for a block) as the
+  OpenInference `metadata` attribute, which Galileo shows as the span's
+  metadata.
+- **Blocked spans keep the rule title.** The status message and block event
+  of a blocked span showed a shipped rule's title as a redacted token
+  (`matched: <RULE-ID>:<redacted ...>`). A reason made only of shipped rule
+  IDs and their catalog titles is now kept as written; other reasons are
+  still scrubbed.
+- **AI discovery records name the user.** The `ai_component.discovered`,
+  `changed` and `removed` records carry `user.id`,
+  `defenseclaw.user.id_kind` and `defenseclaw.user.name` when the signal
+  came from a user's scan, and the AI discovery dashboard's event log shows
+  the user.
+- **Amp traces are named after Amp.** Amp turns were named after the
+  agent mode or definition kind (`invoke_agent medium`,
+  `invoke_agent agent-definition`), so a search for Amp traces found none.
+  They are now `invoke_agent amp`; the mode or custom agent stays in
+  `gen_ai.agent.name`.
+- **Amp keeps DefenseClaw's prompt notice apart from the prompt.** The
+  hidden notice DefenseClaw adds when a prompt matches a rule followed the
+  prompt text directly, so a prompt ending in a command could be read, and
+  run, as that command with the notice's words appended. The notice now
+  starts on its own lines and says it is not part of the request.
+  In action mode it also no longer says DefenseClaw "would block this in
+  action mode": it says the request matched a blocking rule and must not be
+  carried out.
+- **Amp shell commands get the same rule checks as Claude Code and Codex.**
+  Amp's Bash tool sends its command as `cmd`, which the command analysis did
+  not read, so every Amp command was judged only by the text-pattern
+  fallback. A command that blocks in Claude Code or Codex could then run in
+  Amp with a detection-only finding, for example one that writes its output
+  to `~/out.txt`. Amp commands are now analyzed like the other agents'.
+- **AI discovery on macOS skips the folders macOS protects.** Without Full
+  Disk Access, every model file scan counted each folder macOS privacy
+  protection keeps it out of (for example other apps' containers under
+  `~/Library/Containers`) as a filesystem error and reported the scan as
+  `partial`. Those folders are now skipped, as the macOS guide says.
+- **Disabling Kiro removes DefenseClaw's hook file.** When
+  `~/.kiro/hooks/defenseclaw.json` had changed since setup, teardown removed
+  DefenseClaw's hooks but left the file behind as `{"hooks": []}`. A file that
+  holds nothing else once those hooks are out is now removed.
 - **OpenHands tool calls are inspected.** OpenHands sends PascalCase
   `event_type` values (`PreToolUse`) that DefenseClaw did not route, so
   terminal calls ran uninspected even in action mode. OpenHands payloads now
@@ -91,11 +379,19 @@ rest also reach per-user installs.
 - **A command rule still blocks a write to a `~/` or `$HOME/` path.** A
   redirect target the shell expands (`> ~/out.txt`) made the parse partial,
   so a CRITICAL CEL match was only detected. CEL rules that cannot depend on
-  that redirect now see the command with a static target (built-ins: #925).
-- **A command rule blocks the first command of an `&&` or `||` list.** Any
-  list made the parse partial, so a CRITICAL CEL match was only detected.
-  CEL rules that cannot depend on the left-out commands now also see the
-  commands certain to run; later commands stay detection-only (#923).
+  that redirect now see the command with a static target. A built-in rule's
+  code check must hold with and without that target (#925).
+- **Writes to `~/.ssh/authorized_keys` block in every spelling.** The
+  shell expands `~/` and `$HOME/` when the command runs, so
+  `>> ~/.ssh/authorized_keys`, `>> "$HOME/.ssh/authorized_keys"` and
+  `tee -a ~/.ssh/authorized_keys` were allowed with no finding while the
+  absolute path blocked. The authorized-keys rule now also checks the command
+  with those paths resolved under the caller's home.
+- **A command rule blocks every command of an `&&` or `||` list.** Any list
+  made the parse partial, so a rule that blocks `<cmd>` only detected
+  `cd <dir> && <cmd>` or `<cmd> || true`. A list is now judged as if all of
+  its commands run: if a rule blocks any of them, the whole tool call is
+  blocked (#923).
 - **Agents say that DefenseClaw policy made a block.** Rule verdicts reached
   the agent as `matched: <RULE-ID>:<redacted ...>`. They now say
   `DefenseClaw policy blocked this action (rule <RULE-ID>)` and not to retry
@@ -155,6 +451,14 @@ rest also reach per-user installs.
   stopped at its gateway-stop phase, because `stop` refuses there. A
   per-user install left over from before the managed deployment is now
   removed.
+- **A Windows purge removes each account's DefenseClaw folder (enterprise
+  standalone).** Setup `/uninstall PURGE=1` and `uninstall --purge`, run as
+  LocalSystem, now remove each enrolled account's `%USERPROFILE%\.defenseclaw`,
+  including its per-user hook tokens, whether or not the account is signed
+  in. As on Linux and macOS, only the inert hook stubs a running agent may
+  still call and the account's own hooks the foreign-hook policy moved aside
+  stay. The `per_user_state_remaining` warning names each folder the purge
+  could not remove, with the reason.
 - **Amp's `async_shell_command` is inspected like its bash tool.** Commands
   an Amp release ran through `async_shell_command` got no command facts, so
   a rule that needs them was recorded but did not block.
@@ -190,9 +494,73 @@ rest also reach per-user installs.
   earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
   only the `hooks` mapping, keeping every byte outside it, and removes all of
   DefenseClaw's approvals.
+- **Disabling Devin no longer puts DefenseClaw's earlier hooks back.** A
+  Devin backup captured while the config already held DefenseClaw's
+  `devin-hook.sh` hooks restored them at teardown. Teardown now removes
+  DefenseClaw's hooks from the restored config.
+- **`defenseclaw doctor` sends the gateway token only to the gateway it
+  checked.** Doctor verified which process owned the API port, then opened a
+  new connection for its authenticated requests, so a process that took the
+  port over in between could receive the token. Doctor now requires the
+  verified gateway process to have accepted that same connection before it
+  writes the request, and otherwise reports `the connected gateway endpoint is
+  not served by the verified gateway process`. The Codex telemetry runtime
+  check, which sent the token without checking the listener, does the same.
+- **Doctor and setup run the gateway controller they checked.** Starting,
+  restarting and stopping the gateway ran `defenseclaw-gateway` by path after
+  checking who can write it, so the path could name another file by the time
+  it ran. Linux now runs the checked file itself, Windows keeps it locked
+  against replacement until the command finishes, and macOS stops the launch if
+  the file or a directory above it changed. The Windows Cursor runtime probe
+  does the same for PowerShell, and the Windows watchdog repair uses the
+  verified gateway executable instead of the first one on `PATH`.
+- **A failed first Windows standalone install rolls back accounts with
+  per-user agents.** For an account whose `%USERPROFILE%\.defenseclaw` the
+  install created, rollback refused the whole plan when the account had an
+  Amp, Antigravity, Copilot, Devin, Hermes or OpenCode row, and left the
+  folder behind. Each of these connectors now has a bounded list of the
+  files its managed install writes there (runtime sidecars, hook scripts,
+  scoped tokens, runtime generations, the executable selection and its own
+  config backup records), and rollback removes exactly those; any other
+  file, such as the backups of displaced user hooks, still keeps the folder.
+  Stale OpenCode runtime generations are now also cleaned up (#927).
+- **Windows standalone status names the process holding the gateway API
+  port.** While another process listened on `127.0.0.1:18970` (or another
+  account's wildcard listener made Windows refuse the gateway's bind),
+  `enterprise windows status` and `verify` reported only `not_ready`. They
+  now report `api_port_held` with each holder's PID, image and account (or
+  that this account cannot identify it), list them in `api_port_holders`
+  in `--json`, and say that the gateway takes the port back by itself once
+  it is free, as on Linux and macOS (#929).
+- **Windows Setup `/verify` accepts an authentic unsigned build.** `/verify`
+  required a Cisco Authenticode signature even when the Setup's own manifest
+  records an unsigned release, so the documented check failed for every
+  unsigned Setup. It now checks the embedded payload against its manifest,
+  requires the signing state that manifest records, and for an unsigned
+  build prints its SHA-256 to compare with the release's Sigstore-verified
+  `checksums.txt`. It fails only for a changed payload, a stripped signature
+  or an unexpected one. The Windows install page says how to authenticate a
+  0.8.x Setup whose `/verify` still reports the missing signature (#919).
+- **The Windows guardian restores the managed OpenCode plugin right after a
+  change to its attributes.** OpenCode's runtime needs the write-attributes
+  right to load a plugin, and with it a standard account could make the
+  plugin unreadable (read-only or a reparse point), so every account's
+  OpenCode ran without DefenseClaw until the next pass, about a minute. The
+  guardian now watches the plugin's folder and runs the same heal within
+  about a second and logs a tamper line. After 12 restores in a minute it
+  slows to one restore every 5 seconds, so repeated changes cannot keep the
+  plugin unreadable until the next pass, which stays the backstop (#930).
 
 ### Added
 
+- **Per-user credential rotation (enterprise standalone, Linux and macOS).**
+  `defenseclaw-gateway enterprise linux|macos rotate-credentials` replaces
+  the key every enrolled user's per-user credentials derive from.
+  The gateway accepts the old and the new key while the guardian moves and
+  verifies every user; the new key takes effect only then, and any failure
+  moves every user back to the old key. Agents already running lose
+  telemetry until they restart. On Windows the command refuses (exit
+  `1639`); see the enterprise operations guide.
 - **`defenseclaw-gateway audit export --since`, `--until` and `--newest`.**
   `--since` and `--until` take an RFC3339 time or a duration ago (`30m`,
   `2h`). With `--limit N`, `--newest` keeps the N most recent rows; output
@@ -209,6 +577,24 @@ rest also reach per-user installs.
 
 ### Changed
 
+- **`defenseclaw setup rotate-token` on a managed computer.** Where the
+  organization manages DefenseClaw (the standalone profile), the command
+  now refuses before changing anything and names the administrator's
+  rotation command, instead of failing when it tried to stop the per-user
+  gateway. Other computers, Secure Client ones included, are unchanged.
+- **Windows standalone lifecycle events go to a `DefenseClaw` event log
+  that only administrators can write.** Any account can write
+  Application-log entries under any source name, so entries under
+  `DefenseClaw Enterprise` could be forged. Events 100 to 150 now go to the
+  `DefenseClaw` log (source `DefenseClaw Lifecycle`), which only LocalSystem
+  and Administrators can write and the Application log's readers can read;
+  each run that writes an event registers it and a successful uninstall
+  unregisters it. The Application-log copies continue in this release as legacy: move
+  MDM detection rules and SIEM forwarding that query the Application log by
+  source to the `DefenseClaw` log before a later release drops them.
+  `enterprise windows events` now checks the new log, and `--application`
+  the legacy copies. The lifecycle log line's `event.logs` names the logs
+  that took each event (#928).
 - **Plugin teardown without a backup receipt.** Removing the OpenCode or Amp
   connector (or uninstalling) deletes DefenseClaw's plugin file when its
   backup receipt is missing, as long as the file still starts with the

@@ -63,7 +63,7 @@ lists each directive and the version it needs.
 | Lifecycle state | `/var/lib/defenseclaw-enterprise`: lock, snapshots, deployment record, `last-package-result.json`, `last-activation-failure.log`, the last applied config and a rejected one | `root`, `0700` |
 | Transaction snapshots on other filesystems | `/opt/defenseclaw/.lifecycle-snapshots`, `/etc/defenseclaw/.lifecycle-snapshots`: only during a lifecycle transaction (or while a rollback waits for a retry) when `/var` is on its own filesystem. They hold the snapshot's hard links to the files there. | `root`, `0700` |
 | Gateway data | `/var/lib/defenseclaw` | `defenseclaw`, `0700` (the device identity key needs a private directory) |
-| Authorization ledger | `/var/lib/defenseclaw-hook-guardian` | `root:defenseclaw`, `0750` |
+| Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each enrolled user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
 | Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there; the services log to the journal ([Logs and events](/docs/enterprise/operations#logs-and-events)) | `defenseclaw`, `0750` |
 | Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid. |
 
@@ -78,7 +78,7 @@ The units:
 | `defenseclaw-gateway.service` | `defenseclaw`, no capabilities | Policy engine and hook API. `Type=notify` with a 60 s watchdog and `Restart=always`. Config, binaries and ledger are read-only to it. |
 | `defenseclaw-gateway-api.socket` | PID 1 | Listens on `127.0.0.1:18970` |
 | `defenseclaw-gateway-hook.socket` | PID 1 | Listens on `/run/defenseclaw-hook/hook.sock` |
-| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
+| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
@@ -403,6 +403,8 @@ Add `--all` to also delete `~/.defenseclaw`. See
 Run these as root from `/opt/defenseclaw/bin`. Uninstall removes each user's
 DefenseClaw hook registrations and DefenseClaw's own machine-policy entries
 first. Administrator entries in those files stay as they were.
+With `--purge` it also removes each enrolled user's `~/.defenseclaw`, except
+inert hook stubs. See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 On a host installed from the package, `uninstall` leaves the package's
 binaries and units in place, so dpkg or rpm still lists

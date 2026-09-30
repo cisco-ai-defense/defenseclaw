@@ -58,11 +58,16 @@ try {
         }
         $script:TestGuardianReport = $null
         $script:TestGuardianProbes = 0
+        $script:TestGuardianCatchUp = $null
         function Get-DefenseClawGuardianStatusReport {
             param($Layout, $GatewayServiceName)
             $script:TestGuardianProbes++
+            if ($null -ne $script:TestGuardianCatchUp -and $script:TestGuardianProbes -ge 2) {
+                return $script:TestGuardianCatchUp
+            }
             return $script:TestGuardianReport
         }
+        $script:ManifestCatchUpPollMilliseconds = 0
 
         $originalProfile = Get-DefenseClawEnterpriseProfile
         $failures = [Collections.Generic.List[string]]::new()
@@ -135,7 +140,7 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -160,14 +165,19 @@ try {
                 if ($Failures -ne 0) {
                     $errors += 'last guardian reconcile failed for alice/codex: marker'
                 }
+                $state = & $record $StateStamp
+                $state | Microsoft.PowerShell.Utility\Add-Member -NotePropertyName results -NotePropertyValue $Results
                 $report = [ordered]@{
                     ok = $Ok
                     errors = $errors
                     activation = $activation
-                    state = (& $record $StateStamp)
+                    state = $state
                 }
                 if (-not $NoAuthorization) {
                     $report['authorization'] = (& $record $stamp)
+                }
+                if ($RemovedAccountFailures -gt 0) {
+                    $report['removed_account_failures'] = $RemovedAccountFailures
                 }
                 $script:TestGuardianReport = [pscustomobject]$report
             }
@@ -233,12 +243,50 @@ try {
                 $failures.Add("a stale but exact guardian activation was refused: $($adoption.reason)")
             }
 
+            # Verify came in between the enumerator's republication and the
+            # guardian's activation of it, seconds later: it waits for that.
+            Set-TestGuardian $true $republishedSHA256 2
+            $script:TestGuardianCatchUp = $script:TestGuardianReport
+            Set-TestGuardian $true $activatedSHA256 1
+            $script:TestGuardianProbes = 0
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or $script:TestGuardianProbes -ne 2) {
+                $failures.Add("verify did not wait for the guardian to activate a fresh republication: $($adoption.reason)")
+            }
+            $script:TestGuardianCatchUp = $null
+
             # The guardian has not activated the republished manifest yet, or
             # its records do not describe one failure-free reconcile of it.
+            [IO.File]::SetLastWriteTimeUtc($layout.ManifestPath, [DateTime]::UtcNow.AddMinutes(-10))
             Set-TestGuardian $true $activatedSHA256 1
             Assert-TestSyncRefuses 'guardian still on the old manifest' 'guardian'
             Set-TestGuardian $false $republishedSHA256 2 1
             Assert-TestSyncRefuses 'guardian reconcile failed' 'marker'
+            # A failure that lasts until a signed-out account signs in names
+            # that account instead of asking for a retry.
+            $signedOut = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
+            Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018).'
+            # A deleted account whose profile folder was removed fails every
+            # reconcile until the enumerator's next pass drops its rows; the
+            # guardian status counts exactly those failures, and the adoption
+            # accepts them, as verify and status do.
+            Set-TestGuardian $true $republishedSHA256 2 1 -RemovedAccountFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a deleted account's failing rows refused the adoption: $($adoption.reason)")
+            }
             Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
             Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'
             Set-TestGuardian $true $republishedSHA256 2 -NoAuthorization

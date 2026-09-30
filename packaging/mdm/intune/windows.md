@@ -188,7 +188,7 @@ prefix, never the value.
 | Where | What |
 | --- | --- |
 | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result (JSON, one line per run) |
-| Application event log, source "DefenseClaw Enterprise" | Installed, upgraded, repaired, failed, busy and refused events |
+| `DefenseClaw` event log, source "DefenseClaw Lifecycle" (legacy copy: Application log, source "DefenseClaw Enterprise") | Installed, upgraded, repaired, failed, busy and refused events |
 | `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\AppWorkload.log` | Intune's view of the Win32 install and detection |
 | `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\HealthScripts.log` | Remediations runs |
 | `defenseclaw.exe enterprise windows status --profile standalone --json` | Current state; run it elevated |

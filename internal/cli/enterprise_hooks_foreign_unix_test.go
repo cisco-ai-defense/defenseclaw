@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,34 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	}
 	if strings.Join(removed, ",") != "codex@/home/alice" {
 		t.Fatalf("removed %v", removed)
+	}
+
+	// uninstall --purge: the purge of the account's state runs after its
+	// removals, and not at all when one failed (the state holds the backups
+	// a retried removal restores from).
+	previousPurger := enterpriseHookWorkerPurger
+	t.Cleanup(func() { enterpriseHookWorkerPurger = previousPurger })
+	var purged []string
+	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+		purged = append(purged, opts.DataDir)
+		return nil
+	}
+	purgeRequest := enterpriseHookWorkerRequest{
+		Home: "/home/alice", UID: 1001, GID: 1001,
+		Targets: []enterpriseHookWorkerTarget{
+			{Index: 3, Mode: enterpriseHookWorkerModeRemove, Options: enterpriseHookWorkerOptions{ConnectorName: "codex", UserHome: "/home/alice", OwnerUID: 1001, OwnerGID: 1001}},
+			{Index: 4, Mode: enterpriseHookWorkerModePurge, Options: enterpriseHookWorkerOptions{UserHome: "/home/alice", OwnerUID: 1001, OwnerGID: 1001, DataDir: "/home/alice/.defenseclaw"}},
+		},
+	}
+	if response := runEnterpriseHookWorkerApply(context.Background(), purgeRequest); !response.Targets[1].OK || strings.Join(purged, ",") != "/home/alice/.defenseclaw" {
+		t.Fatalf("purge response %+v, purged %v", response, purged)
+	}
+	enterpriseHookWorkerRemover = func(context.Context, enterprisehooks.InstallOptions) error {
+		return errors.New("teardown failed")
+	}
+	purged = nil
+	if response := runEnterpriseHookWorkerApply(context.Background(), purgeRequest); response.Targets[1].OK || len(purged) != 0 {
+		t.Fatalf("purged the state of an account whose removal failed: %+v", response)
 	}
 }
 

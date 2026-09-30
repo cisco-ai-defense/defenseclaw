@@ -1611,13 +1611,8 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 			if err := validateWindowsGenericRemovalFootprint(target, configPaths, footprint); err != nil {
 				return err
 			}
-			if err := conn.Teardown(ctx, setup); err != nil {
-				return fmt.Errorf(
-					"enterprise hooks: connector %s teardown failed under target SID %s: %w",
-					conn.Name(),
-					targetSID,
-					err,
-				)
+			if err := teardownWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+				return err
 			}
 			// A user who deleted the DefenseClaw data directory has no hook
 			// contract left to clear; the registration above is what mattered.
@@ -1630,6 +1625,77 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 			return nil
 		})
 	})
+}
+
+// teardownWindowsGenericManagedTarget runs the connector's teardown under the
+// caller's target impersonation. A standalone per-user connector's teardown,
+// like its setup, re-protects directories the guardian hardened, whose DACL
+// denies the owner WRITE_DAC, so they get the owner-private setup shape for
+// the teardown and the managed DACL back afterwards. A per-user teardown that
+// returns but leaves DefenseClaw's registration in the user's agent
+// configuration fails, so the uninstall names it instead of counting it as
+// removed.
+func teardownWindowsGenericManagedTarget(
+	ctx context.Context,
+	target windowsGenericManagedTarget,
+	configPaths []string,
+	footprint connector.AgentPaths,
+) (teardownErr error) {
+	name := target.conn.Name()
+	_, perUser := windowsStandalonePerUserConnector(name)
+	if perUser {
+		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
+		defer func() {
+			if len(relaxed) == 0 {
+				return
+			}
+			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, relaxed); restoreErr != nil {
+				teardownErr = errors.Join(teardownErr, fmt.Errorf("enterprise hooks: restore the directories relaxed for teardown: %w", restoreErr))
+			}
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	if err := target.conn.Teardown(ctx, target.setup); err != nil {
+		return fmt.Errorf("enterprise hooks: connector %s teardown failed under target SID %s: %w", name, target.sid, err)
+	}
+	if !perUser {
+		return nil
+	}
+	var remaining []string
+	if windowsStandaloneInAgentPluginConnector(name) {
+		// DefenseClaw's whole-file plugin is its registration.
+		for _, path := range configPaths {
+			if _, err := os.Lstat(path); err == nil {
+				remaining = append(remaining, path)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("enterprise hooks: inspect connector %s plugin %s after teardown: %w", name, path, err)
+			}
+		}
+	} else {
+		var err error
+		if remaining, err = connector.OwnedHookConfigReferences(target.conn, target.setup); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
+		}
+		// Antigravity entries are DefenseClaw's by their outer key, also when
+		// they run a command this release no longer renders.
+		if name == "antigravity" && len(remaining) == 0 {
+			for _, path := range configPaths {
+				owned, err := connector.AntigravityHooksHoldOwnedEntries(path)
+				if err != nil {
+					return fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
+				}
+				if owned {
+					remaining = append(remaining, path)
+				}
+			}
+		}
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
+	}
+	return nil
 }
 
 func validateWindowsGenericRemovalFootprint(

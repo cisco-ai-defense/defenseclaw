@@ -81,4 +81,26 @@ func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 	if err := RemoveUserHooks(context.Background(), gone); err != nil {
 		t.Fatalf("a deleted home must not fail uninstall: %v", err)
 	}
+
+	// uninstall --purge deletes everything in ~/.defenseclaw, so it
+	// refuses one that is a link: it would delete the user's own files.
+	linked := newTestHome(t)
+	notes := filepath.Join(linked, "Documents", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(notes), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notes, []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(notes), filepath.Join(linked, ".defenseclaw")); err != nil {
+		t.Fatal(err)
+	}
+	purge := opts
+	purge.UserHome = linked
+	if err := PurgeUserState(context.Background(), purge); err == nil {
+		t.Fatal("PurgeUserState followed a linked ~/.defenseclaw")
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Fatalf("the purge removed the user's own file: %v", err)
+	}
 }

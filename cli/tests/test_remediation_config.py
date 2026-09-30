@@ -44,6 +44,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -292,6 +293,32 @@ def test_f0083_existing_loose_db_is_tightened_without_data_loss(tmp_path):
         store2.db.execute("SELECT 1").fetchone()
     finally:
         store2.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX drops a file's locks when any descriptor for it closes")
+def test_f0083_hardening_keeps_live_stores_sqlite_locks(tmp_path):
+    db_path = str(tmp_path / "audit.db")
+    first = Store(db_path)
+    first.init()
+    first.close()
+
+    # Two live stores in one process (the TUI keeps several). If opening one
+    # dropped the process's SQLite lock, a peer that closes would take the
+    # database for its own and unlink the WAL under both (#869, #882).
+    live = Store(db_path)
+    live.init()
+    second = Store(db_path)
+    try:
+        peer = (
+            "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); "
+            "c.execute('CREATE TABLE IF NOT EXISTS peer (x)'); c.commit(); c.close()"
+        )
+        subprocess.run([sys.executable, "-c", peer, db_path], check=True)
+        assert os.path.exists(db_path + "-wal")
+        live.db.execute("SELECT COUNT(*) FROM peer").fetchone()
+    finally:
+        second.close()
+        live.close()
 
 
 # ---------------------------------------------------------------------------

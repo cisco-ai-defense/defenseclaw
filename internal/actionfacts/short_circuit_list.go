@@ -22,22 +22,23 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// ShortCircuitListReduction returns a complete view of the commands of a
-// partial POSIX action that are certain to run, when the action has && or ||
-// lists. facts must be Analyze(input).
+// ShortCircuitListReduction returns a complete view of a partial POSIX
+// action with && or || lists, read as if every command of each list runs.
+// facts must be Analyze(input).
 //
-// The view is the analysis of a twin of the command that keeps every
-// statement of the top-level sequence and replaces each && or || list with
-// its first command: the only command of the list that always runs. Commands
-// after && or || run only when the command before them succeeds or fails, so
-// the view leaves them out, with every fact they own. A caller may count a
-// semantic match on it only for an expression whose match more commands and
-// facts cannot undo (semantic.Program.ListReductionSafe), and a non-match on
-// it proves nothing about the action.
+// A block stops the whole tool call before any of it runs, so a command that
+// runs only when the one before it succeeds (&&) or fails (||) is judged as
+// if it runs: a rule that blocks `a; b` also blocks `a && b` and `a || b`.
+// The view is the analysis of a twin of the command in which each && or ||
+// list is the sequence of its commands, one statement per line. It has every
+// command of the action and every fact they own; it differs from the action
+// only in that every command is certain to run and the parse is complete, so
+// a caller may count a semantic result on it, match or not, for an
+// expression that reads neither (semantic.Program.ListReductionSafe).
 //
-// The view is unavailable unless every top-level statement and list head is
-// plain (not negated, in the background or a coprocess), the command defines
-// no function and has no here-document, the twin analysis is complete, and
+// The view is unavailable unless every statement of every list is plain (not
+// negated, in the background or a coprocess), the command defines no
+// function and has no here-document, the twin analysis is complete, and
 // every command in it is a plain POSIX process with a static argv.
 func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 	defer func() {
@@ -53,7 +54,7 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 	if original.Parse.Status != StatusPartial {
 		return Facts{}, false
 	}
-	twinSource, ok := shortCircuitListHeads(capture.source)
+	twinSource, ok := shortCircuitListSequence(capture.source)
 	if !ok {
 		return Facts{}, false
 	}
@@ -70,12 +71,13 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 	return twin, true
 }
 
-// shortCircuitListHeads returns source with each top-level && or || list
-// replaced by its first command, one statement per line. It declines a
-// source without such a list, and one where a left-out command could change
-// what a kept one runs (a function definition) or where cutting the text
-// could lose input (a here-document).
-func shortCircuitListHeads(source string) (string, bool) {
+// shortCircuitListSequence returns source with each top-level && or || list
+// replaced by its commands, one statement per line. It declines a source
+// without such a list, one with a negated, background or coprocess statement
+// in a list, and one where a statement could change what another runs (a
+// function definition) or where cutting the text could lose input (a
+// here-document).
+func shortCircuitListSequence(source string) (string, bool) {
 	if source == "" {
 		return "", false
 	}
@@ -99,23 +101,27 @@ func shortCircuitListHeads(source string) (string, bool) {
 	}
 	kept := make([]string, 0, len(file.Stmts))
 	reduced := false
-	for _, stmt := range file.Stmts {
-		head := stmt
-		for !posixStatementHasUnsupportedControl(head) && len(head.Redirs) == 0 {
-			list, isList := head.Cmd.(*syntax.BinaryCmd)
-			if !isList || (list.Op != syntax.AndStmt && list.Op != syntax.OrStmt) {
-				break
-			}
-			head, reduced = list.X, true
+	var flatten func(stmt *syntax.Stmt) bool
+	flatten = func(stmt *syntax.Stmt) bool {
+		if posixStatementHasUnsupportedControl(stmt) {
+			return false
 		}
-		if posixStatementHasUnsupportedControl(head) {
-			return "", false
+		if list, isList := stmt.Cmd.(*syntax.BinaryCmd); isList && len(stmt.Redirs) == 0 &&
+			(list.Op == syntax.AndStmt || list.Op == syntax.OrStmt) {
+			reduced = true
+			return flatten(list.X) && flatten(list.Y)
 		}
-		start, end := int(head.Pos().Offset()), int(head.End().Offset())
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
 		if start < 0 || end <= start || end > len(source) {
-			return "", false
+			return false
 		}
 		kept = append(kept, source[start:end])
+		return true
+	}
+	for _, stmt := range file.Stmts {
+		if !flatten(stmt) {
+			return "", false
+		}
 	}
 	if !reduced {
 		return "", false

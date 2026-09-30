@@ -291,7 +291,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
 		ConsoleStream: destinations.ConsoleStderr,
 		Stdout:        os.Stdout, Stderr: os.Stderr,
-		Secrets:  sidecarObservabilityV8SecretResolver{},
+		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
 		// Exporters check each destination, then connect through the
 		// standalone enterprise.network proxy when one is set.
@@ -808,7 +808,12 @@ func (s *Sidecar) observabilityV8ActivePlan() *config.ObservabilityV8Plan {
 	return owner.runtime.Active().Plan()
 }
 
-type sidecarObservabilityV8SecretResolver struct{}
+// sidecarObservabilityV8SecretResolver resolves env references from the key
+// store and environment, and protected credential references from
+// credentialsDir, which is set only in a standalone enterprise deployment.
+type sidecarObservabilityV8SecretResolver struct {
+	credentialsDir string
+}
 
 func (sidecarObservabilityV8SecretResolver) ResolveObservabilitySecret(name string) (string, bool) {
 	if value, ok := config.GetKey(name); ok && strings.TrimSpace(value) != "" {
@@ -816,6 +821,10 @@ func (sidecarObservabilityV8SecretResolver) ResolveObservabilitySecret(name stri
 	}
 	value, ok := os.LookupEnv(name)
 	return value, ok && strings.TrimSpace(value) != ""
+}
+
+func (resolver sidecarObservabilityV8SecretResolver) ResolveObservabilityCredential(name string) (string, bool) {
+	return config.ResolveObservabilityV8ProtectedCredential(resolver.credentialsDir, name)
 }
 
 func sidecarLoadObservabilityV8CA(ctx context.Context, path string) ([]byte, error) {
@@ -1126,4 +1135,5 @@ var (
 	_ audit.RuntimeV8Emitter                     = (*sidecarOwnedObservabilityV8Runtime)(nil)
 	_ audit.RuntimeV8FindingContentFingerprinter = (*sidecarOwnedObservabilityV8Runtime)(nil)
 	_ config.ObservabilityV8SecretResolver       = sidecarObservabilityV8SecretResolver{}
+	_ config.ObservabilityV8CredentialResolver   = sidecarObservabilityV8SecretResolver{}
 )

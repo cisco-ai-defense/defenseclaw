@@ -11,8 +11,10 @@ keywords:
 ---
 
 This page is for administrators who run a standalone deployment day to day.
-Everything on it is read-only. To upgrade, change the config, repair, or
-remove a deployment, see [Upgrade, repair and remove](/docs/enterprise/lifecycle).
+Everything on it is read-only except
+[rotating per-user credentials](#rotate-per-user-credentials). To upgrade,
+change the config, repair, or remove a deployment, see
+[Upgrade, repair and remove](/docs/enterprise/lifecycle).
 For a failed check, look up the code in [Troubleshooting](/docs/enterprise/troubleshooting).
 Terms such as *guardian*, *enumerator*, and *machine policy* are defined in
 [Concepts](/docs/enterprise/concepts).
@@ -135,6 +137,7 @@ The MDM wrapper scripts print the same document.
 | `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table) |
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
+| `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
 
 The two summary fields are computed differently on each OS:
 
@@ -169,7 +172,7 @@ The two summary fields are computed differently on each OS:
 | `verify` exit code | Not `0` |
 | `coverage_complete` | `false` |
 | `security_complete` | `false` for longer than one enumerator cycle. On Windows with Claude Code enabled, it stays `false` until you complete the Claude Code attestation, so every such host alerts until then |
-| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `verify` reports each as an error |
+| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `verify` reports each as an error, except `agent_unprotected` and `hook_contract_unverified`, which stay warnings for that account |
 | `machine_policy.<connector>.conflicts` or `.higher_precedence` | Not empty |
 | `enrollment.failed` | Greater than `0` (Linux and macOS) |
 | `transaction_pending` | `true` on two runs in a row |
@@ -297,6 +300,81 @@ each `guardian_target_user_path` and `guardian_target_failed` entry names
 the user, the connector and the reason. As root, `defenseclaw-gateway enterprise hooks status --json` lists
 every user and connector with its state.
 
+## Rotate per-user credentials
+
+The guardian gives each enrolled user credentials that it derives from one
+per-machine key and binds to that user's uid or SID. The agents' telemetry
+uses them on every OS, and so do hooks and in-agent plugins on Windows. On
+Linux and macOS, hooks and DefenseClaw's in-agent plugins reach the gateway
+over the hook socket and hold no credential. Rotate the key when a user's
+credentials may have been copied, or on your own schedule.
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux rotate-credentials --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos rotate-credentials --json
+```
+
+The rotation moves every user to the new key before the key takes effect:
+
+1. **Check.** Nothing changes until the gateway reports that it serves the
+   current key alone and a fresh guardian reconcile leaves every user who
+   holds a credential current. A target the guardian cannot protect holds
+   a credential when it was protected before, because the gateway keeps
+   accepting the credentials the guardian wrote for it then. Such a target,
+   including one whose own home blocks it (`guardian_target_user_path`),
+   stops the rotation with `rotation_failed`. Fix that user or remove them
+   from enrollment, then rotate again. A target that holds no credential
+   does not stop the rotation. That covers an agent the guardian never
+   protected, such as a version without a verified hook contract
+   (`hook_contract_unverified`), an account that no longer exists, and a
+   home that is not available yet. The rotation lists these targets in
+   `changes` as skipped. The guardian gives them credentials from the new
+   key once it can protect them.
+2. **Stage.** The new key is written next to the current one. From then on
+   the gateway accepts the credentials of both keys, and it must prove that
+   it accepts each user's new credentials before any user is moved.
+3. **Move.** The guardian re-renders every user from the new key. A second
+   reconcile then re-reads each user's installed files and must find them
+   unchanged.
+4. **Commit.** The new key replaces the current one. The gateway refuses the
+   old key's credentials from then on.
+
+If any step before the commit fails, the rotation removes the new key and
+the guardian moves every user back. The old key is never changed, so each
+user gets back exactly the credentials they had. The command exits `1` with
+`rotation_failed`, which names the step and the users. `rollback_failed`
+beside it means the rollback is not complete yet; its message says whether
+the next lifecycle run finishes it or the guardian re-renders the remaining
+users at its next reconcile, within a minute. If the command is interrupted, the
+next lifecycle action (for example `reconcile`) completes a rotation that had
+already committed or rolls back one that had not, and reports
+`rotation_recovered`. The result names keys only by a prefix of their
+SHA-256. A rotation that committed lists in `changes` the new and the
+previous key, how many targets and users it moved, and the targets it
+skipped. If you interrupt the command, it prints the `reconcile` command to
+run.
+
+What users see:
+
+- **Hooks and plugins on Linux and macOS** keep working through the
+  rotation, because they use the hook socket.
+- **Agents that are already running** keep sending telemetry with the
+  credential they loaded when they started. It works until the commit; after
+  that the gateway refuses it, and that agent's telemetry is lost until the
+  user restarts the agent. Agents started after the rotation use the new
+  credentials. Ask users to restart their agents after a rotation.
+
+On Windows, `enterprise windows rotate-credentials` exits `1639` and changes
+nothing. The Windows guardian writes a user's credentials only while that
+user is signed in, so it cannot move every user before a new key takes
+effect, and replacing the key would fail the hooks of every signed-out user
+closed until they sign in again. To cut off one Windows user, remove them
+from enrollment as described in
+[Contain an incident](/docs/enterprise/lifecycle#contain-an-incident).
+
 ## Logs and events
 
 ### Windows
@@ -306,7 +384,7 @@ every user and connector with its state.
 | Lifecycle log | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`: one JSON result per line, kept as 5 files of up to 5 MiB each |
 | Last result | `%WINDIR%\Logs\DefenseClaw\last-result.json` |
 | MDM wrapper log | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` |
-| Event log | Application log, source **DefenseClaw Enterprise** (table below) |
+| Event log | The `DefenseClaw` event log, source **DefenseClaw Lifecycle** (table below). Only SYSTEM and Administrators can write it. A legacy copy of each event goes to the Application log, source **DefenseClaw Enterprise**, where any account can write under any source name; see [Windows](/docs/enterprise/windows#verify-the-install) |
 | Gateway log | `C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log` |
 | Guardian log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` |
 

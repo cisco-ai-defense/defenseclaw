@@ -178,6 +178,21 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertIn("OpenCode bridge plugin found", result.detail)
 
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_readiness_names_a_group_writable_plugin_folder_with_its_fix(self):
+        # Ubuntu's umask 002 leaves ~/.config/opencode/plugins at 0775; init
+        # ended partial and suggested `setup opencode`, which fails the same way.
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        plugin_dir = os.path.join(self._tmp.name, ".config", "opencode", "plugins")
+        os.makedirs(plugin_dir)
+        os.chmod(plugin_dir, 0o775)
+        with patch.dict(os.environ, {"HOME": self._tmp.name}):
+            os.environ.pop("OPENCODE_CONFIG_DIR", None)
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            result = _connector_readiness(cfg, "opencode")
+
+        self.assertEqual(result.next_command, f"chmod go-w {os.path.realpath(plugin_dir)}")
+
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "omnigent-config")

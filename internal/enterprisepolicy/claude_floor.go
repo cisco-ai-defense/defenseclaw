@@ -442,6 +442,50 @@ func removeClaudeVersionFloor(opts Options, state *State) error {
 	return restoreOrStrip(opts, claudeVersionFloorRecord, path, claudeVersionFloorStrip(), true, state)
 }
 
+// purgeUnrecordedClaudeVersionFloor removes a floor drop-in DefenseClaw has
+// no record of writing when it holds exactly DefenseClaw's rendering of the
+// current floor: the file a rolled-back install left once its record went
+// with the rollback. Only an uninstall with purge runs it, inside
+// transaction. Any other unrecorded file under the drop-in name is the
+// administrator's and stays.
+func purgeUnrecordedClaudeVersionFloor(opts Options, transaction claudeFloorTransaction) (bool, error) {
+	path, err := ClaudeVersionFloorPath(opts)
+	if err != nil {
+		return false, err
+	}
+	unrecorded := func() (bool, error) {
+		if recorded, err := claudeVersionFloorPresent(opts); err != nil || recorded {
+			return false, err
+		}
+		current, exists, err := readPolicyFile(opts, path)
+		floor := ClaudeVersionFloor()
+		if err != nil || !exists || floor == "" {
+			return false, err
+		}
+		rendered, err := renderClaudeVersionFloor(floor)
+		return err == nil && bytes.Equal(current, rendered), err
+	}
+	if found, err := unrecorded(); err != nil || !found {
+		return false, err
+	}
+	removed := false
+	err = transaction(func(policyDir string) error {
+		if err := requireClaudeFloorDir(opts, policyDir); err != nil {
+			return err
+		}
+		found, err := unrecorded()
+		if err != nil || !found {
+			return err
+		}
+		if err := removePolicyFile(opts, path); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
 // ClaudeVersionFloorRecorded reports whether DefenseClaw still records
 // owning a Claude Code version floor drop-in; an uninstall must end with
 // false.

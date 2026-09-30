@@ -365,7 +365,7 @@ func (a *APIServer) renderSandboxVerdict(
 		}
 		resp.HookOutput = codexOutput(req.HookEventName, resp.Action, outputRawAction, plain, resp.AdditionalContext)
 	default:
-		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
+		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, req.HookEventName, resp.Mode, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
 		if profile.Respond != nil {
 			resp.HookOutput = profile.Respond(connector.HookRespondInput{
 				Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,

@@ -1186,7 +1186,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
 			return err
 		}
-		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
+		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
@@ -1197,6 +1197,22 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return c.setupOpenHandsWithTokenRollback(ctx, opts)
 	}
 	return c.setup(ctx, opts, "")
+}
+
+// prepareHermesLifecycleDataDir makes <data dir>, which holds Hermes'
+// lifecycle lock, owner-private. On Windows the managed enterprise guardian
+// creates and protects that directory itself: re-protecting it under the
+// user's token needs the WRITE_DAC its DACL withholds (teardown failed with
+// "Access is denied" and left Hermes' hooks), and doing so rewrote the
+// inherited entries of every other subfolder to the user and SYSTEM only,
+// so an administrator could not remove them. There it is used as it is.
+func prepareHermesLifecycleDataDir(opts SetupOpts) error {
+	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
+		if info, err := os.Lstat(opts.DataDir); err == nil && info.IsDir() {
+			return nil
+		}
+	}
+	return ensureManagedBackupDirRestricted(opts.DataDir)
 }
 
 // setupOpenHandsWithTokenRollback binds the optional process-environment OTLP
@@ -1749,7 +1765,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
 			return err
 		}
-		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
+		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
@@ -1813,6 +1829,18 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	switch {
 	case err != nil:
 		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+	case restored && c.name == "devin":
+		// A Devin backup captured after an earlier DefenseClaw setup (the
+		// per-user devin-hook.sh route) holds DefenseClaw's own hooks, which
+		// the restore just put back; they go too.
+		owned := devinOwnedHookCommands(opts, c.hookCommand(opts))
+		if present, err := devinConfigReferencesHook(path, owned...); err != nil {
+			errs = append(errs, fmt.Sprintf("inspect restored config: %v", err))
+		} else if present {
+			if err := removeDevinHookReferences(path, owned...); err != nil {
+				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
+			}
+		}
 	case restored:
 	case !restored:
 		if err := c.removeConfigEntriesWithManagedBackup(
@@ -1824,6 +1852,15 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
 		} else {
 			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
+		}
+	}
+	if c.name == "antigravity" && opts.ManagedEnterprise {
+		// DefenseClaw's Antigravity entries are its own by their outer key,
+		// also in a hooks.json the restore just put back that was captured
+		// after an earlier DefenseClaw setup (one a rolled-back install left),
+		// and when they run a command this release does not render.
+		if err := removeAntigravityOwnedHookEntries(path); err != nil {
+			errs = append(errs, fmt.Sprintf("remove DefenseClaw hook entries: %v", err))
 		}
 	}
 	if c.name == "hermes" {
@@ -1905,6 +1942,12 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
+	if opts.ManagedEnterprise {
+		// A plugin captured after an earlier DefenseClaw setup (one a
+		// rolled-back install left) is DefenseClaw's own, so putting it back
+		// would leave the registration in place; it goes too.
+		return c.removeOwnedPluginWithoutBackup(path)
+	}
 	return nil
 }
 
@@ -4800,6 +4843,48 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 			handlers = []interface{}{handler}
 		}
 		cfg[key] = map[string]interface{}{event: handlers}
+	}
+	return writeJSONObject(path, cfg)
+}
+
+// antigravityOwnedHookKeyPrefix begins each outer key DefenseClaw owns in
+// Antigravity's hooks.json (patchAntigravityHooks).
+const antigravityOwnedHookKeyPrefix = "defenseclaw-antigravity-"
+
+// AntigravityHooksHoldOwnedEntries reports whether the Antigravity hooks file
+// at path still has one of DefenseClaw's own outer keys, whatever command
+// the entry runs.
+func AntigravityHooksHoldOwnedEntries(path string) (bool, error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	for key := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// removeAntigravityOwnedHookEntries drops DefenseClaw's own outer keys from
+// the Antigravity hooks file at path and keeps every other key.
+func removeAntigravityOwnedHookEntries(path string) error {
+	owned, err := AntigravityHooksHoldOwnedEntries(path)
+	if err != nil || !owned {
+		return err
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	for key := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			delete(cfg, key)
+		}
 	}
 	return writeJSONObject(path, cfg)
 }

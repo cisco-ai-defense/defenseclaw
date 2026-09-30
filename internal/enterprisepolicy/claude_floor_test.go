@@ -690,6 +690,15 @@ func TestClaudeVersionFloorLockedPass(t *testing.T) {
 			t.Fatalf("publish: calls=%d %v", calls, err)
 		}
 		requireUnrecordedFloorFile(t, opts, wantClaudeFloorBytes, "the locked pass")
+		// An uninstall with purge removes an unrecorded file that holds
+		// exactly DefenseClaw's floor, and keeps any other.
+		if removed, err := purgeUnrecordedClaudeVersionFloor(opts, locked); err != nil || !removed || fileExists(claudeFloorFile(t, opts)) {
+			t.Fatalf("purge of DefenseClaw's unrecorded floor: removed=%v %v", removed, err)
+		}
+		writeFile(t, claudeFloorFile(t, opts), "{\"requiredMinimumVersion\": \"9.9.9\"}\n")
+		if removed, err := purgeUnrecordedClaudeVersionFloor(opts, locked); err != nil || removed || !fileExists(claudeFloorFile(t, opts)) {
+			t.Fatalf("purge must keep an administrator's floor file: removed=%v %v", removed, err)
+		}
 	})
 }
 

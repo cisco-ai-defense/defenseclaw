@@ -94,6 +94,9 @@ type llmEventMeta struct {
 	// backend must not be asked to append children to a trace it has already
 	// indexed and finalized.
 	TraceEventID string
+	// Guardrail is the block, ask or alert decision a hook imposed on this
+	// tool call; its tool span carries it.
+	Guardrail hookGuardrailOutcome
 }
 
 func (m llmEventMeta) reportedResponseID() string {
@@ -664,6 +667,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(codexToolArgs(req)))
 		a.rememberHookToolInvocation(meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
+		captureHookToolCall(ctx, meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
 	case "PostToolUse":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn(ctx, "codex", req.SessionID, req.TurnID), a.lastHookPromptID(ctx, "codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
 		meta.ToolID = req.ToolUseID
@@ -779,6 +783,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, req.ToolName, hookSpawnIntentRequested, stringFromJSONRaw(req.ToolArgs))
 		a.rememberHookToolInvocation(meta, req.ToolName, stringFromJSONRaw(req.ToolArgs))
+		captureHookToolCall(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs))
 		a.emitInferredDelegatedAgentTransitions(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), true)
 	case isResultLikeEvent(req.HookEventName):
 		meta.PromptID = firstNonEmpty(
@@ -867,6 +872,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(claudeCodeToolArgs(req)))
 		a.rememberHookToolInvocation(meta, claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)))
+		captureHookToolCall(ctx, meta, claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)))
 	case "PermissionDenied":
 		meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
@@ -2251,6 +2257,9 @@ func (a *APIServer) emitHookToolSpan(
 	merged.AgentName = firstNonEmpty(meta.AgentName, snapshot.meta.AgentName)
 	merged.AgentType = firstNonEmpty(meta.AgentType, snapshot.meta.AgentType)
 	merged.AgentID = firstNonEmpty(meta.AgentID, snapshot.meta.AgentID)
+	if merged.Guardrail.Action == "" {
+		merged.Guardrail = snapshot.meta.Guardrail
+	}
 	merged.Phase = "tool"
 	merged.OperationID = hookOperationID(merged)
 	if emitter := a.observabilityV8RuntimeEmitter(); emitter != nil {

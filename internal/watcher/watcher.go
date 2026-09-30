@@ -18,6 +18,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -225,7 +227,14 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if _, exists := watchedDirs[key]; exists {
 			return true
 		}
-		if err := ensureAndWatch(fsw, dir); err != nil {
+		created, err := ensureAndWatch(fsw, dir)
+		if len(created) > 0 && watcherConnectorName(w.cfg) == "opencode" {
+			// The OpenCode teardown removes these again while they are empty.
+			if recordErr := gatewayconnector.RecordWatcherCreatedDirs(w.cfg.DataDir, created); recordErr != nil {
+				fmt.Fprintf(os.Stderr, "[watch] record created dirs: %v\n", recordErr)
+			}
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
@@ -1351,16 +1360,32 @@ func toFindingInputs(findings []scanner.Finding) []policy.FindingInput {
 	return out
 }
 
-func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
+// ensureAndWatch creates dir when it is missing and watches it. It returns
+// the absolute paths of the folders it created: dir and any missing parents.
+func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
+	var created []string
+	if current, err := filepath.Abs(dir); err == nil {
+		for {
+			if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+			created = append(created, current)
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+			current = parent
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create dir: %w", err)
+		return nil, fmt.Errorf("create dir: %w", err)
 	}
 
 	if err := fsw.Add(dir); err != nil {
-		return fmt.Errorf("watch: %w", err)
+		return created, fmt.Errorf("watch: %w", err)
 	}
 
-	return nil
+	return created, nil
 }
 
 func addClaudeCacheWatches(

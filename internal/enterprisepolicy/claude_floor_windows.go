@@ -53,3 +53,13 @@ func RemoveWindowsClaudeVersionFloor(opts Options) (State, error) {
 	err := removeClaudeVersionFloorWith(opts, windowsClaudeFloorTransaction, &state)
 	return state, err
 }
+
+// PurgeWindowsUnrecordedClaudeVersionFloor is the uninstall-with-purge pass
+// for a floor drop-in whose ownership record DefenseClaw lost (see
+// purgeUnrecordedClaudeVersionFloor). It reports whether it removed one.
+func PurgeWindowsUnrecordedClaudeVersionFloor(opts Options) (bool, error) {
+	if opts.goos() != "windows" {
+		return false, errors.New("PurgeWindowsUnrecordedClaudeVersionFloor applies only to Windows")
+	}
+	return purgeUnrecordedClaudeVersionFloor(opts, windowsClaudeFloorTransaction)
+}

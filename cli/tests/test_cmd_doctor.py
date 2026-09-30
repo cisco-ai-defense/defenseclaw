@@ -2942,9 +2942,9 @@ class DoctorScannerRepairHintTests(unittest.TestCase):
     def test_timeout_says_to_retry_then_names_the_resolver(self):
         import subprocess as sp
 
-        check = self._run(sp.TimeoutExpired(cmd="skill-scanner", timeout=10))
+        check = self._run(sp.TimeoutExpired(cmd="skill-scanner", timeout=30))
         self.assertEqual(check["status"], "fail")
-        self.assertIn("did not answer --version within 10s", check["detail"])
+        self.assertIn("did not answer --version within 30 s", check["detail"])
         self.assertIn("run `defenseclaw doctor` again", check["detail"])
         self.assertIn("`bash defenseclaw-upgrade.sh --yes`", check["detail"])
         self.assertIn("/docs/get-started/upgrade/", check["detail"])

@@ -55,7 +55,7 @@ def test_valid_protocol_invokes_offline_gateway_command() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="/opt/defenseclaw-gateway",
         ),
         patch.object(
@@ -101,7 +101,7 @@ def test_invalid_protocol_is_a_typed_nonzero_result() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -136,7 +136,7 @@ def test_zero_returncode_with_invalid_result_is_a_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -164,7 +164,7 @@ def test_nonzero_returncode_with_valid_result_is_a_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -187,7 +187,7 @@ def test_helper_invalid_text_is_a_safe_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -217,7 +217,7 @@ def test_helper_oversized_stdout_is_a_safe_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -270,7 +270,7 @@ def test_incompatible_protocol_is_rejected(
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -299,7 +299,7 @@ def test_incompatible_protocol_extra_key_is_rejected_without_echoing_payload() -
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(

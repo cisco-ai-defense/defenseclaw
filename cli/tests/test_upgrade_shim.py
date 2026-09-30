@@ -333,6 +333,14 @@ def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.M
     assert "defenseclaw.main" not in sys.modules
 
 
+def test_entry_notice_survives_an_uninstall_that_removed_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """uninstall --all --binaries finished, then the notice import raised ModuleNotFoundError."""
+    monkeypatch.setitem(sys.modules, "defenseclaw.update_notice", None)
+
+    entry._notice(["uninstall", "--all", "--binaries"])
+    entry._notice(["status"])
+
+
 def test_notice_is_silent_without_a_terminal(home: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     monkeypatch.setattr(update_notice, "available_message", lambda: "update!")
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)

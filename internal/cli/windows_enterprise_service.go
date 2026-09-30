@@ -1449,7 +1449,7 @@ func validateWindowsServiceConfig(
 		// The gateway service compiles this file strictly at start; prove
 		// it can before the lifecycle starts it. Secure Client
 		// keeps its historical validation.
-		if err := validateStandaloneGatewayConfig(configPath, expectedDataDir); err != nil {
+		if err := validateStandaloneGatewayConfig(configPath, expectedDataDir, ""); err != nil {
 			return windowsServiceConfigValidation{}, err
 		}
 	}

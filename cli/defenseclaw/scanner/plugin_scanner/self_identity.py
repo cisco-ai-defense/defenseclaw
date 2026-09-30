@@ -71,7 +71,7 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "530b7fd8ea132c81836a4266a8bbe0be1b3d419d07717b41f54c7f3b7cbe2a9f",  # amp-plugin.ts
+            "4e9eddfd7912bb114d1a6089d5d31c0d47867b9e20475fbb3a80d0ed4ebc13a0",  # amp-plugin.ts
             "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
         }
     ),

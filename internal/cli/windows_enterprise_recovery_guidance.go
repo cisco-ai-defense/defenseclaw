@@ -259,6 +259,32 @@ func windowsEnterpriseFirstWindowsPath(text string) string {
 	return strings.TrimRight(strings.TrimSpace(rest[:end]), ".")
 }
 
+// windowsEnterpriseStandaloneSetupCommand is the Setup command line that
+// recovers a pending transaction for action.
+func windowsEnterpriseStandaloneSetupCommand(action, configPath string) string {
+	if action == "uninstall" {
+		return windowsEnterpriseStandaloneSetupName + " /uninstall JSON=1"
+	}
+	config := strings.TrimSpace(configPath)
+	switch {
+	case config == "":
+		config = "<config.yaml>"
+	case strings.ContainsAny(config, " \t"):
+		config = `"` + config + `"`
+	}
+	return windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=" + config + " JSON=1"
+}
+
+// windowsEnterprisePendingInspectionStep is what status and verify say about
+// a pending transaction. Status named only not_ready and the installed
+// version, and verify said "run Repair", which an administrator shell cannot
+// use to recover it; a failed Setup names this same command.
+func windowsEnterprisePendingInspectionStep(configPath string) string {
+	return "A lifecycle transaction is pending, so the DefenseClaw services stay stopped until it finishes or is recovered. " +
+		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
+		windowsEnterpriseStandaloneSetupCommand("ensure", configPath) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+}
+
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
@@ -273,17 +299,7 @@ func windowsEnterpriseStandaloneNextStep(
 	if !pending {
 		return ""
 	}
-	config := strings.TrimSpace(configPath)
-	switch {
-	case config == "":
-		config = "<config.yaml>"
-	case strings.ContainsAny(config, " \t"):
-		config = `"` + config + `"`
-	}
-	command := windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=" + config + " JSON=1"
-	if action == "uninstall" {
-		command = windowsEnterpriseStandaloneSetupName + " /uninstall JSON=1"
-	}
+	command := windowsEnterpriseStandaloneSetupCommand(action, configPath)
 	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	if len(runs) != 0 {

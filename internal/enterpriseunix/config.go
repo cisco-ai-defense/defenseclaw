@@ -145,7 +145,12 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
 		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
 	})
-	compiled, compileErr := config.ParseCompileObservabilityV8(path, raw, config.ObservabilityV8CompileOptions{DefaultDataDir: e.Layout.DataDir})
+	// Credential references resolve from the credentials already stored in
+	// the secrets directory, so a config naming one that `enterprise secret
+	// set` has not stored is refused before anything changes.
+	compiled, compileErr := config.ParseCompileObservabilityV8(path, raw, config.ObservabilityV8CompileOptions{
+		DefaultDataDir: e.Layout.DataDir, CredentialsDir: e.P(e.Layout.SecretsDir),
+	})
 	cfg, loadErr := config.LoadRuntimeV8InspectionCandidateFromBytes(path, raw)
 	restore()
 	envPinMu.Unlock()

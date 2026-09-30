@@ -471,7 +471,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total{source=~\"$source\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -1425,7 +1425,7 @@
     {
       "type": "logs",
       "title": "AI discovery per-signal log",
-      "description": "Canonical v8 per-signal records (`event.name=ai_component.discovered|changed|confidence.changed|removed`). Use log details or search for a vendor, product, or detector.",
+      "description": "Canonical v8 per-signal records (`event.name=ai_component.discovered|changed|confidence.changed|removed`). Use log details or search for a vendor, product, detector, or user.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1469,7 +1469,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],

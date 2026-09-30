@@ -412,11 +412,11 @@ func (c *KiroConnector) hookCommand(opts SetupOpts) string {
 // the .kiro/hooks configuration (KiroHookSurfaceV3); the CLI 2.x agent
 // configuration is unmarked.
 //
-// On Windows both commands are the encoded system PowerShell bridge that
-// Codex and Antigravity use: it starts the GUI-subsystem launcher without a
-// window, waits for it, and exits with its status, so exit 2 (Kiro's only
-// block) reaches Kiro when Kiro runs the command through cmd.exe (Node's
-// shell: true, `cmd /C`) or directly. The earlier `& '<launcher>' ...` form
+// On Windows both commands run the system Windows PowerShell with an encoded
+// script that starts the GUI-subsystem launcher, waits for it and exits with
+// its status, so exit 2 (Kiro's only block) reaches Kiro when Kiro runs the
+// command through cmd.exe (Node's shell: true, `cmd /C`) or directly
+// (windowsKiroHookCommandForBinary). The earlier `& '<launcher>' ...` form
 // failed under cmd.exe ("& was unexpected at this time", exit 1) and, under
 // PowerShell, returned before the GUI launcher finished; either way Kiro
 // proceeded. A launcher that evaluates the command with `powershell -Command`
@@ -433,7 +433,54 @@ func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
 	return windowsKiroHookCommandForBinary(defenseclawHookBinary(), surface)
 }
 
+// windowsKiroHookCommandForBinary renders the Windows Kiro command. Its
+// script starts the launcher with Process.Start rather than Start-Process
+// -Wait, the bridge Codex and Antigravity use: Start-Process opens its handle
+// to the child only after the child is running, so a launcher that exits at
+// once made it fail with "the process has exited" and PowerShell exit 1,
+// which Kiro treats as proceed. Process.Start keeps the handle CreateProcess
+// returns, so the exit status is always there to read. Redirecting stderr
+// makes .NET pass the agent's own stdin and stdout to the launcher (a
+// GUI-subsystem child gets no standard handles otherwise); the script copies
+// the launcher's stderr, where the block reason is, to its own unchanged.
+// Constrained Language mode (WDAC or AppLocker script enforcement) refuses
+// the .NET calls, which would exit 1 on every call, and Start-Process -Wait
+// loses a fast launcher's status there too. In that mode the script runs the
+// launcher with the call operator and pipes its stdout (empty) to Out-Host:
+// a piped GUI-subsystem launcher is awaited on the handle Process.Start
+// returned, and $LASTEXITCODE is its status. The launcher keeps the agent's
+// stdin and stderr. Continue keeps a host that turns native stderr into
+// error records from ending the script with 1.
+// The arguments are fixed tokens without spaces or quotes. Kiro is not part
+// of any enterprise profile on Windows, so only per-user setup writes this.
 func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
+	arguments := "hook --connector kiro"
+	if surface != "" {
+		arguments += " --hook-surface " + surface
+	}
+	quoted := strings.Fields(arguments)
+	for i, argument := range quoted {
+		quoted[i] = powershellQuoteLiteral(argument)
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," + powershellQuoteLiteral(arguments) + ")",
+		"$hookStart.UseShellExecute=$false",
+		"$hookStart.RedirectStandardError=$true",
+		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+		"$hookProcess.WaitForExit()",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// legacyWindowsKiroStartProcessHookCommandForBinary is the Start-Process
+// -Wait bridge earlier builds wrote for Kiro. It is never generated.
+func legacyWindowsKiroStartProcessHookCommandForBinary(hookBinary, surface string) string {
 	if surface == "" {
 		return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary)
 	}
@@ -441,11 +488,11 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
 }
 
 // kiroWindowsOwnedHookCommands are the Windows Kiro commands DefenseClaw
-// wrote for every launcher it may have registered: the current encoded
-// bridge (both surfaces) and the `& '<launcher>' hook --connector kiro`
-// call-operator form earlier builds wrote. Setup replaces and teardown
-// removes an older form in the CLI 2.x agent files, whose entries are
-// otherwise matched by exact command.
+// wrote for every launcher it may have registered: the current command and
+// the Start-Process bridge (both surfaces), and the `& '<launcher>' hook
+// --connector kiro` call-operator form earlier builds wrote. Setup replaces
+// and teardown removes an older form in the CLI 2.x agent files, whose
+// entries are otherwise matched by exact command.
 func kiroWindowsOwnedHookCommands() []string {
 	var commands []string
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
@@ -453,6 +500,8 @@ func kiroWindowsOwnedHookCommands() []string {
 		commands = append(commands,
 			windowsKiroHookCommandForBinary(binary, ""),
 			windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3),
+			legacyWindowsKiroStartProcessHookCommandForBinary(binary, ""),
+			legacyWindowsKiroStartProcessHookCommandForBinary(binary, KiroHookSurfaceV3),
 			legacy,
 			legacy+" --hook-surface "+KiroHookSurfaceV3,
 		)

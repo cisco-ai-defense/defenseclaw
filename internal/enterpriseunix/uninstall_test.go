@@ -14,7 +14,9 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,6 +148,62 @@ func TestFailedUninstallKeepsTheRecordForARetryOrReinstall(t *testing.T) {
 				t.Fatal("the rerun of a failed uninstall was a no-op")
 			}
 			if exists(h.env.P(h.env.Layout.DescriptorPath)) || exists(h.env.deploymentPath()) {
+				t.Fatal("the rerun did not finish the removal")
+			}
+		})
+	}
+}
+
+// removeAllRunner answers `enterprise hooks remove-all` with answer.
+type removeAllRunner struct {
+	Runner
+	answer func(args string) (CommandResult, error)
+}
+
+func (r removeAllRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if joined := strings.Join(args, " "); strings.HasPrefix(joined, "enterprise hooks remove-all ") {
+		return r.answer(joined)
+	}
+	return r.Runner.Run(ctx, name, args...)
+}
+
+// A macOS uninstall --purge returned ok while one account's Devin hooks,
+// which run the hook binary that same uninstall removed, stayed registered,
+// and its only warning named nobody. Each registration left is now an
+// error naming the account and connector with the command to rerun, and
+// the uninstall stops before removing the binaries they run, so the rerun
+// can still remove them.
+func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			left := true
+			var calls []string
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(args string) (CommandResult, error) {
+				calls = append(calls, args)
+				if left {
+					return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"removed":2,"failed":["alice/devin: devin teardown: remove hook entries: permission denied"]}`)}, errors.New("exit 1")
+				}
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"]}`)}, nil
+			}}
+			failed := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireError(t, failed, codePerUserHooks)
+			got := messagesOf(failed.Errors, codePerUserHooks)
+			if !strings.Contains(got, "devin hooks for user alice were not removed: devin teardown: remove hook entries: permission denied") ||
+				!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
+				t.Fatalf("the uninstall does not name the registration left and the rerun: %s", got)
+			}
+			if len(calls) != 1 || !strings.HasSuffix(calls[0], " --purge") {
+				t.Fatalf("a purge does not purge per-user state: %v", calls)
+			}
+			gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+			if !exists(gateway) || !exists(h.env.deploymentPath()) {
+				t.Fatal("the uninstall removed the binaries the registration left still runs")
+			}
+			left = false
+			requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+			if exists(gateway) || exists(h.env.deploymentPath()) {
 				t.Fatal("the rerun did not finish the removal")
 			}
 		})

@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -439,19 +440,47 @@ func standaloneLayoutDataDir(configFile string, document *yaml.Node) (string, bo
 	if root == nil || root.Kind != yaml.MappingNode || v8YAMLMapValue(root, "data_dir") != nil {
 		return "", false
 	}
+	if !standaloneManagedDocument(layout.GOOS, root) {
+		return "", false
+	}
+	return layout.DataDir, true
+}
+
+// ObservabilityCredentialsDir is where the observability credential
+// references of a loaded standalone enterprise config resolve, the same
+// secrets directory as the AI Defense key. Other deployments resolve none.
+func (c *Config) ObservabilityCredentialsDir() string {
+	if c == nil || !c.StandaloneEnterprise() {
+		return ""
+	}
+	return managed.StandaloneSecretsDirForConfig(runtime.GOOS, c.ConfigFilePath)
+}
+
+// standaloneManagedDocument reports whether a v8 source root resolves, with
+// the service pins, to the standalone managed-enterprise profile on goos.
+func standaloneManagedDocument(goos string, root *yaml.Node) bool {
 	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if mode == "" {
 		mode = normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	}
 	if !managed.IsManagedEnterprise(mode) {
-		return "", false
+		return false
 	}
 	declared := yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "profile"))
-	profile, err := managed.ResolveEnterpriseProfile(layout.GOOS, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
-	if err != nil || !managed.IsStandaloneProfile(profile) {
-		return "", false
+	profile, err := managed.ResolveEnterpriseProfile(goos, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
+	return err == nil && managed.IsStandaloneProfile(profile)
+}
+
+// standaloneCredentialsDir is where the observability credential references
+// of a standalone managed-enterprise source resolve: the secrets directory
+// next to it, as for the AI Defense key. Any other source resolves none.
+func standaloneCredentialsDir(configFile string, document *yaml.Node) string {
+	root := v8DocumentRoot(document)
+	if !filepath.IsAbs(strings.TrimSpace(configFile)) || root == nil || root.Kind != yaml.MappingNode ||
+		!standaloneManagedDocument(runtime.GOOS, root) {
+		return ""
 	}
-	return layout.DataDir, true
+	return managed.StandaloneSecretsDirForConfig(runtime.GOOS, configFile)
 }
 
 // standaloneLayoutDataDirForSource applies standaloneLayoutDataDir to the
