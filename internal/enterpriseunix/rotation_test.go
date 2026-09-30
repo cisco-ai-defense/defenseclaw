@@ -186,10 +186,17 @@ func (h *rotationHost) requireNoRotationLeft() {
 func TestRotateCredentialsMovesEveryUserBeforeTheKeyCommits(t *testing.T) {
 	h := newRotationHost(t)
 	idA := connector.UserScopedTokenKeyFingerprint(h.keyA)
-	requireOK(t, h.run(Options{Action: ActionRotateCredentials}))
+	result := h.run(Options{Action: ActionRotateCredentials})
+	requireOK(t, result)
 	keyB := h.committedKey()
 	idB := connector.UserScopedTokenKeyFingerprint(keyB)
 	h.requireNoRotationLeft()
+	// The result says which key replaced which, whom it moved, and that
+	// running agents need a restart.
+	if changes := strings.Join(result.Changes, "\n"); !strings.Contains(changes, shortKeyID(idB)+" in place of key "+shortKeyID(idA)) ||
+		!strings.Contains(changes, "2 per-user target(s) of 2 user(s)") || !strings.Contains(changes, "restart their agents") {
+		t.Fatalf("the result does not describe the rotation: %q", result.Changes)
+	}
 	if keyB == h.keyA || !lowerHexKey(keyB) || h.rendered["alice"] != idB || h.rendered["bob"] != idB {
 		t.Fatalf("rotation left key %s and users on %v", shortKeyID(idB), h.rendered)
 	}
@@ -203,9 +210,18 @@ func TestRotateCredentialsMovesEveryUserBeforeTheKeyCommits(t *testing.T) {
 		t.Fatalf("a user could be moved before the gateway accepted the new key: %v", h.events)
 	}
 
+	// A stopped gateway is refused at once instead of after ReadyTimeout.
+	h = newRotationHost(t)
+	h.services.active[unitGateway] = false
+	result = h.run(Options{Action: ActionRotateCredentials})
+	requireError(t, result, codeRotation)
+	if h.committedKey() != h.keyA || !strings.Contains(result.Errors[0].Message, unitGateway+" is not running") {
+		t.Fatalf("a rotation with the gateway stopped was not refused: %+v", result.Errors)
+	}
+
 	h = newRotationHost(t)
 	h.failStaged = true
-	result := h.run(Options{Action: ActionRotateCredentials})
+	result = h.run(Options{Action: ActionRotateCredentials})
 	requireError(t, result, codeRotation)
 	for _, e := range result.Errors {
 		if e.Code == codeRollbackFailed {

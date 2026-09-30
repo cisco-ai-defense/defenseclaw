@@ -347,7 +347,9 @@ users at its next reconcile, within a minute. If the command is interrupted, the
 next lifecycle action (for example `reconcile`) completes a rotation that had
 already committed or rolls back one that had not, and reports
 `rotation_recovered`. The result names keys only by a prefix of their
-SHA-256.
+SHA-256. A rotation that committed lists in `changes` the new and the
+previous key and how many targets and users it moved. If you interrupt the
+command, it prints the `reconcile` command to run.
 
 What users see:
 

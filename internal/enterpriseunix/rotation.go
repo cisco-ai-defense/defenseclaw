@@ -504,6 +504,10 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 		r.AddWarning(codeRotationRecovered, "removed a staged per-user credential key that no rotation recorded")
 	}
 	idA := connector.UserScopedTokenKeyFingerprint(keyA)
+	if !env.Services.Active(ctx, gateway) && !l.backFromRestart(ctx, gateway) {
+		// Waiting out ReadyTimeout for its keys would only delay the answer.
+		return refuse("%s is not running; run `enterprise %s repair`, then rotate again", gateway.Name, platformName(env.GOOS))
+	}
 	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idA}); err != nil {
 		return refuse("the gateway is not serving the committed per-user credential key alone: %v", err)
 	}
@@ -602,6 +606,14 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 		return 0
 	}
 	// Committed: from here on the only way forward is B.
+	users := map[string]bool{}
+	for _, target := range selected {
+		users[target.User] = true
+	}
+	r.Changes = append(r.Changes,
+		fmt.Sprintf("rotation %s committed key %s in place of key %s", operation, shortKeyID(idB), shortKeyID(idA)),
+		fmt.Sprintf("moved %d per-user target(s) of %d user(s) to the new key", len(selected), len(users)),
+		"agents that were already running send telemetry with the old key's credentials, which the gateway now refuses; ask users to restart their agents")
 	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idB}); err != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s committed key %s, but the gateway has not retired key %s: %v; run verify", operation, shortKeyID(idB), shortKeyID(idA), err))
 	}

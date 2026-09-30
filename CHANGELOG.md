@@ -71,6 +71,13 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **`rotate-credentials` says what it did.** On the enterprise standalone
+  profile on Linux and macOS, a successful rotation printed only `done`. It
+  now lists the committed and the previous key by SHA-256 prefix, how many
+  targets and users moved, and the reminder to restart running agents. It
+  refuses at once when the gateway service is not running, instead of after
+  90 seconds of silence, and an interrupted run prints the `reconcile`
+  command that completes or rolls back the rotation.
 - **A config change on macOS no longer leaves the gateway unloaded.** On the
   enterprise standalone profile, launchd could still be stopping the gateway
   when the lifecycle started it again; the start and its restart fallback
