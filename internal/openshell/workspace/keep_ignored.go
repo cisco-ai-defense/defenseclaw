@@ -223,6 +223,24 @@ func (m *ignoredManifest) markKept(changes []IgnoredChange) {
 	}
 }
 
+// unmarkKept marks unrestored every change markKept marked restored that
+// has a path in the kept directory root, which could not be restored: a
+// grouped change's own path may lie outside root while its files do not.
+func (m *ignoredManifest) unmarkKept(changes []IgnoredChange, root string) {
+	for i := range changes {
+		c := &changes[i]
+		if !c.Restored {
+			continue
+		}
+		for _, p := range append(append([]string{c.Path}, c.files...), c.gone...) {
+			if m.keptRootOf(p) == root {
+				c.Restored = false
+				break
+			}
+		}
+	}
+}
+
 // restoreKept puts back, from the snapshot's copies, each kept directory a
 // change undo restores (Restored) is in: what the session added there is
 // removed, and what it changed or deleted is copied back. A directory it
@@ -255,11 +273,7 @@ func restoreKept(lay layout, name, project string, m *ignoredManifest, changes [
 	for _, root := range roots {
 		if err := restoreKeptDir(project, lay.keptIgnored(name), strings.TrimSuffix(root, "/"), skip, m); err != nil {
 			warnings = append(warnings, "could not restore "+root+" from the copy the undo point keeps: "+err.Error())
-			for i := range changes {
-				if changes[i].Restored && m.keptRootOf(changes[i].Path) == root {
-					changes[i].Restored = false
-				}
-			}
+			m.unmarkKept(changes, root)
 			continue
 		}
 		restored = append(restored, root)

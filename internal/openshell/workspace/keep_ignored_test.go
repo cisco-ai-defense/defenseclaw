@@ -185,3 +185,21 @@ func TestKeptIgnoredDirsInAPlainFolder(t *testing.T) {
 		t.Fatal("the deleted snapshot left its directory (and its copies)")
 	}
 }
+
+// A kept directory undo could not restore leaves every change with a path
+// in it unrestored, also a grouped change whose own path lies outside it.
+func TestUnmarkKeptCoversEveryPathOfAChange(t *testing.T) {
+	m := &ignoredManifest{Kept: []string{"node_modules/", ".venv/"}}
+	changes := []IgnoredChange{
+		{Path: "node_modules/", Restored: true},
+		{Path: "pkg/", Restored: true, files: []string{"node_modules/left-pad/index.js"}},
+		{Path: "old/", Restored: true, gone: []string{"node_modules/gone.js"}},
+		{Path: ".venv/", Restored: true},
+	}
+	m.unmarkKept(changes, "node_modules/")
+	for i, want := range []bool{false, false, false, true} {
+		if changes[i].Restored != want {
+			t.Errorf("change %s: Restored = %v, want %v", changes[i].Path, changes[i].Restored, want)
+		}
+	}
+}
