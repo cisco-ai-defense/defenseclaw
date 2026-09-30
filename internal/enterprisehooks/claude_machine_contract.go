@@ -41,7 +41,7 @@ func WindowsStandaloneClaudeMachinePolicyContract(manifest Manifest) string {
 		if !target.IsEnabled() || !strings.EqualFold(strings.TrimSpace(target.Connector), "claudecode") {
 			continue
 		}
-		resolution := connector.ResolveHookContract("claudecode", target.AgentVersion)
+		resolution := resolveHookContract("claudecode", target.AgentVersion)
 		if resolution.Status != connector.HookCompatibilityKnown {
 			continue
 		}
@@ -87,8 +87,8 @@ func claudeMachineContractLowered(connectorName, from, to string) string {
 	if !strings.EqualFold(strings.TrimSpace(connectorName), "claudecode") {
 		return ""
 	}
-	current := connector.ResolveHookContract("claudecode", from)
-	next := connector.ResolveHookContract("claudecode", to)
+	current := resolveHookContract("claudecode", from)
+	next := resolveHookContract("claudecode", to)
 	if current.Status != connector.HookCompatibilityKnown || next.Status != connector.HookCompatibilityKnown {
 		return ""
 	}

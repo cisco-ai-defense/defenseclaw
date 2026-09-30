@@ -90,8 +90,10 @@ class TestGatewayPidIdentity(unittest.TestCase):
 class TestRestartFailsClosed(unittest.TestCase):
     """F-0142 / F-0143: restart failures must propagate, not be swallowed."""
 
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run", side_effect=FileNotFoundError)
-    def test_f0142_restart_defense_gateway_returns_false_on_failure(self, _mock_run):
+    @patch("defenseclaw.commands.cmd_setup._gateway_lifecycle_executable", return_value=None)
+    def test_f0142_restart_defense_gateway_returns_false_on_failure(self, _mock_exe):
+        # Patch the binary lookup, not subprocess.run: the start path runs the
+        # pinned executable directly, so the old patch let a real gateway start.
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
         with tempfile.TemporaryDirectory() as tmp:

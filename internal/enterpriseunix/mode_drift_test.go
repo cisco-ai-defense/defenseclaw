@@ -20,18 +20,14 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // writeFreshLedger publishes a current guardian authorization ledger, which
 // strict verify requires.
 func writeFreshLedger(t *testing.T, h *testHost) {
 	t.Helper()
-	ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
 	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true})
-	if err := os.WriteFile(ledger, data, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	h.publishLedger(data)
 }
 
 func messagesOf(messages []enterprisestatus.Message, code string) string {

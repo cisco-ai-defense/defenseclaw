@@ -363,3 +363,25 @@ def test_reference_and_schema_use_embedded_go_artifacts() -> None:
         "--format",
         "yaml",
     ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX custody check")
+def test_custody_refusal_names_the_writable_folder_not_the_link(tmp_path):
+    from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    target = shared / "defenseclaw-gateway"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    shared.chmod(0o777)
+    link = tmp_path / "defenseclaw-gateway"
+    link.symlink_to(target)
+    try:
+        with pytest.raises(UnsafePathError) as refused:
+            trusted_posix_executable_path(str(link))
+    finally:
+        shared.chmod(0o755)
+    message = str(refused.value)
+    assert f"folder {os.path.realpath(shared)} " in message
+    assert f"chmod go-w {os.path.realpath(shared)}" in message

@@ -32,6 +32,19 @@ import (
 
 func daemonStartDir(_ string, dataDir string) string { return dataDir }
 
+// daemonExecPath is the file the daemon child is started from. On Linux it
+// is /proc/self/exe, the file this process already runs, so a path swapped
+// after the caller checked the gateway cannot start instead (#643). Other
+// Unix systems have no equivalent and start the checked path.
+func daemonExecPath(executable string) string {
+	if runtime.GOOS == "linux" {
+		if info, err := os.Stat("/proc/self/exe"); err == nil && info.Mode().IsRegular() {
+			return "/proc/self/exe"
+		}
+	}
+	return executable
+}
+
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,

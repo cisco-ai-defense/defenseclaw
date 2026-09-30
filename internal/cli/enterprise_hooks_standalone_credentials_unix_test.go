@@ -63,6 +63,13 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 		if err != nil || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 {
 			t.Fatalf("pass %d: attestation = %+v %v", pass, attestation, err)
 		}
+		// It is bound to the authorization ledger the same run published,
+		// and to none when the run's state did not persist (as a non-root
+		// test, the state file fails its trust check).
+		ledger, err := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianAuthorizationFile))
+		if err != nil || attestation.BoundTo(ledger) != (run.StateErr == nil) || (run.StateErr != nil && attestation.AuthorizationSHA256 != "") {
+			t.Fatalf("pass %d: attestation binding = %q with state error %v (%v)", pass, attestation.AuthorizationSHA256, run.StateErr, err)
+		}
 		previousID = attestation.ID
 		for _, target := range attestation.Targets {
 			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified {

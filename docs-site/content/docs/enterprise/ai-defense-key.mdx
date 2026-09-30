@@ -25,14 +25,14 @@ See [Concepts](/docs/enterprise/concepts) for the terms.
 
 ## Before you start
 
-Install the deployment first, then store the key. `enterprise secret set`
-refuses to run until a deployment is installed (on Windows, `secret remove`
-does too):
+On Linux and macOS the key can be stored before or after the install. Stored
+before the install, it stays readable by root only (`enterprise secret set`
+reports `not_installed` as a warning and exits 0), and the install gives the
+gateway its access, so a config that references the key installs at once.
 
-| OS | Refusal |
-| --- | --- |
-| Linux, macOS | `DefenseClaw enterprise is not installed (no service account)`, exit 1 |
-| Windows | `no standalone managed deployment is installed`, exit 1603 |
+On Windows, install the deployment first: `enterprise secret set` and
+`secret remove` refuse with `no standalone managed deployment is installed`,
+exit 1603.
 
 The MDM wrappers follow the same order for you; see
 [Deliver the key with an MDM](#deliver-the-key-with-an-mdm).
@@ -226,7 +226,7 @@ for recipes.
 | Stored, listed or removed | `0` | `0` |
 | Invalid input: both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
 | Invalid credential name | `1` | `1639` |
-| Not elevated or not root, not installed, or the write failed | `1` | `1603` |
+| Not elevated or not root, not installed (Windows only), or the write failed | `1` | `1603` |
 | The follow-up `ensure` failed and rolled back | `1` | Not applicable |
 | Another lifecycle run holds the lock | `75` | Not applicable |
 | The gateway restart failed after the key was stored | Not applicable | `1603` |

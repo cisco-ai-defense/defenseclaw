@@ -1009,8 +1009,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
     elif signal is not None and getattr(signal, "version", ""):
+        from defenseclaw.connector_contracts import resolve_connector_contract
+
+        why = resolve_connector_contract(key, signal.version).reason
         record["reason"] = (
-            f"installed version {signal.version} is not covered by a known hook contract"
+            f"installed version {signal.version} is not covered by a known hook contract ({why})"
         )
         record["installed_version"] = signal.version
     return record
@@ -1031,7 +1034,9 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         steps.append(
             StepResult(
                 f"{label} mode",
-                "fail",
+                # A connector that stays in observe is protected but not
+                # blocking; it must not fail init/quickstart (and `make all`).
+                "warn",
                 detail,
                 warning.get("next_command", ""),
             )
@@ -1611,6 +1616,19 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             f"OmniGent custom policy not found at {path}",
             "defenseclaw setup omnigent",
         )
+    if connector == "kiro":
+        # Kiro merges hooks from every scope; setup writes the global
+        # ~/.kiro/hooks/defenseclaw.json and, with claw.workspace_dir, the
+        # project's .kiro/hooks/defenseclaw.json. Either one is enough here.
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        candidates = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
+        if workspace:
+            candidates.append(os.path.join(workspace, ".kiro", "hooks", "defenseclaw.json"))
+        for path in candidates:
+            if os.path.isfile(path):
+                return StepResult("Connector", "pass", f"Kiro hooks found at {path}")
+        return StepResult("Connector", "warn", "Kiro hooks not found yet", "defenseclaw setup kiro")
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 

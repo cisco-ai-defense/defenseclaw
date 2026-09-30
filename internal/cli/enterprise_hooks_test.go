@@ -392,6 +392,28 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	if !reflect.DeepEqual(issues, want) {
 		t.Fatalf("issues = %#v, want %#v", issues, want)
 	}
+
+	// A Windows standalone status names a signed-out account and gives the
+	// refused repair's next step instead of the session error.
+	originalCfg := cfg
+	t.Cleanup(func() { cfg = originalCfg })
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+	}
+	state.Results = []enterpriseHookReconcileRow{{
+		User: "dave", SID: "S-1-5-21-111-222-333-1004", Connector: "codex",
+		Error: "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
+	}}
+	signedOut := "last guardian reconcile failed for codex@S-1-5-21-111-222-333-1004: " + state.Results[0].Error
+	if runtime.GOOS == "windows" {
+		signedOut = "the guardian cannot repair codex for dave (S-1-5-21-111-222-333-1004) while that account is signed out: " +
+			"have the account sign in, or remove it with its profile, then run repair again. The guardian repairs " +
+			"DefenseClaw hooks only in the account's own Windows session"
+	}
+	if issues := enterpriseHookGuardianFailureIssues(state); !reflect.DeepEqual(issues, []string{signedOut}) {
+		t.Fatalf("signed-out issues = %#v, want %q", issues, signedOut)
+	}
 }
 
 func TestWriteEnterpriseHookGuardianStateDoesNotAuthorizeFailedEnrollmentPublication(t *testing.T) {

@@ -171,18 +171,19 @@ type SandboxArtifactProvider interface {
 // hooks are not version-gated (Kiro), as an overlay image always pins a
 // reviewed harness build, and one whose sandbox needs a narrower range than
 // its host (OmniGent). A version the host contract accepts and the sandbox
-// refuses gets the sandbox's reason.
+// refuses gets the sandbox's reason. Overlay images pin reviewed builds, so
+// sandbox resolution keeps exact-range matching.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
-		resolution := resolveHookContractAgainst(name, agentVersion, contracts)
+		resolution := strictHookContractResolutionOf(resolveHookContractAgainst(name, agentVersion, contracts))
 		if why := sandboxOnlyRefusals[name]; why != "" && resolution.Status == HookCompatibilityUnknown &&
-			resolveHookContractForOS(name, agentVersion, "linux").Status == HookCompatibilityKnown {
+			resolveHookContractForOSMode(name, agentVersion, "linux", true).Status == HookCompatibilityKnown {
 			resolution.Reason = why
 		}
 		return resolution
 	}
-	return resolveHookContractForOS(connectorName, agentVersion, "linux")
+	return resolveHookContractForOSMode(connectorName, agentVersion, "linux", true)
 }
 
 // sandboxOnlyHookContractsByConnector are reviewed hook contracts that apply

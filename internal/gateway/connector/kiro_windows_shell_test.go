@@ -94,22 +94,22 @@ func guiSubsystemCopyOfTestBinary(t *testing.T) string {
 
 // Kiro honors only exit 2 as a block and proceeds on any other status. Run
 // both rendered Kiro commands, against a GUI-subsystem launcher like the
-// release build, the way Kiro can launch them: through cmd.exe as Node's
-// shell: true does (`cmd.exe /d /s /c "<command>"`) and as an argument
-// vector (`cmd /C <command>`). A block must come back as 2, with the payload
-// delivered on stdin. The earlier `& '<launcher>' ...` command exits 1 in
-// cmd.exe ("& was unexpected at this time").
-//
-// A launcher that runs the command with `powershell -Command` turns any
-// native status other than 0 into 1 (about_PowerShell_exe); no command
-// string that also works in cmd.exe can change that, so it is not tested.
-// Which shell Kiro uses is not documented.
+// release build, every way Kiro can launch them: through `pwsh -Command` and
+// `powershell -Command` (Kiro CLI 2.24 runs `"pwsh" -Command "<command>"`),
+// through cmd.exe as Node's shell: true does (`cmd.exe /d /s /c
+// "<command>"`) and as an argument vector (`cmd /C <command>`), and as a
+// directly started command line. A block must come back as 2, with the
+// payload delivered on stdin. A PowerShell host reports a native status
+// other than 0 as 1 unless the command exits with it, and the earlier
+// `& '<launcher>' ...` command exits 1 in cmd.exe ("& was unexpected at this
+// time").
 func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 	gui := guiSubsystemCopyOfTestBinary(t)
 	t.Cleanup(PinNativeHookExecutableForTest(gui))
 	conn := NewKiroConnector()
 	opts := SetupOpts{DataDir: t.TempDir()}
 	cmdExe := filepath.Join(trustedWindowsSystemDirectory(), "cmd.exe")
+	pwsh, pwshErr := exec.LookPath("pwsh")
 	payload := `{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":"` + kiroShellMarker + `"}}`
 
 	run := func(t *testing.T, surface string, command *exec.Cmd) int {
@@ -125,6 +125,10 @@ func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 		}
 		return command.ProcessState.ExitCode()
 	}
+	type launch struct {
+		name    string
+		command *exec.Cmd
+	}
 	for surface, rendered := range map[string]string{
 		KiroHookSurfaceV3: conn.hookCommandForV3Surface(opts),
 		"v2":              conn.hookCommand(opts),
@@ -132,11 +136,23 @@ func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 		t.Run(surface, func(t *testing.T) {
 			node := exec.Command(cmdExe)
 			node.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /d /s /c "` + rendered + `"`}
-			if code := run(t, surface, node); code != 2 {
-				t.Fatalf("cmd.exe /d /s /c: exit %d, want 2 (Kiro's block)", code)
+			direct := exec.Command(windowsSystemCmdExe())
+			direct.SysProcAttr = &syscall.SysProcAttr{CmdLine: rendered}
+			launches := []launch{
+				{"cmd.exe /d /s /c", node},
+				{"cmd /C", exec.Command(cmdExe, "/C", rendered)},
+				{"direct start", direct},
+				{"powershell -Command", exec.Command(windowsSystemPowerShellExe(), "-NoProfile", "-Command", rendered)},
 			}
-			if code := run(t, surface, exec.Command(cmdExe, "/C", rendered)); code != 2 {
-				t.Fatalf("cmd /C: exit %d, want 2 (Kiro's block)", code)
+			if pwshErr == nil {
+				launches = append(launches, launch{"pwsh -Command", exec.Command(pwsh, "-NoProfile", "-Command", rendered)})
+			} else {
+				t.Logf("pwsh not found, so pwsh -Command is not run: %v", pwshErr)
+			}
+			for _, l := range launches {
+				if code := run(t, surface, l.command); code != 2 {
+					t.Fatalf("%s: exit %d, want 2 (Kiro's block)", l.name, code)
+				}
 			}
 		})
 	}

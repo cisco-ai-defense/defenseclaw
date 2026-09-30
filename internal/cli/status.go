@@ -33,6 +33,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
@@ -178,6 +179,16 @@ func fetchSidecarHealth(client *http.Client, addr string) (gateway.HealthSnapsho
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	addr := sidecarHealthURL(cfg)
+	// /health is public: any process on the port answers it. Never present
+	// another home's or account's gateway as this one.
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		fmt.Println()
+		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+		printGatewayKV("Endpoint", addr)
+		Subhead(problem + ". Its status is not shown.")
+		Subhead(foreignGatewayListenerFix)
+		return fmt.Errorf("the gateway port is held by another process")
+	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	snap, err := fetchSidecarHealth(client, addr)
@@ -187,6 +198,9 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 			fmt.Println()
 			Warn("Sidecar Status: NOT RUNNING")
 			printGatewayKV("Endpoint", addr)
+			if reason := lastGatewayExitError(cfg); reason != "" {
+				printGatewayKV("Last exit", reason)
+			}
 			Subhead(sidecarNotRunningHint(cfg))
 			return fmt.Errorf("sidecar unreachable")
 		}
@@ -222,6 +236,45 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// lastGatewayExitError returns the error a per-user gateway printed as the
+// last line of gateway.log before it exited (for example a refused plugin
+// folder or audit store), so a stopped gateway says why it stopped.
+func lastGatewayExitError(c *config.Config) string {
+	if c == nil || c.StandaloneEnterprise() {
+		return ""
+	}
+	path := filepath.Join(config.DefaultDataPath(), daemon.LogFileName)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const tailBytes = 16 << 10
+	if info.Size() > tailBytes {
+		if _, err := f.Seek(info.Size()-tailBytes, io.SeekStart); err != nil {
+			return ""
+		}
+	}
+	tail, err := io.ReadAll(io.LimitReader(f, tailBytes))
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(tail), "\r\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	reason, ok := strings.CutPrefix(last, "Error: ")
+	if !ok || !utf8.ValidString(reason) {
+		return ""
+	}
+	if len(reason) > 400 {
+		reason = reason[:400] + "..."
+	}
+	return reason
 }
 
 // sidecarNotRunningHint names how to bring the gateway back. The per-user

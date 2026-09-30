@@ -143,7 +143,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			return err
 		}
 		if setup.HookContractID == "" {
-			resolution := connector.ResolveHookContract(conn.Name(), setup.AgentVersion)
+			resolution := resolveHookContract(conn.Name(), setup.AgentVersion)
 			setup.HookContractID = resolution.Contract.ContractID
 		}
 		if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {

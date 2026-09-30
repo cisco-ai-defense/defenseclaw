@@ -24,6 +24,12 @@ name: Release
 # Keep this file's name and run it from main only: installers verify
 # checksums.txt against this workflow's Sigstore identity, and 0.8.8-0.8.10
 # clients trust the legacy channel only when this workflow signed it.
+#
+# dry_run: true builds and checks every asset from any ref, for any version,
+# without the release environment's secrets. It never signs to the public
+# Sigstore log, creates a release or draft, or pushes a tag, branch, package or
+# image; the unsigned assets and an unsigned checksums.txt are uploaded as the
+# run's "release" artifact instead.
 on:
   workflow_dispatch:
     inputs:
@@ -49,16 +55,24 @@ on:
           - release
           - legacy-channel
         default: release
+      dry_run:
+        description: "Build and check everything unsigned from any ref, upload the assets as workflow artifacts, publish nothing"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# A dry run gets its own queue, so a pending dry run never replaces a pending
+# release (a group keeps one pending run).
 concurrency:
-  group: release-${{ github.repository }}
+  group: release-${{ github.repository }}${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
 
 env:
   VERSION: ${{ inputs.version }}
+  DRY_RUN: ${{ inputs.dry_run }}
 
 jobs:
   validate:
@@ -79,7 +93,16 @@ jobs:
           OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::Run the Release workflow from main"; exit 1; }
+          # refuse MESSAGE: stop a release; a dry run only notes it, since it publishes nothing.
+          refuse() {
+            if [[ "$DRY_RUN" == true ]]; then echo "::notice title=Dry run::$1 (allowed in a dry run)"; return 0; fi
+            echo "::error::$1"; exit 1
+          }
+          if [[ "$DRY_RUN" == true ]]; then
+            [[ "$OPERATION" == release ]] || { echo "::error::dry_run supports operation: release only"; exit 1; }
+            echo "dry run: nothing published. The unsigned assets and checksums.txt are uploaded as the run's release artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          [[ "$GITHUB_REF" == refs/heads/main ]] || refuse "Run the Release workflow from main"
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
             || { echo "::error::version must be X.Y.Z, got '$VERSION'"; exit 1; }
           # Only "no release yet" means there is no latest; any other failure stops the run.
@@ -92,21 +115,28 @@ jobs:
             [[ "$latest" == "$VERSION" ]] || { echo "::error::$VERSION must be the published latest release (latest is $latest)"; exit 1; }
           else
             if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" >/dev/null 2>tag.err; then
-              echo "::error::Tag $VERSION already exists; releases are immutable, use the next patch version"; exit 1
+              refuse "Tag $VERSION already exists; releases are immutable, use the next patch version"
+            else
+              # Only a 404 means the tag is free; any other failure stops the run.
+              grep -q 'HTTP 404' tag.err || { cat tag.err >&2; echo "::error::Could not check whether tag $VERSION exists"; exit 1; }
             fi
-            # Only a 404 means the tag is free; any other failure stops the run.
-            grep -q 'HTTP 404' tag.err || { cat tag.err >&2; echo "::error::Could not check whether tag $VERSION exists"; exit 1; }
             # A draft has no tag yet, so look for one by name too.
             drafts="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" -q ".[] | select(.tag_name == \"$VERSION\") | .id")"
-            [[ -z "$drafts" ]] || { echo "::error::A release (or draft) for $VERSION already exists; delete the draft or use the next patch version"; exit 1; }
-            [[ "$VERSION" != 0.* ]] || { echo "::error::Releases start at 1.0.0; 0.x is retired"; exit 1; }
+            [[ -z "$drafts" ]] || refuse "A release (or draft) for $VERSION already exists; delete the draft or use the next patch version"
+            [[ "$VERSION" != 0.* ]] || refuse "Releases start at 1.0.0; 0.x is retired"
             # Publishing marks the release latest, so it must not move latest backwards.
             if [[ -n "$latest" && "$(printf '%s\n%s\n' "$latest" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]]; then
-              echo "::error::$VERSION is older than the latest release $latest"; exit 1
+              refuse "$VERSION is older than the latest release $latest"
             fi
           fi
-          # The previous 1.x release is the upgrade-test baseline.
-          if [[ "$latest" =~ ^[1-9][0-9]*\. ]]; then echo "previous=$latest" >> "$GITHUB_OUTPUT"; fi
+          # The previous 1.x release is the upgrade-test baseline. It must be
+          # older than VERSION, which only a dry run can get wrong.
+          if [[ "$latest" =~ ^[1-9][0-9]*\. && "$latest" != "$VERSION" \
+              && "$(printf '%s\n%s\n' "$latest" "$VERSION" | sort -V | tail -n1)" == "$VERSION" ]]; then
+            echo "previous=$latest" >> "$GITHUB_OUTPUT"
+          elif [[ "$DRY_RUN" == true && "$latest" =~ ^[1-9][0-9]*\. ]]; then
+            echo "::notice title=Dry run::No older 1.x release to upgrade from; install-gate skips the upgrade-previous lanes"
+          fi
 
   build:
     name: Build assets
@@ -132,8 +162,12 @@ jobs:
           python-version: "3.13"
       - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
+      # The tag stays in this job's checkout. A dry run may rebuild a version
+      # that is already tagged, so it moves the local copy to this commit.
       - name: Tag the build commit locally
-        run: git tag "$VERSION"
+        run: |
+          if [[ "$DRY_RUN" == true ]]; then git tag -d "$VERSION" >/dev/null 2>&1 || true; fi
+          git tag "$VERSION"
 
       - name: Build the OpenClaw plugin into the gateway embed tree
         run: |
@@ -145,11 +179,13 @@ jobs:
           git restore --worktree -- .
           test -z "$(git status --porcelain)"
 
+      # .goreleaser.yaml disables its release and has no publishers; a dry run
+      # also skips the publish stage outright.
       - name: Build gateway archives and SBOMs
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
         with:
           version: "v2.15.4"
-          args: release --clean
+          args: release --clean${{ inputs.dry_run && ' --skip=publish' || '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -174,10 +210,11 @@ jobs:
       # Optional: GPG detached signatures for the Linux enterprise packages
       # (signed trust in packaging/mdm/linux). Without the secret the
       # packages rely on the cosign-signed checksums.txt (hash-pinned trust).
+      # A dry run never reads the secret.
       - name: Sign the enterprise Linux packages (optional)
         env:
-          ENTERPRISE_GPG_PRIVATE_KEY: ${{ secrets.ENTERPRISE_GPG_PRIVATE_KEY }}
-          ENTERPRISE_GPG_PASSPHRASE: ${{ secrets.ENTERPRISE_GPG_PASSPHRASE }}
+          ENTERPRISE_GPG_PRIVATE_KEY: ${{ !inputs.dry_run && secrets.ENTERPRISE_GPG_PRIVATE_KEY || '' }}
+          ENTERPRISE_GPG_PASSPHRASE: ${{ !inputs.dry_run && secrets.ENTERPRISE_GPG_PASSPHRASE || '' }}
         run: |
           set -euo pipefail
           if [[ -z "${ENTERPRISE_GPG_PRIVATE_KEY:-}" ]]; then
@@ -210,7 +247,10 @@ jobs:
     needs: validate
     runs-on: macos-15
     timeout-minutes: 60
-    environment: release
+    # A dry run runs outside the release environment and blanks every secret,
+    # so it never signs, notarizes or uploads to Apple. (An empty name means no
+    # environment; `dry_run && '' || 'release'` would always pick 'release'.)
+    environment: ${{ !inputs.dry_run && 'release' || '' }}
     outputs:
       verification: ${{ steps.app.outputs.verification_status }}
     steps:
@@ -222,12 +262,12 @@ jobs:
       - name: Build, sign, notarize and package
         id: app
         env:
-          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
-          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
-          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ !inputs.dry_run && secrets.MACOS_DEVELOPER_ID_P12_BASE64 || '' }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ !inputs.dry_run && secrets.MACOS_DEVELOPER_ID_P12_PASSWORD || '' }}
+          MACOS_SIGNING_IDENTITY: ${{ !inputs.dry_run && secrets.MACOS_SIGNING_IDENTITY || '' }}
+          MACOS_NOTARY_KEY_BASE64: ${{ !inputs.dry_run && secrets.MACOS_NOTARY_KEY_BASE64 || '' }}
+          MACOS_NOTARY_KEY_ID: ${{ !inputs.dry_run && secrets.MACOS_NOTARY_KEY_ID || '' }}
+          MACOS_NOTARY_ISSUER_ID: ${{ !inputs.dry_run && secrets.MACOS_NOTARY_ISSUER_ID || '' }}
           MACOS_REQUIRE_NOTARIZATION: "false"
         run: |
           set -euo pipefail
@@ -249,8 +289,8 @@ jobs:
           scripts/verify-macos-app-release.sh "$VERSION" macos-out "$VERIFICATION_STATUS"
           if [[ "$VERIFICATION_STATUS" != notarized ]]; then
             # install.sh puts this app on users' Macs, so an ad-hoc signed one
-            # ships only when asked for.
-            if [[ "$ALLOW_UNNOTARIZED" != true ]]; then
+            # ships only when asked for. A dry run ships nothing.
+            if [[ "$ALLOW_UNNOTARIZED" != true && "$DRY_RUN" != true ]]; then
               echo "::error title=Unnotarized macOS app::The Apple signing secrets are missing, so the app is only ad-hoc signed. Set them in the release environment, or re-run with allow_unnotarized_macos_app: true."
               exit 1
             fi
@@ -274,7 +314,8 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: release
+    # A dry run has no environment and no certificate, so it never signs.
+    environment: ${{ !inputs.dry_run && 'release' || '' }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -284,8 +325,8 @@ jobs:
           go-version-file: go.mod
       - name: Build, and Authenticode-sign when a certificate is configured
         env:
-          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
-          WINDOWS_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ !inputs.dry_run && secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 || '' }}
+          WINDOWS_AUTHENTICODE_PFX_PASSWORD: ${{ !inputs.dry_run && secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD || '' }}
         run: |
           set -euo pipefail
           args=(--version "$VERSION" --out-dir enterprise-windows)
@@ -312,14 +353,20 @@ jobs:
           retention-days: 7
 
   # Standalone managed-enterprise pkg for MDMs. Developer ID signing and
-  # notarization run only when the Apple secrets are configured.
+  # notarization run only when the Apple installer secrets are configured;
+  # without them the pkg ships unsigned, pinned by its SHA-256 in the
+  # cosign-signed checksums.txt, and the release notes say so.
   enterprise-macos:
     name: Build the standalone macOS enterprise package
     if: inputs.operation == 'release'
     needs: validate
     runs-on: macos-15
     timeout-minutes: 45
-    environment: release
+    # A dry run has no environment and no Apple secrets, so it never signs,
+    # notarizes or uploads to Apple.
+    environment: ${{ !inputs.dry_run && 'release' || '' }}
+    outputs:
+      pkg_signed: ${{ steps.pkg.outputs.signed }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -328,17 +375,28 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build, sign and notarize when Apple credentials are configured
+        id: pkg
         env:
-          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
-          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          MACOS_INSTALLER_P12_BASE64: ${{ secrets.MACOS_INSTALLER_P12_BASE64 }}
-          MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
-          MACOS_INSTALLER_SIGNING_IDENTITY: ${{ secrets.MACOS_INSTALLER_SIGNING_IDENTITY }}
-          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
-          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-        run: packaging/mdm/signing/build-macos-release.sh "$VERSION" enterprise-macos
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ !inputs.dry_run && secrets.MACOS_DEVELOPER_ID_P12_BASE64 || '' }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ !inputs.dry_run && secrets.MACOS_DEVELOPER_ID_P12_PASSWORD || '' }}
+          MACOS_SIGNING_IDENTITY: ${{ !inputs.dry_run && secrets.MACOS_SIGNING_IDENTITY || '' }}
+          MACOS_INSTALLER_P12_BASE64: ${{ !inputs.dry_run && secrets.MACOS_INSTALLER_P12_BASE64 || '' }}
+          MACOS_INSTALLER_P12_PASSWORD: ${{ !inputs.dry_run && secrets.MACOS_INSTALLER_P12_PASSWORD || '' }}
+          MACOS_INSTALLER_SIGNING_IDENTITY: ${{ !inputs.dry_run && secrets.MACOS_INSTALLER_SIGNING_IDENTITY || '' }}
+          MACOS_NOTARY_KEY_BASE64: ${{ !inputs.dry_run && secrets.MACOS_NOTARY_KEY_BASE64 || '' }}
+          MACOS_NOTARY_KEY_ID: ${{ !inputs.dry_run && secrets.MACOS_NOTARY_KEY_ID || '' }}
+          MACOS_NOTARY_ISSUER_ID: ${{ !inputs.dry_run && secrets.MACOS_NOTARY_ISSUER_ID || '' }}
+        run: |
+          set -euo pipefail
+          packaging/mdm/signing/build-macos-release.sh "$VERSION" enterprise-macos
+          pkg="defenseclaw-enterprise-$VERSION-darwin-arm64.pkg"
+          if pkgutil --check-signature "enterprise-macos/$pkg" 2>/dev/null \
+              | grep -q 'signed by a developer certificate issued by Apple for distribution'; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "$pkg is unsigned. Deployments verify it by its SHA-256 in the cosign-signed checksums.txt." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: enterprise-macos
@@ -346,8 +404,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Signing writes to the public Sigstore log, so a dry run skips this job.
   sign:
     name: Checksum and sign
+    if: ${{ !inputs.dry_run }}
     needs: [build, macos-app, enterprise-windows, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -365,6 +425,7 @@ jobs:
       - name: Write and sign checksums.txt
         run: |
           set -euo pipefail
+          [[ "$DRY_RUN" != true ]] || { echo "::error::A dry run never signs"; exit 1; }
           cd release
           find . -maxdepth 1 -type f ! -name '.*' | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
           grep -Eq '  install\.sh$' checksums.txt && grep -Eq '  install\.ps1$' checksums.txt \
@@ -382,9 +443,57 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The dry run's stand-in for sign: the same checksums.txt, unsigned, and the
+  # same "release" artifact, which is where a dry run's assets end up.
+  dry-run-assets:
+    name: Checksum the dry-run assets (unsigned)
+    if: inputs.dry_run
+    needs: [build, macos-app, enterprise-windows, enterprise-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release
+          merge-multiple: true
+      - name: Write checksums.txt (not signed)
+        env:
+          APP_VERIFICATION: ${{ needs.macos-app.outputs.verification }}
+          PKG_SIGNED: ${{ needs.enterprise-macos.outputs.pkg_signed }}
+        run: |
+          set -euo pipefail
+          cd release
+          find . -maxdepth 1 -type f ! -name '.*' | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
+          grep -Eq '  install\.sh$' checksums.txt && grep -Eq '  install\.ps1$' checksums.txt \
+            && grep -Eq '  defenseclaw-upgrade\.sh$' checksums.txt
+          {
+            echo "## dry run: nothing published"
+            echo
+            echo "Nothing was signed, released, tagged or pushed. The assets and an unsigned checksums.txt are this run's \`release\` artifact."
+            echo "macOS app: ${APP_VERIFICATION:-unknown}. macOS enterprise pkg signed: ${PKG_SIGNED:-unknown}."
+            echo
+            echo '```'
+            cat checksums.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+          retention-days: 3
+
   install-gate:
     name: Install and upgrade (${{ matrix.os }})
-    needs: [validate, sign]
+    needs: [validate, sign, dry-run-assets]
+    # Either sign or dry-run-assets runs, never both. A dry run's assets have
+    # no signature bundle, so the installers take their checksum-only path for
+    # --local assets ("relying on checksums") and the fresh lane skips its
+    # signature check.
+    if: >-
+      ${{ !cancelled() && needs.validate.result == 'success' &&
+      ((!inputs.dry_run && needs.sign.result == 'success') ||
+      (inputs.dry_run && needs.dry-run-assets.result == 'success')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -403,6 +512,10 @@ jobs:
         with:
           name: release
           path: release
+      - name: Note the checksum-only verification
+        if: inputs.dry_run
+        shell: bash
+        run: echo "::notice title=Dry run::These assets are unsigned; the installers verify them against checksums.txt only."
       - name: Fetch the previous release
         if: env.PREVIOUS != ''
         shell: bash
@@ -438,13 +551,19 @@ jobs:
 
   publish:
     name: Publish
-    needs: [sign, install-gate]
+    # Explicit results: dry-run-assets is always skipped here, and a skipped
+    # job anywhere upstream would make the implicit success() false.
+    if: >-
+      ${{ !inputs.dry_run && !cancelled() && needs.sign.result == 'success' &&
+      needs.install-gate.result == 'success' && needs.enterprise-macos.result == 'success' }}
+    needs: [sign, install-gate, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      PKG_SIGNED: ${{ needs.enterprise-macos.outputs.pkg_signed }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -453,8 +572,17 @@ jobs:
       - name: Create the release
         run: |
           set -euo pipefail
+          [[ "$DRY_RUN" != true ]] || { echo "::error::A dry run never publishes"; exit 1; }
+          # Notes given with --generate-notes go above the generated ones.
+          notes=()
+          if [[ "$PKG_SIGNED" != true ]]; then
+            pkg="defenseclaw-enterprise-$VERSION-darwin-arm64.pkg"
+            printf '%s\n\n' "**macOS enterprise package:** \`$pkg\` is unsigned (not Developer ID-signed or notarized). Verify the cosign signature on \`checksums.txt\`, then the pkg against its SHA-256 in \`checksums.txt\`." > notes.md
+            echo "$pkg ships unsigned; the release notes say to verify it through the cosign-signed checksums.txt." >> "$GITHUB_STEP_SUMMARY"
+            notes=(--notes-file notes.md)
+          fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$VERSION" --generate-notes --draft release/*
+            --title "$VERSION" --generate-notes ${notes[@]+"${notes[@]}"} --draft release/*
           if [[ "${{ inputs.draft }}" != true ]]; then
             gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
             echo "Published $VERSION as the latest release"
@@ -468,7 +596,8 @@ jobs:
   # Uses the 0.8.10 publisher unchanged, so no 0.x code lives on main.
   legacy-channel:
     name: Point 0.8.x upgrades at ${{ inputs.version }}
-    if: inputs.operation == 'legacy-channel'
+    # validate refuses a legacy-channel dry run; this is the second guard.
+    if: inputs.operation == 'legacy-channel' && !inputs.dry_run
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -505,6 +634,7 @@ jobs:
       - name: Sign and advance the stable channel
         run: |
           set -euo pipefail
+          [[ "$DRY_RUN" != true ]] || { echo "::error::A dry run never pushes the release channel"; exit 1; }
           commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" -q .sha)"
           RELEASE_TAG="$VERSION" RELEASE_COMMIT="$commit" RELEASE_CHECKSUMS="$GITHUB_WORKSPACE/target/checksums.txt" \
             bash legacy/scripts/publish-release-channel.sh

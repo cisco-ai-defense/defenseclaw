@@ -394,7 +394,19 @@ def status(app: AppContext, as_json: bool) -> None:
             "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
         )
     else:
-        _status_row("Sidecar", ux._style("not running", fg="yellow"))
+        try:
+            from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
+
+            holder = _foreign_gateway_port_holder(cfg)
+        except Exception:  # noqa: BLE001 - status stays best effort
+            holder = ""
+        if holder:
+            _status_row(
+                "Sidecar",
+                ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
+            )
+        else:
+            _status_row("Sidecar", ux._style("not running", fg="yellow"))
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
         _print_agents(cfg)
@@ -402,7 +414,9 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
         hint(
-            "Start sidecar:  defenseclaw-gateway start",
+            "Free the port:  stop that process, or set gateway.api_port to a free port"
+            if holder
+            else "Start sidecar:  defenseclaw-gateway start",
             "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
         )
 

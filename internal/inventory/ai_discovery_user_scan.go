@@ -124,6 +124,79 @@ type UserScanRecord struct {
 	Report    AIDiscoveryReport `json:"report"`
 }
 
+// UserScanPassName is the guardian's pass record in the spool, next to the
+// <uid>.json records.
+const UserScanPassName = "pass.json"
+
+// maxUserScanPassExtension bounds how long a pass record keeps the users'
+// records current, so a guardian that stopped mid-pass cannot keep them
+// forever.
+const maxUserScanPassExtension = 24 * time.Hour
+
+// UserScanPass is the guardian's record of its scan passes: when the current
+// (or last) pass started, whether it is still running, and how long the last
+// complete pass took. A pass over many homes can take longer than a record's
+// lifetime; the gateway keeps each record current for that much longer, so a
+// user's items do not show as gone and then new again while the pass is on
+// its way back to them.
+type UserScanPass struct {
+	Version         int       `json:"version"`
+	StartedAt       time.Time `json:"started_at"`
+	Running         bool      `json:"running"`
+	LastPassSeconds int64     `json:"last_pass_seconds"`
+}
+
+// extension is how much longer than the usual lifetime a record stays
+// current: the last complete pass's duration, or the running pass's age if
+// that is longer.
+func (p UserScanPass) extension(now time.Time) time.Duration {
+	ext := time.Duration(p.LastPassSeconds) * time.Second
+	if p.Running {
+		if age := now.Sub(p.StartedAt); age > ext {
+			ext = age
+		}
+	}
+	switch {
+	case ext < 0:
+		return 0
+	case ext > maxUserScanPassExtension:
+		return maxUserScanPassExtension
+	}
+	return ext
+}
+
+// ReadUserScanPass reads the guardian's pass record; a missing record is the
+// zero pass.
+func ReadUserScanPass(path string) (UserScanPass, error) {
+	var pass UserScanPass
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return pass, nil
+	}
+	if err != nil {
+		return pass, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return pass, errors.New("not a regular record within the size limit")
+	}
+	if err := userScanFileTrustCheck(path); err != nil {
+		return pass, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return pass, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&pass); err != nil {
+		return UserScanPass{}, fmt.Errorf("parse pass record: %w", err)
+	}
+	if pass.Version != UserScanRecordVersion || pass.LastPassSeconds < 0 {
+		return UserScanPass{}, errors.New("unsupported pass record")
+	}
+	return pass, nil
+}
+
 // ScanUserHome runs one full scan of home, as the account that owns it, with
 // no state store, history or telemetry. It keeps only evidence inside home
 // and the account's own processes; machine-wide surfaces (system binaries,
@@ -338,8 +411,9 @@ var userScanFileTrustCheck = func(path string) error {
 }
 
 // detectUserScans reads the spool. A record older than three scan intervals
-// is skipped, so the signals of a user the guardian no longer scans age out
-// as gone.
+// (at least 15 minutes), plus the time the guardian's passes take, is
+// skipped, so the signals of a user the guardian no longer scans age out as
+// gone while a slow pass keeps the others current.
 func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal, int, map[string]string) {
 	entries, err := os.ReadDir(s.opts.UserScanDir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -355,6 +429,11 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 	var out []AISignal
 	files := 0
 	errs := map[string]string{}
+	if pass, err := ReadUserScanPass(filepath.Join(s.opts.UserScanDir, UserScanPassName)); err != nil {
+		errs["user_scan:pass"] = err.Error()
+	} else {
+		ttl += pass.extension(now)
+	}
 	for _, entry := range entries {
 		uid, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || uid == "" || strings.Trim(uid, "0123456789") != "" {

@@ -209,11 +209,8 @@ func TestPartiallyPublishedMachinePolicyIsReportedAndSettles(t *testing.T) {
 func TestVerifyReportsMissingMachinePolicy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
-	ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
 	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true})
-	if err := os.WriteFile(ledger, data, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	h.publishLedger(data)
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 	if err := os.Remove(h.env.P(claudeDropIn)); err != nil {
 		t.Fatal(err)

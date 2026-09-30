@@ -373,6 +373,50 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
 
+    def test_quickstart_observe_downgrade_still_registers_every_connector(self):
+        # A connector left in observe is a warning: every selected connector is
+        # still configured and quickstart (and `make all`) exits zero.
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        def setting(name, warning=None):
+            row = {
+                "connector": name,
+                "profile": "action",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            }
+            if warning:
+                row["mode_warning"] = warning
+            return row
+
+        settings = [
+            setting("codex"),
+            setting("claudecode"),
+            setting("devin", {"connector": "devin", "reason": "version not verified", "next_command": ""}),
+        ]
+        with (
+            patch.object(cmd_init, "_build_noninteractive_connector_settings", return_value=settings),
+            patch.object(
+                cmd_init,
+                "_activate_additional_connectors",
+                return_value=(["codex", "claudecode", "devin"], None),
+            ) as activate,
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "codex, mode=action"),
+            ),
+        ):
+            result = self._invoke(
+                ["--non-interactive", "--yes", "--skip-install", "--no-start-gateway", "--no-verify"]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        activate.assert_called_once()
+        self.assertIn("requested action, configured observe: version not verified", result.output)
+        self.assertIn("hooks for claudecode, devin are installed when the gateway starts", result.output)
+
     def test_sidecar_step_names_how_the_start_was_declined(self):
         # Manual test R2-41: the Sidecar step names the answer given, not a
         # flag the operator never typed, and the Next list points at
@@ -1147,7 +1191,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
-        self.assertEqual(summary["status"], "needs_attention")
+        self.assertEqual(summary["status"], "partial")
         self.assertEqual(summary["connector"], "hermes")
         self.assertEqual(summary["profile"], "observe")
         warning = summary["connector_mode_warnings"][0]
@@ -1160,7 +1204,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
             f"defenseclaw setup trusted-paths add {os.path.realpath('/tmp/fake')}",
         )
         setup = {step["name"]: step for step in summary["setup"]}
-        self.assertEqual(setup["Hermes mode"]["status"], "fail")
+        self.assertEqual(setup["Hermes mode"]["status"], "warn")
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -3552,6 +3596,21 @@ class TestMultiConnectorInit(unittest.TestCase):
         with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]):
             self.assertEqual(cmd_init._prompt_action_connectors(["codex"]), [])
 
+    def test_rerun_preselects_connectors_already_in_action_mode(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]) as prompt:
+            cmd_init._prompt_action_connectors(["codex", "opencode"], ["opencode"])
+        self.assertEqual(prompt.call_args.kwargs["default_selected"], ["opencode"])
+
+        guardrail = MagicMock()
+        guardrail.effective_mode.side_effect = lambda c: "action" if c == "opencode" else "observe"
+        with (
+            patch("defenseclaw.config.config_path_for_data_dir", return_value=__file__),
+            patch("defenseclaw.config.load", return_value=SimpleNamespace(guardrail=guardrail)),
+        ):
+            self.assertEqual(cmd_init._current_action_connectors(["codex", "opencode"], "/x"), ["opencode"])
+
     def test_single_connector_selection_prompts_trust_without_picker(self):
         from defenseclaw.commands import cmd_init
         from defenseclaw.inventory import agent_discovery as ad
@@ -3952,7 +4011,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
 
         summary = json.loads(result.output)
-        self.assertEqual(summary["status"], "needs_attention")
+        self.assertEqual(summary["status"], "partial")
         warning = summary["connector_mode_warnings"][0]
         self.assertEqual(warning["connector"], "codex")
         self.assertEqual(warning["requested_mode"], "action")
@@ -3962,7 +4021,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.assertTrue(
             any(
                 step["name"] == "Codex mode"
-                and step["status"] == "fail"
+                and step["status"] == "warn"
                 and "requested action, configured observe" in step["detail"]
                 for step in summary["setup"]
             ),
@@ -4015,7 +4074,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
 
         summary = json.loads(result.output)
-        self.assertEqual(summary["status"], "needs_attention")
+        self.assertEqual(summary["status"], "partial")
         self.assertIn("hermes", summary["connectors"])
         warning = summary["connector_mode_warnings"][0]
         self.assertEqual(warning["connector"], "hermes")

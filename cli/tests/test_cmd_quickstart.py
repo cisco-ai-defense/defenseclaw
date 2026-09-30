@@ -253,9 +253,10 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 "--skip-gateway",
                 "--json-summary",
             ])
-        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        # Staying in observe is a warning, not a failed quickstart.
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
-        self.assertEqual(summary["status"], "needs_attention")
+        self.assertEqual(summary["status"], "partial")
         self.assertEqual(summary["connector"], "hermes")
         self.assertEqual(summary["profile"], "observe")
         warning = summary["connector_mode_warnings"][0]

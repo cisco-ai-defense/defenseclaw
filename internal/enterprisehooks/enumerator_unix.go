@@ -1027,16 +1027,16 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 		// (validateHookContract), while it refuses a change to another
 		// version below the floor as drift, so following one would stop
 		// every repair of the user's hooks.
-		admitted, reason := standaloneNotGatedVersionAdmitted(connector.ResolveHookContract(connectorName, to))
+		admitted, reason := standaloneNotGatedVersionAdmitted(resolveHookContract(connectorName, to))
 		if admitted {
 			return ""
 		}
 		return reason
 	}
-	if connector.ResolveHookContract(connectorName, to).Status == connector.HookCompatibilityKnown {
+	if resolveHookContract(connectorName, to).Status == connector.HookCompatibilityKnown {
 		return ""
 	}
-	if connector.ResolveHookContract(connectorName, from).Status != connector.HookCompatibilityKnown {
+	if resolveHookContract(connectorName, from).Status != connector.HookCompatibilityKnown {
 		return "" // nothing verified to keep
 	}
 	return fmt.Sprintf("version %s is not verified against a known hook contract", strings.TrimSpace(to))

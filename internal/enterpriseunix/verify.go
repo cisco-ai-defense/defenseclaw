@@ -380,27 +380,37 @@ func sameUnitFile(env *Env, got, want string) bool {
 	return err == nil && os.SameFile(gotInfo, wantInfo)
 }
 
-// ledgerProblem checks the guardian authorization ledger freshness.
+// ledgerProblem checks that the guardian authorization ledger is fresh and
+// that the guardian's root-only credential attestation belongs to it. The
+// ledger carries earlier successes forward so a target stays eligible for
+// repair; only the attestation says what the last reconcile did, so an old
+// success in the ledger alone is never current readiness. A reconcile writes
+// the ledger before the attestation, so a read between the two is retried.
 func (l *lifecycle) ledgerProblem() string {
 	env := l.env
 	path := env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
-	data, err := readBounded(path, 4<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return "the hook guardian has not published its authorization ledger yet"
+	for attempt := 1; ; attempt++ {
+		data, err := readBounded(path, 4<<20)
+		if errors.Is(err, os.ErrNotExist) {
+			return "the hook guardian has not published its authorization ledger yet"
+		}
+		if err != nil {
+			return "guardian ledger: " + err.Error()
+		}
+		var ledger struct {
+			UpdatedAt string `json:"updated_at"`
+		}
+		if json.Unmarshal(data, &ledger) == nil && ledger.UpdatedAt != "" {
+			if err := managed.ValidateHookGuardianFreshness(ledger.UpdatedAt, env.Now()); err != nil {
+				return "guardian ledger: " + err.Error()
+			}
+		}
+		problem, torn := env.attestationProblem(data)
+		if !torn || attempt == 5 {
+			return problem
+		}
+		time.Sleep(env.PollInterval)
 	}
-	if err != nil {
-		return "guardian ledger: " + err.Error()
-	}
-	var ledger struct {
-		UpdatedAt string `json:"updated_at"`
-	}
-	if err := json.Unmarshal(data, &ledger); err != nil || ledger.UpdatedAt == "" {
-		return ""
-	}
-	if err := managed.ValidateHookGuardianFreshness(ledger.UpdatedAt, env.Now()); err != nil {
-		return "guardian ledger: " + err.Error()
-	}
-	return ""
 }
 
 // describe fills the result's services, readiness and enrollment.

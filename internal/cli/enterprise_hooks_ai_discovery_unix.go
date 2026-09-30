@@ -109,7 +109,7 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		fmt.Fprintf(stderr, "[hook-guardian] ai discovery spool: %v\n", err)
 		return
 	}
-	enrolled := map[string]bool{}
+	enrolled := map[string]bool{inventory.UserScanPassName: true}
 	accounts := []enterpriseHookWorkerAccount{}
 	resolver := enterprisehooks.StandaloneResolver()
 	for _, row := range rows {
@@ -151,6 +151,20 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		fmt.Fprintf(stderr, "[hook-guardian] ai discovery signatures: %v\n", err)
 		return
 	}
+	// The pass record tells the gateway a pass is on its way, and how long
+	// the last one took, so records do not expire during a slow pass.
+	started := time.Now()
+	pass, _ := inventory.ReadUserScanPass(filepath.Join(dir, inventory.UserScanPassName))
+	pass = inventory.UserScanPass{Version: inventory.UserScanRecordVersion, StartedAt: started.UTC(), Running: true, LastPassSeconds: pass.LastPassSeconds}
+	if err := writeEnterpriseHookAIDiscoveryPass(dir, pass); err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] ai discovery pass record: %v\n", err)
+	}
+	defer func() {
+		pass.Running, pass.LastPassSeconds = false, int64(time.Since(started).Round(time.Second)/time.Second)
+		if err := writeEnterpriseHookAIDiscoveryPass(dir, pass); err != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] ai discovery pass record: %v\n", err)
+		}
+	}()
 	options := inventory.UserScanOptionsFromConfig(cfg)
 	jobs := make([]enterpriseHookWorkerJob, 0, len(accounts))
 	for _, account := range accounts {
@@ -191,12 +205,24 @@ func writeEnterpriseHookAIDiscoveryRecord(dir string, account enterpriseHookWork
 	if err != nil {
 		return err
 	}
+	return writeEnterpriseHookAIDiscoverySpoolFile(dir, strconv.Itoa(account.UID)+".json", data)
+}
+
+func writeEnterpriseHookAIDiscoveryPass(dir string, pass inventory.UserScanPass) error {
+	data, err := json.Marshal(pass)
+	if err != nil {
+		return err
+	}
+	return writeEnterpriseHookAIDiscoverySpoolFile(dir, inventory.UserScanPassName, data)
+}
+
+func writeEnterpriseHookAIDiscoverySpoolFile(dir, name string, data []byte) error {
 	tmp, err := os.CreateTemp(dir, ".scan-*")
 	if err != nil {
 		return err
 	}
-	name := tmp.Name()
-	defer os.Remove(name)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
 	_, err = tmp.Write(data)
 	if err == nil {
 		err = tmp.Chmod(0o640)
@@ -208,10 +234,10 @@ func writeEnterpriseHookAIDiscoveryRecord(dir string, account enterpriseHookWork
 		err = closeErr
 	}
 	if err == nil {
-		err = enterpriseHookAuthorizationOwnershipSetter(name)
+		err = enterpriseHookAuthorizationOwnershipSetter(tmpName)
 	}
 	if err == nil {
-		err = os.Rename(name, filepath.Join(dir, strconv.Itoa(account.UID)+".json"))
+		err = os.Rename(tmpName, filepath.Join(dir, name))
 	}
 	return err
 }

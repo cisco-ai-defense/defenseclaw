@@ -3421,6 +3421,23 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertTrue(gateway_ready)
         self.app.logger.log_action.assert_called_once()
 
+    def test_add_detected_restart_verifies_whole_roster_but_requires_added(self):
+        # The gateway republishes the whole roster, so the existing codex
+        # entry must be an expected peer, not an unexpected lock entry.
+        self._seed_map("codex")
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._restart_services",
+        ) as restart, patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex", "cursor"],
+        ):
+            res = _invoke(["--add-detected", "--yes", "--restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        restart.assert_called_once()
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["codex", "cursor"])
+        self.assertEqual(restart.call_args.kwargs["connector"], "cursor")
+
     def test_add_detected_is_a_noop_when_every_detected_connector_is_active(self):
         self._seed_map("codex")
         gc = self.app.cfg.guardrail

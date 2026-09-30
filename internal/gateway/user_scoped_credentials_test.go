@@ -396,6 +396,13 @@ func TestUserScopedCredentialsFollowAKeyRotation(t *testing.T) {
 	check("staged", true, true, userScopedTestKey, stagedKey)
 	pendingErr = errors.New("untrusted owner")
 	check("untrusted staged key", true, false, userScopedTestKey)
-	committed, pending, pendingErr = stagedKey, "", nil
+	// A rollback retires the staged key: it still authenticates until the
+	// guardian has moved every user back.
+	retiring := stagedKey
+	api.userScopedCredentials.loadRetiringKey = func(string) (string, error) { return retiring, nil }
+	pending, pendingErr = "", nil
+	check("retiring", true, true, userScopedTestKey, stagedKey)
+	retiring = ""
+	committed = stagedKey
 	check("committed", false, true, stagedKey)
 }

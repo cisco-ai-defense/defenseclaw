@@ -442,6 +442,13 @@ vendor machine policy the transaction had already published can still point
 at the stopped gateway. `status` shows the state; `verify` refuses until the
 transaction is recovered. The failed result names the command to run next.
 
+The rollback of a failed first install also puts back each signed-in
+account's agent configuration and removes the machine policy the install
+published. It can act only as accounts that are signed in, and only when it
+runs as LocalSystem; no guardian is left to clean a signed-out account later.
+The result lists each item it could not remove as a `rollback_leftover`
+warning, by account and connector, with the command that removes it.
+
 Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
 **System**, or another MDM's system context). `/ensure` recovers the pending
 transaction and then installs or upgrades; `/uninstall` recovers it and
