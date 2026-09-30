@@ -51,6 +51,14 @@ certificate and notary key (add `MACOS_INSTALLER_P12_BASE64` and
 in its own PKCS#12); the app's five secrets alone leave the pkg unsigned. See
 `packaging/mdm/signing/README.md` for the trust channels.
 
+The macOS pkg ships unsigned for now: the `release` environment does not
+carry the Developer ID Installer secrets, and their absence does not fail the
+run. The pkg is protected by its SHA-256 in the cosign-signed
+`checksums.txt`. When a release's pkg is unsigned, the `enterprise-macos` job
+summary says so, and the release notes open with a line telling deployments
+to verify the pkg through `checksums.txt`. Adding the installer secrets later
+turns signing back on with no workflow change.
+
 To try a release on real machines before users see it, run the workflow with
 `draft: true` and download the draft's assets (`gh release download X.Y.Z`).
 Use disposable test machines or VMs, not anyone's working install: an
@@ -81,6 +89,42 @@ and publish:
 
 ```bash
 gh release edit X.Y.Z --draft=false --latest
+```
+
+## Dry run
+
+A dry run exercises the whole workflow, including the enterprise Windows and
+macOS jobs, without publishing anything. Use it after changing the workflow
+or the packaging scripts. It runs from any branch, and the version may already
+be released or be older than the latest release:
+
+```bash
+gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref <branch> -f version=X.Y.Z -f dry_run=true
+```
+
+With `dry_run: true`:
+
+- `validate` still runs its read-only checks, but notes a non-`main` ref, an
+  existing tag, release or draft, a 0.x version or an older version instead of
+  failing. It refuses `operation: legacy-channel`.
+- `build`, `macos-app`, `enterprise-windows` and `enterprise-macos` run outside
+  the `release` environment with every secret blanked. The app is ad-hoc
+  signed, and the Setup, pkg and Linux packages are unsigned. Nothing is
+  Authenticode-signed, GPG-signed or sent to Apple for notarization.
+- `sign` is skipped, because it writes to the public Sigstore log.
+  `dry-run-assets` writes an unsigned `checksums.txt` instead.
+- `install-gate` runs the full install and upgrade lifecycle on the unsigned
+  assets. With no `checksums.txt.bundle`, the installers verify `--local`
+  assets against `checksums.txt` only. The upgrade-from-previous lanes run
+  only when the latest release is older than the dry-run version.
+- `publish` and `legacy-channel` never run. Their release and push steps also
+  stop on their own in a dry run.
+
+The assets and `checksums.txt` are the run's `release` artifact, kept for 3
+days, and the run summary starts with "dry run: nothing published":
+
+```bash
+gh run download <run-id> --repo cisco-ai-defense/defenseclaw -n release -D dry-run-assets
 ```
 
 ## When a release is broken
