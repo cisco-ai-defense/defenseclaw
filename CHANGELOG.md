@@ -86,6 +86,19 @@ rest also reach per-user installs.
   and verify now re-read those records for up to two seconds until they
   describe one pass, and verify waits up to 30 seconds for the guardian to
   activate a `targets.yaml` the enumerator has just republished.
+- **A rolled-back first Windows install takes back DefenseClaw's agent
+  registrations and machine policy.** On the enterprise standalone profile,
+  the rollback of a failed first install removed each account's
+  `~\.defenseclaw`, with the backups of the agent files the install had
+  changed, but left DefenseClaw's entries in them (the Amp plugin, the
+  Antigravity `hooks.json`, the Hermes `config.yaml` and
+  `shell-hooks-allowlist.json`) and left the Copilot and OpenCode machine
+  policy, the Claude Code version floor, the hook runtime folder and the
+  vendor lock files. The rollback now puts each agent file back to the bytes
+  the install found, as the account, or removes it when the install created
+  it, before it removes the folder, and then removes that machine policy. A
+  file changed after the install wrote it stays as it is, and so do the
+  files of an account that is not signed in.
 - **A rolled-back first Windows install leaves no event log or empty
   folder.** Its failure event registered the DefenseClaw event log and
   `C:\Program Files\Cisco` stayed empty; the event now goes to the
