@@ -454,8 +454,11 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			OK bool `json:"ok"`
 			// Ready is OK with sandboxes turned on (sandboxesOff).
 			Ready bool `json:"ready"`
+			// OpenShellInstall is when setup offers the OpenShell install
+			// (DoctorReport.OpenShellInstallNeeded), which the TUI presets.
+			OpenShellInstall bool `json:"openshell_install"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off, rep})
+		}{rep.OK(), rep.OK() && !off, rep.OpenShellInstallNeeded(), rep})
 	}
 	a.printDoctor(rep)
 	if !rep.OK() {

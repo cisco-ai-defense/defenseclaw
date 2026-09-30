@@ -213,11 +213,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			"which runs NVIDIA's installer and sets up the service")
 		return &Silent{Err: fmt.Errorf("on Linux OpenShell must come with the %s user service NVIDIA's installer sets up", openshell.GatewayService)}
 	}
-	// A failed Gateway check with a supported CLI is not the install's:
-	// DefenseClaw's install step would find that CLI and install nothing,
-	// and the doctor's fix, printed below, is the way on (a gateway of
-	// another release than the CLI is restarted through its service).
-	if cli := rep.Get(openshell.CheckIDCLI); cli == nil || cli.Status == openshell.StatusFail || failed(rep, openshell.CheckIDGatewayService) {
+	// The install is offered only where DefenseClaw's install step would
+	// run NVIDIA's installer: no CLI, or one it upgrades
+	// (DoctorReport.OpenShellInstallNeeded). Over a supported CLI it
+	// installs nothing, so a failed Gateway or Gateway service check is
+	// the doctor's fix's, which the loop below prints (a stopped service
+	// is started, a gateway of another release than the CLI is restarted
+	// through its service).
+	if rep.OpenShellInstallNeeded() {
 		install := o.InstallOpenShell
 		if !install && !o.NonInteractive {
 			// On macOS the installer installs a Homebrew formula, without sudo.
@@ -256,7 +259,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		rep = a.runDoctor(ctx)
 	}
-	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion} {
+	// A stopped service leaves the gateway not answering, whose fix (start
+	// it) comes first; with the gateway answering, the service's own fix.
+	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
+		openshell.CheckIDGatewayService} {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {

@@ -570,6 +570,95 @@ func TestSetupOnAGatewayOfAnotherRelease(t *testing.T) {
 	}
 }
 
+// TestSetupOffersTheInstallOnlyForTheCLI: with the supported OpenShell
+// 0.1.1 CLI and its openshell-gateway unit (or Homebrew service) installed
+// but stopped, setup asked "Install OpenShell 0.1.1 with NVIDIA's
+// installer?", whose yes installed nothing ("✓ OpenShell 0.1.1 is already
+// installed") before it showed the doctor's fix, and -n said "OpenShell
+// 0.1.1 is needed" without it. A CLI newer than supported got the same
+// question, whose yes failed (the install step does not downgrade). Setup
+// offers the install only where it runs NVIDIA's installer, for a CLI
+// missing or one it upgrades; with any other CLI it stops on the doctor's
+// fix.
+func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
+	const start = "systemctl --user enable --now openshell-gateway"
+	stopped := func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayService)
+		c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is inactive"
+		c.Fix = &openshell.Fix{Summary: "start the gateway and enable it at login", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
+		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService, Installed: true}
+	}
+	for _, tc := range []struct {
+		name  string
+		edit  func(*openshell.DoctorReport)
+		check string
+		stop  string
+		fix   string
+	}{
+		{"service stopped", func(r *openshell.DoctorReport) {
+			stopped(r)
+			c := r.Get(openshell.CheckIDGatewayVersion)
+			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
+			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
+		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway " + start + "\n"},
+		// Something else answers: the service's own fix.
+		{"service stopped, a gateway answers", stopped, "Gateway service",
+			"✗ Gateway service: openshell-gateway is inactive\n", "→ start the gateway and enable it at login " + start + "\n"},
+		{"CLI newer than supported", func(r *openshell.DoctorReport) {
+			r.CLIVersion = "0.2.0"
+			c := r.Get(openshell.CheckIDCLI)
+			c.Status, c.Detail = openshell.StatusFail, "OpenShell 0.2.0 is not supported; DefenseClaw drives >=0.1.1 <0.2.0"
+			c.Fix = &openshell.Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, then install OpenShell 0.1.1",
+				Command: "defenseclaw sandbox setup --install-openshell"}
+		}, "OpenShell CLI", "✗ OpenShell CLI: OpenShell 0.2.0 is not supported", "→ DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0"},
+	} {
+		for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
+			t.Run(fmt.Sprintf("%s %+v", tc.name, o), func(t *testing.T) {
+				ta := setupApp(t, "", "", false)
+				ta.HostDoctor = hostReport(tc.edit)
+				inst := &fakeInstaller{}
+				ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+					inst.consent = consent
+					return inst
+				}
+				wantErr(t, ta.Setup(bg, o), "is not usable yet ("+tc.check+"); see `defenseclaw sandbox doctor`")
+				has(t, ta.output(), tc.stop, tc.fix)
+				lacks(t, ta.output(), "Install OpenShell", "already installed", "is needed")
+				if inst.ran || len(ta.gateway.planned) != 0 {
+					t.Fatalf("installer ran %v, gateway plans %+v", inst.ran, ta.gateway.planned)
+				}
+			})
+		}
+	}
+
+	// A CLI the install upgrades is offered it.
+	older := func(r *openshell.DoctorReport) {
+		r.CLIVersion = "0.0.40"
+		c := r.Get(openshell.CheckIDCLI)
+		c.Status, c.Detail = openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1; upgrade it in place to 0.1.1"
+	}
+	ta := setupApp(t, "n\n", "", false)
+	ta.HostDoctor = hostReport(older)
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
+	has(t, ta.output(), "✗ OpenShell 0.0.40 unsupported", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+
+	// The TUI presets its "Install OpenShell" from `sandbox doctor --json`.
+	for _, tc := range []struct {
+		edit func(*openshell.DoctorReport)
+		want bool
+	}{{nil, false}, {stopped, false}, {older, true}} {
+		ta := newTestApp(t, "")
+		ta.HostDoctor = hostReport(tc.edit)
+		ta.ok(t, ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+		var rep struct {
+			OpenShellInstall *bool `json:"openshell_install"`
+		}
+		if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OpenShellInstall == nil || *rep.OpenShellInstall != tc.want {
+			t.Fatalf("doctor json openshell_install = %v, %v; want %v", rep.OpenShellInstall, err, tc.want)
+		}
+	}
+}
+
 func TestSetupStopsOnHostFailure(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	before, _ := os.ReadFile(ta.ConfigPath)

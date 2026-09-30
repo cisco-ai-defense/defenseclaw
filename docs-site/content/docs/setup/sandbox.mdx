@@ -1367,6 +1367,18 @@ way on: stop its gateway if one runs and remove that OpenShell, then run
 with NVIDIA's installer and sets the unit up. Setup refuses such an
 OpenShell, on Linux as on a Mac (see [Troubleshooting](#troubleshooting)):
 it changes the gateway's settings and restarts it through the unit.
+Setup offers the install only where it runs NVIDIA's installer: with no
+OpenShell CLI, or one older than 0.1.1, which it upgrades. It does not
+downgrade a CLI newer than DefenseClaw drives, whose **OpenShell CLI** fix
+is to remove it first. With OpenShell installed, a failing **Gateway**,
+**Gateway service**, registration or mTLS check is not the install's:
+setup prints that check's fix and stops
+(``the OpenShell gateway is not usable yet (Gateway service)``, pointing
+at `defenseclaw sandbox doctor`), with `--install-openshell` too; a
+stopped service's fix is to start it. The TUI shows that fix as the hint
+of **Install OpenShell** and leaves it off, as it does for a failing
+**MicroVM driver** check, whose fix setup makes with the install's consent
+(step 2).
 Nor is the install the fix of a gateway that answers with another release
 than a supported CLI (``the gateway that answers runs OpenShell 0.0.40, not
 the OpenShell 0.1.1 installed here``): that gateway is not the one the
@@ -1375,7 +1387,7 @@ CLI's install runs, so the **Gateway** check restarts the gateway service
 service), which `--fix` does where that service runs the gateway, and
 says so when the restarted gateway is still of another release. With the
 service stopped, something else runs that gateway: stop it, then start
-the service. Setup then stops on that fix instead of offering the install.
+the service.
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway

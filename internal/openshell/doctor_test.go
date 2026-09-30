@@ -337,6 +337,17 @@ type checkWant struct {
 }
 
 // fixWant describes the fix of a case's first check.
+// installNeeded checks DoctorReport.OpenShellInstallNeeded: setup offers
+// the install only where its install step runs NVIDIA's installer.
+func installNeeded(want bool) func(*testing.T, *doctorFixture, *openshell.DoctorReport) {
+	return func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
+		t.Helper()
+		if got := r.OpenShellInstallNeeded(); got != want {
+			t.Fatalf("OpenShellInstallNeeded = %v, want %v\n%s", got, want, r)
+		}
+	}
+}
+
 type fixWant struct {
 	command string // the exact command, when set
 	text    string // in the summary or the command, when set
@@ -518,10 +529,16 @@ func TestDoctorChecks(t *testing.T) {
 			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		}, want: []checkWant{{"gateway-service", fail, "nvidia/openshell/openshell is not installed"}}, fix: &fixWant{command: install}},
 
-		{name: "cli missing", setup: func(f *doctorFixture) { f.found["openshell"] = false }, want: []checkWant{{"openshell-cli", fail, "not on PATH"}}},
-		{name: "cli 0.0.x", setup: cliVersion("openshell 0.0.16\n"), want: []checkWant{{"openshell-cli", fail, "predates 0.0.37"}}},
+		{name: "cli missing", setup: func(f *doctorFixture) { f.found["openshell"] = false }, want: []checkWant{{"openshell-cli", fail, "not on PATH"}},
+			then: installNeeded(true)},
+		{name: "cli 0.0.x", setup: cliVersion("openshell 0.0.16\n"), want: []checkWant{{"openshell-cli", fail, "predates 0.0.37"}}, then: installNeeded(true)},
 		{name: "cli 0.0.x that upgrades in place", setup: cliVersion("openshell 0.0.40\n"),
-			want: []checkWant{{"openshell-cli", fail, "upgrade it in place"}}, fix: &fixWant{command: install}},
+			want: []checkWant{{"openshell-cli", fail, "upgrade it in place"}}, fix: &fixWant{command: install}, then: installNeeded(true)},
+		{name: "cli without a release", setup: cliVersion("openshell dev\n"), want: []checkWant{{"openshell-cli", fail, "--version"}}, then: installNeeded(true)},
+		// The install step refuses a newer CLI: it does not downgrade.
+		{name: "cli newer than supported", setup: cliVersion("openshell 0.2.0\n"), want: []checkWant{{"openshell-cli", fail, "not supported"}},
+			fix:  &fixWant{command: install, manual: true, text: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, then install OpenShell 0.1.1"},
+			then: installNeeded(false)},
 		{name: "cli and gateway differ", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.1.2") },
 			want: []checkWant{{"gateway-version", warn, "gateway 0.1.2 but CLI 0.1.1"}}},
 		{name: "gateway outside the window", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.2.0") },
@@ -540,8 +557,10 @@ func TestDoctorChecks(t *testing.T) {
 					t.Fatalf("fix did not restart and verify the gateway (verified %d): %v", f.verified, f.runner.Calls())
 				}
 			}},
+		// The supported CLI's install would install nothing.
 		{name: "gateway stopped", setup: func(f *doctorFixture) { unit("inactive", "enabled")(f); f.fake.SetHealth(false, "0.1.1") },
-			want: []checkWant{{"gateway-version", fail, "unhealthy"}}, fix: &fixWant{command: start, auto: true}},
+			want: []checkWant{{"gateway-version", fail, "unhealthy"}, {"gateway-service", fail, "inactive"}}, fix: &fixWant{command: start, auto: true},
+			then: installNeeded(false)},
 		// No gateway service to start: the fix is the install, which the
 		// doctor does not run (it offered `systemctl --user enable --now`,
 		// or on a Mac `brew services start` of a formula that is not

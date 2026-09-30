@@ -191,6 +191,29 @@ func (r *DoctorReport) OpenShellOutsideUnit() bool {
 	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "systemd" && !r.Service.Installed
 }
 
+// OpenShellInstallNeeded reports whether DefenseClaw's install step
+// (Installer.Install) would run NVIDIA's installer on this host: no
+// OpenShell CLI, one whose release it cannot read, or one older than
+// SupportedMin, which it upgrades. Over a supported CLI it installs
+// nothing, and one newer than supported it refuses, so there every other
+// failing check (the gateway, its service, the MicroVM driver) is its
+// fix's, not the install's. Setup offers the install only then, and the
+// TUI presets it only then (`sandbox doctor --json` reports it as
+// openshell_install).
+func (r *DoctorReport) OpenShellInstallNeeded() bool {
+	cli := r.Get(CheckIDCLI)
+	switch {
+	case cli == nil:
+		return true
+	case cli.Status != StatusFail:
+		return false
+	case r.CLIVersion == "":
+		return true
+	}
+	v, err := ParseVersion(r.CLIVersion)
+	return err != nil || v.Compare(mustParse(SupportedBelow)) < 0
+}
+
 // Get returns the check with id, or nil.
 func (r *DoctorReport) Get(id string) *Check {
 	for i := range r.Checks {
@@ -1111,6 +1134,11 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 	r.cli, r.report.CLIVersion = v, v.String()
 	if err := CheckSupported(v); err != nil {
 		c.Status, c.Detail, c.Fix = StatusFail, err.Error(), install
+		if v.Compare(mustParse(SupportedBelow)) >= 0 {
+			// Installer.Install refuses a newer CLI: it does not downgrade.
+			c.Fix = &Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell " + v.String() +
+				", then install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+		}
 		return
 	}
 	c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s", v, path)
