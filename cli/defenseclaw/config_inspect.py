@@ -32,7 +32,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.gateway import resolve_trusted_gateway_binary
 
 CONFIG_V8_WIRE_VERSION: Final = 2
 CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 15
@@ -158,7 +159,10 @@ def _helper_argv(
     gateway_binary: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> list[str]:
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw") from exc
     if not binary:
         raise ConfigInspectError(
             "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"

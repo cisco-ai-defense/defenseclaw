@@ -599,6 +599,33 @@ def resolve_gateway_binary() -> str | None:
     return None
 
 
+def resolve_trusted_gateway_binary() -> str | None:
+    """Return :func:`resolve_gateway_binary` for helpers whose answer is trusted.
+
+    The canonical config and rule-pack helpers run the gateway binary and act
+    on what it prints, and Doctor runs them on every check. On Linux and
+    macOS a binary found on ``PATH`` or in ``~/.local/bin`` must pass the
+    custody check the gateway lifecycle uses: held only by root or this
+    account, with no group- or world-writable file or parent directory. A
+    path another account could replace was run as it was. An explicit
+    ``DEFENSECLAW_GATEWAY_BIN`` (a ``.env`` cannot set it) and the verified
+    Windows package sibling are used as they are.
+
+    Raises :class:`defenseclaw.file_permissions.UnsafePathError` for a binary
+    that fails the check.
+    """
+
+    binary = resolve_gateway_binary()
+    if not binary or os.name == "nt" or os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip():
+        return binary
+    from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path
+
+    try:
+        return trusted_posix_executable_path(binary)
+    except UnsafePathError as exc:
+        raise UnsafePathError(f"refusing to run {binary}: {exc}", code=exc.code) from exc
+
+
 def packaged_windows_gateway_path() -> str | None:
     """Return the gateway sibling for a corroborated native Windows runtime.
 

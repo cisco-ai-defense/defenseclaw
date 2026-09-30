@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -14,6 +15,26 @@ from defenseclaw import config_inspect
 
 def _completed(*, stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable custody")
+def test_helper_refuses_a_path_gateway_another_account_can_replace(tmp_path, monkeypatch) -> None:
+    """Doctor ran a PATH-resolved stub in a world-writable folder for its config checks (#643)."""
+    from defenseclaw.gateway import GATEWAY_BIN_NAME
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    marker = tmp_path / "stub-ran"
+    stub = shared / GATEWAY_BIN_NAME
+    stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    stub.chmod(0o755)
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(shared))
+
+    with pytest.raises(config_inspect.ConfigInspectError, match="refusing to run"):
+        config_inspect.inspect_v8_config("validate", config_path=str(tmp_path / "config.yaml"))
+    assert not marker.exists()
 
 
 def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
@@ -29,7 +50,7 @@ def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
         "effective": {"buckets": [], "destinations": []},
     }
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
         patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=json.dumps(payload))) as run,
     ):
         result = config_inspect.inspect_v8_config(
@@ -70,7 +91,7 @@ def test_explicit_target_gateway_bypasses_installed_binary_resolution() -> None:
         "valid": True,
     }
     with (
-        patch.object(config_inspect, "resolve_gateway_binary") as resolve,
+        patch.object(config_inspect, "resolve_trusted_gateway_binary") as resolve,
         patch.object(
             config_inspect.subprocess,
             "run",
@@ -92,7 +113,7 @@ def test_explicit_target_gateway_bypasses_installed_binary_resolution() -> None:
 def test_bridge_rejects_protocol_drift_and_never_echoes_helper_stdout() -> None:
     hidden = "DO-NOT-ECHO-SECRET"
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=hidden)),
         pytest.raises(config_inspect.ConfigInspectError) as caught,
     ):
@@ -105,7 +126,7 @@ def test_bridge_rejects_protocol_drift_and_never_echoes_helper_stdout() -> None:
         "config_version": 8,
     }
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=json.dumps(incompatible))),
         pytest.raises(config_inspect.ConfigInspectError, match="protocol is incompatible"),
     ):
@@ -122,7 +143,7 @@ def test_validation_refusal_preserves_exact_safe_field_and_reason() -> None:
         "reason": "[config_schema_invalid] configuration violates the enum constraint; expected one of [grpc,http/protobuf]",
     }
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(
             config_inspect.subprocess,
             "run",
@@ -148,7 +169,7 @@ def test_validation_refusal_rejects_multiline_structured_diagnostic() -> None:
         "reason": "unsafe\nsecond line",
     }
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(
             config_inspect.subprocess,
             "run",
@@ -164,13 +185,13 @@ def test_validation_refusal_rejects_multiline_structured_diagnostic() -> None:
 
 def test_bridge_missing_binary_and_timeout_are_actionable() -> None:
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value=None),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value=None),
         pytest.raises(config_inspect.ConfigInspectError, match="defenseclaw upgrade"),
     ):
         config_inspect.inspect_v8_config("validate", config_path="config.yaml")
 
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(
             config_inspect.subprocess,
             "run",
@@ -195,7 +216,7 @@ def test_validation_environment_overrides_are_process_only_and_value_safe() -> N
     }
     secret = "must-never-enter-argv"
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.dict(config_inspect.os.environ, {"PRESERVED": "ambient"}, clear=True),
         patch.object(
             config_inspect.subprocess,
@@ -231,7 +252,7 @@ def test_validation_environment_drops_execution_control_from_ambient_and_overrid
         "valid": True,
     }
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="/safe/gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/safe/gateway"),
         patch.dict(
             config_inspect.os.environ,
             {
@@ -277,7 +298,7 @@ def test_invalid_validation_environment_never_starts_helper_or_echoes_value(
     overrides: dict[str, str],
 ) -> None:
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(config_inspect.subprocess, "run") as run,
         pytest.raises(config_inspect.ConfigInspectError) as caught,
     ):
@@ -293,7 +314,7 @@ def test_invalid_validation_environment_never_starts_helper_or_echoes_value(
 def test_reference_and_schema_use_embedded_go_artifacts() -> None:
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": {"observability": {}}}
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=json.dumps(schema))) as run,
     ):
         rendered = config_inspect.config_v8_schema()
@@ -301,7 +322,7 @@ def test_reference_and_schema_use_embedded_go_artifacts() -> None:
     assert run.call_args.args[0] == ["gateway", "config-v8", "schema"]
 
     with (
-        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout="# reference\n")) as run,
     ):
         assert config_inspect.config_v8_reference("yaml") == "# reference\n"

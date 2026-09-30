@@ -179,7 +179,10 @@ through Doctor's open handle to it, Windows keeps it locked against changes,
 renames and replacement until the command finishes, and macOS stops the launch
 if the file or a directory above it changed after the check. The command then
 starts the long-running gateway from that same path, which on Linux and macOS
-relies on the custody above.
+relies on the custody above. On Linux and macOS the config and rule-pack
+checks that Doctor and other commands run through `defenseclaw-gateway` need
+the same custody for a binary found on `PATH` or in `~/.local/bin`, and refuse
+one that fails it; `DEFENSECLAW_GATEWAY_BIN` is used as set.
 
 When `.env` was readable by another local principal, Doctor does not simply
 tighten permissions around the exposed value. It crosses a verified

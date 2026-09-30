@@ -71,6 +71,16 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Config and rule-pack checks no longer run a gateway binary another
+  account can replace.** Doctor, `config validate` and the observability
+  and redaction commands run `defenseclaw-gateway config-v8` and
+  `rulepack validate` to check the config and rule packs. On Linux and
+  macOS a `defenseclaw-gateway` found on `PATH` or in `~/.local/bin` now
+  needs the custody the gateway lifecycle already required (held by root or
+  this account, no group- or world-writable file or parent folder); before,
+  a binary in a folder any account could write was run five times per
+  `doctor --fix`. `DEFENSECLAW_GATEWAY_BIN` is used as it is. The doctor
+  repair names such a binary instead of reporting `binary not found`.
 - **Doctor's own audit record no longer goes to another account's
   listener.** Doctor's checks refused to send the gateway token to a process
   that is not the verified gateway, but the action record it writes at the

@@ -10908,6 +10908,27 @@ def _gateway_lifecycle_selection(
     )
 
 
+def _untrusted_gateway_on_path(search_path: str) -> str:
+    """Name a defenseclaw-gateway on the search path that failed the custody check.
+
+    The lifecycle refuses such a binary, and the repair used to report it as
+    "binary not found".
+    """
+    if os.name == "nt":
+        return ""
+    from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path
+    from defenseclaw.gateway import GATEWAY_BIN_NAME
+
+    found = shutil.which(GATEWAY_BIN_NAME, path=search_path)
+    if not found or not os.path.isabs(found):
+        return ""
+    try:
+        trusted_posix_executable_path(found)
+    except UnsafePathError as exc:
+        return f"refusing to run {found}: {exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
+    return ""
+
+
 def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str]:
     """Run setup's ownership-aware gateway lifecycle in the selected home.
 
@@ -10939,7 +10960,7 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
     if selection.executable is None:
         if selection.requires_running_process:
             return False, "verified running gateway executable is unavailable"
-        return False, "binary not found"
+        return False, _untrusted_gateway_on_path(child_env.get("PATH", os.defpath)) or "binary not found"
     from defenseclaw.commands.cmd_setup import _trusted_gateway_lifecycle_executable
 
     revalidated_executable = _trusted_gateway_lifecycle_executable(
