@@ -113,6 +113,15 @@ rest also reach per-user installs.
   as an error, and only the process and model file scans named themselves,
   so every scan ended `partial scan: `. That scan now skips those folders as
   the model file scan does, and every failing scan is named.
+- **A Kiro hook on Windows that exits at once still blocks.** The Windows
+  Kiro command started the hook with `Start-Process -Wait`, which opens its
+  handle to the hook only after the hook is running; a hook that had already
+  exited came back as exit 1 ("the process has exited") instead of the block
+  code 2, and Kiro went ahead. The command now starts the hook with .NET
+  `Process.Start`, which keeps that handle. In Constrained Language mode,
+  which does not allow those calls, it still uses `Start-Process -Wait`. Run
+  `defenseclaw setup kiro` again to replace the older command. Other
+  connectors are unchanged.
 - **Kiro's hook file goes when its version key is gone.** Teardown still
   left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
   file had lost its `version` key (as `uninstall --purge` on macOS found in
