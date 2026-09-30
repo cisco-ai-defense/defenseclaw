@@ -57,6 +57,9 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") {
 		return kiroShellActionArgs(toolName, args)
 	}
+	if strings.EqualFold(strings.TrimSpace(connectorName), "amp") {
+		return ampShellActionArgs(toolName, args)
+	}
 	if !strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") ||
 		!strings.EqualFold(strings.TrimSpace(toolName), "run_command") {
 		return args
@@ -134,6 +137,42 @@ func kiroShellActionArgs(toolName string, args json.RawMessage) json.RawMessage 
 	}
 	if !dropped {
 		return args
+	}
+	out, err := json.Marshal(projected)
+	if err != nil {
+		return args
+	}
+	return out
+}
+
+// ampShellActionArgs gives Amp's Bash tool arguments, {"cmd": ..., "cwd": ...},
+// the "command" key of the shell schema ActionFacts reads. Under "cmd"
+// ActionFacts found no command at all, so every Amp command stayed on the
+// fallback lane: a rule whose match needs command facts, such as a CRITICAL
+// match with a runtime-expanded redirect target ("> ~/out.txt"), was only
+// detected while Claude Code and Codex blocked it. Any other shape, including
+// an unknown key or a "command" key beside "cmd", is returned unchanged.
+func ampShellActionArgs(toolName string, args json.RawMessage) json.RawMessage {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "bash") {
+		return args
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(args, &object); err != nil || object == nil || !jsonObjectKeysUnique(args) {
+		return args
+	}
+	if _, ok := object["cmd"]; !ok {
+		return args
+	}
+	projected := make(map[string]json.RawMessage, len(object))
+	for key, raw := range object {
+		switch key {
+		case "cmd":
+			projected["command"] = raw
+		case "cwd":
+			projected[key] = raw
+		default:
+			return args
+		}
 	}
 	out, err := json.Marshal(projected)
 	if err != nil {

@@ -122,6 +122,12 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Amp shell commands get the same rule checks as Claude Code and Codex.**
+  Amp's Bash tool sends its command as `cmd`, which the command analysis did
+  not read, so every Amp command was judged only by the text-pattern
+  fallback. A command that blocks in Claude Code or Codex could then run in
+  Amp with a detection-only finding, for example one that writes its output
+  to `~/out.txt`. Amp commands are now analyzed like the other agents'.
 - **AI discovery on macOS skips the folders macOS protects.** Without Full
   Disk Access, every model file scan counted each folder macOS privacy
   protection keeps it out of (for example other apps' containers under
