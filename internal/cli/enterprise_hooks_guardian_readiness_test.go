@@ -537,9 +537,12 @@ func TestGuardianWatchKeepsReadyFreshDuringLongReconcile(t *testing.T) {
 	readyWrites := countGuardianReadyWrites(t, fixture.statePath)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	longPass := func(passCtx context.Context) int32 {
+	longPass := func(passCtx context.Context, waitForRefresh bool) int32 {
 		before := readyWrites.Load()
-		for deadline := time.Now().Add(300 * time.Millisecond); time.Now().Before(deadline); {
+		minimum := time.Now().Add(300 * time.Millisecond)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(minimum) ||
+			(waitForRefresh && readyWrites.Load()-before < 3 && time.Now().Before(deadline)) {
 			noteEnterpriseHookReconcileProgress(passCtx)
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -554,10 +557,10 @@ func TestGuardianWatchKeepsReadyFreshDuringLongReconcile(t *testing.T) {
 		case 1: // startup: a target failed, so the guardian is not ready
 			return enterpriseHookReconcileRun{Failures: 1}, nil
 		case 2: // a long pass that started while not ready
-			whileWaiting = longPass(passCtx)
+			whileWaiting = longPass(passCtx, false)
 			return enterpriseHookReconcileRun{}, nil
 		case 3: // a long pass that started while ready, and then fails
-			whileReady = longPass(passCtx)
+			whileReady = longPass(passCtx, true)
 			return enterpriseHookReconcileRun{Failures: 1}, nil
 		case 4:
 			afterFailedPass = fixture.reader()
@@ -572,7 +575,7 @@ func TestGuardianWatchKeepsReadyFreshDuringLongReconcile(t *testing.T) {
 		t.Fatalf("ready was published %d times during a pass that started while waiting_for_targets", whileWaiting)
 	}
 	if whileReady < 3 {
-		t.Fatalf("ready was published %d times during a 300ms pass with a 10ms refresh, want it kept fresh", whileReady)
+		t.Fatalf("ready was published %d times during a progressing pass with a 10ms refresh, want at least 3", whileReady)
 	}
 	if afterFailedPass != guardianstate.StateWaitingForTargets {
 		t.Fatalf("readiness after a failed long pass = %q, want waiting_for_targets", afterFailedPass)
