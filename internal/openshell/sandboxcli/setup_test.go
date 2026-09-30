@@ -402,9 +402,10 @@ func TestSetupInstallQuestionSaysHowItInstalls(t *testing.T) {
 // TestSetupNamesTheHomebrewGatewayItNeeds: on a Mac with OpenShell
 // installed from the release binaries (gateway healthy and registered),
 // setup showed "✓ OpenShell 0.1.1", asked to install it again, and on "n"
-// said "OpenShell 0.1.1 is needed" (manual test M9). The installer would
-// find that CLI and change nothing; what is missing is the Homebrew
-// formula whose service DefenseClaw restarts the gateway through.
+// said "OpenShell 0.1.1 is needed" (manual test M9). DefenseClaw's install
+// step would find that CLI and not run NVIDIA's installer; what is missing
+// is the Homebrew formula whose service DefenseClaw restarts the gateway
+// through.
 func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
 	notBrew := hostReport(func(r *openshell.DoctorReport) {
 		c := r.Get(openshell.CheckIDGatewayService)
@@ -425,14 +426,17 @@ func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
 	// as the TUI's machine check does (RT-A-1: it showed "✓ OpenShell
 	// 0.1.1"). The refusal said "The OpenShell 0.1.1 found here", not
 	// where, and told a user who had just run `setup --install-openshell`
-	// to run it: it names the path and what to do before that command.
+	// to run it: it names the path and what to do before that command. It
+	// said "NVIDIA's installer would find it and install nothing", but that
+	// installer installs the formula whatever else is on PATH: what skips
+	// it is DefenseClaw's install step, which finds the supported CLI.
 	has(t, ta.output(), "  ✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula\n",
 		"✗ Gateway service: the nvidia/openshell/openshell Homebrew formula is not installed\n",
 		"→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. "+
 			"The OpenShell 0.1.1 at /Users/dev/openshell-direct/prefix/bin/openshell was installed another way, so DefenseClaw cannot restart its gateway, "+
-			"and NVIDIA's installer would find it and install nothing. First stop that gateway and remove that OpenShell; "+
+			"and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. First stop that gateway and remove that OpenShell; "+
 			"then run `defenseclaw sandbox setup --install-openshell`, which installs the formula\n")
-	lacks(t, ta.output(), "Install OpenShell", "is needed", "✓ OpenShell", "found here")
+	lacks(t, ta.output(), "Install OpenShell", "is needed", "✓ OpenShell", "found here", "NVIDIA's installer would find it")
 	if inst.ran {
 		t.Fatal("the installer ran")
 	}

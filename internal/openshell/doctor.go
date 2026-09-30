@@ -165,8 +165,9 @@ func (r *DoctorReport) OK() bool {
 
 // OpenShellOutsideFormula reports a Mac whose OpenShell CLI was installed
 // another way than the Homebrew formula DefenseClaw runs the gateway
-// through: setup refuses it (the installer would find the CLI and install
-// nothing), and OpenShellOutsideFormulaFix is the way on.
+// through: setup refuses it (DefenseClaw's install step would find the CLI
+// and not run NVIDIA's installer), and OpenShellOutsideFormulaFix is the
+// way on.
 func (r *DoctorReport) OpenShellOutsideFormula() bool {
 	cli := r.Get(CheckIDCLI)
 	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "brew" && !r.Service.Installed
