@@ -295,7 +295,9 @@ def test_expand_matches_the_gateways_rule(monkeypatch, tmp_path):
     # "~" or "~user/..." stays as written on both sides, so the gateway and
     # doctor check the same candidates.
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert openclaw_presence._expand("~/.openclaw/openclaw.json") == str(tmp_path / ".openclaw" / "openclaw.json")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # expanduser's home on Windows
+    expanded = openclaw_presence._expand("~/.openclaw/openclaw.json")
+    assert os.path.normpath(expanded) == os.path.normpath(str(tmp_path / ".openclaw" / "openclaw.json"))
     assert openclaw_presence._expand("~alice/.openclaw") == "~alice/.openclaw"
     assert openclaw_presence._expand("~") == "~"
     assert openclaw_presence._expand("/opt/openclaw") == "/opt/openclaw"
