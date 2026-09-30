@@ -580,7 +580,7 @@ On macOS, enhanced discovery respects the operating system's Transparency, Conse
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
 
-## Runtime planes: what actually ran [#runtime-planes-what-actually-ran]
+## Runtime planes: what actually ran
 
 Discovery and AIBOM show what is present. The runtime planes show what actually ran and where it sent data.
 They cover inference compute, per-process egress and agent actions.

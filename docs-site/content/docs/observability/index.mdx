@@ -411,10 +411,11 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
    or run `defenseclaw setup observability disable <name>` when disabling it is
    the intended policy change.
 
-### Runbook: destination delivery [#runbook-audit-sink]
+### Runbook: audit sink
 
-This alert keeps the historical `audit.sink` metric name. The affected target
-is a named `observability.destinations` entry.
+This runbook covers destination delivery. The alert keeps the historical
+`audit.sink` metric name; the affected target is a named
+`observability.destinations` entry.
 
 1. Identify the `sink_kind` and destination name, then inspect its delivered,
    dropped, retry, and circuit-state telemetry.
