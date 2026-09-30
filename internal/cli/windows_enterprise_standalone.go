@@ -92,7 +92,7 @@ type windowsEnterpriseInstallerReport struct {
 	RecoveryGatewayRefusal json.RawMessage `json:"recovery_gateway_refusal"`
 
 	// probeFailed marks a failure document that reports no deployment
-	// state at all (no installed or transaction_pending field): the
+	// state at all (no installed field and no pending transaction): the
 	// installer refused before it could read the host.
 	probeFailed bool
 }
@@ -337,9 +337,11 @@ func parseWindowsEnterpriseInstallerReport(body []byte) (*windowsEnterpriseInsta
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(line, &fields); err == nil {
+			// A standalone failure carries its recovery evidence, including
+			// transaction_pending: false, without reading the host, so only
+			// a pending transaction counts as deployment state here.
 			_, installed := fields["installed"]
-			_, pending := fields["transaction_pending"]
-			report.probeFailed = !report.OK && !installed && !pending
+			report.probeFailed = !report.OK && !installed && !report.TransactionPending
 		}
 		return &report, nil
 	}

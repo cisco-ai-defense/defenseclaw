@@ -823,9 +823,16 @@ func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 }
 
 func TestParseWindowsEnterpriseInstallerReportMarksStatelessFailures(t *testing.T) {
-	failure, err := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`))
-	if err != nil || !failure.probeFailed {
-		t.Fatalf("failure document %+v, %v", failure, err)
+	for _, body := range []string{
+		`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`,
+		// A refused standalone repair carries its recovery evidence, not the
+		// deployment state.
+		`{"schema_version":1,"ok":false,"action":"repair","transaction_pending":false,"error":"x","errors":["x"]}`,
+	} {
+		failure, err := parseWindowsEnterpriseInstallerReport([]byte(body))
+		if err != nil || !failure.probeFailed {
+			t.Fatalf("failure document %s: %+v, %v", body, failure, err)
+		}
 	}
 	for _, body := range []string{
 		`{"schema_version":1,"ok":false,"action":"status","installed":false,"transaction_pending":false,"errors":[]}`,
