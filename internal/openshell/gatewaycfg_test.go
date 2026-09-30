@@ -636,6 +636,46 @@ func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
 	}
 }
 
+// TestGatewayConfigTrustsTheProbeWithoutAServiceEnvironment (fu2 review
+// 3): on Linux, a private gateway started by hand with
+// OPENSHELL_SERVER_PORT=8080 and registered at :8080 was refused bind
+// mounts ("…but the openshell-gateway service listens on port 17670"): with
+// no unit, its port is in an environment DefenseClaw cannot read, and the
+// default was compared. Without a service environment the registration and
+// the client-auth probe of the gateway it reaches decide; a gateway.toml
+// that opens the gateway to others is still refused.
+func TestGatewayConfigTrustsTheProbeWithoutAServiceEnvironment(t *testing.T) {
+	setup := func(t *testing.T, toml string) *gatewayFixture {
+		f := newGatewayFixture(t)
+		f.unit = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n"
+		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "https://127.0.0.1:8080",
+			"is_remote": false, "gateway_port": 8080, "auth_mode": "mtls"}, nil)
+		f.write(t, "gateway.toml", toml)
+		return f
+	}
+	f := setup(t, operatorTOML)
+	plan := f.plan(t, bindMounts)
+	if f.probes != 1 || !plan.BindMounts {
+		t.Fatalf("plan %+v, probes %d", plan, f.probes)
+	}
+	plan.Manual = true
+	if _, err := f.cfg.Write(context.Background(), plan); err != nil || !strings.Contains(f.read(t, "gateway.toml"), "enable_bind_mounts = true") {
+		t.Fatalf("Write = %v\n%s", err, f.read(t, "gateway.toml"))
+	}
+	// Listening beyond this machine is refused, whatever the port.
+	exposed := strings.Replace(operatorTOML, "[openshell.drivers.docker]", "[openshell.gateway]\nbind_address = \"0.0.0.0:8080\"\n\n[openshell.drivers.docker]", 1)
+	f = setup(t, exposed)
+	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, openshell.ErrGatewayExposed) {
+		t.Fatalf("Plan on a gateway listening beyond loopback = %v", err)
+	}
+	// The probe still refuses a gateway that lets in a client without the certificate.
+	f = setup(t, operatorTOML)
+	f.probe = func() error { return openshell.ErrGatewayExposed }
+	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrBindMountsRefused) {
+		t.Fatalf("Plan on an exposed gateway = %v", err)
+	}
+}
+
 // TestGatewayConfigRecordsPendingRestart covers a restart that never
 // happens after the files were written: the pending mark stays until a
 // restart succeeds, on every platform.

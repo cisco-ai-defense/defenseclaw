@@ -948,6 +948,23 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 			})
 		}
 	})
+	// A private gateway run by hand on another port than the default
+	// (OPENSHELL_SERVER_PORT=8080) failed "…but the openshell-gateway
+	// service listens on port 17670": without the unit its environment is
+	// unknown, and the probe of the gateway the registration reaches
+	// decides (fu2 review 3).
+	t.Run("gateway run by hand on another port", func(t *testing.T) {
+		f, _ := release(t, "0.1.1")
+		f.addRegistration("openshell", map[string]any{"name": "openshell", "gateway_endpoint": "https://127.0.0.1:8080", "auth_mode": "mtls"})
+		f.runner.On("pgrep -u 1000 -f", "4242\n", nil)
+		f.runner.On("ps -o etime= -p 4242", "01:00:00\n", nil)
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusPass, "https://127.0.0.1:8080")
+		expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusPass, "enabled for the docker driver")
+		if f.probes == 0 {
+			t.Fatal("the gateway was not probed")
+		}
+	})
 	// NVIDIA's installer runs for a CLI it upgrades, and sets the unit up.
 	t.Run("OpenShell the install upgrades", func(t *testing.T) {
 		f, _ := release(t, "0.0.40")

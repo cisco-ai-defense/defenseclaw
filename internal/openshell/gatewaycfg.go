@@ -1131,7 +1131,8 @@ func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map
 // as it does for the gateway. It returns ErrGatewayExposed for settings
 // that let in clients without the registration's certificate or listen
 // beyond loopback, and ErrGatewayMismatch when the registration reaches
-// another port than the service listens on.
+// another port than the service listens on, which only the service's
+// environment says: with none (env nil) the ports are not compared.
 func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]string) error {
 	s := st.server
 	var issues []string
@@ -1167,6 +1168,13 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	}
 	if len(issues) > 0 {
 		return fmt.Errorf("%w: %s", ErrGatewayExposed, strings.Join(issues, "; "))
+	}
+	if env == nil {
+		// No service environment to say where the gateway listens (one
+		// run by hand takes OPENSHELL_SERVER_PORT from its own, launchd
+		// cannot be asked): the registration and the client-auth probe
+		// of the gateway it reaches decide.
+		return nil
 	}
 	if _, regPort, err := net.SplitHostPort(reg.Target()); err != nil || regPort != port {
 		return fmt.Errorf("%w: registration %s reaches %s, but the %s service listens on port %s", ErrGatewayMismatch, reg.Name, reg.Endpoint, GatewayService, port)
