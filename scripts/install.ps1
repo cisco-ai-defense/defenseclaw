@@ -781,13 +781,14 @@ function Undo-Snapshot([string]$Slot) {
 }
 
 function Protect-BinDir {
-    # The CLI runs only a gateway whose file and folder no other account can
-    # write. A ~\.local\bin that inherits the profile's Administrators entry,
-    # as one another tool's installer created does, fails that check, and the
-    # CLI then refuses the gateway installed there. Keep only this account and
-    # LocalSystem on the folder; what it holds inherits that.
+    # The CLI runs only a gateway whose file and folder no account other than
+    # this one, LocalSystem and the built-in Administrators group (matched by
+    # SID) can write. A ~\.local\bin another tool created with a looser ACL
+    # (Users or Everyone may write) fails that check, and the CLI then refuses
+    # the gateway installed there. Keep only this account and LocalSystem on
+    # such a folder; what it holds inherits that.
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $trusted = @($user.Value, "S-1-5-18", "S-1-3-4")
+    $trusted = @($user.Value, "S-1-5-18", "S-1-3-4", "S-1-5-32-544")
     # The write rights the CLI's custody check counts (GENERIC_ALL/WRITE included).
     $write = 0x500D0156
     $acl = Get-Acl -LiteralPath $BinDir
