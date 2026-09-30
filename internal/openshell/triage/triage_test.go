@@ -285,6 +285,17 @@ func TestClassifyDenyPackWithoutPortsUnderOpenProfile(t *testing.T) {
 	}
 }
 
+// A port the egress proxy does not carry is refused whatever the host: an
+// unblock of a host the balanced profile does not list would not lift it,
+// so the rejection is not unblockable (the TUI and the macOS app offered
+// "u to unblock" for git over ssh; PR 1022 final review).
+func TestARefusedPortIsNotUnblockable(t *testing.T) {
+	got := Classify(context.Background(), proposal("gitlab.example.net", 22), testPolicy(effBalanced))
+	if got.Verdict != Reject || got.Reason != ReasonPortNotAllowed || got.Unblockable {
+		t.Fatalf("Classify(gitlab.example.net:22) on balanced = %+v, want a rejection no unblock lifts", got)
+	}
+}
+
 // The worst endpoint decides a proposal, and one naming more than one
 // destination host is rejected: approving opens every endpoint of it, but
 // an ask shows the user one destination.
