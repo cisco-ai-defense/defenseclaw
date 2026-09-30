@@ -140,6 +140,21 @@ func TestStopKeepsTheDetachedRunLog(t *testing.T) {
 	if n := len(e.events("runbox", sandboxapi.ActivityLifecycle, "run_interrupted")); n != 1 {
 		t.Fatalf("%d run_interrupted events; a finished run was said to be ended", n)
 	}
+	// A later stop finds the same finished run: its log is kept as it is.
+	reads := func() int {
+		return len(slices.DeleteFunc(e.fake.ExecCalls(), func(c openshelltest.ExecCall) bool {
+			return !slices.Contains(c.Command, "defenseclaw-run-log")
+		}))
+	}
+	before := reads()
+	e.startBox("runbox", sandboxapi.StartRequest{})
+	e.stopBox("runbox")
+	if reads() != before {
+		t.Fatal("a stop read the log of a run already kept again")
+	}
+	if log, err := e.m.RunLog(t.Context(), "runbox", 0); err != nil || log.State != sandboxapi.RunExited || log.Log != "done\n" {
+		t.Fatalf("run log after another stop = %+v, %v", log, err)
+	}
 
 	dir := filepath.Join(e.dataDir, "sandboxes", "runbox", runLogDirName)
 	if !fileExists(filepath.Join(dir, runLogMetaFile)) {

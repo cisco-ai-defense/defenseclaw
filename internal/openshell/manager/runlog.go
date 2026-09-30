@@ -131,6 +131,11 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 	if run.Started > 0 {
 		meta.StartedAt = time.Unix(run.Started, 0).UTC()
 	}
+	if run.State != runRunning && m.keptAlready(name, meta) {
+		// A run that was over at an earlier stop (a session since, or a
+		// pull that started the sandbox): its log is kept as it is.
+		return
+	}
 	if run.State == runRunning {
 		m.logf("sandbox %s: the stop ends its detached run, which was still going", name)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "run_interrupted",
@@ -156,6 +161,23 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 	if err := m.saveRunLog(name, meta, log); err != nil {
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
 	}
+}
+
+// keptAlready reports whether the kept run log is of the run meta
+// describes, as it stands: the same sandbox, start and ending.
+func (m *Manager) keptAlready(name string, meta keptRun) bool {
+	if meta.StartedAt.IsZero() {
+		return false
+	}
+	data, err := safefile.ReadRegularFileBounded(filepath.Join(m.runLogDir(name), runLogMetaFile), 64<<10)
+	if err != nil {
+		return false
+	}
+	var kept keptRun
+	if json.Unmarshal(data, &kept) != nil {
+		return false
+	}
+	return kept.SandboxID == meta.SandboxID && kept.StartedAt.Equal(meta.StartedAt) && kept.State == meta.State && kept.Exit == meta.Exit
 }
 
 // saveRunLog writes a kept run log. The earlier metadata goes first and the
