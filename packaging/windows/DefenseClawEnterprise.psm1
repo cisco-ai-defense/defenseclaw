@@ -165,6 +165,10 @@ $script:DefenseClawRecoveryGatewayRefusal = $null
 # and whether this run did. Set per recovery; reset per lifecycle run.
 $script:DefenseClawRecoveryActivationDeferrable = $false
 $script:DefenseClawRecoveryActivationDeferred = $false
+# A standalone uninstall with purge also removes each enrolled account's
+# per-user DefenseClaw folder when the managed-hook teardown finalizes
+# (Invoke-DefenseClawGatewayCommand tells the helper). Set per lifecycle run.
+$script:DefenseClawUninstallPurgeUserState = $false
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -12751,6 +12755,7 @@ function Invoke-DefenseClawGatewayCommand {
         'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED',
         'DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED',
         'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
+        'DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE',
         'DEFENSECLAW_ENTERPRISE_PROFILE',
         'CODEX_HOME'
     )
@@ -12781,6 +12786,14 @@ function Invoke-DefenseClawGatewayCommand {
         [Environment]::SetEnvironmentVariable(
             'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
             $(if ([bool]$Layout.ClaudeEffectivePolicyVerified) { '1' } else { $null }),
+            'Process'
+        )
+        # Set only for a standalone uninstall with purge, whose finalize then
+        # removes the enrolled accounts' per-user folders; a caller's value
+        # never reaches a helper.
+        [Environment]::SetEnvironmentVariable(
+            'DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE',
+            $(if ([bool]$script:DefenseClawUninstallPurgeUserState) { '1' } else { $null }),
             'Process'
         )
         # Lifecycle helpers resolve the same profile the services are pinned
@@ -20225,8 +20238,9 @@ function Add-DefenseClawUserRegistrationCleanupResult {
                 -Value $lists[$name] `
                 -Force
     }
-    # The standalone finalize names each enrolled account's per-user folder,
-    # which the uninstall does not remove; a purge reports it.
+    # The standalone finalize names each enrolled account's per-user folder
+    # that stays: with purge, each one it could not remove and why. Only a
+    # purge reports it.
     $remaining = $null
     if ($null -ne $report) {
         $remaining = $report.PSObject.Properties['user_state_remaining']
@@ -23786,6 +23800,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$ProductVersion
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
+    $script:DefenseClawUninstallPurgeUserState = (
+        $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
+    )
     $entryProfileRoots = Get-DefenseClawProfileRoots
     if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
         $InstallRoot = [string]$entryProfileRoots.InstallRoot

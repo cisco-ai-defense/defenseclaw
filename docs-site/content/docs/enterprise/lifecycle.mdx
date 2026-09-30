@@ -374,6 +374,11 @@ Config, credentials, state, and logs stay unless you purge.
   who are signed out keep theirs. The result lists them in the
   `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
+- **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem,
+  also removes each enrolled account's `%USERPROFILE%\.defenseclaw`, whether
+  or not the account is signed in. The same two things stay as on Linux and
+  macOS. The `per_user_state_remaining` warning names each folder it could
+  not remove, with the reason.
 
 ```bash title="Linux: remove everything"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json

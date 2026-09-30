@@ -5871,6 +5871,30 @@
       ],
       "since": "0.8.0",
       "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE",
+      "category": "hook_internal",
+      "purpose": "Tell the standalone Windows managed-hook teardown finalize that the uninstall purges, so it also removes each enrolled account's per-user DefenseClaw folder.",
+      "default": "unset (the finalize only names each per-user folder)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/windows_managed_hooks_teardown.go",
+          "description": "Removes each enrolled account's %USERPROFILE%\\.defenseclaw as LocalSystem after a committed uninstall with purge"
+        },
+        {
+          "location": "packaging/windows/DefenseClawEnterprise.psm1",
+          "description": "Sets it for the helpers of a standalone uninstall with purge and clears it for every other helper run"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Lifecycle-owned helper switch: the lifecycle sets or clears it for every helper it runs, so a caller's inherited value never reaches the finalize."
     }
   ]
 }

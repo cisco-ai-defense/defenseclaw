@@ -213,7 +213,7 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer certificates (SHA-256 thumbprints). Applies to a signed Setup. |
 | `JSON=1` | Print the result document on standard output |
 | `NOSTART=1` | Install or update with the services stopped and disabled. A later `/repair` starts them. |
-| `PURGE=1` | With `/uninstall`, also remove the state under `C:\ProgramData\Cisco\DefenseClaw` |
+| `PURGE=1` | With `/uninstall`, also remove the state under `C:\ProgramData\Cisco\DefenseClaw` and each enrolled account's `%USERPROFILE%\.defenseclaw` |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
@@ -574,12 +574,19 @@ removal left in the user's agent configuration (the message names the file).
 To clean every user, run the uninstall as LocalSystem while they are signed
 in.
 
-`PURGE=1` removes the machine state only. Each enrolled account keeps its
-`%USERPROFILE%\.defenseclaw` folder, with inert hook scripts and that
-account's per-user hook tokens, which nothing accepts once the gateway is
-gone. A purge names each folder in its `per_user_state_remaining` warning.
-Some of its folders deny Administrators, so remove each one as LocalSystem
-once the account is signed out.
+`PURGE=1` also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
+folder, including that account's per-user hook tokens, whether or not the
+account is signed in. Some of its subfolders grant only the account and
+SYSTEM, not Administrators, so this also needs the uninstall to run as
+LocalSystem. As on Linux and macOS, two things stay: each DefenseClaw hook
+script, replaced by a stub that exits without doing anything, because an
+agent that is still running may call the hook path it loaded; and the
+account's own hooks that the foreign-hook policy moved aside
+(`foreign-hooks-backup`). The `per_user_state_remaining` warning names each
+folder the purge could not remove and why: the uninstall did not run as
+LocalSystem, a file in it could not be removed, or the account's roaming or
+container profile is not on the computer while it is signed out. Remove
+what it names as LocalSystem.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
