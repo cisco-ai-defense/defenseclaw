@@ -22,6 +22,8 @@ import {
 import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import GithubSlugger from 'github-slugger';
+import { legacyRedirects, splitTarget } from '../lib/redirects';
 
 const CONTENT_ROOT = resolve(process.cwd(), 'content/docs');
 
@@ -31,6 +33,8 @@ interface MdxFile {
   url: string;
   content: string;
   headings: string[];
+  // Lines removed with the frontmatter, to report file line numbers.
+  lineOffset: number;
 }
 
 async function listMdxFiles(dir: string): Promise<string[]> {
@@ -59,21 +63,62 @@ function slugsToUrl(slugs: string[]): string {
   return slugs.length === 0 ? '/docs/' : `/docs/${slugs.join('/')}/`;
 }
 
-// Pull h2/h3 headings from a Markdown body so the validator can
-// match `#anchor` references. Mirrors GitHub's slug rules
-// (lowercase, dashes, strip non-word chars) — close enough to
-// Fumadocs's TOC-builder for practical link checking.
+// Pull headings from a Markdown body so the validator can match
+// `#anchor` references. This mirrors Fumadocs's remark-heading
+// plugin: an explicit `## Title [#custom-id]` wins; otherwise the
+// flattened heading text goes through github-slugger, with one
+// slugger per page so duplicate headings get `-1`, `-2`, ...
+// Headings inside fenced code blocks are ignored.
+const CUSTOM_ID = /\s*\[#([^\]]+?)]\s*$/;
+
+// Approximate mdast flattening: keep the text of inline code, link
+// text and JSX children; drop markup that contributes no text.
+function flattenInline(text: string): string {
+  const parts = text.split(/(`+)([\s\S]*?)\1/);
+  let out = '';
+  // split() with two capture groups yields [plain, ticks, code, plain, ...].
+  for (let i = 0; i < parts.length; i += 3) {
+    out += stripMarkup(parts[i] ?? '');
+    if (i + 2 < parts.length) out += parts[i + 2];
+  }
+  return out;
+}
+
+function stripMarkup(text: string): string {
+  return text
+    .replace(/!\[([^\]]*)]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]*)]\([^)]*\)/g, '$1')
+    .replace(/<\/?[A-Za-z][^>]*>/g, '')
+    .replace(/(\*\*|__)(.+?)\1/g, '$2')
+    .replace(/(^|[^\w*])\*(?!\s)([^*]+?)\*(?!\w)/g, '$1$2')
+    .replace(/(^|[^\w])_(?!\s)([^_]+?)_(?![\w])/g, '$1$2')
+    .replace(/\\([\\`*_{}\[\]()#+\-.!<>|~])/g, '$1');
+}
+
 function extractHeadings(body: string): string[] {
+  const slugger = new GithubSlugger();
   const slugs: string[] = [];
+  let fence: { char: string; len: number } | null = null;
   for (const line of body.split(/\r?\n/)) {
-    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+    const f = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (f) {
+      const char = f[1][0];
+      const len = f[1].length;
+      if (!fence) fence = { char, len };
+      else if (fence.char === char && len >= fence.len && /^\s*(`+|~+)\s*$/.test(line)) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    const m = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
     if (!m) continue;
-    if (m[1].length < 2) continue; // skip h1 (page title)
-    const slug = m[2]
-      .toLowerCase()
-      .replace(/[^\w\s-]/g, '')
-      .trim()
-      .replace(/\s+/g, '-');
+    let text = m[2];
+    const custom = CUSTOM_ID.exec(text);
+    if (custom) {
+      slugs.push(custom[1]);
+      continue;
+    }
+    text = flattenInline(text);
+    const slug = slugger.slug(text);
     if (slug) slugs.push(slug);
   }
   return slugs;
@@ -108,13 +153,69 @@ async function buildPages(): Promise<MdxFile[]> {
       url: slugsToUrl(slugs),
       content,
       headings: extractHeadings(content),
+      lineOffset: raw.slice(0, raw.length - content.length).split('\n').length - 1,
     });
   }
   return out;
 }
 
+function normalizePath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  return `${trimmed}/`;
+}
+
+// Legacy redirects (lib/redirects.ts). Returns the number of errors.
+function checkRedirects(pages: MdxFile[]): number {
+  let errors = 0;
+  const byUrl = new Map(pages.map((page) => [page.url, page]));
+  for (const [key, { to }] of Object.entries(legacyRedirects)) {
+    const sourceUrl = `/docs/${key}/`;
+    if (byUrl.has(sourceUrl)) {
+      console.warn(
+        `[validate-links] warning: redirect source ${sourceUrl} is still a real page; the page wins until it is removed.`,
+      );
+    }
+    const { path, hash } = splitTarget(to);
+    const target = byUrl.get(normalizePath(path));
+    if (!target) {
+      console.error(`[validate-links] redirect ${sourceUrl} -> ${to}: target page does not exist.`);
+      errors += 1;
+    } else if (hash && !target.headings.includes(hash.slice(1))) {
+      console.error(`[validate-links] redirect ${sourceUrl} -> ${to}: anchor ${hash} does not exist on the target.`);
+      errors += 1;
+    }
+  }
+
+  // Content must link the new URL, never a redirect source.
+  const keys = Object.keys(legacyRedirects)
+    .sort((a, b) => b.length - a.length)
+    .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const linkPattern = new RegExp(`/docs/(${keys.join('|')})(?=[/#?)"'\\s>]|$)`, 'g');
+  for (const page of pages) {
+    const lines = page.content.split(/\r?\n/);
+    lines.forEach((line, index) => {
+      for (const match of line.matchAll(linkPattern)) {
+        const rel = relative(process.cwd(), page.absolutePath);
+        console.error(
+          `[validate-links] ${rel}:${index + 1 + page.lineOffset}: links redirect source /docs/${match[1]}; link ${legacyRedirects[match[1]].to} instead.`,
+        );
+        errors += 1;
+      }
+    });
+  }
+  return errors;
+}
+
 async function checkLinks() {
   const pages = await buildPages();
+  const redirectErrors = checkRedirects(pages);
+  const realUrls = new Set(pages.map((page) => page.url));
+  // Redirect sources without a real page are still served (as a
+  // redirect), so they are valid URLs; checkRedirects reports any
+  // content link that uses one.
+  const redirectEntries = Object.keys(legacyRedirects)
+    .filter((key) => !realUrls.has(`/docs/${key}/`))
+    .map((key) => ({ value: { slug: key.split('/') }, hashes: [] as string[] }));
   const scanned = await scanURLs({
     preset: 'next',
     // Pass the public catch-all route explicitly. tinyglobby returns
@@ -128,7 +229,7 @@ async function checkLinks() {
       'docs/[[...slug]]': pages.map((page) => ({
         value: { slug: page.slugs },
         hashes: page.headings,
-      })),
+      })).concat(redirectEntries),
     },
   });
 
@@ -138,8 +239,7 @@ async function checkLinks() {
     url: page.url,
   }));
 
-  printErrors(
-    await validateFiles(files, {
+  const results = await validateFiles(files, {
       scanned,
       markdown: {
         // The MDX components below accept `href` and Fumadocs's
@@ -155,9 +255,15 @@ async function checkLinks() {
       // against the page's own URL) so a stray `./neighbour` still
       // gets checked instead of being silently ignored.
       checkRelativePaths: 'as-url',
-    }),
-    true,
-  );
+  });
+  printErrors(results, false);
+  const linkErrors = results.reduce((n, r) => n + r.errors.length, 0);
+  if (linkErrors + redirectErrors > 0) {
+    console.error(
+      `[validate-links] ${linkErrors} broken link(s), ${redirectErrors} redirect error(s).`,
+    );
+    process.exit(1);
+  }
 }
 
 void checkLinks();

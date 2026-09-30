@@ -7,6 +7,8 @@ import { mdxComponents } from '@/components/mdx-components';
 import { BreadcrumbSchema, TechArticleSchema } from '@/components/structured-data';
 import { ConnectorBrand } from '@/components/connector-brand';
 import matrix from '@/data/capability-matrix.json';
+import { legacyRedirects, splitTarget } from '@/lib/redirects';
+import { LegacyRedirect } from '@/components/legacy-redirect';
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 
@@ -17,7 +19,11 @@ interface PageParams {
 export default async function Page({ params }: PageParams) {
   const slug = (await params).slug;
   const page = source.getPage(slug);
-  if (!page) notFound();
+  if (!page) {
+    const redirect = legacyRedirects[(slug ?? []).join('/')];
+    if (redirect) return <LegacyRedirect to={redirect.to} title={redirect.title} />;
+    notFound();
+  }
 
   const MDX = page.data.body;
   const url = canonicalUrl(page.url);
@@ -76,13 +82,28 @@ export default async function Page({ params }: PageParams) {
 }
 
 export async function generateStaticParams() {
-  return source.generateParams();
+  // Legacy URLs that no longer have a real page get a static redirect
+  // page. The sitemap, llms.txt and OG routes enumerate `source` pages
+  // only, so these stay out of them.
+  const redirectParams = Object.keys(legacyRedirects)
+    .filter((key) => !source.getPage(key.split('/')))
+    .map((key) => ({ slug: key.split('/') }));
+  return [...source.generateParams(), ...redirectParams];
 }
 
 export async function generateMetadata({ params }: PageParams): Promise<Metadata> {
   const slug = (await params).slug;
   const page = source.getPage(slug);
-  if (!page) return {};
+  if (!page) {
+    const redirect = legacyRedirects[(slug ?? []).join('/')];
+    if (!redirect) return {};
+    const { path } = splitTarget(redirect.to);
+    return {
+      title: `Moved: ${redirect.title}`,
+      robots: { index: false, follow: true },
+      alternates: { canonical: canonicalUrl(path) },
+    };
+  }
 
   const canonical = canonicalUrl(page.url);
   const ogPath = `/docs-og${
