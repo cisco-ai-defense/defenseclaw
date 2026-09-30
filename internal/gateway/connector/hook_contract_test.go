@@ -207,7 +207,7 @@ func TestHookContractResolution(t *testing.T) {
 		{"opencode_reviewed_pin", "opencode", "opencode 1.18.10", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.10"},
 		{"opencode_previous_pin", "opencode", "opencode 1.18.11", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.11"},
 		{"opencode_previous_pin_11819", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
-		{"opencode_current_pin", "opencode", "opencode 1.18.31", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.31"},
+		{"opencode_current_pin", "opencode", "opencode 1.18.33", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.33"},
 		{"opencode_next_minor_unknown", "opencode", "opencode 1.19.0", HookCompatibilityUnknown, "", "1.19.0"},
 		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v1", ""},
 		{"antigravity_before_documented_floor", "antigravity", "Antigravity CLI v1.1.7", HookCompatibilityUnknown, "", "1.1.7"},

@@ -2737,6 +2737,9 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
 			details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
 			connName = "managed standalone"
+		} else if connName == "openclaw" && openClawNotInstalledLocally(s.currentConfig()) {
+			details["summary"] = "OpenClaw is not installed (standalone mode)"
+			details["hint"] = "hooks and the local audit continue; after installing OpenClaw, run 'defenseclaw setup openclaw' to connect to its gateway"
 		}
 		s.health.SetGateway(StateDisabled, "", details)
 		fmt.Fprintf(os.Stderr,
@@ -5570,7 +5573,10 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	openclaw / zeptoclaw       → always dial. The WS upstream is the
 //	                             whole point of these connectors;
 //	                             skipping it would break every
-//	                             existing OpenClaw install.
+//	                             existing OpenClaw install. The one
+//	                             exception is openclaw + loopback host
+//	                             where agent discovery found no
+//	                             OpenClaw: nothing can listen there.
 //	codex / claudecode + loopback host
 //	                           → SKIP. These connectors emit telemetry
 //	                             through hooks/native telemetry +
@@ -5632,7 +5638,9 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return false
 	}
 	switch configuredConnectorName(cfg) {
-	case "openclaw", "zeptoclaw":
+	case "openclaw":
+		return !openClawNotInstalledLocally(cfg)
+	case "zeptoclaw":
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
@@ -5642,6 +5650,15 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		// connector=openclaw or wire a non-loopback host.
 		return false
 	}
+}
+
+// openClawNotInstalledLocally reports a loopback fleet address on a machine
+// where agent discovery found no OpenClaw. OpenClaw is init's default
+// connector, so without this check such an install dials 127.0.0.1:18789
+// forever and reports the gateway as reconnecting. A remote gateway.host
+// still dials, and so does an install whose discovery has not run.
+func openClawNotInstalledLocally(cfg *config.Config) bool {
+	return isLoopbackGatewayHost(cfg.Gateway.Host) && connector.CachedAgentNotFound(cfg.DataDir, "openclaw")
 }
 
 // RequiresFleetGateway reports whether the configured topology depends on the

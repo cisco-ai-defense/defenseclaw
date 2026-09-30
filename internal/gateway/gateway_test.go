@@ -627,6 +627,28 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 			t.Errorf("gatewayShouldConnectForConfiguredConnector(nil) = %v, want false", got)
 		}
 	})
+
+	// OpenClaw is init's default connector. When discovery found no
+	// OpenClaw on this machine, nothing listens on the loopback fleet port,
+	// so the gateway reports itself off instead of reconnecting forever. A
+	// remote gateway.host still dials.
+	t.Run("openclaw_not_installed", func(t *testing.T) {
+		dataDir := t.TempDir()
+		cache := `{"agents":{"openclaw":{"installed":false,"binary_path":"","version":""}}}`
+		if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), []byte(cache), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for host, want := range map[string]bool{"127.0.0.1": false, "gw.example.com": true} {
+			cfg := &config.Config{
+				DataDir:   dataDir,
+				Guardrail: config.GuardrailConfig{Connector: "openclaw"},
+				Gateway:   config.GatewayConfig{Host: host},
+			}
+			if got := gatewayShouldConnectForConfiguredConnector(cfg); got != want {
+				t.Errorf("OpenClaw not installed, gateway.host=%q: dial = %v, want %v", host, got, want)
+			}
+		}
+	})
 }
 
 // TestRunGatewayLoop_StandaloneShortCircuits is the integration-level

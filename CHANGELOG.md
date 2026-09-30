@@ -117,6 +117,21 @@ rest also reach per-user installs.
   that matched nothing once two agents existed, and the AI runtime tiles and
   discovery error rate show data. The local observability guide explains
   when to set `observability.metric_policy.temporality: cumulative`.
+- **OpenCode newer than 1.18.19 is supported.** OpenCode updates itself, and
+  setup refused 1.18.20 and later with `detected-but-unsupported-version`, so
+  enterprise deployments reported it unprotected. The reviewed range is now
+  `>=1.18.10,<1.19.0`, checked against OpenCode 1.18.33.
+- **The gateway reports the OpenClaw fleet client off when OpenClaw is not
+  installed.** OpenClaw is the default connector, so an install without
+  OpenClaw dialed `127.0.0.1:18789` without end and showed the gateway as
+  reconnecting. When agent discovery found no OpenClaw and `gateway.host` is a
+  loopback address, the gateway reports it disabled with "OpenClaw is not
+  installed", and doctor expects that. Any other `gateway.host`, or
+  `gateway.fleet_mode: enabled`, still dials.
+- **`defenseclaw version` skips the OpenClaw plugin when OpenClaw is not
+  configured.** On installs of other connectors the plugin row read
+  `(not installed)` and `missing`, and a plugin left from an earlier OpenClaw
+  setup counted as drift. The row now reads `(not used)` and `skipped`.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
