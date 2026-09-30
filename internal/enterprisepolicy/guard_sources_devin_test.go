@@ -43,9 +43,10 @@ func TestGuardScansDevinPluginHooks(t *testing.T) {
 	}
 
 	// Every recorded path counts against the scan budget, missing ones too.
+	missing := filepath.VolumeName(req.Home) + string(filepath.Separator) + "m"
 	var many []string
 	for i := 0; i <= guardScanReferenceLimit; i++ {
-		many = append(many, jsonString(fmt.Sprintf("/m/%d", i)))
+		many = append(many, jsonString(filepath.Join(missing, fmt.Sprint(i))))
 	}
 	writeFile(t, filepath.Join(store, "lock.json"), `{"paths": [`+strings.Join(many, ",")+`]}`)
 	if decision := EvaluateForeignHooks(req); !decision.Incomplete || !decision.Deny {
