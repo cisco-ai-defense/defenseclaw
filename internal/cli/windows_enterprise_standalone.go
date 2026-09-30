@@ -484,6 +484,23 @@ func applyWindowsEnterpriseInstallerReport(
 			result.Errors[firstError].Message += " " + next
 		}
 	}
+	if !lifecycle && report.TransactionPending {
+		configPath := ""
+		if opts != nil {
+			configPath = opts.configPath
+		}
+		step := windowsEnterprisePendingInspectionStep(configPath)
+		named := false
+		for i := firstError; i < len(result.Errors); i++ {
+			if message := result.Errors[i].Message; strings.Contains(message, "lifecycle transaction is pending") {
+				result.Errors[i].Message = strings.TrimSuffix(strings.TrimSuffix(message, "; run Repair"), ".") + ". " + step
+				named = true
+			}
+		}
+		if !named {
+			result.AddWarning("transaction_pending", step)
+		}
+	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report)
 	if opts != nil && opts.purge {
 		addWindowsEnterpriseUserStateWarning(result, report)

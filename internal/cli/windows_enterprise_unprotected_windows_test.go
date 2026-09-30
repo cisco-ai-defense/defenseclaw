@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -196,6 +197,26 @@ func TestWindowsStandaloneEnrollmentCountsOnlyPendingTargets(t *testing.T) {
 	enrollment, err := readWindowsEnterpriseStandaloneEnrollmentAt(manifest, dir)
 	if err != nil || enrollment.Targets != 2 || enrollment.Pending != 1 {
 		t.Fatalf("enrollment = %+v, %v; want 2 targets, 1 pending", enrollment, err)
+	}
+}
+
+// Status and verify of a computer with a pending transaction name it and the
+// Setup command that recovers it; verify said "run Repair", which cannot.
+func TestWindowsStandaloneInspectionNamesAPendingTransaction(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousFailure := windowsEnterpriseGatewayStartFailure
+	t.Cleanup(func() { windowsEnterpriseGatewayStartFailure = previousFailure })
+	windowsEnterpriseGatewayStartFailure = func() (string, string) { return "", "" }
+	for action, report := range map[string]*windowsEnterpriseInstallerReport{
+		"status": {Installed: true, TransactionPending: true},
+		"verify": {Installed: true, TransactionPending: true, Error: "cannot verify while a lifecycle transaction is pending; run Repair"},
+	} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
+		applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{}, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
+		text := fmt.Sprintf("%+v %+v", result.Errors, result.Warnings)
+		if !strings.Contains(text, "as LocalSystem: "+windowsEnterpriseStandaloneSetupName+" /ensure") || strings.Contains(text, "run Repair") {
+			t.Fatalf("%s of a pending transaction: %s", action, text)
+		}
 	}
 }
 

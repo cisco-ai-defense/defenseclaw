@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Windows status and verify say how to recover a pending transaction.**
+  On the enterprise standalone profile, `status` showed only `not_ready`
+  and the installed version, and `verify` said `run Repair`, which cannot
+  recover it from an administrator shell. Both now say a transaction is
+  pending and name the Setup `/ensure` command to run as LocalSystem, as a
+  failed Setup does.
 - **A Windows install that fails on a held API port names the holder.** On
   the enterprise standalone profile, a first install whose gateway could not
   bind `127.0.0.1:18970` reported only `enterprise readiness timed out:
