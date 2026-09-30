@@ -122,6 +122,11 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **AI discovery on macOS skips the folders macOS protects.** Without Full
+  Disk Access, every model file scan counted each folder macOS privacy
+  protection keeps it out of (for example other apps' containers under
+  `~/Library/Containers`) as a filesystem error and reported the scan as
+  `partial`. Those folders are now skipped, as the macOS guide says.
 - **Disabling Kiro removes DefenseClaw's hook file.** When
   `~/.kiro/hooks/defenseclaw.json` had changed since setup, teardown removed
   DefenseClaw's hooks but left the file behind as `{"hooks": []}`. A file that
