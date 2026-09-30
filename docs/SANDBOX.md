@@ -161,8 +161,11 @@ not the driver's name or `runtime.GOOS`.
   arguments or URL look like they carry a credential (a `--api-key VALUE`
   or `--token=VALUE` argument, a `NAME=VALUE` or `X-API-Key: VALUE`
   argument with a credential name, a Bearer value, a well-known token
-  format, a URL query or fragment value) is left behind on vm, with a
-  `--credential` hint.
+  format, or a URL, as the server URL or in an argument, with a password,
+  a query or fragment value, or a user name; in an argument, a user name
+  alone counts only when it looks like a token, since package and
+  database URLs name an ordinary user such as `git@` or `postgres@`) is
+  left behind on vm, with a `--credential` hint.
 - **Image names.** The vm driver reads images from the local Docker image
   store and falls back to a registry pull of the same name when it does not
   find one. Its references use a registry host under the reserved `.invalid`
