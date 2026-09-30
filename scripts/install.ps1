@@ -780,10 +780,39 @@ function Undo-Snapshot([string]$Slot) {
     Remove-Tree $Slot
 }
 
+function Protect-BinDir {
+    # The CLI runs only a gateway whose file and folder no other account can
+    # write. A ~\.local\bin that inherits the profile's Administrators entry,
+    # as one another tool's installer created does, fails that check, and the
+    # CLI then refuses the gateway installed there. Keep only this account and
+    # LocalSystem on the folder; what it holds inherits that.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $trusted = @($user.Value, "S-1-5-18", "S-1-3-4")
+    # The write rights the CLI's custody check counts (GENERIC_ALL/WRITE included).
+    $write = 0x500D0156
+    $acl = Get-Acl -LiteralPath $BinDir
+    $open = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.AccessControlType -eq "Allow" -and ([int]$_.FileSystemRights -band $write) -and $trusted -notcontains $_.IdentityReference.Value
+    })
+    if (-not $open.Count) { return }
+    $secure = New-Object Security.AccessControl.DirectorySecurity
+    $secure.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
+        $secure.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow"))
+    }
+    try {
+        Set-Acl -LiteralPath $BinDir -AclObject $secure
+        Write-Info "Restricted $BinDir to this account and SYSTEM"
+    } catch {
+        Write-Warn "Could not restrict $BinDir to this account ($($_.Exception.Message)); DefenseClaw refuses a gateway other accounts can write"
+    }
+}
+
 function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
     if (-not (New-Venv $Venv)) { return $false }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    Protect-BinDir
     # Binaries an earlier run renamed aside while they were running.
     foreach ($name in $ManagedFiles) {
         Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force | Remove-Item -Force -ErrorAction SilentlyContinue

@@ -7248,6 +7248,11 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     except (ConfigInspectError, V8ConfigError, ValueError) as exc:
         _emit("fail", "Observability v8 effective plan", str(exc), r=r)
         return
+    except OSError as exc:
+        # A config or snapshot the account cannot read or protect is a
+        # finding, not a crash of the whole report.
+        _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
+        return
     _check_observability_v8_status(status, r, live_health=live_health)
     _check_connector_export_custody(
         inspect_connector_custody(
@@ -11218,19 +11223,9 @@ def _untrusted_gateway_on_path(search_path: str) -> str:
     The lifecycle refuses such a binary, and the repair used to report it as
     "binary not found".
     """
-    if os.name == "nt":
-        return ""
-    from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path
-    from defenseclaw.gateway import GATEWAY_BIN_NAME
+    from defenseclaw.commands.cmd_setup import _refused_gateway_lifecycle_candidate
 
-    found = shutil.which(GATEWAY_BIN_NAME, path=search_path)
-    if not found or not os.path.isabs(found):
-        return ""
-    try:
-        trusted_posix_executable_path(found)
-    except UnsafePathError as exc:
-        return f"refusing to run {found}: {exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
-    return ""
+    return _refused_gateway_lifecycle_candidate(search_path)
 
 
 def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str]:
