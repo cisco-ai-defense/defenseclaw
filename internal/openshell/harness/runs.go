@@ -44,15 +44,41 @@ type DetachedRun struct {
 	Started int64 `json:"started,omitempty"`
 }
 
-// RunAliveFunc defines the POSIX sh function run_alive DIR: the latest run
-// in the run directory DIR is going while the pid in latest.pid is a live
-// process whose command line names latest.exit, its runner's (a pid reused
-// after the sandbox restarted is not the run's; a process table that hides
-// command lines trusts the pid). The run directory is the workload's: only
-// a regular file is read, and only its first bytes.
-const RunAliveFunc = `run_alive() {
-  rs_pid=
-  [ -f "$1/latest.pid" ] && rs_pid=$(head -c 32 "$1/latest.pid" 2>/dev/null | tr -d '\n')
+// RunReadFunc defines the POSIX sh functions rs_open FILE, which opens
+// FILE on fd 3 when what it names is a regular file as it is opened, and
+// rs_read FILE BYTES, which prints at most the first BYTES of a regular
+// FILE (callers read it in a command substitution). The run directory is
+// the workload's: a FIFO, a device or a link to one must neither hold a
+// read nor feed it without end, nor be opened at all when it is there to
+// be seen, so callers look first ([ -f ]), and rs_open covers one swapped
+// in after that look. Its open is read-write, which never waits for a
+// FIFO's other end as a read-only one does, and its check is of what was
+// opened (/dev/fd/3), so nothing can change in between. An open that fails
+// ends the shell, as a redirection error of exec does (in rs_read's command
+// substitution, a subshell that then prints nothing). head and tail are
+// the image's, from the root-owned /usr/bin. The functions keep their
+// arguments in variables of their own first: an old bash as sh loses the
+// caller's positional parameters across a function that runs exec.
+const RunReadFunc = `rs_open() {
+  rs_of=$1
+  { exec 3<>"$rs_of"; } 2>/dev/null || return 1
+  [ -f /dev/fd/3 ] || [ -f /proc/self/fd/3 ] || { exec 3<&-; return 1; }
+}
+rs_read() {
+  rs_rf=$1; rs_rn=$2
+  [ -f "$rs_rf" ] && rs_open "$rs_rf" || return 1
+  /usr/bin/head -c "$rs_rn" <&3 2>/dev/null
+  exec 3<&-
+}
+`
+
+// RunAliveFunc defines the POSIX sh function run_alive DIR (and
+// RunReadFunc's): the latest run in the run directory DIR is going while
+// the pid in latest.pid is a live process whose command line names
+// latest.exit, its runner's (a pid reused after the sandbox restarted is
+// not the run's; a process table that hides command lines trusts the pid).
+const RunAliveFunc = RunReadFunc + `run_alive() {
+  rs_pid=$(rs_read "$1/latest.pid" 32 | tr -d '\n')
   case "$rs_pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$rs_pid" 2>/dev/null || return 1
   [ ! -r "/proc/$rs_pid/cmdline" ] || tr '\0' ' ' <"/proc/$rs_pid/cmdline" 2>/dev/null | grep -q latest.exit
@@ -60,24 +86,28 @@ const RunAliveFunc = `run_alive() {
 `
 
 // RunStateFunc defines the POSIX sh function run_state DIR [mark] (and
-// run_alive), which prints how the latest run in the run directory DIR
+// RunAliveFunc's), which prints how the latest run in the run directory DIR
 // stands, nothing without a run: run=running while its runner is alive and
 // latest.exit holds no status of the run's own, run=exited with
 // run_exit=<status> once it holds one, run=interrupted when the run ended
 // without one (a stop ended it, or the sandbox stopped under it); then
 // run_started=<epoch seconds>. With mark, a run that has no status yet is
-// marked interrupted in latest.exit first (a stop is about to end it).
+// marked interrupted in latest.exit first (a stop is about to end it); the
+// mark is written read-write too, so a FIFO swapped in cannot hold it.
 const RunStateFunc = RunAliveFunc + `run_state() {
-  [ -e "$1/latest.pid" ] || [ -e "$1/latest.log" ] || return 0
-  rs_run=interrupted; rs_started=
-  run_alive "$1" && rs_run=running
-  if [ -f "$1/latest.exit" ] && [ -s "$1/latest.exit" ]; then
-    rs_exit=$(head -c 32 "$1/latest.exit" 2>/dev/null | tr -dc 'A-Za-z0-9_.-')
+  rs_d=$1; rs_mark=$2
+  [ -e "$rs_d/latest.pid" ] || [ -e "$rs_d/latest.log" ] || return 0
+  rs_run=interrupted
+  run_alive "$rs_d" && rs_run=running
+  rs_exit=$(rs_read "$rs_d/latest.exit" 32)
+  if [ -n "$rs_exit" ]; then
+    rs_exit=$(printf '%s' "$rs_exit" | tr -dc 'A-Za-z0-9_.-')
     [ "$rs_exit" = interrupted ] || { rs_run=exited; echo "run_exit=$rs_exit"; }
-  elif [ "$2" = mark ] && [ -e "$1/latest.pid" ]; then
-    { printf 'interrupted\n' > "$1/latest.exit"; } 2>/dev/null
+  elif [ "$rs_mark" = mark ] && [ -e "$rs_d/latest.pid" ] &&
+    { [ ! -e "$rs_d/latest.exit" ] || { [ -f "$rs_d/latest.exit" ] && [ ! -s "$rs_d/latest.exit" ]; }; }; then
+    { printf 'interrupted\n' 1<>"$rs_d/latest.exit"; } 2>/dev/null
   fi
-  [ -f "$1/latest.started" ] && rs_started=$(head -c 32 "$1/latest.started" 2>/dev/null | tr -dc 0-9)
+  rs_started=$(rs_read "$rs_d/latest.started" 32 | tr -dc 0-9)
   echo "run=$rs_run"
   echo "run_started=$rs_started"
 }

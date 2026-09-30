@@ -19,11 +19,14 @@
 package harness
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -32,15 +35,40 @@ import (
 // daemon's stop does (mark true), and parses what it printed.
 func runState(t *testing.T, dir string, mark bool) DetachedRun {
 	t.Helper()
+	return runStateIn(t, "/bin/sh", dir, mark)
+}
+
+// runStateIn is runState in the shell sh, bounded: run_state must never
+// wait on what the workload left in the run directory.
+func runStateIn(t *testing.T, sh, dir string, mark bool) DetachedRun {
+	t.Helper()
 	call := `run_state "$1"`
 	if mark {
 		call += " mark"
 	}
-	out, err := exec.Command("/bin/sh", "-c", RunStateFunc+call+"\n", "sh", dir).Output()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, sh, "-c", RunStateFunc+call+"\n", "sh", dir).Output()
 	if err != nil {
-		t.Fatalf("run_state: %v\n%s", err, out)
+		t.Fatalf("run_state in %s: %v\n%s", sh, err, out)
 	}
 	return ParseRun(out)
+}
+
+// shells are the POSIX shells on this machine the scripts run in: /bin/sh,
+// and dash, the sh of Debian-based images, where it is installed.
+func shells(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, sh := range []string{"/bin/sh", "/bin/dash", "/usr/bin/dash"} {
+		if _, err := os.Stat(sh); err == nil {
+			out = append(out, sh)
+		}
+	}
+	if len(out) == 0 {
+		t.Skip("/bin/sh is required")
+	}
+	return out
 }
 
 // runDir writes a detached run's files as `sandbox run --detach` leaves
@@ -118,5 +146,94 @@ func TestRunStateAgreesForTheCLIAndTheStop(t *testing.T) {
 	}
 	if got := runState(t, t.TempDir(), true); got != (DetachedRun{State: sandboxapi.RunNone}) {
 		t.Fatalf("a sandbox without a run reads %+v", got)
+	}
+}
+
+// The run directory is the workload's: a FIFO or a link to a device where a
+// run file should be, whether planted or swapped in after a look, never
+// holds run_state (a stop, `sandbox stop`'s question), which reads only
+// what is a regular file as it opens it and writes its mark without
+// waiting for a reader.
+func TestRunStateNeverWaitsOnTheWorkload(t *testing.T) {
+	for _, sh := range shells(t) {
+		for _, file := range []string{"latest.pid", "latest.exit", "latest.started"} {
+			for _, kind := range []string{"fifo", "device"} {
+				t.Run(filepath.Base(sh)+"/"+file+"/"+kind, func(t *testing.T) {
+					d := runDir(t, true, "")
+					path := filepath.Join(d, file)
+					if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+					if kind == "fifo" {
+						if err := syscall.Mkfifo(path, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := os.Symlink("/dev/zero", path); err != nil {
+						t.Fatal(err)
+					}
+					cli := runStateIn(t, sh, d, false)
+					stop := runStateIn(t, sh, d, true)
+					if cli.State == sandboxapi.RunNone || stop.State == sandboxapi.RunNone || cli.Exit != "" {
+						t.Fatalf("the CLI reads %+v, the stop %+v", cli, stop)
+					}
+					if file == "latest.pid" && stop.State != sandboxapi.RunInterrupted {
+						t.Fatalf("a run without a readable pid reads %+v", stop)
+					}
+					if file == "latest.started" && stop.Started != 0 {
+						t.Fatalf("a start read from a %s: %+v", kind, stop)
+					}
+					if info, err := os.Lstat(path); err != nil || (kind == "fifo") != (info.Mode()&os.ModeNamedPipe != 0) {
+						t.Fatalf("%s was replaced: %v, %v", file, info, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+// The scripts work alike in each shell a sandbox image may have as sh.
+func TestRunStateInEachShell(t *testing.T) {
+	for _, sh := range shells(t) {
+		d := runDir(t, true, "")
+		if got := runStateIn(t, sh, d, true); got != (DetachedRun{State: sandboxapi.RunRunning, Started: 1790000000}) {
+			t.Fatalf("%s: a live run reads %+v", sh, got)
+		}
+		if exit, _ := os.ReadFile(filepath.Join(d, "latest.exit")); string(exit) != "interrupted\n" {
+			t.Fatalf("%s: latest.exit = %q after the stop's look", sh, exit)
+		}
+		if got := runStateIn(t, sh, runDir(t, false, "7\n"), false); got != (DetachedRun{State: sandboxapi.RunExited, Exit: "7", Started: 1790000000}) {
+			t.Fatalf("%s: an exited run reads %+v", sh, got)
+		}
+	}
+}
+
+// rs_open checks what it opened, not what was there when the caller looked:
+// a FIFO or a device swapped in after the look is refused at once, not
+// waited on, and a link to a regular file (latest.log links to the dated
+// log) is read.
+func TestRsOpenRefusesWhatIsNotARegularFile(t *testing.T) {
+	d := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(d, "fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/zero", filepath.Join(d, "zero")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "dated.log"), []byte("0123456789\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(d, "dated.log"), filepath.Join(d, "latest.log")); err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range shells(t) {
+		for name, want := range map[string]string{"fifo": "refused\n", "zero": "refused\n", "latest.log": "opened 6789\n"} {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			script := RunReadFunc + `if rs_open "$1"; then printf 'opened '; /usr/bin/tail -c 5 <&3; else echo refused; fi` + "\n"
+			out, err := exec.CommandContext(ctx, sh, "-c", script, "sh", filepath.Join(d, name)).Output()
+			cancel()
+			if err != nil || string(out) != want {
+				t.Fatalf("%s: rs_open %s: %q, %v; want %q", sh, name, out, err, want)
+			}
+		}
 	}
 }

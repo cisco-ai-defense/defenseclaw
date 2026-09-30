@@ -56,15 +56,20 @@ const (
 )
 
 // runLogScript prints the end of the latest run's log in the run
-// directory $1, at most $2 bytes (exit 3: there is no log). The run
-// directory is the workload's: only a regular file is read.
-const runLogScript = `d=$1
-[ -f "$d/latest.log" ] || exit 3
-exec tail -c "$2" "$d/latest.log" 2>/dev/null
+// directory $1, at most $2 bytes (exit 3: there is no log; another status:
+// latest.log names something other than a regular file, or it could not be
+// opened). The run directory is the workload's: only what is a regular file
+// as it is opened is read (harness.RunReadFunc), and no more than $2 bytes
+// of it however it grows.
+const runLogScript = harness.RunReadFunc + `d=$1; n=$2
+[ -e "$d/latest.log" ] || exit 3
+[ -f "$d/latest.log" ] && rs_open "$d/latest.log" || exit 4
+/usr/bin/tail -c "$n" <&3 2>/dev/null | /usr/bin/head -c "$n"
 `
 
-// runLogWait bounds the read of a run's log at a stop.
-const runLogWait = 30 * time.Second
+// runLogWait bounds the read of a run's log at a stop: at most
+// sandboxapi.MaxRunLogBytes of a regular file.
+const runLogWait = 10 * time.Second
 
 // keptRun describes a kept run log (runLogMetaFile).
 type keptRun struct {
@@ -96,7 +101,9 @@ func (b *box) sandboxID() string {
 // keepRunLog keeps the end of the log of the detached run a stop found in
 // a ready sandbox (endHarness), with how the run stood: a run still going
 // is interrupted by the stop, and the feed says so. Best effort: the stop
-// goes ahead whatever happens here.
+// goes ahead whatever happens here. A stop of a sandbox whose hooks were
+// tampered with (hooks.on_tamper: stop) keeps no log: the log is the
+// workload's, and that stop waits on nothing the workload controls.
 func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harness.DetachedRun) {
 	if run.State == sandboxapi.RunNone {
 		return
@@ -121,15 +128,26 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harne
 	if err := m.dropRunLogMeta(name); err != nil {
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
 	}
-	kept := m.readRunLog(ctx, gw, name, meta)
+	m.mu.Lock()
+	tamper := b.tamperStop
+	m.mu.Unlock()
+	kept := false
+	if tamper {
+		m.logf("sandbox %s: the log of its detached run is not kept: the stop is for hook tampering", name)
+	} else {
+		kept = m.readRunLog(ctx, gw, name, meta)
+	}
 	if run.State != sandboxapi.RunRunning {
 		return
 	}
 	m.logf("sandbox %s: the stop ends its detached run, which was still going", name)
 	msg := "sandbox " + name + "'s detached run was still going; the stop ended it unfinished"
-	if kept {
+	switch {
+	case kept:
 		msg += ", and its log is kept (`defenseclaw sandbox logs " + name + "`)"
-	} else {
+	case tamper:
+		msg += "; its log was not kept, since the sandbox was stopped for tampering with its hooks"
+	default:
 		msg += "; its log could not be kept"
 	}
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "run_interrupted", Message: msg})

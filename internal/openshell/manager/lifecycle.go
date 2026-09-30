@@ -239,11 +239,11 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	}
 	// The harness exits on its own first, so its end-of-session hook runs
 	// and its terminal ends as after /exit (graceful.go); a detached run
-	// the stop ends is marked interrupted, and its log is kept for `sandbox
-	// logs` of the stopped sandbox (runlog.go).
+	// the stop ends is marked interrupted, and once the stop is published
+	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
 	run := m.endHarness(ctx, gw, b)
-	m.keepRunLog(ctx, gw, b, run)
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	m.keepRunLog(ctx, gw, b, run)
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)

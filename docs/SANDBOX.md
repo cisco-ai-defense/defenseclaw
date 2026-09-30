@@ -1330,14 +1330,21 @@ stop goes ahead whatever the sandbox answers. The same exec looks at the
 sandbox's latest detached run in `/sandbox/.defenseclaw/runs` first (the run
 is going while `latest.pid` is a live process whose command line names
 `latest.exit`, its runner's) and marks one that has not ended interrupted in
-`latest.exit`, which the runner keeps. When there is a run, the stop then
+`latest.exit`, which the runner keeps. The CLI reads a run with the same
+script (`harness.RunStateFunc`), so `sandbox stop`'s question and the stop
+agree. When there is a run, the stop then publishes the `stopping` phase and
 keeps the last 1 MiB of its log and how it stood under
 `<data_dir>/sandboxes/<name>/runlog/`, tied to the OpenShell sandbox id, and
 says on the feed when it ended one still going (`run_interrupted`); `GET
-…/logs` serves it, and `sandbox logs` of the stopped sandbox prints it. Every
-stop goes through this: the CLI's, the TUI's, the macOS app's, undo's and a
-tamper stop's. The CLI only asks first, on a terminal, before `sandbox stop`
-ends a run still going. In a git project undo:
+…/logs` serves it, and `sandbox logs` of the stopped sandbox prints it. The
+run directory is the workload's: every read opens a file read-write (which
+never waits on a FIFO), reads it only when what it opened is a regular file,
+and reads a bounded part of it, and the log read is bounded at ten seconds.
+Every stop goes through this: the CLI's, the TUI's, the macOS app's, undo's
+and a tamper stop's, except that a tamper stop keeps no log (it waits on
+nothing the workload controls; the feed says the log was not kept). The CLI
+only asks first, on a terminal, before `sandbox stop` ends a run still
+going. In a git project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;

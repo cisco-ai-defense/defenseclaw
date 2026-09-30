@@ -684,11 +684,13 @@ Every stop of a running sandbox (`…/stop`, `…/undo` with `stop`, and a
 tamper stop under `hooks.on_tamper: stop`) looks at the sandbox's latest
 detached run (`sandbox run --detach`) before it ends the harness. A run
 still going is marked interrupted, and the feed gets a `sandbox.lifecycle`
-event with reason `run_interrupted`. Once the harness has exited, the daemon
-keeps the last 1 MiB of the run's log on the host (under
-`<data_dir>/sandboxes/<name>/runlog/`), which `GET …/{name}/logs` serves
-while the sandbox is stopped, and which `sandbox logs` of a stopped sandbox
-prints. The next stop that finds a run replaces it; a delete removes it.
+event with reason `run_interrupted`. Once the harness has exited and the
+sandbox reads `stopping`, the daemon keeps the last 1 MiB of the run's log on
+the host (under `<data_dir>/sandboxes/<name>/runlog/`), which `GET
+…/{name}/logs` serves while the sandbox is stopped, and which `sandbox logs`
+of a stopped sandbox prints. A tamper stop keeps no log: it waits on nothing
+the workload controls, and its `run_interrupted` event says the log was not
+kept. The next stop that finds a run replaces it; a delete removes it.
 Bytes of the log that are not UTF-8 come back replaced.
 
 ### Approvals and unblocks
