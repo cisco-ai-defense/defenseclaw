@@ -42,7 +42,7 @@ RUNTIME_CONTRACT = {
     "rich": (">=14.2,<15", None),
     "textual": (">=8.2.8,<9", None),
     "pygments": (">=2.20,<3", None),
-    "litellm": (">=1.84.0,<1.92.0", None),
+    "litellm": (">=1.96.2,<1.97", None),
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
@@ -112,9 +112,9 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         document["tool"]["uv"]["override-dependencies"],
     ):
         requirements = _requirements(requirement_set)
-        assert Version("1.83.7") not in requirements["litellm"].specifier
-        assert Version("1.84.0") in requirements["litellm"].specifier
-        assert Version("1.92.0") not in requirements["litellm"].specifier
+        assert Version("1.96.1") not in requirements["litellm"].specifier
+        assert Version("1.96.2") in requirements["litellm"].specifier
+        assert Version("1.97.0") not in requirements["litellm"].specifier
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
@@ -190,15 +190,23 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
-    assert Version(locked["litellm"]) >= Version("1.84.0")
+    assert Version(locked["litellm"]) >= Version("1.96.2")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 
+    # Installers resolve hash-locked wheels only, so the locked LiteLLM must
+    # publish a wheel for every installer platform (or one pure-Python wheel).
     litellm = next(package for package in lock["package"] if package["name"] == "litellm")
-    assert any(
-        wheel["url"].endswith(f"litellm-{litellm['version']}-py3-none-any.whl")
-        for wheel in litellm["wheels"]
-    )
+    wheel_names = [wheel["url"].rsplit("/", 1)[-1] for wheel in litellm["wheels"]]
+    if not any(name.endswith("-py3-none-any.whl") for name in wheel_names):
+        for platform_tag in (
+            "manylinux_2_28_x86_64",
+            "manylinux_2_28_aarch64",
+            "macosx_10_12_x86_64",
+            "macosx_11_0_arm64",
+            "win_amd64",
+        ):
+            assert any(name.endswith(f"-abi3-{platform_tag}.whl") for name in wheel_names), platform_tag
 
 
 def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() -> None:
@@ -252,7 +260,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
     # skill scanner 2.0.4: rich>=13, textual>=1, and litellm>=1.77;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
-    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.84,<1.92.
+    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.96.2,<1.97.
     # Scanner 2.0.5-2.0.9 instead pin old LiteLLM/Textual releases, and
     # 2.0.10-2.0.13 cap Textual<8, so 2.0.4 is the newest viable wheel.
     intersections = {
@@ -261,7 +269,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
         "litellm": [
             Requirement("litellm>=1.77.0"),
             Requirement("litellm>=1.77.0"),
-            Requirement("litellm>=1.84.0,<1.92.0"),
+            Requirement("litellm>=1.96.2,<1.97"),
         ],
         "importlib-metadata": [
             Requirement("importlib-metadata>=8.7.1,<8.8"),
@@ -270,7 +278,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     witnesses = {
         "rich": Version("14.3.4"),
         "textual": Version(TEXTUAL_LOCKED_VERSION),
-        "litellm": Version("1.91.0"),
+        "litellm": Version("1.96.2"),
         "importlib-metadata": Version("8.7.1"),
     }
     for name, requirements in intersections.items():

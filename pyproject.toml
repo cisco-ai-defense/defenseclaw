@@ -58,7 +58,7 @@ dependencies = [
     # MCP scanner >=4.3.1 pins vulnerable LiteLLM releases exactly. 4.3.0 is
     # the newest trusted release whose METADATA permits the project's secure
     # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
-    # a release compatible with LiteLLM >=1.84.0.
+    # a release compatible with LiteLLM >=1.96.2.
     "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
     # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
     # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
@@ -69,11 +69,12 @@ dependencies = [
     # wheel and validates the exact MCP Scanner API; source installs use
     # VirusTotal's upstream yara-python distribution.
     "yara-python>=4.5.4; python_version>='3.11'",
-    # CVE-2026-40217 is fixed in 1.83.10; CVE-2026-49468 is fixed in 1.84.0.
-    # Stable LiteLLM releases currently declare Python <3.14. Version 1.92.0
-    # also dropped the portable wheel required by Windows and macOS, so keep
-    # the latest portable line until upstream restores cross-platform wheels.
-    "litellm>=1.84.0,<1.92.0",
+    # CVE-2026-40217 is fixed in 1.83.10; CVE-2026-49468 is fixed in 1.84.0;
+    # CVE-2026-84377 is fixed in 1.96.2. Releases from 1.92 on ship compiled
+    # wheels instead of one pure-Python wheel, and some omit macOS or Windows.
+    # 1.96.2 publishes abi3 wheels for Linux, macOS and Windows x64, so cap
+    # below the next minor line and re-check the wheel set before raising it.
+    "litellm>=1.96.2,<1.97",
     # LiteLLM requires <9 and the development OpenTelemetry API requires
     # <8.8; retain the security floor while expressing their intersection.
     "importlib-metadata>=8.7.1,<8.8",
@@ -204,8 +205,9 @@ override-dependencies = [
     # CVE-2026-69248/69249 fixed in 49.0.0; CVE-2026-69247 fixed in 50.0.0;
     # PYSEC-2026-3552 / -3553 / -3554 fixed in 50.0.0.
     "cryptography>=50.0.0,<51",
-    # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
-    "litellm>=1.84.0,<1.92.0",
+    # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0;
+    # CVE-2026-84377 fixed in 1.96.2.
+    "litellm>=1.96.2,<1.97",
     # litellm pins exact transitive versions that conflict with what
     # cisco-ai-skill-scanner 2.0.11 (and our own pins) expect. We
     # override to a single compatible version per package — the newer
