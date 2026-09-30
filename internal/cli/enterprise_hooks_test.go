@@ -729,6 +729,33 @@ func TestCompareEnterpriseHookGuardianRecordsRejectsStaleOrFutureReconcile(t *te
 	}
 }
 
+// The guardian rewrites its three records every pass; a status or verify that
+// read in the middle of one met two passes' records and failed although the
+// guardian was healthy, so MDM detection on Windows flapped.
+func TestLoadEnterpriseHookGuardianRecordsRereadsAPassInProgress(t *testing.T) {
+	previousRead, previousDelay := readEnterpriseHookGuardianRecordsOnce, enterpriseHookGuardianRecordRetryDelay
+	t.Cleanup(func() {
+		readEnterpriseHookGuardianRecordsOnce, enterpriseHookGuardianRecordRetryDelay = previousRead, previousDelay
+	})
+	enterpriseHookGuardianRecordRetryDelay = 0
+	reads := 0
+	readEnterpriseHookGuardianRecordsOnce = func(string) enterpriseHookGuardianRecords {
+		reads++
+		stamp := "2026-09-30T12:30:33Z"
+		records := enterpriseHookGuardianRecords{StateExists: true, AuthorizationExists: true, ActivationExists: true}
+		records.State.UpdatedAt, records.Authorization.UpdatedAt, records.Activation.UpdatedAt = stamp, stamp, stamp
+		if reads == 1 {
+			records.Activation.UpdatedAt = "2026-09-30T12:29:33Z"
+		}
+		return records
+	}
+
+	records := loadEnterpriseHookGuardianRecords(t.TempDir())
+	if reads != 2 || records.Activation.UpdatedAt != records.State.UpdatedAt {
+		t.Fatalf("reads = %d, activation stamp %q: want one re-read of the finished pass", reads, records.Activation.UpdatedAt)
+	}
+}
+
 func TestCompareEnterpriseHookGuardianRecordsRequiresExactActivationIdentity(t *testing.T) {
 	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	baseState := enterpriseHookGuardianState{

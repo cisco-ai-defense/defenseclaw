@@ -770,7 +770,8 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	state, stateExists, stateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
+	records := loadEnterpriseHookGuardianRecords(cfg.DataDir)
+	state, stateExists, stateErr := records.State, records.StateExists, records.StateErr
 	removedAccountFailures := 0
 	if stateErr != nil {
 		report.Errors = append(report.Errors, stateErr.Error())
@@ -789,7 +790,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		}
 		report.Enrollment = enterpriseHookEnrollmentFromRows(state.Results)
 	}
-	authorization, authorizationExists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
+	authorization, authorizationExists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
 	if authorizationErr != nil {
 		report.Errors = append(report.Errors, authorizationErr.Error())
 	} else if !authorizationExists {
@@ -797,7 +798,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	} else {
 		report.Authorization = &authorization
 	}
-	activation, activationExists, activationErr := loadEnterpriseHookGuardianActivation(cfg.DataDir)
+	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
 	if activationErr != nil {
 		report.Errors = append(report.Errors, activationErr.Error())
 	} else if !activationExists {
@@ -1527,9 +1528,10 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	if err != nil {
 		return run, err
 	}
-	authorization, exists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
-	activation, activationExists, activationErr := loadEnterpriseHookGuardianActivation(cfg.DataDir)
-	guardianState, guardianStateExists, guardianStateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
+	records := loadEnterpriseHookGuardianRecords(cfg.DataDir)
+	authorization, exists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
+	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
+	guardianState, guardianStateExists, guardianStateErr := records.State, records.StateExists, records.StateErr
 	// The rows of a deleted account whose profile folder was removed fail
 	// every reconcile until the enumerator drops them; verify accepts exactly
 	// those failures, as status does.
@@ -2919,6 +2921,70 @@ type enterpriseHookGuardianActivation struct {
 	FailureCount     int                          `json:"failure_count"`
 	PendingCount     int                          `json:"pending_count,omitempty"`
 	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
+}
+
+// enterpriseHookGuardianRecords is one read of the three records the
+// guardian rewrites on every pass: its state, the protected authorization and
+// the activation receipt.
+type enterpriseHookGuardianRecords struct {
+	State               enterpriseHookGuardianState
+	StateExists         bool
+	StateErr            error
+	Authorization       enterpriseHookGuardianAuthorization
+	AuthorizationExists bool
+	AuthorizationErr    error
+	Activation          enterpriseHookGuardianActivation
+	ActivationExists    bool
+	ActivationErr       error
+}
+
+// midPass reports a read that met a guardian pass in progress: a record the
+// guardian was replacing (a sharing violation on Windows), or complete
+// records of two passes.
+func (r enterpriseHookGuardianRecords) midPass() bool {
+	for _, err := range []error{r.StateErr, r.AuthorizationErr, r.ActivationErr} {
+		if err != nil && enterpriseHookGuardianRecordBusy(err) {
+			return true
+		}
+	}
+	if r.StateErr != nil || r.AuthorizationErr != nil || r.ActivationErr != nil ||
+		!r.StateExists || !r.AuthorizationExists || !r.ActivationExists {
+		return false
+	}
+	return r.State.UpdatedAt != r.Authorization.UpdatedAt || r.Activation.UpdatedAt != r.Authorization.UpdatedAt
+}
+
+func readEnterpriseHookGuardianRecords(dataDir string) enterpriseHookGuardianRecords {
+	var r enterpriseHookGuardianRecords
+	r.State, r.StateExists, r.StateErr = loadEnterpriseHookGuardianState(dataDir)
+	r.Authorization, r.AuthorizationExists, r.AuthorizationErr = loadEnterpriseHookGuardianAuthorization(dataDir)
+	r.Activation, r.ActivationExists, r.ActivationErr = loadEnterpriseHookGuardianActivation(dataDir)
+	return r
+}
+
+// Seams for tests. The guardian writes its three records within
+// milliseconds; 20 reads 100 ms apart outlast a pass by far.
+var (
+	readEnterpriseHookGuardianRecordsOnce  = readEnterpriseHookGuardianRecords
+	enterpriseHookGuardianRecordRetryDelay = 100 * time.Millisecond
+)
+
+const enterpriseHookGuardianRecordReads = 20
+
+// loadEnterpriseHookGuardianRecords reads the guardian's records as one
+// reconcile. The guardian rewrites them every minute, and a status or verify
+// that read in the middle of a pass failed although the guardian was healthy
+// (MDM detection on Windows flapped in about one run in eight). Re-read
+// briefly until the three name one pass; any other result is returned as
+// read.
+func loadEnterpriseHookGuardianRecords(dataDir string) enterpriseHookGuardianRecords {
+	for read := 1; ; read++ {
+		records := readEnterpriseHookGuardianRecordsOnce(dataDir)
+		if !records.midPass() || read == enterpriseHookGuardianRecordReads {
+			return records
+		}
+		time.Sleep(enterpriseHookGuardianRecordRetryDelay)
+	}
 }
 
 func writeEnterpriseHookGuardianState(
