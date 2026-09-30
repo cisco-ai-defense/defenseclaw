@@ -53,6 +53,9 @@ type rotationHost struct {
 	keyA       string
 	rendered   map[string]string // user -> key fingerprint of their hooks
 	failStaged bool              // bob fails whenever a key is staged
+	// failed are targets every reconcile reports failed, beside the users.
+	failed     []enterprisehooks.CredentialAttestationTarget
+	reconciles int
 	events     []string
 }
 
@@ -136,8 +139,9 @@ func (h *rotationHost) liveKeyIDs() []string {
 func (h *rotationHost) reconcile() {
 	keys := h.liveKeys()
 	keyID := connector.UserScopedTokenKeyFingerprint(keys[len(keys)-1])
+	h.reconciles++
 	attestation := enterprisehooks.CredentialAttestation{
-		Version: enterprisehooks.CredentialAttestationVersion, ID: fmt.Sprintf("%032x", len(h.events)+1),
+		Version: enterprisehooks.CredentialAttestationVersion, ID: fmt.Sprintf("%032x", h.reconciles),
 		UpdatedAt: "2026-09-29T00:00:00Z", ManifestSHA256: strings.Repeat("d", 64), KeyID: keyID,
 		Targets: []enterprisehooks.CredentialAttestationTarget{},
 	}
@@ -155,6 +159,7 @@ func (h *rotationHost) reconcile() {
 		}
 		attestation.Targets = append(attestation.Targets, target)
 	}
+	attestation.Targets = append(attestation.Targets, h.failed...)
 	data, _ := json.Marshal(attestation)
 	if err := os.WriteFile(h.env.attestationPath(), data, 0o600); err != nil {
 		h.t.Fatal(err)
@@ -234,6 +239,48 @@ func TestRotateCredentialsMovesEveryUserBeforeTheKeyCommits(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0].Message, "codex for user bob") {
 		t.Fatalf("the failure does not name the user: %+v", result.Errors)
+	}
+}
+
+// One account's agent that the guardian could not protect (an agent
+// version without a verified hook contract) blocked the rotation for the
+// whole host. It holds no per-user credential, so the rotation now moves
+// every other user and names it; so does an account that no longer exists.
+// A failed target the authorization ledger still protects holds the
+// current key's credentials, and the rotation still refuses it.
+func TestRotateCredentialsSkipsTargetsWithoutACredential(t *testing.T) {
+	h := newRotationHost(t)
+	h.accounts.accounts["carol"] = Account{Name: "carol", UID: 1003, GID: 1003}
+	h.failed = []enterprisehooks.CredentialAttestationTarget{{Connector: "devin", User: "carol", UID: 1003, State: enterprisehooks.CredentialTargetFailed}}
+	protect := func(carol bool) {
+		targets := []map[string]any{{"user": "alice", "connector": "codex", "ok": true}, {"user": "bob", "connector": "codex", "ok": true}}
+		if carol {
+			targets = append(targets, map[string]any{"user": "carol", "connector": "devin", "ok": true})
+		}
+		data, _ := json.Marshal(map[string]any{"version": 1, "protected_targets": targets})
+		if err := os.WriteFile(filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile), data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protect(false)
+	result := h.run(Options{Action: ActionRotateCredentials})
+	requireOK(t, result)
+	keyB := h.committedKey()
+	if keyB == h.keyA || !strings.Contains(strings.Join(result.Changes, "\n"), "skipped 1 target(s) that hold no per-user credential: devin for user carol") {
+		t.Fatalf("the rotation did not skip and name the unprotected target: %q", result.Changes)
+	}
+
+	protect(true)
+	result = h.run(Options{Action: ActionRotateCredentials})
+	requireError(t, result, codeRotation)
+	if h.committedKey() != keyB || !strings.Contains(result.Errors[0].Message, "hold a per-user credential failed their reconcile: devin for user carol") {
+		t.Fatalf("a failed target that holds a credential did not stop the rotation: %+v", result.Errors)
+	}
+
+	delete(h.accounts.accounts, "carol")
+	requireOK(t, h.run(Options{Action: ActionRotateCredentials}))
+	if h.committedKey() == keyB {
+		t.Fatal("the target of an account that no longer exists blocked the rotation")
 	}
 }
 

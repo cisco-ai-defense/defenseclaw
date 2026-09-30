@@ -146,6 +146,15 @@ rest also reach per-user installs.
   refuses at once when the gateway service is not running, instead of after
   90 seconds of silence, and an interrupted run prints the `reconcile`
   command that completes or rolls back the rotation.
+- **One unprotected account no longer blocks `rotate-credentials`.** On the
+  enterprise standalone profile on Linux and macOS, one account whose agent
+  the guardian could not protect, such as an agent version without a
+  verified hook contract, stopped the rotation for the whole host. The
+  rotation now moves every account that holds a per-user credential and
+  lists the targets that hold none as skipped: agents the guardian never
+  protected, accounts that no longer exist and homes that are not available
+  yet. A target that was protected before and now fails still stops the
+  rotation, because it holds the current key's credentials.
 - **A config change on macOS no longer leaves the gateway unloaded.** On the
   enterprise standalone profile, launchd could still be stopping the gateway
   when the lifecycle started it again; the start and its restart fallback

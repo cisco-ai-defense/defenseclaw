@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -47,8 +48,15 @@ import (
 //
 //  1. Preflight, before anything changes: the deployment is installed, the
 //     committed key A is present and trusted, the gateway reports exactly A
-//     live, and a fresh guardian reconcile attests every enabled target
-//     current on A with no failed target.
+//     live, and a fresh guardian reconcile attests every target that holds
+//     a credential current on A. A target that is not current holds one
+//     while the guardian's authorization ledger carries its last success
+//     forward (the gateway accepts credentials for every target the ledger
+//     protects), and then the rotation refuses. One that holds none (never
+//     protected, for example an agent version without a verified hook
+//     contract, or an account that no longer exists) is skipped and named:
+//     the guardian renders it from whichever key is committed once it can
+//     protect it.
 //  2. Stage: record the intent in the root-only lifecycle directory, then
 //     write key B beside A (connector.PendingUserScopedTokenKeyPath) under
 //     the guardian's reconcile lock. The gateway now accepts the credentials
@@ -304,14 +312,87 @@ func credentialTargets(attestation enterprisehooks.CredentialAttestation) map[st
 	return out
 }
 
-func failedTargets(attestation enterprisehooks.CredentialAttestation) []string {
-	var labels []string
+// targetsNotMoved sorts the targets of attestation that are not current
+// (failed or pending), which the rotation cannot move, into those that
+// still hold a per-user credential and those that hold none. A target holds
+// one while the guardian's authorization ledger carries its last success
+// forward: the gateway accepts the credentials of every target the ledger
+// protects, and the target's files keep the ones an earlier reconcile
+// rendered. One whose account no longer exists holds none that anyone can
+// use; the commit retires them with the old key. err is set when the ledger
+// cannot be read, so which of them hold a credential is unknown.
+func (l *lifecycle) targetsNotMoved(ctx context.Context, attestation enterprisehooks.CredentialAttestation) (held, skipped []string, err error) {
+	var protected map[string]bool
 	for _, target := range attestation.Targets {
-		if target.State == enterprisehooks.CredentialTargetFailed {
-			labels = append(labels, target.Label())
+		if target.State == enterprisehooks.CredentialTargetCurrent {
+			continue
+		}
+		if protected == nil {
+			if protected, err = l.env.ledgerProtectedTargets(); err != nil {
+				return nil, nil, err
+			}
+		}
+		if protected[protectedTargetKey(target.Connector, target.User, target.UserHome)] && !l.accountAbsent(ctx, target.User) {
+			held = append(held, target.Label())
+		} else {
+			skipped = append(skipped, target.Label())
 		}
 	}
-	return labels
+	slices.Sort(held)
+	slices.Sort(skipped)
+	return held, skipped, nil
+}
+
+// ledgerProtectedTargets reads the protected targets of the guardian's
+// authorization ledger, keyed by protectedTargetKey.
+func (e *Env) ledgerProtectedTargets() (map[string]bool, error) {
+	path := filepath.Join(e.P(e.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
+	if err := e.Trust(path, TrustAdminFile); err != nil {
+		return nil, err
+	}
+	data, err := readBounded(path, 4<<20)
+	if err != nil {
+		return nil, err
+	}
+	type identity struct {
+		Connector string `json:"connector"`
+		User      string `json:"user"`
+		UserHome  string `json:"user_home"`
+	}
+	var ledger struct {
+		Targets []struct {
+			identity
+			OK     bool      `json:"ok"`
+			Result *identity `json:"result"`
+		} `json:"protected_targets"`
+	}
+	if err := json.Unmarshal(data, &ledger); err != nil {
+		return nil, fmt.Errorf("the hook guardian authorization ledger %s is not valid: %w", path, err)
+	}
+	protected := map[string]bool{}
+	for _, target := range ledger.Targets {
+		if !target.OK {
+			continue
+		}
+		// The guardian keys a row by these, falling back to its result.
+		name, home := strings.TrimSpace(target.Connector), strings.TrimSpace(target.UserHome)
+		if target.Result != nil {
+			name = cmp.Or(name, target.Result.Connector)
+			home = cmp.Or(home, target.Result.UserHome)
+		}
+		protected[protectedTargetKey(name, target.User, home)] = true
+	}
+	return protected, nil
+}
+
+// protectedTargetKey is the guardian's key for a protected target: the
+// connector and the account name, or the home for a target named by home.
+func protectedTargetKey(connectorName, user, home string) string {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	if user = strings.TrimSpace(user); user != "" {
+		return name + "\x00user\x00" + user
+	}
+	return name + "\x00home\x00" + filepath.Clean(strings.TrimSpace(home))
 }
 
 func listLabels(labels []string) string {
@@ -324,7 +405,9 @@ func listLabels(labels []string) string {
 
 // onKey reports whether attestation shows every target of want current and
 // verified on keyID, and every other credential-bearing target verified
-// too. fatal is set for a state no further reconcile fixes.
+// too. fatal is set for a state no further reconcile fixes. A target
+// outside want that is not current held no credential when the rotation
+// began (targetsNotMoved), so it does not stop the rotation.
 func onKey(attestation enterprisehooks.CredentialAttestation, keyID, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (done bool, fatal string) {
 	switch {
 	case attestation.ManifestSHA256 != manifestSHA256:
@@ -332,15 +415,25 @@ func onKey(attestation enterprisehooks.CredentialAttestation, keyID, manifestSHA
 	case attestation.KeyID != keyID:
 		return false, fmt.Sprintf("the guardian rendered from key %s, not %s", shortKeyID(attestation.KeyID), shortKeyID(keyID))
 	}
-	if failed := failedTargets(attestation); len(failed) > 0 {
-		return false, fmt.Sprintf("%d guardian target(s) failed: %s", len(failed), listLabels(failed))
-	}
 	have := credentialTargets(attestation)
-	var missing []string
+	failed := map[string]bool{}
+	for _, target := range attestation.Targets {
+		failed[target.Key()] = target.State == enterprisehooks.CredentialTargetFailed
+	}
+	var lost, missing []string
 	for key, target := range want {
-		if _, ok := have[key]; !ok {
+		if _, ok := have[key]; ok {
+			continue
+		}
+		if failed[key] {
+			lost = append(lost, target.Label())
+		} else {
 			missing = append(missing, target.Label())
 		}
+	}
+	if len(lost) > 0 {
+		slices.Sort(lost)
+		return false, fmt.Sprintf("%d guardian target(s) that hold a per-user credential failed: %s", len(lost), listLabels(lost))
 	}
 	if len(missing) > 0 {
 		slices.Sort(missing)
@@ -518,9 +611,13 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	if preflight.KeyID != idA {
 		return refuse("the hook guardian rendered from key %s, not the committed key %s", shortKeyID(preflight.KeyID), shortKeyID(idA))
 	}
-	if failed := failedTargets(preflight); len(failed) > 0 {
-		return refuse("%d guardian target(s) failed their reconcile: %s. Fix or disable them (see `enterprise %s status`), then rotate again",
-			len(failed), listLabels(failed), platformName(env.GOOS))
+	held, skipped, err := l.targetsNotMoved(ctx, preflight)
+	switch {
+	case err != nil:
+		return refuse("the hook guardian could not protect every target, and whether they hold a per-user credential is unknown: %v", err)
+	case len(held) > 0:
+		return refuse("%d guardian target(s) that hold a per-user credential failed their reconcile: %s. Fix or disable them (see `enterprise %s status`), then rotate again",
+			len(held), listLabels(held), platformName(env.GOOS))
 	}
 	selected := credentialTargets(preflight)
 
@@ -612,7 +709,11 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	}
 	r.Changes = append(r.Changes,
 		fmt.Sprintf("rotation %s committed key %s in place of key %s", operation, shortKeyID(idB), shortKeyID(idA)),
-		fmt.Sprintf("moved %d per-user target(s) of %d user(s) to the new key", len(selected), len(users)),
+		fmt.Sprintf("moved %d per-user target(s) of %d user(s) to the new key", len(selected), len(users)))
+	if len(skipped) > 0 {
+		r.Changes = append(r.Changes, fmt.Sprintf("skipped %d target(s) that hold no per-user credential: %s; the guardian renders them from the new key once it can protect them", len(skipped), listLabels(skipped)))
+	}
+	r.Changes = append(r.Changes,
 		"agents that were already running send telemetry with the old key's credentials, which the gateway now refuses; ask users to restart their agents")
 	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idB}); err != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s committed key %s, but the gateway has not retired key %s: %v; run verify", operation, shortKeyID(idB), shortKeyID(idA), err))
