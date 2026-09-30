@@ -42,8 +42,11 @@ func TestKiroMatchersFollowEachEngine(t *testing.T) {
 			t.Errorf("the regular expression %q matched %s as a glob", kiroV3MatchAllTools, tool)
 		}
 	}
-	// Kiro's v3 engine drops a hook whose matcher does not compile.
-	if _, err := regexp.Compile(kiroV2MatchAllTools); err == nil {
+	// Kiro's v3 engine drops a hook whose matcher does not compile. The
+	// pattern goes through a function so the check stays a runtime one
+	// (staticcheck's SA1000 flags an invalid constant pattern).
+	compiles := func(pattern string) bool { _, err := regexp.Compile(pattern); return err == nil }
+	if compiles(kiroV2MatchAllTools) {
 		t.Errorf("the CLI 2.x glob %q compiles as a regular expression; the v3 engine would run it", kiroV2MatchAllTools)
 	}
 	for _, spec := range kiroV3HookSpecs {
