@@ -337,18 +337,29 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	// update to Xcode 27.0 (or delete it).", with the Command Line Tools
 	// 27.0 selected: the hint named "Xcode or the Command Line Tools", and
 	// a user could have updated the current ones. It names that Xcode.app.
-	tools := func(clt, xcode string) *openshell.DeveloperTools {
-		return &openshell.DeveloperTools{MacOS: "27.0", Selected: "/Library/Developer/CommandLineTools", CLT: clt, XcodeApp: "/Applications/Xcode.app", Xcode: xcode}
+	tools := func(macOS, clt, xcode string) *openshell.DeveloperTools {
+		return &openshell.DeveloperTools{MacOS: macOS, Selected: "/Library/Developer/CommandLineTools", CLT: clt, XcodeApp: "/Applications/Xcode.app", Xcode: xcode}
 	}
+	generic := "→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
+		"Update them as it says, then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"
 	for _, tc := range []struct {
 		tools *openshell.DeveloperTools
 		hint  string
 	}{
-		{tools("27.0.0.0.1.1788430756", "26.2"), "→ Homebrew says why above. The Command Line Tools 27.0, which xcode-select selects, are current for macOS 27.0, " +
+		{tools("27.0", "27.0.0.0.1.1788430756", "26.2"), "→ Homebrew says why above. The Command Line Tools 27.0, which xcode-select selects, are current for macOS 27.0, " +
 			"but Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so: update that Xcode (from the App Store) or delete it, as Homebrew says; " +
 			"updating the Command Line Tools does not help. Then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
-		{tools("26.2.0.0.1.1764812424", "26.2"), "→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
-			"Update them as it says, then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
+		{tools("27.0", "26.2.0.0.1.1764812424", "26.2"), generic},
+		// Homebrew wants the Command Line Tools 16.0.0 and Xcode 16.0 on
+		// macOS 15. With the tools 15.3 it refuses them too ("Your Command
+		// Line Tools are too outdated."): setup said they were current and
+		// that updating them did not help.
+		{tools("15.6", "15.3.0.0.1.1708646388", "14.3.1"), generic},
+		// With the tools 16.4 it refuses Xcode 15.4 alone: setup gave the
+		// generic hint.
+		{tools("15.6", "16.4.0.0.1.1747106510", "15.4"), "→ Homebrew says why above. The Command Line Tools 16.4, which xcode-select selects, are current for macOS 15.6, " +
+			"but Homebrew checks Xcode 15.4 at /Applications/Xcode.app even so: update that Xcode (from the App Store) or delete it, as Homebrew says; " +
+			"updating the Command Line Tools does not help. Then run `defenseclaw sandbox setup` again (see " + openshell.TroubleshootingURL + ")\n"},
 	} {
 		ta := setupApp(t, "", "", false)
 		ta.GOOS = "darwin"

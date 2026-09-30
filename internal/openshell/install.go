@@ -374,8 +374,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an
-			// Xcode or Command Line Tools older than the newest release:
-			// the error says which are here.
+			// Xcode or Command Line Tools older than the oldest it builds
+			// with on this macOS (homebrewMinimums): the error says which
+			// are here.
 			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp)}
 		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)

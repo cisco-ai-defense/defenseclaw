@@ -60,18 +60,92 @@ type DeveloperTools struct {
 }
 
 // OutdatedXcodeApp reports current Command Line Tools, which xcode-select
-// selects (their version at least the macOS major release), next to an
-// Xcode.app of an older major release. Homebrew refuses that Xcode.app
-// even so ("Your Xcode (26.2) at /Applications/Xcode.app is too outdated.
-// Please update to Xcode 27.0 (or delete it)."): updating or removing it
-// is the fix, not the Command Line Tools. An Xcode.app whose version could
-// not be read does not count.
+// selects (at least the ones Homebrew wants on this macOS release:
+// homebrewMinimums), next to an Xcode.app older than the Xcode Homebrew
+// wants. Homebrew refuses that Xcode.app even so ("Your Xcode (26.2) at
+// /Applications/Xcode.app is too outdated. Please update to Xcode 27.0 (or
+// delete it)."): updating or removing it is the fix, not the Command Line
+// Tools. A version that could not be read does not count.
 func (d *DeveloperTools) OutdatedXcodeApp() bool {
 	if d == nil || d.XcodeApp == "" || d.Xcode == "" || filepath.Clean(d.Selected) != CommandLineTools {
 		return false
 	}
-	macOS := majorVersion(d.MacOS)
-	return macOS > 0 && majorVersion(d.CLT) >= macOS && majorVersion(d.Xcode) < macOS
+	xcode, clt, ok := homebrewMinimums(d.MacOS)
+	if !ok {
+		return false
+	}
+	cltCurrent, cltKnown := atLeast(d.CLT, clt)
+	xcodeCurrent, xcodeKnown := atLeast(d.Xcode, xcode)
+	return cltKnown && xcodeKnown && cltCurrent && !xcodeCurrent
+}
+
+// homebrewMinimum are the oldest Xcode and Command Line Tools Homebrew
+// builds a formula from source with on the macOS releases before 26
+// (MacOS::Xcode.minimum_version and MacOS::CLT.minimum_version in its
+// os/mac/xcode.rb): the tools of the next year's release, so macOS 15
+// needs Xcode 16.0 and the Command Line Tools 16.0.0.
+var homebrewMinimum = map[int]struct{ xcode, clt string }{
+	15: {"16.0", "16.0.0"},
+	14: {"15.0", "15.0.0"},
+	13: {"14.1", "14.0.0"},
+	12: {"13.1", "13.0.0"},
+	11: {"12.2", "12.5.0"},
+}
+
+// homebrewMinimums are the oldest Xcode and Command Line Tools Homebrew
+// builds a formula from source with on macOS (sw_vers -productVersion):
+// homebrewMinimum's before macOS 26, from 26 on (the release after 15) the
+// release's own ("27.0" and "27.0.0" on macOS 27). Below either Homebrew
+// stops before the build ("Your Xcode (26.2) at /Applications/Xcode.app is
+// too outdated.", "Your Command Line Tools are too outdated."). ok is
+// false where they are not known: before macOS 11, or no version.
+func homebrewMinimums(macOS string) (xcode, clt string, ok bool) {
+	major := majorVersion(macOS)
+	if m, found := homebrewMinimum[major]; found {
+		return m.xcode, m.clt, true
+	}
+	if major <= 15 {
+		return "", "", false
+	}
+	return fmt.Sprintf("%d.0", major), fmt.Sprintf("%d.0.0", major), true
+}
+
+// atLeast reports whether the dotted version v is want or later, compared
+// as numbers part by part, a missing part counting as 0 ("16.0" is
+// "16.0.0", and "15.3.0.0.1.1708646388" comes before "16.0.0"); known is
+// false when either is not a dotted version.
+func atLeast(v, want string) (current, known bool) {
+	a, b := versionParts(v), versionParts(want)
+	if a == nil || b == nil {
+		return false, false
+	}
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			return x > y, true
+		}
+	}
+	return true, true
+}
+
+// versionParts are the numbers of a dotted version (nil when a part is
+// not a number).
+func versionParts(v string) []int {
+	var parts []int
+	for _, s := range strings.Split(strings.TrimSpace(v), ".") {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return nil
+		}
+		parts = append(parts, n)
+	}
+	return parts
 }
 
 // ShortVersion is v's major and minor release ("27.0.0.0.1.1788430756" is
