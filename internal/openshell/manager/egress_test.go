@@ -680,6 +680,41 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	}
 }
 
+// An upload of more than the threshold to a host an allow entry exempts is
+// only reported, with or without the block. With the block off the finding
+// points to it; with it on it says the host is exempt, not to turn on a
+// block that is on already.
+func TestLargeUploadToAnExemptHost(t *testing.T) {
+	for _, block := range []bool{false, true} {
+		t.Run(fmt.Sprintf("block %v", block), func(t *testing.T) {
+			e := newEnv(t, func(c *config.Config) {
+				c.OpenShell.Egress.LargeUploadMB = 1
+				c.OpenShell.Egress.BlockLargeUploads = block
+				c.OpenShell.Egress.Allow = []string{"files.example.net"}
+			})
+			e.run()
+			proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+			e.live(sandboxapi.CreateRequest{Name: "upbox"})
+			conn, _ := proxy.open(t, "upbox", "files.example.net:80")
+			const size = 2 << 20
+			_, err := fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: files.example.net\r\nContent-Length: %d\r\n\r\n", size)
+			must(t, err)
+			chunk := bytes.Repeat([]byte("u"), 32<<10)
+			for sent := 0; sent < size; sent += len(chunk) {
+				_, err := conn.Write(chunk)
+				must(t, err)
+			}
+			eventually(t, "the large-upload finding", func() bool { return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 })
+			_ = conn.Close()
+			f := e.tel.findingsOf(audit.SandboxFindingLargeUpload)[0]
+			advises := strings.Contains(f.Remediation, "openshell.egress.block_large_uploads: true cuts such uploads")
+			if f.Severity != "MEDIUM" || advises == block || (block && !strings.Contains(f.Remediation, "exempt")) {
+				t.Fatalf("finding = %+v", f)
+			}
+		})
+	}
+}
+
 func TestEgressSinkMapping(t *testing.T) {
 	e := newEnv(t, nil)
 	e.run()

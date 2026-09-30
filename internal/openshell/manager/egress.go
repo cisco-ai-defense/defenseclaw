@@ -709,13 +709,19 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			m.largeUploadBlocked(ctx, ident, e)
 			return
 		}
+		remediation := "Review what the agent uploaded; block the destination if it is not expected " +
+			"(openshell.egress.block_large_uploads: true cuts such uploads)."
+		if p, ok := m.creds.Lookup(e.BindingID); ok && p.BlockLargeUploads {
+			// Under the block only an exempt destination is reported.
+			remediation = "Review what the agent uploaded. The large-upload block is on, but " + e.Host +
+				" is exempt from it (an unblock, an allow entry or your organization's allowed list names it), so the upload was only reported; " +
+				"remove that entry if the destination is not expected."
+		}
 		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "MEDIUM",
 			Title:       "Large upload to a first-seen destination",
 			Description: fmt.Sprintf("%s sent %d bytes to %s, which it had not contacted before.", e.SandboxName, e.BytesUp, e.Host),
-			Evidence:    truncate(e.Reason, 512), TargetRef: e.Host,
-			Remediation: "Review what the agent uploaded; block the destination if it is not expected " +
-				"(openshell.egress.block_large_uploads: true cuts such uploads).",
+			Evidence:    truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation,
 			Timestamp: e.Time,
 		})
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: e.SandboxName,
