@@ -14,6 +14,8 @@ package enterpriseunix
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,6 +179,10 @@ func (h *rotationHost) reconcile() {
 		attestation.Targets = append(attestation.Targets, target)
 	}
 	attestation.Targets = append(attestation.Targets, h.failed...)
+	if ledger, err := os.ReadFile(filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)); err == nil {
+		sum := sha256.Sum256(ledger)
+		attestation.AuthorizationSHA256 = hex.EncodeToString(sum[:])
+	}
 	data, _ := json.Marshal(attestation)
 	if err := os.WriteFile(h.env.attestationPath(), data, 0o600); err != nil {
 		h.t.Fatal(err)

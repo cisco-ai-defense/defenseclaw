@@ -57,11 +57,8 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
 			data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": false, "target_count": 3, "success_count": 1, "failure_count": 2})
-			if err := os.WriteFile(ledger, data, 0o640); err != nil {
-				t.Fatal(err)
-			}
+			h.publishLedger(data)
 			if before := h.run(Options{Action: ActionStatus}); !before.SecurityComplete {
 				t.Fatalf("the test host must start security-complete: %+v %+v", before.Readiness, before.Warnings)
 			}
@@ -136,10 +133,9 @@ func TestGuardianCleanupPendingIsReported(t *testing.T) {
 	cleanup, _ := json.Marshal(map[string]any{"version": 1, "pending": []map[string]any{
 		{"connector": "kiro", "sid": "", "uid": 1001, "user": "alice", "user_home": "/home/alice"},
 	}})
-	for name, data := range map[string][]byte{managed.HookGuardianAuthorizationFile: ledger, managed.HookGuardianUserCleanupFile: cleanup} {
-		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o640); err != nil {
-			t.Fatal(err)
-		}
+	h.publishLedger(ledger)
+	if err := os.WriteFile(filepath.Join(authDir, managed.HookGuardianUserCleanupFile), cleanup, 0o640); err != nil {
+		t.Fatal(err)
 	}
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		result := h.run(Options{Action: action})

@@ -282,6 +282,33 @@ func (e *Env) readAttestation() (enterprisehooks.CredentialAttestation, error) {
 	return enterprisehooks.ParseCredentialAttestation(data)
 }
 
+// attestationProblem checks the guardian's credential attestation against
+// ledger, the authorization ledger bytes just read: it must be from the
+// reconcile that published them and name a key the gateway holds. torn is
+// set when it is from another reconcile, which a read between the guardian's
+// two writes also sees.
+func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
+	if _, err := os.Lstat(e.attestationPath()); errors.Is(err, os.ErrNotExist) {
+		return "the hook guardian has not published its credential attestation yet", false
+	}
+	attestation, err := e.readAttestation()
+	if err != nil {
+		return "guardian credential attestation: " + err.Error(), false
+	}
+	if !attestation.BoundTo(ledger) {
+		return "the hook guardian's authorization ledger does not match its last credential attestation; the next guardian reconcile publishes both", true
+	}
+	if attestation.KeyID == "" {
+		return "", false
+	}
+	for _, path := range []string{e.committedUserKeyPath(), e.stagedUserKeyPath()} {
+		if data, err := readBounded(path, userKeyMaxBytes); err == nil && connector.UserScopedTokenKeyFingerprint(strings.TrimSpace(string(data))) == attestation.KeyID {
+			return "", false
+		}
+	}
+	return fmt.Sprintf("the hook guardian's last reconcile rendered per-user credentials from key %s, which the gateway no longer holds; the next guardian reconcile renders them again", shortKeyID(attestation.KeyID)), false
+}
+
 func (e *Env) attestationID() string {
 	attestation, err := e.readAttestation()
 	if err != nil {

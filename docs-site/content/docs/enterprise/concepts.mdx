@@ -179,8 +179,14 @@ macOS, where the administrator supplies the file.
 
 The guardian's record of which user is enrolled for which agent. Only the
 guardian writes it; the gateway reads it. On Linux and macOS the gateway checks
-the kernel-reported user ID of each hook call against it. Status and readiness
-come from the ledger, not from a file the gateway can write.
+the kernel-reported user ID of each hook call against it. The ledger keeps a
+user's last success so the guardian can repair that user's hooks. On Linux and
+macOS, every guardian reconcile also writes a credential attestation next to
+the ledger. It is root-only and records what that run did for each target and
+which key it used. Status and verify count the guardian ready only when the
+attestation comes from the same run as the ledger and names a key the gateway
+holds. They name every target the attestation reports failed. Readiness never
+comes from an old success in the ledger or from a file the gateway can write.
 
 ### Runtime descriptor
 

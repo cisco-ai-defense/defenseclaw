@@ -798,11 +798,8 @@ func TestStatusAndVerify(t *testing.T) {
 	requireError(t, h.run(Options{Action: ActionVerify}), codeNotInstalled)
 
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
 	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 2, "success_count": 2})
-	if err := os.WriteFile(ledger, data, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	h.publishLedger(data)
 	verify := h.run(Options{Action: ActionVerify})
 	requireOK(t, verify)
 	if verify.Enrollment.Targets != 2 || !verify.Readiness.Guardian {
@@ -958,11 +955,8 @@ func TestAgentPrefixesReachDiscovery(t *testing.T) {
 func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
 	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": false, "target_count": 2, "success_count": 1, "failure_count": 1})
-	if err := os.WriteFile(ledger, data, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	h.publishLedger(data)
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 		{"user": "alice", "connector": "codex", "ok": true},
 		{"user": "bob", "connector": "devin", "ok": false, "error": `enterprise hooks: connector devin agent version "3999.0.0" is not verified against a known hook contract: no hook contract matches normalized agent version`},
