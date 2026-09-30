@@ -109,6 +109,16 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 // consulted. A request for any connector other than the binding's gets an
 // empty profile, which supports no events and matches no contract.
 func (a *APIServer) hookProfileForRequest(ctx context.Context, name string) connector.HookProfile {
+	profile := a.hookProfileForRequestBase(ctx, name)
+	if name == "copilot" && copilotVSCodeLocalFromContext(ctx) {
+		// A hook command registered for the VS Code Local harness speaks
+		// that harness's dialect (agent_hook_copilot_vscode.go).
+		return connector.CopilotVSCodeLocalProfile(profile)
+	}
+	return profile
+}
+
+func (a *APIServer) hookProfileForRequestBase(ctx context.Context, name string) connector.HookProfile {
 	binding, ok := sandboxauth.FromContext(ctx)
 	if !ok {
 		return a.hookProfileForConnector(name)

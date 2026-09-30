@@ -740,6 +740,14 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		correlationContractID := hookContractID
 		switch correlationContractID {
 		case "copilot-hooks-v1", "copilot-hooks-v2":
+		case CopilotVSCodeLocalContractID:
+			// The VS Code Local harness sends a snake_case body with a
+			// session and a per-call tool_use_id.
+			bindings := appendBindings(base,
+				reported(CorrelationTargetSession, ns, "session", "session_id"),
+				reported(CorrelationTargetTool, ns, "tool_use", "tool_use_id"),
+			)
+			return makeSpec(CorrelationProfileCopilotV1, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "the VS Code Local harness reports session_id and tool_use_id but no turn, agent or model IDs"))
 		default:
 			return CorrelationSpec{}, false
 		}

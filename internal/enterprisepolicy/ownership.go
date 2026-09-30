@@ -47,6 +47,9 @@ type ownershipRecord struct {
 	CreatedDirs     []string `json:"created_dirs,omitempty"`
 	Rewrites        []string `json:"rewrites,omitempty"`
 	UpdatedAt       string   `json:"updated_at"`
+	// OwnedKeys names the values DefenseClaw added to a shared policy
+	// store it does not own whole (the VS Code device policies).
+	OwnedKeys []string `json:"owned_keys,omitempty"`
 }
 
 var recordNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -270,6 +273,9 @@ func ownershipRecordNames(opts Options, connector string) []string {
 	}
 	if connector == ConnectorClaudeCode {
 		names = append(names, claudeVersionFloorRecord)
+	}
+	if connector == ConnectorCopilot {
+		names = append(names, vscodePolicyRecord)
 	}
 	return names
 }

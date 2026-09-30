@@ -233,7 +233,23 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
 				return
 			}
-			if !connector.ValidCopilotHookEvent(event) {
+			vscodeLocal := copilotHookDialectFromHeaders(r.Header) == connector.CopilotHookSurfaceVSCodeLocal
+			if vscodeLocal {
+				// The VS Code Local harness names the event in its body.
+				// It must be the event the hook command is bound to, so a
+				// body cannot pick a weaker event's handling.
+				if !connector.ValidCopilotVSCodeLocalHookEvent(event) {
+					a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+					return
+				}
+				if payloadString(payload, "hook_event_name") != event {
+					a.recordConnectorHookRejection(r.Context(), connectorName, event, "harness_event_mismatch", int64(len(b)))
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "harness_event_mismatch"})
+					return
+				}
+				r = r.WithContext(withCopilotVSCodeLocal(r.Context()))
+			} else if !connector.ValidCopilotHookEvent(event) {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
 				return
@@ -288,6 +304,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// .kiro/hooks command, so the request states which config invoked it.
 		if connectorName == "kiro" {
 			req.HookSurface = kiroHookSurfaceFromHeaders(r.Header)
+		}
+		if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) {
+			req.HookSurface = connector.CopilotHookSurfaceVSCodeLocal
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
@@ -1953,6 +1972,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		fallbackTool := agentHookTrustedActionTool(
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
+		if req.ConnectorName == "copilot" && req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
+			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
+		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
 		)

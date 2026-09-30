@@ -74,6 +74,9 @@ type spec struct {
 	endpoint    string // gateway path ("/api/v1/claude-code/hook")
 	outputField string // response field echoed to stdout ("claude_code_output")
 	style       decisionStyle
+	// dialect is the --hook-surface value a dialect-specific spec serves
+	// (copilotVSCodeLocalSpec); "" for a connector's default spec.
+	dialect string
 	// failOpenOnly is set when the upstream host has no exit-status or
 	// fail-closed hook contract. Runtime, authentication, transport, timeout,
 	// and malformed-response failures must then remain an empty exit-0 allow;
@@ -253,6 +256,21 @@ func cursorActionOutput(event, action, reason string) string {
 		// exit 2 remains Cursor's documented generic block signal.
 		return `{}`
 	}
+}
+
+// copilotVSCodeLocalSpec serves Copilot hook commands registered for the VS
+// Code Local harness (--hook-surface vscode-local). Unlike the Copilot CLI,
+// that harness has a blocking hook contract (a PreToolUse deny, and exit 2
+// as a blocking error), so the connector fail mode governs local failures;
+// emitCopilotVSCodeLocalResult renders them as structured bodies.
+var copilotVSCodeLocalSpec = spec{
+	connector: "copilot", hookName: "copilot-hook", errLabel: "copilot",
+	subject: "copilot tool", endpoint: "/api/v1/copilot/hook",
+	outputField: "hook_output", style: styleHookEcho, dialect: copilotVSCodeLocalSurface,
+	defaultBlockReason: "Blocked by DefenseClaw policy.",
+	oversizedClosed:    failResult{body: tooLarge, exit: blockExit, closed: true},
+	unreachableStrict:  failResult{body: failedClosed, exit: blockExit, closed: true},
+	responseClosed:     failResult{body: failedClosed, exit: blockExit, closed: true},
 }
 
 func specFor(connector string) (spec, bool) {
