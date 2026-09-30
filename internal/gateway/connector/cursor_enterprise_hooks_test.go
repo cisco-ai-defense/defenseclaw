@@ -127,8 +127,35 @@ func TestWindowsCursorEnterprisePathValidation(t *testing.T) {
 	}
 }
 
+func TestWindowsCursorEnterpriseHookCommandIsShellNeutral(t *testing.T) {
+	for _, adapterPath := range []string{
+		testWindowsCursorAdapter,
+		`d:\Cisco Files\O'Brien\cursor-hook.ps1`,
+	} {
+		command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPrefix := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/") +
+			" -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+		if !strings.HasPrefix(command, wantPrefix) {
+			t.Fatalf("Cursor enterprise command = %q, want prefix %q", command, wantPrefix)
+		}
+		if strings.Contains(command, "&") || strings.Contains(command, "'") || strings.Contains(command, `\`) {
+			t.Fatalf("Cursor enterprise command is not neutral to PowerShell and Bash parsing: %q", command)
+		}
+		wantScript := "$input | & " + powershellQuoteLiteral(adapterPath)
+		if decoded := decodePowerShellEncodedCommandForTest(t, command); decoded != wantScript {
+			t.Fatalf("decoded Cursor enterprise command = %q, want %q", decoded, wantScript)
+		}
+		if wantLegacy := "& " + powershellQuoteLiteral(adapterPath); legacyCommand != wantLegacy {
+			t.Fatalf("legacy Cursor enterprise command = %q, want %q", legacyCommand, wantLegacy)
+		}
+	}
+}
+
 func TestMergeVerifyAndRemoveWindowsCursorEnterpriseHooks(t *testing.T) {
-	command, err := windowsCursorEnterpriseHookCommand(testWindowsCursorAdapter)
+	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(testWindowsCursorAdapter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,11 +167,13 @@ func TestMergeVerifyAndRemoveWindowsCursorEnterpriseHooks(t *testing.T) {
   "hooks": {
     "beforeShellExecution": [
       {"type":"command","command":"` + jsonEscapeForTest(t, foreignCommand) + `","timeout":9000,"operator":{"x":1}},
+	  {"type":"command","command":"` + jsonEscapeForTest(t, legacyCommand) + `","timeout":30,"failClosed":true},
       {"type":"command","command":"` + jsonEscapeForTest(t, command) + `","timeout":1,"failClosed":false},
       {"type":"command","command":"` + jsonEscapeForTest(t, nearMatch) + `","timeout":7000}
     ],
     "operatorEvent": [
       {"type":"command","command":"` + jsonEscapeForTest(t, foreignCommand) + `","failClosed":false},
+	  {"type":"command","command":"` + jsonEscapeForTest(t, legacyCommand) + `","failClosed":true},
       {"type":"command","command":"` + jsonEscapeForTest(t, command) + `","failClosed":true}
     ]
   }
@@ -205,7 +234,8 @@ func TestMergeVerifyAndRemoveWindowsCursorEnterpriseHooks(t *testing.T) {
 			continue
 		}
 		for _, entry := range entries {
-			if cursorHookCommand(entry) == command {
+			entryCommand := cursorHookCommand(entry)
+			if entryCommand == command || entryCommand == legacyCommand {
 				t.Fatalf("managed command remains under %s: %#v", event, entry)
 			}
 		}
