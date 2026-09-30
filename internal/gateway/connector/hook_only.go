@@ -1177,6 +1177,20 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			}
 		}
 	}
+	if c.name == "cursor" {
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.patchCursorProxyEnv(opts); err != nil {
+				return fmt.Errorf("cursor proxy env: %w", err)
+			}
+		}
+	}
+	if c.name == "copilot" {
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.patchCopilotProxyEnv(opts); err != nil {
+				return fmt.Errorf("copilot proxy env: %w", err)
+			}
+		}
+	}
 	if c.name == "hermes" {
 		configPath := c.configPath(opts)
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
@@ -1191,12 +1205,31 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.patchHermesProxyEnv(opts, configPath); err != nil {
+				return fmt.Errorf("hermes proxy env: %w", err)
+			}
+		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
 			return c.setup(ctx, opts, configPath)
 		})
 	}
-	if c.name == "openhands" && runtime.GOOS == "darwin" {
-		return c.setupOpenHandsWithTokenRollback(ctx, opts)
+	if c.name == "openhands" {
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.patchOpenHandsProxyEnv(opts); err != nil {
+				return fmt.Errorf("openhands proxy env: %w", err)
+			}
+		}
+		if runtime.GOOS == "darwin" {
+			return c.setupOpenHandsWithTokenRollback(ctx, opts)
+		}
+	}
+	if c.name == "devin" {
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.writeProxyEnvFile(opts); err != nil {
+				return fmt.Errorf("devin proxy env: %w", err)
+			}
+		}
 	}
 	return c.setup(ctx, opts, "")
 }
@@ -1252,7 +1285,15 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 		}
 	}
 	if c.pluginArtifact {
-		return c.setupPluginArtifact(opts)
+		if err := c.setupPluginArtifact(opts); err != nil {
+			return err
+		}
+		if c.name == "amp" && (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			if err := c.writeProxyEnvFile(opts); err != nil {
+				return fmt.Errorf("amp proxy env: %w", err)
+			}
+		}
+		return nil
 	}
 	if c.name == "openhands" {
 		if err := c.migrateOpenHandsConfigTarget(opts, c.configPath(opts)); err != nil {
@@ -2257,6 +2298,79 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 func (c *hookOnlyConnector) effectiveFailClosed(opts SetupOpts) bool {
 	cap := c.HookCapabilities(opts)
 	return cap.SupportsFailClosed && resolveHookFailMode(opts, c) == "closed"
+}
+
+// writeProxyEnvFile writes a JSON env file that the connector's hook script
+// or process wrapper sources at startup. The file sets OPENAI_BASE_URL and
+// ANTHROPIC_BASE_URL to route LLM traffic through the DefenseClaw proxy.
+func (c *hookOnlyConnector) writeProxyEnvFile(opts SetupOpts) error {
+	proxyBase := "http://" + opts.ProxyAddr + "/c/" + c.name
+	envFile := filepath.Join(opts.DataDir, c.name+"_proxy_env.json")
+	env := map[string]string{
+		"OPENAI_BASE_URL":    proxyBase + "/v1",
+		"ANTHROPIC_BASE_URL": proxyBase,
+	}
+	if c.gatewayToken != "" {
+		env["DEFENSECLAW_GATEWAY_TOKEN"] = c.gatewayToken
+	}
+	out, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(envFile), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(envFile, append(out, '\n'), 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[%s] proxy env written to %s\n", c.name, envFile)
+	return nil
+}
+
+// patchCursorProxyEnv writes proxy environment variables for Cursor.
+// Cursor respects OPENAI_BASE_URL from the process environment when
+// using OpenAI-compatible providers.
+func (c *hookOnlyConnector) patchCursorProxyEnv(opts SetupOpts) error {
+	return c.writeProxyEnvFile(opts)
+}
+
+// patchCopilotProxyEnv writes proxy environment variables for Copilot.
+func (c *hookOnlyConnector) patchCopilotProxyEnv(opts SetupOpts) error {
+	return c.writeProxyEnvFile(opts)
+}
+
+// patchHermesProxyEnv writes proxy environment for Hermes. Hermes reads
+// its LLM provider config from config.yaml; the env file is sourced by
+// the hook script wrapper.
+func (c *hookOnlyConnector) patchHermesProxyEnv(opts SetupOpts, _ string) error {
+	return c.writeProxyEnvFile(opts)
+}
+
+// patchOpenHandsProxyEnv writes proxy environment variables for OpenHands.
+// OpenHands respects LLM_BASE_URL and OPENAI_BASE_URL.
+func (c *hookOnlyConnector) patchOpenHandsProxyEnv(opts SetupOpts) error {
+	proxyBase := "http://" + opts.ProxyAddr + "/c/openhands"
+	envFile := filepath.Join(opts.DataDir, "openhands_proxy_env.json")
+	env := map[string]string{
+		"OPENAI_BASE_URL":    proxyBase + "/v1",
+		"ANTHROPIC_BASE_URL": proxyBase,
+		"LLM_BASE_URL":       proxyBase + "/v1",
+	}
+	if c.gatewayToken != "" {
+		env["DEFENSECLAW_GATEWAY_TOKEN"] = c.gatewayToken
+	}
+	out, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(envFile), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(envFile, append(out, '\n'), 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[openhands] proxy env written to %s\n", envFile)
+	return nil
 }
 
 func hermesConfigPath(SetupOpts) string {
