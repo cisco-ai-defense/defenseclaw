@@ -877,6 +877,77 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 			t.Fatal("bind mounts were not probed against the gateway that answers")
 		}
 	})
+	// Setup writes a change for a gateway run by hand, without a restart
+	// or a pending-restart mark (GatewayConfigurator.Write): the doctor
+	// said "✓ Project bind mounts: enabled for the docker driver" and
+	// "OpenShell usage telemetry is off" before any restart, as systemd
+	// reports no start without the unit (fu2 review 1). The start of the
+	// openshell-gateway that pgrep finds says whether the gateway loaded
+	// the files; without one, the doctor cannot tell.
+	t.Run("change written for a gateway run by hand", func(t *testing.T) {
+		const pgrep = "pgrep -u 1000 -f ^([^ ]*/)?openshell-gateway( |$)"
+		for _, tc := range []struct {
+			name string
+			// written is how long ago setup wrote the files; the gateway
+			// started an hour ago.
+			written time.Duration
+			noPID   bool
+			status  openshell.CheckStatus
+			mounts  string
+			tele    string
+		}{
+			{name: "written after the start", written: time.Minute, status: openshell.StatusWarn,
+				mounts: "gateway.toml, but the gateway has not been restarted since it changed",
+				tele:   "/gateway.env, but the gateway has not been restarted since it changed"},
+			{name: "restarted since", written: 2 * time.Hour, status: openshell.StatusPass,
+				mounts: "enabled for the docker driver", tele: "OpenShell usage telemetry is off"},
+			{name: "no gateway process found", written: 2 * time.Hour, noPID: true, status: openshell.StatusWarn,
+				mounts: "gateway.toml, but DefenseClaw cannot tell whether the gateway was restarted on it: it found no start time for that gateway, which runs another way",
+				tele:   "/gateway.env, but DefenseClaw cannot tell whether the gateway was restarted on it"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f, _ := release(t, "0.1.1")
+				off := false
+				f.doctor.WantTelemetry = &off
+				at := time.Now().Add(-tc.written)
+				f.writeTOML(enabledTOML, at)
+				env := filepath.Join(f.dir, "gateway.env")
+				writeFile(t, env, "OPENSHELL_TELEMETRY_ENABLED=false\n", 0o600)
+				if err := os.Chtimes(env, at, at); err != nil {
+					t.Fatal(err)
+				}
+				if tc.noPID {
+					f.runner.On(pgrep, "", errors.New("exit status 1"))
+				} else {
+					f.runner.On(pgrep, "4242\n4250\n", nil)
+					f.runner.On("ps -o etime= -p 4242", "    01:00:00\n", nil)
+				}
+				r := f.run()
+				c := expectCheck(t, r, openshell.CheckIDBindMounts, tc.status, tc.mounts)
+				tele := expectCheck(t, r, openshell.CheckIDTelemetry, tc.status, tc.tele)
+				if tc.status != openshell.StatusPass && !strings.HasPrefix(tele.Detail, "OpenShell usage telemetry is off in ") {
+					t.Fatalf("telemetry detail %q", tele.Detail)
+				}
+				if !f.runner.Called(pgrep) {
+					t.Fatalf("pgrep not asked: %v", f.runner.Calls())
+				}
+				if tc.status == openshell.StatusPass {
+					if c.Fix != nil || tele.Fix != nil {
+						t.Fatalf("fixes %+v, %+v", c.Fix, tele.Fix)
+					}
+					return
+				}
+				for _, fix := range []*openshell.Fix{c.Fix, tele.Fix} {
+					if fix == nil || fix.Automatic || fix.RestartsGateway || !strings.HasPrefix(fix.Summary, "restart the gateway the way you started it, ") {
+						t.Fatalf("fix = %+v", fix)
+					}
+				}
+				if f.runner.Called("systemctl --user restart") {
+					t.Fatal("restarted through the unit that is not there")
+				}
+			})
+		}
+	})
 	// NVIDIA's installer runs for a CLI it upgrades, and sets the unit up.
 	t.Run("OpenShell the install upgrades", func(t *testing.T) {
 		f, _ := release(t, "0.0.40")

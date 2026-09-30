@@ -512,6 +512,21 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			})
 		}
 	})
+	// Setup writes a change for a gateway run by hand without a
+	// pending-restart mark: with no start to compare gateway.toml with,
+	// the doctor cannot say the gateway loaded it (fu2 review 1).
+	t.Run("no start known and no mark", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.runner.On("ps -o etime= -p 7976", "", errors.New("exit status 1"))
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "gateway.toml, but DefenseClaw cannot tell whether the gateway was restarted on it: "+
+			"it found no start time for that gateway, which runs another way")
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.RestartsGateway || c.Fix.Summary != "restart the gateway the way you started it, if you have not since it changed; "+
+			"DefenseClaw restarts it only through the nvidia/openshell/openshell service, which is not installed" {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+	})
 	// The start ps reports is only good to the second: a gateway.toml
 	// written just before the gateway started, in its second, is loaded
 	// (it warned on this Mac, gateway.toml at 04:37:34.4 under a gateway

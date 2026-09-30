@@ -1535,7 +1535,7 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		// Nothing to enable, and no reason to edit docker settings or
 		// restart the gateway for them.
 		mounts.Status, mounts.Detail = StatusSkip, d.MountRefusal+": every run works on a copy"
-		r.telemetryCheck(&tele, st, envErr)
+		r.telemetryCheck(ctx, &tele, st, envErr)
 		return
 	}
 	// Bind mounts reach any host path through the gateway's root Docker
@@ -1582,17 +1582,29 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		}
 	case unverified != nil && r.gateway != nil && r.gateway.Healthy:
 		mounts.Status, mounts.Detail = StatusWarn, "enabled, but DefenseClaw could not confirm that only you can reach the gateway: "+unverified.Error()
+	case r.startUnknown(ctx):
+		// Setup writes the change for a gateway run another way, and its
+		// user restarts it: without its start, "enabled" may be only the
+		// file's.
+		mounts.Status, mounts.Detail = StatusWarn, "enabled in "+st.TOMLPath+", "+restartUnknown
+		mounts.Fix = r.gatewayChangeFix("", "if you have not since "+filepath.Base(st.TOMLPath)+" changed", nil)
 	default:
 		mounts.Status, mounts.Detail = StatusPass, "enabled for the docker driver"
 	}
-	r.telemetryCheck(&tele, st, envErr)
+	r.telemetryCheck(ctx, &tele, st, envErr)
 }
 
 // telemetryCheck compares OpenShell's usage telemetry with
-// openshell.upstream_telemetry.
-func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr error) {
+// openshell.upstream_telemetry. The setting is gateway.env's, which a
+// gateway no gateway service runs has loaded only once its user restarted
+// it after the file changed (manual).
+func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *GatewayConfigState, envErr error) {
 	on := st.TelemetryEnabled()
 	state := map[bool]string{true: "on", false: "off"}[on]
+	manual := st.EnvExists && r.serviceMissing() && !r.nothingToRestart()
+	// Only gateway.env holds the setting.
+	envOnly := *st
+	envOnly.TOMLModTime = time.Time{}
 	switch {
 	case r.GOOS == "darwin":
 		// The Homebrew service's wrapper sources gateway.env before it
@@ -1607,6 +1619,13 @@ func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr e
 		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
 		tele.Fix = r.gatewayChangeFix("set "+EnvTelemetryEnabled+"="+want+" in gateway.env", "",
 			r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}}))
+	case manual && r.restartPending(ctx, &envOnly):
+		tele.Status = StatusWarn
+		tele.Detail = "OpenShell usage telemetry is " + state + " in " + st.EnvPath + ", but the gateway has not been restarted since it changed"
+		tele.Fix = r.gatewayChangeFix("", "with the variables in "+filepath.Base(st.EnvPath)+" in its environment, to load them", nil)
+	case manual && r.startUnknown(ctx):
+		tele.Status, tele.Detail = StatusWarn, "OpenShell usage telemetry is "+state+" in "+st.EnvPath+", "+restartUnknown
+		tele.Fix = r.gatewayChangeFix("", "with the variables in "+filepath.Base(st.EnvPath)+" in its environment, if you have not since it changed", nil)
 	default:
 		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
 	}
@@ -1681,26 +1700,23 @@ func restartPending(st *GatewayConfigState, started time.Time, approx bool) bool
 const psStartSlack = 2 * time.Second
 
 // gatewayStartedAt is when the running gateway started, to tell what
-// configuration it loaded: the service's start (systemd), else on a Mac the
-// start of the openshell-gateway process ps lists, which Homebrew's
+// configuration it loaded: the service's start (systemd), else the start
+// of this user's openshell-gateway process (gatewayPID), which Homebrew's
 // service does not report and a gateway run another way has no service
 // for. It is zero when neither is known.
 func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
 	if r.service != nil && !r.service.StartedAt.IsZero() {
 		return r.service.StartedAt
 	}
-	if r.GOOS != "darwin" {
-		return time.Time{}
-	}
 	if r.startedDone {
 		return r.started
 	}
 	r.startedDone = true
-	gw := r.gatewayProcess(ctx)
-	if gw == nil {
+	pid := r.gatewayPID(ctx)
+	if pid == 0 {
 		return time.Time{}
 	}
-	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-o", "etime=", "-p", strconv.Itoa(gw.pid)}, Timeout: 10 * time.Second})
+	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-o", "etime=", "-p", strconv.Itoa(pid)}, Timeout: 10 * time.Second})
 	if err != nil {
 		return time.Time{}
 	}
@@ -1713,6 +1729,50 @@ func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
 	r.started, r.startedApprox = time.Now().Add(-up-time.Second), true
 	return r.started
 }
+
+// gatewayPID is the process of this user's running openshell-gateway, or
+// 0: on a Mac the one ps lists (gatewayProcess), on Linux the first whose
+// command line pgrep matches (gatewayCommandLine). Linux's ps -o comm= is
+// the name cut to 15 characters, which processes cannot tell from another.
+func (r *doctorRun) gatewayPID(ctx context.Context) int {
+	switch r.GOOS {
+	case "darwin":
+		if gw := r.gatewayProcess(ctx); gw != nil {
+			return gw.pid
+		}
+		return 0
+	case "linux":
+	default:
+		return 0
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "pgrep", Args: []string{"-u", strconv.Itoa(r.Geteuid()), "-f", gatewayCommandLine},
+		Timeout: 10 * time.Second})
+	if err != nil {
+		return 0
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	pid, err := strconv.Atoi(strings.TrimSpace(first))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// gatewayCommandLine is the pattern pgrep -f finds a gateway's process by:
+// a command line whose first word is openshell-gateway, with its path or
+// without.
+const gatewayCommandLine = "^([^ ]*/)?" + GatewayBinary + "( |$)"
+
+// startUnknown reports a gateway that answers, which no gateway service
+// runs, and whose start DefenseClaw could not find (gatewayStartedAt):
+// whether its user restarted it on the configuration on disk is not
+// known.
+func (r *doctorRun) startUnknown(ctx context.Context) bool {
+	return r.serviceMissing() && !r.nothingToRestart() && r.gatewayStartedAt(ctx).IsZero()
+}
+
+// restartUnknown ends the detail of a gateway setting where startUnknown.
+const restartUnknown = "but DefenseClaw cannot tell whether the gateway was restarted on it: it found no start time for that gateway, which runs another way"
 
 // parseElapsed reads ps's etime, "[[dd-]hh:]mm:ss".
 func parseElapsed(s string) (time.Duration, bool) {

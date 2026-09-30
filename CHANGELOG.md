@@ -450,7 +450,12 @@ deleted.
   asked about as `Write this change? DefenseClaw cannot restart this
   gateway: …`, written without a restart, and ends with `restart the
   OpenShell gateway yourself, the way you started it, so it runs on the
-  change above`; teardown restores those files the same way. Setup stops
+  change above`; teardown restores those files the same way. Until that
+  restart the doctor's bind-mounts, telemetry and vm-identity checks warn
+  that the gateway has not been restarted since the change (on Linux the
+  gateway's start comes from `pgrep` and `ps`, as no unit reports it), and
+  with no gateway process found they warn that DefenseClaw cannot tell
+  whether it was, instead of reporting the change loaded. Setup stops
   only where it would have to start that gateway (none answers), with the
   doctor's fix: start it yourself, or, for a gateway DefenseClaw starts
   and restarts, remove that OpenShell and run `sandbox setup
