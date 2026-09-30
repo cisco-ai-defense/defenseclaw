@@ -16,6 +16,21 @@ import (
 	"time"
 )
 
+// LocalKeywordSignal is a named set of keywords used for local fallback routing.
+type LocalKeywordSignal struct {
+	Name     string
+	Keywords []string
+	Operator string // "OR" or "AND"
+}
+
+// LocalKeywordDecision maps a keyword signal to a model backend.
+type LocalKeywordDecision struct {
+	Name      string
+	Priority  int
+	Signal    string // signal name to match
+	ModelRef  string // backend alias
+}
+
 // RemoteRouterClient implements ModelRouter by calling the vLLM Semantic Router
 // classify/intent API. It gets a routing decision (which model to use) without
 // forwarding the request — DefenseClaw handles forwarding via Bifrost.
@@ -26,6 +41,8 @@ type RemoteRouterClient struct {
 	healthClient *http.Client
 	backends     map[string]ModelRouterBackend
 	dotenv       string
+	keywordSignals   []LocalKeywordSignal
+	keywordDecisions []LocalKeywordDecision
 }
 
 const remoteRouterHealthTimeout = 2 * time.Second
@@ -143,16 +160,31 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 		return outcome
 	}
 
-	msgs := make([]classifyMessage, len(input.Messages))
-	for i, m := range input.Messages {
-		msgs[i] = classifyMessage{Role: m.Role, Content: m.Content}
+	// Send only the last user message to the classifier to avoid matching
+	// keywords in system prompts, tool definitions, and conversation history.
+	var lastUserMsg classifyMessage
+	for i := len(input.Messages) - 1; i >= 0; i-- {
+		if strings.EqualFold(input.Messages[i].Role, "user") {
+			lastUserMsg = classifyMessage{Role: input.Messages[i].Role, Content: input.Messages[i].Content}
+			break
+		}
 	}
+	if lastUserMsg.Content == "" {
+		fmt.Fprintf(os.Stderr, "[routing] classify: no user message found in %d messages (roles:", len(input.Messages))
+		for _, m := range input.Messages {
+			fmt.Fprintf(os.Stderr, " %s", m.Role)
+		}
+		fmt.Fprintf(os.Stderr, ")\n")
+		return outcome
+	}
+	contentPreview := lastUserMsg.Content
+	if len(contentPreview) > 200 {
+		contentPreview = contentPreview[:200]
+	}
+	fmt.Fprintf(os.Stderr, "[routing] classify: last user msg (%d chars): %q\n", len(lastUserMsg.Content), contentPreview)
 
-	// v0.3's IntentRequest accepts only text, messages, and options. Keep
-	// gateway-only identity, headers, tools, and policy metadata out of this
-	// trust boundary rather than relying on the classifier to ignore them.
 	reqBody := classifyRequest{
-		Messages: msgs,
+		Messages: []classifyMessage{lastUserMsg},
 		Options:  &classifyOptions{ReturnProbabilities: true},
 	}
 
@@ -176,7 +208,10 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[routing] sr unreachable: falling back to default provider (%v)\n", err)
+		fmt.Fprintf(os.Stderr, "[routing] sr unreachable: trying local keyword fallback (%v)\n", err)
+		if localResult := c.tryLocalKeywordFallback(input); localResult != nil {
+			return *localResult
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || reqCtx.Err() != nil {
 			outcome.FailureCode = SemanticRouteFailureTimeout
 		} else {
@@ -187,23 +222,29 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// A classifier may echo request content in its error body. Never copy
-		// that body into persistent gateway.log; the HTTP status is sufficient
-		// for bounded operational diagnosis.
 		_, _ = io.Copy(io.Discard, resp.Body)
-		fmt.Fprintf(os.Stderr, "[routing] classifier returned HTTP %d; falling back to default provider\n", resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "[routing] classifier returned HTTP %d; trying local keyword fallback\n", resp.StatusCode)
+		if localResult := c.tryLocalKeywordFallback(input); localResult != nil {
+			return *localResult
+		}
 		outcome.FailureCode = SemanticRouteFailureUpstreamStatus
 		return outcome
 	}
 
 	var classResp classifyResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&classResp); err != nil {
-		fmt.Fprintf(os.Stderr, "[routing] decode error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[routing] decode error: trying local keyword fallback (%v)\n", err)
+		if localResult := c.tryLocalKeywordFallback(input); localResult != nil {
+			return *localResult
+		}
 		outcome.FailureCode = SemanticRouteFailureDecode
 		return outcome
 	}
 
 	if classResp.RecommendedModel == "" {
+		if localResult := c.tryLocalKeywordFallback(input); localResult != nil {
+			return *localResult
+		}
 		outcome.FailureCode = SemanticRouteFailureDecode
 		return outcome
 	}
@@ -247,27 +288,35 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 		decision.Provider = provider
 		decision.Model = model
 		decision.TargetURL = strings.TrimRight(strings.TrimSpace(backend.BaseURL), "/")
+		decision.HostHeader = strings.TrimSpace(backend.HostHeader)
 		decision.TargetURLOverride = true
-		// A routing decision always establishes a new credential boundary. Even
-		// when the selected backend is keyless, clear the connector's original
-		// provider key rather than forwarding it to a different backend.
-		decision.APIKeyOverride = true
-		if backend.APIKeyEnv != "" {
-			if tokenResolver != nil {
-				resolved, err := tokenResolver(ctx, provider)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[routing] managed credential resolution failed for provider %q: %v\n", provider, err)
+		switch backend.Auth {
+		case "passthrough":
+			// Forward the client's original Authorization header unchanged.
+			decision.APIKeyOverride = false
+		case "none":
+			// Strip the Authorization header (keyless backend).
+			decision.APIKeyOverride = true
+			decision.APIKey = ""
+		default: // "api_key" or legacy empty
+			decision.APIKeyOverride = true
+			if backend.APIKeyEnv != "" {
+				if tokenResolver != nil {
+					resolved, err := tokenResolver(ctx, provider)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "[routing] managed credential resolution failed for provider %q: %v\n", provider, err)
+						outcome.FailureCode = SemanticRouteFailureCredential
+						return outcome
+					}
+					decision.APIKey = strings.TrimSpace(resolved)
+				} else {
+					decision.APIKey = ResolveAPIKey(backend.APIKeyEnv, c.dotenv)
+				}
+				if decision.APIKey == "" {
+					fmt.Fprintf(os.Stderr, "[routing] credential %q for model alias %q is unavailable: falling back to default provider\n", backend.APIKeyEnv, recommendedAlias)
 					outcome.FailureCode = SemanticRouteFailureCredential
 					return outcome
 				}
-				decision.APIKey = strings.TrimSpace(resolved)
-			} else {
-				decision.APIKey = ResolveAPIKey(backend.APIKeyEnv, c.dotenv)
-			}
-			if decision.APIKey == "" {
-				fmt.Fprintf(os.Stderr, "[routing] credential %q for model alias %q is unavailable: falling back to default provider\n", backend.APIKeyEnv, recommendedAlias)
-				outcome.FailureCode = SemanticRouteFailureCredential
-				return outcome
 			}
 		}
 	}
@@ -293,6 +342,112 @@ func boundedRouterLabel(value string, limit int) string {
 	return b.String()
 }
 
+// SetLocalKeywords configures the local keyword fallback so the gateway can
+// route by keyword when the remote semantic router is unreachable.
+func (c *RemoteRouterClient) SetLocalKeywords(signals []LocalKeywordSignal, decisions []LocalKeywordDecision) {
+	c.keywordSignals = signals
+	c.keywordDecisions = decisions
+}
+
+// localKeywordClassify performs gateway-local keyword matching as a fallback
+// when the remote semantic router is unavailable. Returns the matched backend
+// alias or "" if no decision matched.
+func (c *RemoteRouterClient) localKeywordClassify(text string) string {
+	if len(c.keywordSignals) == 0 || len(c.keywordDecisions) == 0 {
+		return ""
+	}
+	lower := strings.ToLower(text)
+	matched := make(map[string]bool, len(c.keywordSignals))
+	for _, sig := range c.keywordSignals {
+		for _, kw := range sig.Keywords {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				matched[sig.Name] = true
+				break
+			}
+		}
+	}
+	type candidate struct {
+		priority int
+		modelRef string
+	}
+	var best *candidate
+	for _, dec := range c.keywordDecisions {
+		if !matched[dec.Signal] {
+			continue
+		}
+		if best == nil || dec.Priority > best.priority {
+			best = &candidate{priority: dec.Priority, modelRef: dec.ModelRef}
+		}
+	}
+	if best != nil {
+		return best.modelRef
+	}
+	return ""
+}
+
+func (c *RemoteRouterClient) tryLocalKeywordFallback(input *ModelRouterInput) *SemanticRouteOutcome {
+	if input == nil || len(c.keywordSignals) == 0 {
+		return nil
+	}
+	// Only classify based on the last user message to avoid matching
+	// keywords in system prompts, tool definitions, and conversation history.
+	var text string
+	for i := len(input.Messages) - 1; i >= 0; i-- {
+		if strings.EqualFold(input.Messages[i].Role, "user") {
+			text = input.Messages[i].Content
+			break
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	alias := c.localKeywordClassify(text)
+	textPreview := text
+	if len(textPreview) > 200 {
+		textPreview = textPreview[:200]
+	}
+	fmt.Fprintf(os.Stderr, "[routing] local keyword classify: text=%q signals=%d decisions=%d result=%q\n", textPreview, len(c.keywordSignals), len(c.keywordDecisions), alias)
+	if alias == "" {
+		return nil
+	}
+	backend, ok := c.backends[alias]
+	if !ok {
+		return nil
+	}
+	model := strings.TrimSpace(backend.Model)
+	provider := strings.TrimSpace(backend.Provider)
+	if model == "" || provider == "" {
+		return nil
+	}
+	decision := &ModelRouterDecision{
+		Model:             model,
+		Provider:          provider,
+		TargetURL:         strings.TrimRight(strings.TrimSpace(backend.BaseURL), "/"),
+		HostHeader:        strings.TrimSpace(backend.HostHeader),
+		TargetURLOverride: true,
+		Reason:            fmt.Sprintf("local-keyword-fallback model=%s", alias),
+	}
+	switch backend.Auth {
+	case "passthrough":
+		decision.APIKeyOverride = false
+	case "none":
+		decision.APIKeyOverride = true
+		decision.APIKey = ""
+	default: // "api_key" or legacy empty
+		decision.APIKeyOverride = true
+		if backend.APIKeyEnv != "" {
+			decision.APIKey = ResolveAPIKey(backend.APIKeyEnv, c.dotenv)
+			if decision.APIKey == "" {
+				fmt.Fprintf(os.Stderr, "[routing] local fallback: credential %q for %q unavailable\n", backend.APIKeyEnv, alias)
+				return nil
+			}
+		}
+	}
+	result := outcomeFromDecision(input, decision, 0)
+	fmt.Fprintf(os.Stderr, "[routing] local keyword fallback matched: %s → %s/%s\n", alias, provider, model)
+	return &result
+}
+
 var _ ModelRouter = (*RemoteRouterClient)(nil)
 
 // Healthy checks if the SR service is reachable.
@@ -312,4 +467,15 @@ func (c *RemoteRouterClient) Healthy(ctx context.Context) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+func (c *RemoteRouterClient) Models() []string {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.backends))
+	for name := range c.backends {
+		names = append(names, name)
+	}
+	return names
 }

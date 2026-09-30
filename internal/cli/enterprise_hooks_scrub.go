@@ -92,6 +92,10 @@ var claudeManagedEnvKeys = map[string]struct{}{
 	"OTEL_LOG_TOOL_DETAILS":               {},
 	"OTEL_RESOURCE_ATTRIBUTES":            {},
 	"OTEL_SERVICE_NAME":                   {},
+	"ANTHROPIC_BASE_URL":                  {},
+	"ANTHROPIC_BEDROCK_BASE_URL":          {},
+	"CLAUDE_CODE_USE_BEDROCK":             {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":       {},
 }
 
 var (

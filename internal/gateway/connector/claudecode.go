@@ -44,6 +44,10 @@ import (
 type ClaudeCodeConnector struct {
 	gatewayToken string
 	masterKey    string
+	// hybridProxy is true when guardrail.proxy_mode=hybrid. Claude Code then
+	// sends Anthropic Messages traffic to the local proxy without X-DC-Auth,
+	// so loopback callers must be trusted even when a gateway token exists.
+	hybridProxy bool
 }
 
 // NewClaudeCodeConnector creates a new Claude Code connector.
@@ -67,6 +71,7 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	c.hybridProxy = opts.HybridProxyMode
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 	if err != nil {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
@@ -239,9 +244,13 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		bearer := strings.TrimPrefix(auth, "Bearer ")
+		if c.gatewayToken != "" && SecureTokenMatch(bearer, c.gatewayToken) {
+			return true
+		}
+		if c.masterKey != "" && SecureTokenMatch(bearer, c.masterKey) {
 			return true
 		}
 	}
@@ -363,8 +372,12 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 		telemetryEndpoint = profile.NativeOTLP.Endpoint
 	}
 
+	llmMode := LLMTrafficModeForConnector(c.Name())
+	if opts.HybridProxyMode {
+		llmMode = LLMTrafficModeHybrid
+	}
 	return ConnectorCapabilities{
-		LLMTrafficMode: LLMTrafficModeForConnector(c.Name()),
+		LLMTrafficMode: llmMode,
 		ACP:            ACPAgentCapabilityForConnector(c.Name()),
 		Hooks:          c.HookCapabilities(opts),
 		MCP: SurfaceCapability{
@@ -1428,6 +1441,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 // operator's pristine values for any keys we overwrite. Keep this
 // list in sync with the CLAUDE_CODE_* / OTEL_* vars Claude reads.
 var claudeCodeOtelEnvKeys = []string{
+	"ANTHROPIC_BASE_URL",
 	"CLAUDE_CODE_ENABLE_TELEMETRY",
 	"DEFENSECLAW_FAIL_MODE",
 	"OTEL_METRICS_EXPORTER",
@@ -1481,6 +1495,19 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	env, err := spec.EnvBlock()
 	if err != nil {
 		return map[string]string{}
+	}
+	if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+		proxyBase := "http://" + opts.ProxyAddr + "/c/claudecode"
+		// Route Claude Code traffic through the DefenseClaw proxy using
+		// the Anthropic Messages API (same approach as OpenRouter).
+		// ANTHROPIC_BASE_URL redirects all API calls to the proxy.
+		// ANTHROPIC_AUTH_TOKEN sends the gateway token as Bearer (not x-api-key).
+		// ANTHROPIC_API_KEY must be empty to prevent fallback to direct Anthropic auth.
+		env["ANTHROPIC_BASE_URL"] = proxyBase
+		if gwToken := resolveGatewayTokenForProxyEnv(); gwToken != "" {
+			env["ANTHROPIC_AUTH_TOKEN"] = gwToken
+		}
+		env["ANTHROPIC_API_KEY"] = ""
 	}
 	return env
 }

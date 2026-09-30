@@ -62,7 +62,29 @@ type SRModelCard struct {
 }
 
 type SRSignalsConfig struct {
-	Keywords []SRKeywordSignal `yaml:"keywords,omitempty"`
+	Keywords   []SRKeywordSignal    `yaml:"keywords,omitempty"`
+	Embeddings []SREmbeddingSignal  `yaml:"embeddings,omitempty"`
+	Domains    []SRDomainSignal     `yaml:"domains,omitempty"`
+	Complexity []SRComplexitySignal `yaml:"complexity,omitempty"`
+}
+
+type SREmbeddingSignal struct {
+	Name       string   `yaml:"name"`
+	Candidates []string `yaml:"candidates"`
+}
+
+type SRDomainSignal struct {
+	Name       string   `yaml:"name"`
+	Categories []string `yaml:"categories"`
+}
+
+type SRComplexitySignal struct {
+	Name             string   `yaml:"name"`
+	MinMessageLength int      `yaml:"min_message_length,omitempty"`
+	MaxMessageLength int      `yaml:"max_message_length,omitempty"`
+	MinToolCount     int      `yaml:"min_tool_count,omitempty"`
+	MaxToolCount     int      `yaml:"max_tool_count,omitempty"`
+	Indicators       []string `yaml:"indicators,omitempty"`
 }
 
 type SRKeywordSignal struct {
@@ -143,6 +165,7 @@ type SRGlobalEmbeddings struct {
 
 type SRGlobalSemanticEmbedding struct {
 	MMBertModelPath string                   `yaml:"mmbert_model_path"`
+	Qwen3ModelPath  string                   `yaml:"qwen3_model_path,omitempty"`
 	EmbeddingConfig SREmbeddingRuntimeConfig `yaml:"embedding_config"`
 }
 
@@ -162,11 +185,14 @@ type SREmptyProviders struct {
 // TranslateInput mirrors the fields needed from config.RoutingConfig
 // without importing the config package.
 type TranslateInput struct {
-	Port      int
-	Algorithm string
-	Models    []TranslateModel
-	Signals   TranslateSignals
-	Decisions []TranslateDecision
+	Port             int
+	Algorithm        string
+	ModelSelection   bool
+	MMBertModelPath  string
+	Qwen3ModelPath   string
+	Models           []TranslateModel
+	Signals          TranslateSignals
+	Decisions        []TranslateDecision
 }
 
 type TranslateModel struct {
@@ -179,7 +205,30 @@ type TranslateModel struct {
 }
 
 type TranslateSignals struct {
-	Keywords []TranslateKeyword
+	Keywords   []TranslateKeyword
+	Embeddings []TranslateEmbedding
+	Domains    []TranslateDomain
+	Complexity []TranslateComplexity
+}
+
+type TranslateEmbedding struct {
+	Name        string
+	Description string
+	Examples    []string
+}
+
+type TranslateDomain struct {
+	Name       string
+	Categories []string
+}
+
+type TranslateComplexity struct {
+	Name             string
+	MinMessageLength int
+	MaxMessageLength int
+	MinToolCount     int
+	MaxToolCount     int
+	Indicators       []string
 }
 
 type TranslateKeyword struct {
@@ -252,10 +301,11 @@ func Translate(input TranslateInput) *SRConfig {
 			Stores: SRGlobalStores{SemanticCache: SRFeatureToggle{Enabled: false}},
 			ModelCatalog: SRGlobalModelCatalog{
 				Embeddings: SRGlobalEmbeddings{Semantic: SRGlobalSemanticEmbedding{
-					MMBertModelPath: "",
+					MMBertModelPath: input.MMBertModelPath,
+					Qwen3ModelPath:  input.Qwen3ModelPath,
 					EmbeddingConfig: SREmbeddingRuntimeConfig{
-						PreloadEmbeddings:  false,
-						EnableSoftMatching: false,
+						PreloadEmbeddings:  input.MMBertModelPath != "" || input.Qwen3ModelPath != "",
+						EnableSoftMatching: input.ModelSelection || input.MMBertModelPath != "" || input.Qwen3ModelPath != "",
 					},
 				}},
 				KBs: []interface{}{},
@@ -291,6 +341,28 @@ func Translate(input TranslateInput) *SRConfig {
 			Name:     k.Name,
 			Keywords: k.Keywords,
 			Operator: k.Operator,
+		})
+	}
+	for _, e := range input.Signals.Embeddings {
+		cfg.Routing.Signals.Embeddings = append(cfg.Routing.Signals.Embeddings, SREmbeddingSignal{
+			Name:       e.Name,
+			Candidates: e.Examples,
+		})
+	}
+	for _, d := range input.Signals.Domains {
+		cfg.Routing.Signals.Domains = append(cfg.Routing.Signals.Domains, SRDomainSignal{
+			Name:       d.Name,
+			Categories: d.Categories,
+		})
+	}
+	for _, c := range input.Signals.Complexity {
+		cfg.Routing.Signals.Complexity = append(cfg.Routing.Signals.Complexity, SRComplexitySignal{
+			Name:             c.Name,
+			MinMessageLength: c.MinMessageLength,
+			MaxMessageLength: c.MaxMessageLength,
+			MinToolCount:     c.MinToolCount,
+			MaxToolCount:     c.MaxToolCount,
+			Indicators:       c.Indicators,
 		})
 	}
 

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 
 	acpcatalog "github.com/defenseclaw/defenseclaw/internal/acp"
 )
@@ -70,6 +71,10 @@ type SetupOpts struct {
 	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken             string // gateway bearer token; baked into hook curl -H
+	// HybridProxyMode is true when guardrail.proxy_mode=hybrid, meaning a
+	// hook-only connector should also route LLM traffic through the proxy.
+	// When set, Setup injects ANTHROPIC_BASE_URL pointing at ProxyAddr.
+	HybridProxyMode bool
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -171,6 +176,11 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+
+	// RoutingEnabled is true when routing.enabled=true in config.yaml.
+	// Hook-only connectors use this to redirect LLM traffic through the
+	// proxy for model routing, even when HybridProxyMode is false.
+	RoutingEnabled bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
@@ -401,11 +411,12 @@ func ACPAgentCapabilityForConnector(name string) ACPCapability {
 	return ACPCapability{}
 }
 
-// LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
-// ConnectorCapabilities.LLMTrafficMode.
+// LLMTrafficModeProxy / LLMTrafficModeHooksOnly / LLMTrafficModeHybrid are
+// the values of ConnectorCapabilities.LLMTrafficMode.
 const (
 	LLMTrafficModeProxy     = "proxy"
 	LLMTrafficModeHooksOnly = "hooks-only"
+	LLMTrafficModeHybrid    = "hybrid"
 )
 
 // LLMTrafficModeForConnector returns the traffic mode for a connector
@@ -418,6 +429,23 @@ func LLMTrafficModeForConnector(name string) string {
 		return LLMTrafficModeProxy
 	}
 	return LLMTrafficModeHooksOnly
+}
+
+// resolveGatewayTokenForProxyEnv reads the gateway token from the dotenv
+// file at ~/.defenseclaw/.env. Used by standalone env-builder functions
+// that don't have a connector receiver.
+func resolveGatewayTokenForProxyEnv() string {
+	envPath := homePath(".defenseclaw", ".env")
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "DEFENSECLAW_GATEWAY_TOKEN=") {
+			return strings.TrimPrefix(line, "DEFENSECLAW_GATEWAY_TOKEN=")
+		}
+	}
+	return ""
 }
 
 // ConnectorCapabilityProvider — optional, connectors that can describe their

@@ -899,6 +899,11 @@
         "connector": {
           "$ref": "#/$defs/boundedString"
         },
+        "proxy_mode": {
+          "type": "string",
+          "enum": ["", "hybrid"],
+          "default": ""
+        },
         "allow_empty_providers": {
           "type": "boolean",
           "default": false
@@ -3484,6 +3489,10 @@
         "enabled": {
           "type": "boolean"
         },
+        "model_selection": {
+          "type": "boolean",
+          "description": "Enable semantic router model selection so keyword-based routing decisions are enforced instead of always falling through to the default model."
+        },
         "version": {
           "type": "string",
           "enum": [
@@ -3544,12 +3553,38 @@
               "base_url": {
                 "$ref": "#/$defs/boundedString"
               },
+              "host_header": {
+                "$ref": "#/$defs/boundedString"
+              },
+              "auth": {
+                "type": "string",
+                "description": "Authentication mode: passthrough (forward client auth), api_key (use api_key_env), none (strip auth), aws_sigv4 (Phase 2).",
+                "enum": [
+                  "passthrough",
+                  "api_key",
+                  "none",
+                  "aws_sigv4"
+                ]
+              },
               "api_key_env": {
                 "$ref": "#/$defs/envName"
               },
               "capabilities": {
                 "$ref": "#/$defs/stringList"
               }
+            }
+          }
+        },
+        "embeddings": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Embedding model paths for semantic classification signals.",
+          "properties": {
+            "mmbert_model_path": {
+              "type": "string"
+            },
+            "qwen3_model_path": {
+              "type": "string"
             }
           }
         },
@@ -3594,6 +3629,103 @@
                   }
                 }
               }
+            },
+            "embeddings": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "examples"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "examples": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            },
+            "domains": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "categories"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "categories": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            },
+            "complexity": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "min_message_length": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "max_message_length": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "min_tool_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "max_tool_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "indicators": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
             }
           }
         },
@@ -3630,13 +3762,24 @@
                       "type": "string",
                       "enum": [
                         "keyword",
-                        "KEYWORD"
+                        "KEYWORD",
+                        "embedding",
+                        "EMBEDDING",
+                        "domain",
+                        "DOMAIN",
+                        "complexity",
+                        "COMPLEXITY"
                       ]
                     },
                     "name": {
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 128
+                    },
+                    "min_confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
                     }
                   }
                 }

@@ -111,7 +111,7 @@ func TestRoutingConfigValidateRejectsInvalidRelationships(t *testing.T) {
 			c.Decisions[0].Conditions = []RoutingCondition{{Type: "keyword", Name: "missing"}}
 		}, want: "unknown keyword signal"},
 		{name: "unsupported condition", edit: func(c *RoutingConfig) {
-			c.Decisions[0].Conditions = []RoutingCondition{{Type: "embedding", Name: "code"}}
+			c.Decisions[0].Conditions = []RoutingCondition{{Type: "magic", Name: "code"}}
 		}, want: "unsupported"},
 		{name: "invalid signal operator", edit: func(c *RoutingConfig) { c.Signals.Keywords[0].Operator = "XOR" }, want: "AND or OR"},
 		{name: "invalid key env", edit: func(c *RoutingConfig) { c.Models[1].APIKeyEnv = "not-valid!" }, want: "environment variable"},
@@ -141,5 +141,116 @@ func TestRoutingConfigValidateRejectsInvalidRelationships(t *testing.T) {
 				t.Fatalf("Validate() = %v, want substring %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestRoutingFullSignalConfigRoundTrip(t *testing.T) {
+	cfg := RoutingConfig{
+		Enabled:    true,
+		Embeddings: RoutingEmbeddingsConfig{MMBertModelPath: "/tmp/mmbert"},
+		Models: []RoutingModelBackend{
+			{Name: "cloud", Provider: "openai", Model: "o4-mini", BaseURL: "https://api.openai.com/v1", APIKeyEnv: "OPENAI_API_KEY"},
+			{Name: "local", Provider: "openai", Model: "llama3.2:3b", BaseURL: "http://localhost:11434/v1"},
+		},
+		Signals: RoutingSignalConfig{
+			Keywords:   []RoutingKeywordSignal{{Name: "planning", Keywords: []string{"plan", "design"}, Operator: "OR"}},
+			Embeddings: []RoutingEmbeddingSignal{{Name: "arch", Description: "architecture", Examples: []string{"design a system"}}},
+			Domains:    []RoutingDomainSignal{{Name: "devops", Categories: []string{"kubernetes"}}},
+			Complexity: []RoutingComplexitySignal{{Name: "high", MinMessageLength: 500}},
+		},
+		Decisions: []RoutingDecisionRule{
+			{Name: "complex-to-cloud", Priority: 100, ModelRefs: []string{"cloud"},
+				Conditions: []RoutingCondition{
+					{Type: "embedding", Name: "arch", MinConfidence: 0.8},
+					{Type: "complexity", Name: "high"},
+				}, Operator: "AND"},
+			{Name: "plan-to-cloud", Priority: 90, ModelRefs: []string{"cloud"},
+				Conditions: []RoutingCondition{{Type: "keyword", Name: "planning"}}},
+			{Name: "devops-to-local", Priority: 80, ModelRefs: []string{"local"},
+				Conditions: []RoutingCondition{{Type: "domain", Name: "devops"}}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("full signal config should validate, got: %v", err)
+	}
+}
+
+func TestRoutingEmptySignalsWithEnabledRouting(t *testing.T) {
+	cfg := RoutingConfig{
+		Enabled: true,
+		Models: []RoutingModelBackend{{
+			Name: "test", Provider: "openai", Model: "gpt-4o", BaseURL: "https://api.openai.com/v1",
+		}},
+		Signals:   RoutingSignalConfig{},
+		Decisions: nil,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty signals with enabled routing should be valid: %v", err)
+	}
+}
+
+func TestRoutingExistingKeywordOnlyConfigStillValid(t *testing.T) {
+	cfg := RoutingConfig{
+		Enabled: true,
+		Models: []RoutingModelBackend{{
+			Name: "test", Provider: "openai", Model: "gpt-4o", BaseURL: "https://api.openai.com/v1",
+		}},
+		Signals: RoutingSignalConfig{
+			Keywords: []RoutingKeywordSignal{{Name: "code", Keywords: []string{"fix", "debug"}, Operator: "OR"}},
+		},
+		Decisions: []RoutingDecisionRule{{
+			Name: "route-code", Priority: 100, ModelRefs: []string{"test"},
+			Conditions: []RoutingCondition{{Type: "keyword", Name: "code"}},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("keyword-only config must remain valid: %v", err)
+	}
+}
+
+func TestRoutingValidateRejectsEmbeddingWithoutModelPaths(t *testing.T) {
+	cfg := RoutingConfig{
+		Enabled: true,
+		Models: []RoutingModelBackend{{
+			Name: "test", Provider: "openai", Model: "gpt-4o", BaseURL: "https://api.openai.com/v1",
+		}},
+		Signals: RoutingSignalConfig{
+			Embeddings: []RoutingEmbeddingSignal{{Name: "arch", Examples: []string{"design"}}},
+		},
+		Decisions: []RoutingDecisionRule{{
+			Name: "route-arch", Priority: 100, ModelRefs: []string{"test"},
+			Conditions: []RoutingCondition{{Type: "embedding", Name: "arch"}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for embedding condition without model paths")
+	}
+	if !strings.Contains(err.Error(), "embedding model path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRoutingValidateRejectsMinConfidenceOutOfRange(t *testing.T) {
+	cfg := RoutingConfig{
+		Enabled:    true,
+		Embeddings: RoutingEmbeddingsConfig{MMBertModelPath: "/tmp/mmbert"},
+		Models: []RoutingModelBackend{{
+			Name: "test", Provider: "openai", Model: "gpt-4o", BaseURL: "https://api.openai.com/v1",
+		}},
+		Signals: RoutingSignalConfig{
+			Embeddings: []RoutingEmbeddingSignal{{Name: "arch", Examples: []string{"design"}}},
+		},
+		Decisions: []RoutingDecisionRule{{
+			Name: "route-arch", Priority: 100, ModelRefs: []string{"test"},
+			Conditions: []RoutingCondition{{Type: "embedding", Name: "arch", MinConfidence: 1.5}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for min_confidence > 1.0")
+	}
+	if !strings.Contains(err.Error(), "min_confidence") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

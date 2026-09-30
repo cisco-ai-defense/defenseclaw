@@ -1478,6 +1478,24 @@ func TestClaudeCode_Authenticate_Loopback(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Authenticate_HybridLoopbackWithGatewayToken(t *testing.T) {
+	c := NewClaudeCodeConnector()
+	c.SetCredentials("my-token", "my-master")
+	c.hybridProxy = true
+
+	r := httptest.NewRequest("POST", "/v1/messages", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	if !c.Authenticate(r) {
+		t.Fatal("hybrid proxy must accept loopback Claude Code traffic without X-DC-Auth")
+	}
+
+	r2 := httptest.NewRequest("POST", "/v1/messages", nil)
+	r2.RemoteAddr = "10.0.0.5:54321"
+	if c.Authenticate(r2) {
+		t.Fatal("hybrid proxy must still reject non-loopback callers without a token")
+	}
+}
+
 func TestClaudeCode_Authenticate_Token(t *testing.T) {
 	c := NewClaudeCodeConnector()
 	c.SetCredentials("my-token", "my-master")
