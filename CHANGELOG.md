@@ -356,8 +356,10 @@ deleted.
   when every host those rules name in the call is one the sandbox's proxy
   reaches because of an unblock: a sandbox unblock does this in that
   sandbox, an `--always` unblock in every sandbox. Subdomains nobody
-  unblocked, names next to a shell expansion, calls another rule flags too
-  and hosts the proxy allows for another reason keep their verdict. The
+  unblocked, names next to a shell expansion, calls another rule flags too,
+  calls Cisco AI Defense or the LLM judge flags or blocks (a custom-policy
+  block that names no rule included) and hosts the proxy allows for another
+  reason keep their verdict. The
   audit row's reason names the rule that was not applied, and
   `extra.sandbox_egress_unblocked` the unblocks. Both drivers.
 

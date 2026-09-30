@@ -73,13 +73,21 @@ const sandboxEgressUnblockExtra = "sandbox_egress_unblocked"
 // request's sandbox (SandboxIngressConfig.EgressUnblock). ok is false, and
 // resp unchanged, otherwise. A destination the request names in a form the
 // scan cannot read as one host (a shell expansion next to it, a longer name
-// that only contains the domain) keeps the verdict.
+// that only contains the domain) keeps the verdict, and so does a verdict a
+// scan lane took part in (Cisco AI Defense, the LLM judge), which may block
+// without naming a rule.
 func (a *APIServer) liftUnblockedDestinations(ctx context.Context, req agentHookRequest, resp agentHookResponse) (agentHookResponse, bool) {
 	action := strings.ToLower(strings.TrimSpace(resp.Action))
 	raw := strings.ToLower(strings.TrimSpace(resp.RawAction))
 	if (action == "" || action == "allow") && (raw == "" || raw == "allow") &&
 		severityRank[strings.ToUpper(strings.TrimSpace(resp.Severity))] < severityRank["LOW"] {
 		// A plain allow: nothing to lift.
+		return resp, false
+	}
+	if resp.laneVerdict {
+		// A scan lane (Cisco AI Defense, the LLM judge) took part: it may
+		// block or raise the severity without naming a rule, so the
+		// destination rules alone did not decide the verdict.
 		return resp, false
 	}
 	binding, ok := sandboxauth.FromContext(ctx)

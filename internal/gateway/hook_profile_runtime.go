@@ -155,6 +155,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
 		SourceReason:      resp.SourceReason,
+		laneVerdict:       resp.laneVerdict,
 	}
 }
 
@@ -173,5 +174,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
 		SourceReason:      resp.SourceReason,
+		laneVerdict:       resp.laneVerdict,
 	}
 }

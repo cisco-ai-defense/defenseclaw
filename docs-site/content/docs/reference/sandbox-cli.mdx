@@ -927,8 +927,9 @@ An unblock also stops DefenseClaw's destination rules (such as
 blocking tool calls that name the unblocked host, in the sandboxes the
 unblock covers: the agent is no longer told a destination is blocked that
 the proxy lets it reach, and the activity feed shows no finding for it. A
-call that names a subdomain you did not unblock, or that another rule
-flags too, keeps its verdict.
+call that names a subdomain you did not unblock, that another rule flags
+too, or that Cisco AI Defense or the LLM judge flags or blocks (even without
+naming a rule), keeps its verdict.
 
 ```bash
 defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a

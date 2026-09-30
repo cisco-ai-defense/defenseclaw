@@ -558,8 +558,9 @@ refused with "blocked by your organization's DefenseClaw policy".
 Once a host is unblocked, DefenseClaw's tool-call rules for known exfil
 destinations (such as `C2-WEBHOOK-SITE`) stop flagging calls to it in the
 sandboxes the unblock covers, so the agent is not told the destination is
-blocked while the proxy lets it through. Calls to its subdomains, and calls
-another rule flags, keep their notice.
+blocked while the proxy lets it through. Calls to its subdomains, calls
+another rule flags, and calls Cisco AI Defense or the LLM judge flags or
+blocks keep their notice.
 
 ### Answer the rare asks
 

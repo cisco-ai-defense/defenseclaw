@@ -108,6 +108,9 @@ type claudeCodeHookResponse struct {
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled *bool  `json:"-"`
 	SourceReason     string `json:"-"`
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// took part in the verdict. Never serialized.
+	laneVerdict bool
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -283,6 +286,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.laneVerdict = verdict.laneVerdict
 	return resp
 }
 

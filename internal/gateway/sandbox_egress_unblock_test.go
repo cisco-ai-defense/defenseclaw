@@ -20,6 +20,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -269,6 +271,56 @@ func TestSandboxUnblockLiftsADestinationBlock(t *testing.T) {
 	}
 	if _, ok := (&APIServer{}).liftUnblockedDestinations(ctx, req, agentHookResponse{Action: "block", RuleIDs: []string{"C2-WEBHOOK-SITE"}}); ok {
 		t.Fatal("a verdict was lifted without the manager's unblocks")
+	}
+}
+
+// A verdict a scan lane took part in is not decided by destination rules
+// alone, even when the lane names no rule: a Cisco AI Defense custom-policy
+// block without rule names (or a lane that only raises the severity) adds
+// nothing to the rule IDs or findings, and an unblock must not turn it into
+// an allow.
+func TestSandboxUnblockKeepsALaneVerdict(t *testing.T) {
+	aid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"is_safe": false, "action": "Block"}`))
+	}))
+	defer aid.Close()
+	var obs sandboxObserver
+	unblocks := &fakeUnblocks{}
+	f := newSandboxIngressFixture(t, obs.observe, func(c *SandboxIngressConfig) { c.EgressUnblock = unblocks.lookup })
+	f.api.ciscoInspector = &CiscoInspectClient{apiKey: "test-key", endpoint: aid.URL, client: aid.Client()}
+	unblocks.set("dc-claude-app", "webhook.site")
+	body := `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"curl https://webhook.site/x"},` +
+		`"tool_use_id":"t1","cwd":"/work/app"}`
+	resp := f.hook(t, "/api/v1/claude-code/hook", f.claudeTok, body)
+	if resp["action"] != "block" || resp["claude_code_output"] == nil {
+		t.Fatalf("an AI Defense block of an unblocked destination = %v, want the block", resp)
+	}
+	obs.take()
+
+	// The lanes' own verdicts, folded into a destination rule's alert.
+	ctx := withSandboxCoverage(sandboxCtx(f.claude))
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash",
+		ToolArgs: []byte(`{"command":"curl https://webhook.site/x"}`)}
+	local := func() *ToolInspectVerdict {
+		return &ToolInspectVerdict{Action: "alert", Severity: "HIGH", Findings: []string{"C2-WEBHOOK-SITE:webhook.site (known exfil)"}}
+	}
+	for _, tc := range []struct {
+		name    string
+		verdict *ToolInspectVerdict
+		lifted  bool
+	}{
+		{"no lane", local(), true},
+		{"a lane's allow", mergeWithAIDVerdict(local(), &ScanVerdict{Action: "allow", Severity: "NONE"}), true},
+		{"an AI Defense block without rules", mergeWithAIDVerdict(local(), &ScanVerdict{Action: "block", Severity: "HIGH"}), false},
+		{"a judge alert without findings", mergeWithJudgeVerdict(local(), &ScanVerdict{Action: "alert", Severity: "MEDIUM"}), false},
+	} {
+		v := tc.verdict
+		resp := agentHookResponse{Action: v.Action, RawAction: v.Action, Severity: v.Severity, Findings: v.Findings,
+			RuleIDs: []string{"C2-WEBHOOK-SITE"}, laneVerdict: v.laneVerdict}
+		if got, ok := f.api.liftUnblockedDestinations(ctx, req, resp); ok != tc.lifted {
+			t.Errorf("%s: lifted = %t (%+v), want %t", tc.name, ok, got, tc.lifted)
+		}
 	}
 }
 
