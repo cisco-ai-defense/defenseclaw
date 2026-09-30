@@ -1,16 +1,13 @@
 {
-  "title": "Setup",
+  "title": "Guardrails and scanners",
   "pages": [
     "index",
     "guardrail",
-    "semantic-routing",
-    "sandbox",
-    "sandbox-policy",
     "unified-llm-key",
+    "semantic-routing",
     "skill-scanner",
     "mcp-scanner",
-    "webhooks",
     "registries",
-    "enterprise-deployment"
+    "webhooks"
   ]
 }
