@@ -73,9 +73,15 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 		h := newTestHost(t, "linux")
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 		edited := editConfigInPlace(t, h, "mode: observe", "mode: action")
-		requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+		r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireOK(t, r)
 		if got := h.read(h.env.Layout.ConfigPath); got != edited {
 			t.Fatal("a valid in-place edit was not applied")
+		}
+		// The result says what the apply did (#1032).
+		changes := strings.Join(r.Changes, "\n")
+		if !strings.Contains(changes, "applied the edited "+h.env.Layout.ConfigPath) || !strings.Contains(changes, "restarted "+unitGateway) {
+			t.Fatalf("the apply result does not say what it changed: %q", r.Changes)
 		}
 		if got, err := os.ReadFile(h.env.committedConfigPath()); err != nil || string(got) != edited {
 			t.Fatalf("the applied config copy was not updated: %v", err)

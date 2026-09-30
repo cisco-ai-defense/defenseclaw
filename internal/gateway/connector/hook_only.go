@@ -1828,7 +1828,7 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	}
 	switch {
 	case err != nil:
-		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+		errs = append(errs, restoreBackupFailure(err))
 	case restored && c.name == "devin":
 		// A Devin backup captured after an earlier DefenseClaw setup (the
 		// per-user devin-hook.sh route) holds DefenseClaw's own hooks, which

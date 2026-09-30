@@ -906,6 +906,17 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if record != nil {
+		// An edit made in place (the config-apply trigger) is never rewritten,
+		// so applyFiles does not name it; the result still says it was applied.
+		if p.configFromInstalled && p.config.SHA != record.ConfigSHA256 {
+			l.noteChange("applied the edited %s", env.Layout.ConfigPath)
+		}
+		if p.secretsSHA != record.SecretsSHA256 {
+			l.noteChange("applied the changed secrets")
+		}
+	}
+	changesApplied := len(r.Changes) > changesBefore
 	// Vendor machine policy goes in before the services start so the
 	// gateway loads a descriptor that names exactly the connectors whose
 	// hooks are in place.
@@ -948,8 +959,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeActivate, err)
 		}
 		for _, unit := range units {
-			if unit.Activate && !contains(previouslyActive, unit.Name) && env.Services.Active(ctx, unit) {
+			if !unit.Activate || !env.Services.Active(ctx, unit) {
+				continue
+			}
+			switch {
+			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
+			case changesApplied && unit.Kind == "gateway":
+				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
 	} else {
