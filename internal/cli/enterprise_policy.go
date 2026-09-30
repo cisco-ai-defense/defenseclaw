@@ -161,7 +161,11 @@ type enterprisePolicyUserReport struct {
 	Enrollment string                                    `json:"enrollment,omitempty"`
 	Decisions  map[string]enterprisepolicy.GuardDecision `json:"foreign_hooks"`
 	Live       []enterprisepolicy.LiveResult             `json:"live,omitempty"`
-	Error      string                                    `json:"error,omitempty"`
+	// DevinACP lists the Devin Desktop ACP registry entries that run
+	// outside DefenseClaw's Devin coverage. Report only: it never makes
+	// the report incomplete.
+	DevinACP []enterprisepolicy.ACPRegistryFinding `json:"devin_acp_registry,omitempty"`
+	Error    string                                `json:"error,omitempty"`
 }
 
 type enterprisePolicyReport struct {
@@ -222,6 +226,16 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 	}
 	scanErr := runAsEnterprisePolicyTarget(target, func() error {
 		for _, name := range connectors {
+			if name == "devin" {
+				userReport.DevinACP = enterprisepolicy.ScanDevinACPRegistry(ctx.opts.GOOS, target.UserHome, func(connector string) bool {
+					for _, managed := range ctx.connectors {
+						if managed == connector {
+							return true
+						}
+					}
+					return false
+				})
+			}
 			policy, ok := summary.Connectors[name]
 			if !ok || !policy.Guard {
 				continue
@@ -458,6 +472,9 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 				}
 				fmt.Fprintf(out, "    %-12s %-11s %s %s %s sha256:%s\n", name, state, finding.Scope, finding.Path, dashIfEmpty(finding.Event), finding.Digest)
 			}
+		}
+		for _, entry := range report.User.DevinACP {
+			fmt.Fprintf(out, "    %-12s %-11s %s %s: %s\n", "devin-acp", "reported", entry.Path, dashIfEmpty(entry.Agent), entry.Reason)
 		}
 		for _, live := range report.User.Live {
 			verdict := "FAILED"

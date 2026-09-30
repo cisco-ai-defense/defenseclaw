@@ -133,28 +133,72 @@ func Identity() string {
 // identityFrom walks up from self. A parent that started after its child
 // is a reused process ID (the real parent exited), so the walk stops there.
 func identityFrom(lookup func(int) (Process, error), self int) string {
+	agent, ok := agentFrom(lookup, self)
+	if !ok {
+		return ""
+	}
+	return agent.identity()
+}
+
+// agentFrom returns the agent process: self's nearest ancestor that is not a
+// shell or DefenseClaw wrapper, below any session root.
+func agentFrom(lookup func(int) (Process, error), self int) (Process, bool) {
 	child, err := lookup(self)
 	if err != nil {
-		return ""
+		return Process{}, false
 	}
 	for hop := 0; hop < maxHops; hop++ {
 		pid := child.Parent
 		if pid <= 1 || pid == child.PID {
-			return ""
+			return Process{}, false
 		}
 		parent, err := lookup(pid)
 		if err != nil || parent.Exited || parent.Start > child.Start {
-			return ""
+			return Process{}, false
 		}
 		name := normalizedName(parent.Name)
 		if sessionRootNames[name] {
-			return ""
+			return Process{}, false
 		}
 		// Some process APIs cannot resolve an executable name even when they
 		// return a stable PID and start time. The name is only a hint for
 		// skipping wrappers; it must not be required to name the process.
 		if !transparent(name) {
-			return parent.identity()
+			return parent, true
+		}
+		child = parent
+	}
+	return Process{}, false
+}
+
+// Host returns the normalized executable name of the process that started
+// the agent (the agent's nearest ancestor that is not a shell or wrapper),
+// or "" when it cannot be resolved. It tells an agent a desktop app runs
+// (Devin Local under Devin Desktop) from the same agent run in a terminal.
+// It is an attribution hint the user can influence, never an identity or an
+// authorization input.
+func Host() string {
+	lookup, done := newLookup()
+	defer done()
+	return hostFrom(lookup, os.Getpid())
+}
+
+func hostFrom(lookup func(int) (Process, error), self int) string {
+	child, ok := agentFrom(lookup, self)
+	if !ok {
+		return ""
+	}
+	for hop := 0; hop < maxHops; hop++ {
+		pid := child.Parent
+		if pid <= 0 || pid == child.PID {
+			return ""
+		}
+		parent, err := lookup(pid)
+		if err != nil || parent.Start > child.Start {
+			return ""
+		}
+		if name := normalizedName(parent.Name); name != "" && !transparent(name) {
+			return name
 		}
 		child = parent
 	}

@@ -120,6 +120,14 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 					result.Reported = append(result.Reported, finding)
 				}
 			}
+		case formatDevinPlugins:
+			// Plugin hooks live in Devin's plugin store; the user uninstalls
+			// the plugin. Report them and leave the store alone.
+			for _, finding := range scan.scanDevinPlugins(source) {
+				if !finding.Allowed {
+					result.Reported = append(result.Reported, finding)
+				}
+			}
 		case formatPluginDir:
 			for _, finding := range scan.scanPluginDir(source) {
 				// Past a scan budget a finding may be unapprovable only

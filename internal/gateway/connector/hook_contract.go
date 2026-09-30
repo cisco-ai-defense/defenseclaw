@@ -710,9 +710,9 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   devinToolCallLifecycle(),
 		Notes: []string{
 			"The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
-			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
+			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config. Devin Desktop 3.9.19 removed the legacy Cascade agent; builds before it run Cascade under a separate contract that is not registered.",
 			"Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
-			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded.",
+			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, and native OTLP are excluded. DefenseClaw registers no plugin hooks; under the standalone enterprise profile the foreign-hook guard checks the hooks of installed Devin plugins.",
 		},
 	}},
 	"copilot": {

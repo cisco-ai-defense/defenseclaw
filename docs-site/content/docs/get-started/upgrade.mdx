@@ -160,9 +160,9 @@ you run `defenseclaw setup devin`:
   (listing each setting that moved) when the gateway made the rename itself, and `removed state left by the retired connector ID` when
   `defenseclaw upgrade` had already rewritten `config.yaml`.
 
-What is not protected: conversations in Devin Desktop's legacy **Cascade**
-agent. New Devin Desktop tabs start on Devin Local, which is protected;
-existing Cascade conversations keep running without DefenseClaw hooks.
+What is not protected: Devin Desktop builds before 3.9.19, which still run
+the legacy **Cascade** agent without DefenseClaw hooks. Devin Desktop 3.9.19
+removed Cascade; its tabs run Devin Local, which is protected.
 
 To confirm, run `defenseclaw doctor` and check that the Devin hook row passes,
 then open a new Devin Desktop tab or Devin CLI session.
