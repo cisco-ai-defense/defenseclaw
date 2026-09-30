@@ -362,6 +362,23 @@ deleted.
   reason keep their verdict. The
   audit row's reason names the rule that was not applied, and
   `extra.sandbox_egress_unblocked` the unblocks. Both drivers.
+- A sandboxed agent is told why the egress proxy refused an HTTPS
+  destination (#954). The proxy answers a refused `CONNECT` with a 403 whose
+  body clients never show (`curl: (56) CONNECT tunnel failed, response
+  403`), so the agent saw only a connection error. Now the post-tool hook of
+  the sandbox's next shell or fetch tool call adds a short note to the
+  model's context. It names each destination the proxy refused in the last
+  two minutes and why, and gives the user's `sandbox unblock HOST --sandbox
+  NAME` command when an unblock lifts the refusal, or says who can allow
+  it. The note tells the agent not to try another way. The harness hooks
+  that carry it are Claude Code `PostToolUse`/`PostToolUseFailure`, Codex
+  `PostToolUse`, Copilot CLI `postToolUse`/`postToolUseFailure`, Cursor
+  `postToolUse` and Devin `PostToolUse`. Each refusal is told once, and only
+  to the sandbox whose proxy credential made the request. A host unblocked
+  since is left out. The audit row's `extra.sandbox_egress_refused` names
+  what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
+  OmniGent have no post-tool context field, so there only the terminal's
+  live notice reports the block. Both drivers.
 
 ### OpenShell sandboxes on macOS (MicroVM driver)
 

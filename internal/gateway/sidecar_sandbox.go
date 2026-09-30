@@ -234,6 +234,17 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		EgressUnblock: func(b sandboxauth.Binding, host string) (string, bool) {
 			return mgr.EgressUnblock(b.ID, b.SandboxName, host)
 		},
+		EgressRefusals: func(b sandboxauth.Binding) []SandboxEgressRefusal {
+			refused := mgr.EgressRefusals(b.ID, b.SandboxName)
+			if len(refused) == 0 {
+				return nil
+			}
+			out := make([]SandboxEgressRefusal, 0, len(refused))
+			for _, r := range refused {
+				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy})
+			}
+			return out
+		},
 	}); err != nil {
 		return nil, err
 	}
