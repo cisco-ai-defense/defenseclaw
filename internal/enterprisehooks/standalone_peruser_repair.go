@@ -85,40 +85,44 @@ const standaloneOwnedHookConfigName = "defenseclaw.json"
 // file inside the home, as the user and owner-only. Without them a first
 // install failed with "hook config parent missing" for every account that
 // had not created the folder itself (for example ~/.kiro/hooks). It returns
-// the hook config files that may still be missing: Setup writes them. An
+// the hook config files that may still be missing (Setup writes them) and
+// the folders it created, which Setup then finds already there. An
 // existing element that is a link, not a directory, owned by someone else
 // or writable by group or others is refused, and nothing is created below
 // it.
-func prepareOwnedHookConfigParents(home, connectorName string, paths []string, uid int) ([]string, error) {
+func prepareOwnedHookConfigParents(home, connectorName string, paths []string, uid int) ([]string, []string, error) {
 	if !standalonePerUserRepair(uid) || !standaloneOwnedHookConfigConnectors[strings.ToLower(strings.TrimSpace(connectorName))] {
-		return nil, nil
+		return nil, nil, nil
 	}
 	home = filepath.Clean(home)
-	var owned []string
+	var owned, created []string
 	for _, raw := range paths {
 		path := filepath.Clean(strings.TrimSpace(raw))
 		if filepath.Base(path) != standaloneOwnedHookConfigName || !filepath.IsAbs(path) || !pathInside(home, path) {
 			continue
 		}
-		if err := mkdirUserHookConfigParents(home, filepath.Dir(path), uid); err != nil {
-			return nil, err
+		made, err := mkdirUserHookConfigParents(home, filepath.Dir(path), uid)
+		created = append(created, made...)
+		if err != nil {
+			return nil, created, err
 		}
 		owned = append(owned, path)
 	}
-	return owned, nil
+	return owned, created, nil
 }
 
 // mkdirUserHookConfigParents walks from home to dir one element at a time,
 // validating each existing directory and creating each missing one with
-// mode 0700.
-func mkdirUserHookConfigParents(home, dir string, uid int) error {
+// mode 0700. It returns the directories it created.
+func mkdirUserHookConfigParents(home, dir string, uid int) ([]string, error) {
 	rel, err := filepath.Rel(home, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("enterprise hooks: refusing hook config parent outside user home: %s", dir)
+		return nil, fmt.Errorf("enterprise hooks: refusing hook config parent outside user home: %s", dir)
 	}
 	if rel == "." {
-		return nil
+		return nil, nil
 	}
+	var created []string
 	current := home
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		if part == "" || part == "." {
@@ -127,28 +131,30 @@ func mkdirUserHookConfigParents(home, dir string, uid int) error {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if os.IsNotExist(err) {
-			if err := os.Mkdir(current, 0o700); err != nil && !os.IsExist(err) {
-				return fmt.Errorf("enterprise hooks: create hook config parent %s: %w", current, err)
+			if err := os.Mkdir(current, 0o700); err == nil {
+				created = append(created, current)
+			} else if !os.IsExist(err) {
+				return created, fmt.Errorf("enterprise hooks: create hook config parent %s: %w", current, err)
 			}
 			info, err = os.Lstat(current)
 		}
 		if err != nil {
-			return fmt.Errorf("enterprise hooks: inspect hook config parent %s: %w", current, err)
+			return created, fmt.Errorf("enterprise hooks: inspect hook config parent %s: %w", current, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("enterprise hooks: refusing symlink in hook config path: %s", current)
+			return created, fmt.Errorf("enterprise hooks: refusing symlink in hook config path: %s", current)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("enterprise hooks: hook config parent is not a directory: %s", current)
+			return created, fmt.Errorf("enterprise hooks: hook config parent is not a directory: %s", current)
 		}
 		if owned, actual := fileOwnerMatches(current, uid); !owned {
-			return fmt.Errorf("enterprise hooks: hook config parent %s owner uid=%d does not match target uid=%d", current, actual, uid)
+			return created, fmt.Errorf("enterprise hooks: hook config parent %s owner uid=%d does not match target uid=%d", current, actual, uid)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("enterprise hooks: hook config parent %s is group/other writable", current)
+			return created, fmt.Errorf("enterprise hooks: hook config parent %s is group/other writable", current)
 		}
 	}
-	return nil
+	return created, nil
 }
 
 // standaloneHookRuntimeRecordMaxBytes bounds the lock and runtime records

@@ -674,6 +674,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     if verify is None:
         verify = True
 
+    connector_settings, unselectable = _leave_out_unselectable_connectors(connector_settings, data_dir)
     primary = connector_settings[0]
     extras = connector_settings[1:]
     # When extra connectors will be merged in after the primary bootstrap,
@@ -716,6 +717,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
+    if unselectable:
+        _report_unselectable_connectors(report, unselectable)
     if not start_gateway:
         _word_sidecar_skip(report, prompted=interactive_wizard, flag=start_gateway_flag)
 
@@ -1440,6 +1443,47 @@ def _append_mode_warning_steps(report, warnings: list[dict]) -> None:
                 warning.get("next_command", ""),
             )
         )
+
+
+def _leave_out_unselectable_connectors(
+    connector_settings: list[dict],
+    data_dir,
+) -> tuple[list[dict], dict[str, str]]:
+    """Drop Windows connectors whose agent executable setup would refuse.
+
+    Setup selects every protected connector's executable in one transaction,
+    so one refused agent failed the whole roster. When at least one selected
+    connector remains, the refused ones are left out and reported instead.
+    """
+    if platform_support.host_os() != "windows" or len(connector_settings) < 2:
+        return connector_settings, {}
+    from defenseclaw.agent_selection import setup_agent_selection_problems
+    from defenseclaw.config import default_data_path
+
+    names = [connector_paths.normalize(s["connector"]) for s in connector_settings]
+    problems = setup_agent_selection_problems(os.fspath(data_dir or default_data_path()), names)
+    kept = [s for s, name in zip(connector_settings, names) if name not in problems]
+    if not problems or not kept:
+        return connector_settings, {}
+    return kept, problems
+
+
+def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:
+    from defenseclaw.bootstrap import StepResult, _next_commands, _rollup_status
+
+    details = "; ".join(f"{name}: {reason}" for name, reason in sorted(problems.items()))
+    first = sorted(problems)[0]
+    first = "claude-code" if first == "claudecode" else first
+    report.setup.append(
+        StepResult(
+            "Agent Selection",
+            "warn",
+            f"left out {', '.join(sorted(problems))}, which setup cannot select ({details})",
+            f"defenseclaw setup {first}",
+        )
+    )
+    report.status = _rollup_status(report.setup, report.readiness)
+    report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
 
 def _build_noninteractive_connector_settings(
