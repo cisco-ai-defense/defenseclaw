@@ -37,6 +37,13 @@ BOOTSTRAP_ENVIRONMENT_SMOKE = (
     / "enterprise-bootstrap-environment-smoke.ps1"
 )
 UNINSTALL_TRANSACTION_SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-uninstall-transaction-smoke.ps1"
+UNINSTALL_ACL_RECOVERY_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-acl-recovery-smoke.ps1"
+)
 SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     ROOT
     / "packaging"
@@ -1444,6 +1451,17 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
             ),
         ),
         (
+            UNINSTALL_ACL_RECOVERY_SMOKE,
+            (
+                "canonical_noop",
+                "inherited_acl_repaired",
+                "metadata_bytes_preserved",
+                "hashed_attestation_repaired",
+                "changed_attestation_rejected",
+                "foreign_writer_rejected",
+            ),
+        ),
+        (
             SELF_UNINSTALL_HELPER_CAPTURE_SMOKE,
             (
                 "engine",
@@ -1463,6 +1481,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
         "bootstrap",
         "bootstrap-environment",
         "uninstall-transaction",
+        "uninstall-acl-recovery",
         "helper-capture",
     ),
 )

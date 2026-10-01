@@ -7404,6 +7404,181 @@ function Get-DefenseClawDeploymentMetadata {
     return $metadata
 }
 
+function Repair-DefenseClawUninstallAdminFileAcl {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]
+        [ValidateSet('deployment', 'attestation')]
+        [string]$Kind,
+        [string]$ExpectedSHA256
+    )
+    $path = if ($Kind -eq 'deployment') {
+        [string]$Layout.MetadataPath
+    }
+    else {
+        [string]$Layout.AgentApplicationControlAttestationPath
+    }
+    Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
+    # This file is lifecycle authority. Never turn a caller-writable file into
+    # trusted evidence merely by stamping an administrator-only DACL on it.
+    # The no-follow snapshot also requires one hard link and pins its identity.
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+        $path
+    )
+    if ($null -eq $before) {
+        return $false
+    }
+    $expected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory:$false `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    $actual = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$before.SecurityDescriptor, 0
+    )
+    $aclDrift = ''
+    try {
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual $actual `
+            -Expected $expected
+    }
+    catch {
+        $aclDrift = $_.Exception.Message
+    }
+
+    # The parent directories must also exclude untrusted write/delete access:
+    # otherwise a user could replace the checked file before the native stamp.
+    # Missing SYSTEM/Administrators rights may be repaired, but a null DACL,
+    # foreign owner, deny ACE, or foreign writer cannot authenticate the bytes.
+    if (-not [string]::IsNullOrEmpty($aclDrift)) {
+        # The shared vendor ancestors use advisory ACL checks during normal
+        # lifecycle work. A repair of authority-bearing metadata needs a
+        # stricter boundary: DELETE_CHILD or ownership rights on any ancestor
+        # could replace StateRoot after its identity was checked.
+        foreach ($ancestor in @(
+            [string]$script:ProgramData
+        ) + @($Layout.StateRootAncestors)) {
+            Assert-DefenseClawNoReparsePath -Path $ancestor
+            $ancestorAcl = Microsoft.PowerShell.Security\Get-Acl `
+                -LiteralPath $ancestor
+            $ancestorRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$ancestorAcl.GetSecurityDescriptorBinaryForm(), 0
+            )
+            if ($null -eq $ancestorRaw.DiscretionaryAcl) {
+                throw "refusing uninstall ACL recovery through a null DACL: $ancestor"
+            }
+            $ancestorOwner = ConvertTo-DefenseClawSID `
+                -Identity $ancestorAcl.Owner
+            if ($ancestorOwner -notin @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            )) {
+                throw "refusing uninstall ACL recovery through an untrusted ancestor owner: $ancestor"
+            }
+            foreach ($rule in $ancestorAcl.Access) {
+                if ($rule.AccessControlType -ne
+                        [Security.AccessControl.AccessControlType]::Allow -or
+                    (($rule.PropagationFlags -band
+                            [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
+                    continue
+                }
+                $sid = ConvertTo-DefenseClawSID `
+                    -Identity $rule.IdentityReference
+                if ($sid -notin @(
+                    $script:SystemSID,
+                    $script:AdministratorsSID,
+                    $script:TrustedInstallerSID
+                ) -and (Test-DefenseClawReplacementRights `
+                    -Rights $rule.FileSystemRights)) {
+                    throw "refusing uninstall ACL recovery through a replaceable ancestor: $ancestor"
+                }
+            }
+        }
+        foreach ($candidate in @(
+            [string]$Layout.StateRoot,
+            [string]$Layout.InstallStateDirectory,
+            $path
+        )) {
+            Assert-DefenseClawNoReparsePath -Path $candidate
+            $candidateAcl = Microsoft.PowerShell.Security\Get-Acl `
+                -LiteralPath $candidate
+            $candidateRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$candidateAcl.GetSecurityDescriptorBinaryForm(), 0
+            )
+            if ($null -eq $candidateRaw.DiscretionaryAcl) {
+                throw "refusing uninstall ACL recovery through a null DACL: $candidate"
+            }
+            $verdicts = @(Get-DefenseClawPathAclVerdicts `
+                -Path $candidate `
+                -AllowedWriterSIDs @(
+                    $script:SystemSID,
+                    $script:AdministratorsSID,
+                    $script:TrustedInstallerSID
+                ) `
+                -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+                -AllowedOwnerSIDs @(
+                    $script:SystemSID,
+                    $script:AdministratorsSID,
+                    $script:TrustedInstallerSID
+                ) `
+                -AllowInheritance)
+            $unsafe = @($verdicts |
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -ne 'Rights' })
+            if ($unsafe.Count -gt 0) {
+                throw "refusing uninstall ACL recovery: $($unsafe[0].Reason)"
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSHA256)) {
+        if ($ExpectedSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'uninstall ACL recovery requires a valid attestation hash'
+        }
+        $actualHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $path `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($actualHash -cne $ExpectedSHA256) {
+            throw 'refusing uninstall ACL recovery for changed attestation content'
+        }
+    }
+    if (-not [string]::IsNullOrEmpty($aclDrift)) {
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path $path `
+            -Reason "uninstall is restoring a trusted file ACL after: $aclDrift"
+        Set-DefenseClawPathAcl `
+            -Path $path `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        $after = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+            $path, [uint32]0
+        )
+        if ([string]$after.Identity -cne [string]$before.Identity) {
+            throw 'uninstall ACL recovery changed managed file identity'
+        }
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$after.SecurityDescriptor, 0
+            )) `
+            -Expected $expected
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSHA256) -and
+        -not [string]::IsNullOrEmpty($aclDrift)) {
+        $finalHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $path `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($finalHash -cne $ExpectedSHA256) {
+            throw 'attestation content changed during uninstall ACL recovery'
+        }
+    }
+    return $true
+}
+
 function New-DefenseClawDeploymentMetadata {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22457,6 +22632,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         '^DefenseClawCertGateway_[a-f0-9]{10}$',
         [Text.RegularExpressions.RegexOptions]::CultureInvariant
     )
+    $recoverProductionUninstallAcl = [bool](
+        $Action -eq 'Uninstall' -and -not $certificationServiceScope
+    )
     if ($certificationServiceScope -and
         $Action -in @('Install', 'Upgrade', 'Repair') -and
         -not $AllowUnsigned) {
@@ -22552,7 +22730,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     if ((Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $layout.MetadataPath `
             -PathType Leaf) -and
-        ($Action -ne 'Status' -or (Test-DefenseClawAdministrator))) {
+        ($Action -ne 'Status' -or (Test-DefenseClawAdministrator)) -and
+        -not $recoverProductionUninstallAcl) {
         # Protected metadata, not a caller-supplied certification path, is the
         # authority for continuing an existing core-hardening certification
         # deployment.
@@ -22562,7 +22741,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -LiteralPath $layout.AgentApplicationControlAttestationPath `
         -PathType Leaf
     if ($applicationControlAttestationExists -and
-        ($Action -ne 'Status' -or (Test-DefenseClawAdministrator))) {
+        ($Action -ne 'Status' -or (Test-DefenseClawAdministrator)) -and
+        -not $recoverProductionUninstallAcl) {
         $existingApplicationControlAttestation =
             Get-DefenseClawAgentApplicationControlAttestation -Layout $layout
         $layout.AgentApplicationControlAttested = [bool](
@@ -22663,6 +22843,53 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
         Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
+
+        if ($recoverProductionUninstallAcl) {
+            # Authenticate ownership and repair only recoverable ACL drift
+            # under the lifecycle lock, before any metadata is trusted.
+            $uninstallMetadataExists = Repair-DefenseClawUninstallAdminFileAcl `
+                -Layout $layout `
+                -Kind deployment
+            if ($uninstallMetadataExists) {
+                $uninstallMetadata = Get-DefenseClawDeploymentMetadata `
+                    -Layout $layout `
+                    -Required
+                $nativeSecurity = Initialize-DefenseClawNativeSecurity
+                $attestationSnapshot =
+                    $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                        [string]$layout.AgentApplicationControlAttestationPath
+                    )
+            }
+            if ($uninstallMetadataExists -and
+                $null -ne $attestationSnapshot) {
+                $attestationHashProperty = $uninstallMetadata.PSObject.Properties[
+                    'agent_application_control_attestation_sha256'
+                ]
+                $attestationHash = if ($null -eq $attestationHashProperty) {
+                    ''
+                }
+                else {
+                    [string]$attestationHashProperty.Value
+                }
+                if ($attestationHash -cmatch '^[0-9a-f]{64}$') {
+                    [void](Repair-DefenseClawUninstallAdminFileAcl `
+                        -Layout $layout `
+                        -Kind attestation `
+                        -ExpectedSHA256 $attestationHash)
+                }
+                # Older metadata did not bind this file by hash. Preserve
+                # its original strict read rather than blessing unknown bytes.
+                $existingApplicationControlAttestation =
+                    Get-DefenseClawAgentApplicationControlAttestation `
+                        -Layout $layout
+                $layout.AgentApplicationControlAttested = [bool](
+                    $existingApplicationControlAttestation.agent_application_control_enforced
+                )
+                $layout.ClaudeEffectivePolicyVerified = [bool](
+                    $existingApplicationControlAttestation.claude_effective_policy_verified
+                )
+            }
+        }
 
         # A purge receipt lives outside StateRoot and is authenticated before
         # any managed layout directory is created. It is therefore sufficient
