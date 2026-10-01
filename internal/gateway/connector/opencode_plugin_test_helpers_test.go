@@ -92,10 +92,9 @@ func openCodePluginTestData(t *testing.T, server *httptest.Server) templateData 
 }
 
 // nodeHarnessTimeout bounds one node run of a plugin harness, and each step
-// of an interactive harness session. It covers node's start, which on a busy
-// Windows runner can take many seconds when it is the job's first node
-// process, and a first request, which pays one-time costs of its own (the
-// process's first socket and token file open) on top of the plugin's 10s
+// after the start of an interactive harness session. It covers node's start,
+// which on a busy Windows runner can take many seconds when it is the job's
+// first node process, and a request, which waits on the plugin's own 10s
 // gateway timeout.
 const nodeHarnessTimeout = 60 * time.Second
 
@@ -132,10 +131,8 @@ const nodeHarnessReady = "harness-ready"
 
 // nodeHarnessSession is a running interactive harness: each request line
 // written to it is answered with one stdout line. Node's start, each reply
-// and the exit are bounded separately (the first node.exe launch on a fresh
-// Windows runner pays the image load and antivirus scan, and its first
-// request the first socket), and a failure reports the step, how node
-// exited, and its whole stderr.
+// and the exit are bounded separately, and a failure reports the step, how
+// node exited, and its whole stderr.
 type nodeHarnessSession struct {
 	t      *testing.T
 	cmd    *exec.Cmd
@@ -144,6 +141,22 @@ type nodeHarnessSession struct {
 	exited chan struct{}
 	stderr bytes.Buffer // written by exec until exited is closed
 	err    error        // cmd.Wait's result, set before exited is closed
+}
+
+// nodeHarnessStartTimeout bounds an interactive harness's start: node's
+// launch, the plugin's load and its load heartbeat. That wait is mostly the
+// operating system's: a node.exe launch that pays an antivirus image scan
+// has taken over a minute on a Windows host whose real-time scanning was
+// backed up. So the bound is the time left before the test's deadline, less
+// nodeHarnessTimeout to report and clean up, and never less than
+// nodeHarnessTimeout.
+func nodeHarnessStartTimeout(t *testing.T) time.Duration {
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - nodeHarnessTimeout; left > nodeHarnessTimeout {
+			return left
+		}
+	}
+	return nodeHarnessTimeout
 }
 
 // startNodeHarnessSession starts an ES module harness with node and waits
@@ -180,7 +193,7 @@ func startNodeHarnessSession(t *testing.T, harness string, args ...string) *node
 		close(s.exited)
 	}()
 	t.Cleanup(func() { _ = s.stop() })
-	if got := s.next("start", nodeHarnessTimeout); got != nodeHarnessReady {
+	if got := s.next("start", nodeHarnessStartTimeout(t)); got != nodeHarnessReady {
 		t.Fatalf("start: node printed %q before its ready line; %s", got, s.stop())
 	}
 	return s
