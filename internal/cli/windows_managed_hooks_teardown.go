@@ -542,9 +542,17 @@ func runWindowsManagedHooksTeardown(
 			report.SurvivingOwnedPathReferences = surviving
 		}
 		if err == nil {
+			// The users' registrations and, with purge, their per-user folders
+			// go before the journal records the phase finalized: a rerun of
+			// an uninstall interrupted while they were removed finds the
+			// phase still prepared and runs finalize, and so this cleanup,
+			// again. Once the phase is finalized, a rerun skips finalize.
 			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
 				journal,
 				report.JournalPath,
+				&report,
+				runtimeDir,
+				manifest,
 			)
 		}
 		if err == nil {
@@ -552,9 +560,6 @@ func runWindowsManagedHooksTeardown(
 			report.SafeToRemoveBinary = true
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
-		}
-		if err == nil {
-			completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
 		}
 	}
 	if err != nil {
@@ -1193,9 +1198,17 @@ func restoreWindowsManagedHooksRuntimeSelectors(
 	return nil
 }
 
+// finalizeWindowsManagedHooksTeardown retires the machine wiring the
+// prepared journal records, removes the users' registrations and, with
+// purge, their per-user folders, and only then records the phase finalized,
+// so a rerun after an interruption finds the phase prepared and retries
+// that cleanup.
 func finalizeWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
+	report *windowsManagedHooksTeardownReport,
+	runtimeDir string,
+	manifest enterprisehooks.Manifest,
 ) (int, error) {
 	collected := 0
 	for _, target := range journal.Targets {
@@ -1217,8 +1230,27 @@ func finalizeWindowsManagedHooksTeardown(
 		}
 		collected += removed
 	}
+	if err := windowsManagedHooksTeardownStandaloneMachineFinalizer(); err != nil {
+		return collected, err
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(report, runtimeDir, manifest)
+	journal.Phase = "finalized"
+	if err := windowsManagedHooksTeardownJournalWriter(journalPath, journal); err != nil {
+		return collected, err
+	}
+	return collected, nil
+}
+
+// The standalone machine steps of finalize and the journal writer are
+// replaceable in tests.
+var (
+	windowsManagedHooksTeardownStandaloneMachineFinalizer = finalizeWindowsManagedHooksTeardownStandaloneMachineState
+	windowsManagedHooksTeardownJournalWriter              = writeWindowsManagedHooksTeardownJournal
+)
+
+func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
 	// Standalone: a local account deleted with its profile has left the
-	// manifest, so the teardown above never reached its selector entries.
+	// manifest, so the teardown never reached its selector entries.
 	// They go now, before the selector locks below. Failing to drop one only
 	// leaves that stale entry, so it does not fail the uninstall.
 	if err := enterprisehooks.RemoveWindowsStandaloneDeletedAccountSelectorTargets(); err != nil {
@@ -1228,18 +1260,14 @@ func finalizeWindowsManagedHooksTeardown(
 	// root hold only lock files by now (verification proved enrollments,
 	// selectors and the summary gone), so an uninstall leaves none behind.
 	if _, err := enterprisehooks.RemoveWindowsStandaloneHookRuntimeDirectories(); err != nil {
-		return collected, fmt.Errorf("finalize standalone hook runtime directories: %w", err)
+		return fmt.Errorf("finalize standalone hook runtime directories: %w", err)
 	}
-	// The garbage collection above was the last selector transaction, so the
+	// Finalize's garbage collection was the last selector transaction, so the
 	// selector locks in the vendor machine-policy directories can go too.
 	if err := enterprisehooks.RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
-		return collected, fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
+		return fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
 	}
-	journal.Phase = "finalized"
-	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
-		return collected, err
-	}
-	return collected, nil
+	return nil
 }
 
 func windowsManagedHooksTeardownTargetForSelector(

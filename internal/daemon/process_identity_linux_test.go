@@ -133,6 +133,9 @@ func TestDeletedExecutableStopsOnlyThroughAuthenticatedShutdown(t *testing.T) {
 	if running, pid := d.IsRunning(); !running || pid != cmd.Process.Pid {
 		t.Fatalf("replaced executable liveness = (%v, %d), want PID %d", running, pid, cmd.Process.Pid)
 	}
+	if !d.RunsReplacedExecutable() {
+		t.Fatal("status does not report that this home's gateway runs a replaced binary")
+	}
 	if err := d.Stop(50 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
 		t.Fatalf("direct stop of a replaced executable = %v, want ErrUnsafeProcessIdentity", err)
 	}

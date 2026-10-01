@@ -145,17 +145,23 @@ func (h *rotationHost) liveKeyIDs() []string {
 	return ids
 }
 
-// reconcile renders both users from the staged key, else the committed one,
-// as the guardian does: a user already on it is verified, anyone else is
-// repaired. A user whose key the gateway no longer accepts is recorded as
-// refused.
+// reconcile renders both users from the staged key while the guardian's
+// prepare record names it, else from the committed one, as the guardian
+// does: a user already on it is verified, anyone else is repaired. A user
+// whose key the gateway no longer accepts is recorded as refused.
 func (h *rotationHost) reconcile() {
-	path := h.env.stagedUserKeyPath()
-	if !exists(path) {
-		path = h.env.committedUserKeyPath()
+	key := h.committedKey()
+	var transaction enterprisehooks.CredentialTransaction
+	if data, err := os.ReadFile(h.env.transactionPath()); err == nil {
+		if transaction, err = enterprisehooks.ParseCredentialTransaction(data); err != nil {
+			h.t.Fatal(err)
+		}
+		if staged, err := os.ReadFile(h.env.stagedUserKeyPath()); err == nil &&
+			transaction.RendersNext(connector.UserScopedTokenKeyFingerprint(key), connector.UserScopedTokenKeyFingerprint(strings.TrimSpace(string(staged)))) {
+			key = strings.TrimSpace(string(staged))
+		}
 	}
-	key, _ := os.ReadFile(path)
-	keyID := connector.UserScopedTokenKeyFingerprint(strings.TrimSpace(string(key)))
+	keyID := connector.UserScopedTokenKeyFingerprint(key)
 	for _, user := range []string{"alice", "bob"} {
 		if !slices.Contains(h.liveKeyIDs(), h.rendered[user]) {
 			h.events = append(h.events, "refused "+user)
@@ -165,13 +171,16 @@ func (h *rotationHost) reconcile() {
 	attestation := enterprisehooks.CredentialAttestation{
 		Version: enterprisehooks.CredentialAttestationVersion, ID: fmt.Sprintf("%032x", h.reconciles),
 		UpdatedAt: "2026-09-29T00:00:00Z", ManifestSHA256: strings.Repeat("d", 64), KeyID: keyID,
+		OperationID: transaction.OperationID, Phase: transaction.Phase,
 		Targets: []enterprisehooks.CredentialAttestationTarget{},
 	}
 	for index, user := range []string{"alice", "bob"} {
 		target := enterprisehooks.CredentialAttestationTarget{Connector: "codex", User: user, UID: 1001 + index, State: enterprisehooks.CredentialTargetCurrent}
+		credential, _ := connector.UserScopedHookAPIToken(key, "codex", fmt.Sprint(target.UID))
+		target.CredentialID = connector.UserScopedCredentialKeyID(credential)
 		switch {
 		case user == "bob" && h.failStaged && exists(h.env.stagedUserKeyPath()):
-			target.State, target.UID = enterprisehooks.CredentialTargetFailed, -1
+			target.State, target.UID, target.CredentialID = enterprisehooks.CredentialTargetFailed, -1, ""
 		case h.rendered[user] == keyID:
 			target.Credentials, target.Verified = true, true
 		case h.holdBack && !exists(h.env.stagedUserKeyPath()):
@@ -204,7 +213,7 @@ func (h *rotationHost) committedKey() string {
 
 func (h *rotationHost) requireNoRotationLeft() {
 	h.t.Helper()
-	for _, path := range []string{h.env.stagedUserKeyPath(), h.env.retiringUserKeyPath(), h.env.rotationIntentPath()} {
+	for _, path := range []string{h.env.stagedUserKeyPath(), h.env.retiringUserKeyPath(), h.env.transactionPath(), h.env.rotationIntentPath()} {
 		if exists(path) {
 			h.t.Fatalf("%s is left behind", path)
 		}
@@ -363,7 +372,11 @@ func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	keyB := strings.Repeat("b2", 32)
 	idB := connector.UserScopedTokenKeyFingerprint(keyB)
 	interrupt := func() {
-		if err := h.env.saveRotationIntent(rotationIntent{SchemaVersion: rotationSchemaVersion, OperationID: strings.Repeat("0", 32), PreviousKeyID: idA, NextKeyID: idB}); err != nil {
+		intent := rotationIntent{SchemaVersion: rotationSchemaVersion, OperationID: strings.Repeat("0", 32), PreviousKeyID: idA, NextKeyID: idB}
+		if err := h.env.saveRotationIntent(intent); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.env.saveTransaction(intent, enterprisehooks.CredentialPhasePrepare, strings.Repeat("d", 64)); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(h.env.stagedUserKeyPath(), []byte(keyB+"\n"), 0o600); err != nil {
@@ -396,4 +409,41 @@ func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	interrupt()
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
 	h.requireNoRotationLeft()
+}
+
+// A rotation takes a reconcile as proof only when it ran under the
+// rotation's own operation and phase, attests each credential the key
+// derives for that account, and names the account the rotation began with.
+func TestOnKeyTakesOnlyThisPhasesBoundProof(t *testing.T) {
+	key, manifest := strings.Repeat("a1", 32), strings.Repeat("d", 64)
+	attest := func(uid, credentialUID int) enterprisehooks.CredentialAttestation {
+		credential, err := connector.UserScopedHookAPIToken(key, "codex", fmt.Sprint(credentialUID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return enterprisehooks.CredentialAttestation{
+			Version: enterprisehooks.CredentialAttestationVersion, ManifestSHA256: manifest,
+			KeyID: connector.UserScopedTokenKeyFingerprint(key), OperationID: "op1", Phase: enterprisehooks.CredentialPhaseRollback,
+			Targets: []enterprisehooks.CredentialAttestationTarget{{
+				Connector: "codex", User: "alice", UID: uid, State: enterprisehooks.CredentialTargetCurrent,
+				Credentials: true, Verified: true, CredentialID: connector.UserScopedCredentialKeyID(credential),
+			}},
+		}
+	}
+	want := credentialTargets(attest(1001, 1001))
+	if done, fatal := onKey(attest(1001, 1001), key, "op1", enterprisehooks.CredentialPhaseRollback, manifest, want); !done || fatal != "" {
+		t.Fatalf("bound proof refused: done=%v fatal=%q", done, fatal)
+	}
+	prepare, other := attest(1001, 1001), attest(1001, 1001)
+	prepare.Phase, other.OperationID = enterprisehooks.CredentialPhasePrepare, "op2"
+	for name, attestation := range map[string]enterprisehooks.CredentialAttestation{
+		"prepare phase":        prepare,
+		"other operation":      other,
+		"unbound credential":   attest(1001, 1002),
+		"moved to another uid": attest(1002, 1002),
+	} {
+		if done, fatal := onKey(attestation, key, "op1", enterprisehooks.CredentialPhaseRollback, manifest, want); done || fatal == "" {
+			t.Errorf("%s: accepted as proof (done=%v)", name, done)
+		}
+	}
 }

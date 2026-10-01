@@ -383,7 +383,15 @@ def status(app: AppContext, as_json: bool) -> None:
     # (N rows), so the output never branches on connector count.
     health = _fetch_runtime_bound_health(client, cfg)
     if health is not None:
-        _status_row("Sidecar", ux._style("running", fg="green"))
+        from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
+
+        if _gateway_runs_replaced_binary(cfg):
+            _status_row(
+                "Sidecar",
+                ux._style("running a replaced binary; run defenseclaw-gateway restart", fg="yellow"),
+            )
+        else:
+            _status_row("Sidecar", ux._style("running", fg="green"))
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)

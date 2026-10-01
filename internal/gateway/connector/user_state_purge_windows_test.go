@@ -34,7 +34,7 @@ func TestPurgeUserStateInRootHandlesReadOnlyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := PurgeUserStateInRoot(root); err != nil {
+	if err := PurgeUserStateInRoot(root, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(token); !os.IsNotExist(err) {

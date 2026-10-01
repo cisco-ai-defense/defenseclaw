@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -155,5 +156,56 @@ func TestGuardianReadinessNeedsTheCurrentAttestation(t *testing.T) {
 	requireError(t, verify, codeVerify)
 	if verify.SecurityComplete || !strings.Contains(messagesOf(verify.Errors, codeVerify), "codex for user bob is not protected") {
 		t.Fatalf("a failure the attestation reports was hidden by the guardian state: %+v", verify.Errors)
+	}
+
+	// The attestation must be in the current format, for the current
+	// targets.yaml, and bind each credential to the one the key it names
+	// derives for that account; the next reconcile rewrites an older one.
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n  - user: alice\n    uid: 1001\n    connector: codex\n")
+	key := strings.Repeat("a1", 32)
+	if err := os.MkdirAll(filepath.Dir(h.env.committedUserKeyPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.committedUserKeyPath(), []byte(key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credential, _ := connector.UserScopedHookAPIToken(key, "codex", "1001")
+	for _, tc := range []struct {
+		name, want string
+		change     func(*enterprisehooks.CredentialAttestation)
+	}{
+		{"bound", "", func(*enterprisehooks.CredentialAttestation) {}},
+		{"another credential", "whose credentials are not the ones key", func(a *enterprisehooks.CredentialAttestation) {
+			a.Targets[0].CredentialID = strings.Repeat("f", 64)
+		}},
+		{"older format", "older format 1", func(a *enterprisehooks.CredentialAttestation) {
+			a.Version, a.Targets[0].CredentialID = enterprisehooks.LegacyCredentialAttestationVersion, ""
+		}},
+		{"another roster", "lists 2 target(s), but targets.yaml enables 1", func(a *enterprisehooks.CredentialAttestation) {
+			a.Targets = append(a.Targets, enterprisehooks.CredentialAttestationTarget{Connector: "codex", User: "bob", UID: -1, State: enterprisehooks.CredentialTargetPending})
+		}},
+		{"another targets.yaml", "has not reconciled the current targets.yaml", func(a *enterprisehooks.CredentialAttestation) {
+			a.ManifestSHA256 = strings.Repeat("d", 64)
+		}},
+	} {
+		h.publishLedger(ledger, enterprisehooks.CredentialAttestationTarget{
+			Connector: "codex", User: "alice", UID: 1001, State: enterprisehooks.CredentialTargetCurrent,
+			Credentials: true, Verified: true, CredentialID: connector.UserScopedCredentialKeyID(credential),
+		})
+		data, _ := os.ReadFile(h.env.attestationPath())
+		var attestation enterprisehooks.CredentialAttestation
+		if err := json.Unmarshal(data, &attestation); err != nil {
+			t.Fatal(err)
+		}
+		attestation.KeyID = connector.UserScopedTokenKeyFingerprint(key)
+		tc.change(&attestation)
+		data, _ = json.Marshal(attestation)
+		if err := os.WriteFile(h.env.attestationPath(), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		verify := h.run(Options{Action: ActionVerify})
+		if got := messagesOf(verify.Errors, codeVerify); verify.Readiness.Guardian != (tc.want == "") || tc.want != "" && !strings.Contains(got, tc.want) {
+			t.Fatalf("%s: guardian ready=%v errors=%s", tc.name, verify.Readiness.Guardian, got)
+		}
 	}
 }

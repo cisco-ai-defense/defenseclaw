@@ -43,6 +43,19 @@ func daemonStartDir(executable, _ string) string {
 
 func daemonExecPath(executable string) string { return executable }
 
+// daemonLaunchPin is a no-op on Windows, which starts the checked path. The
+// CLI's lifecycle calls hold that file open without write or delete sharing
+// until they exit, so it cannot be replaced or renamed in between.
+type daemonLaunchPin struct{ path string }
+
+func pinDaemonLaunch(executable string) (*daemonLaunchPin, error) {
+	return &daemonLaunchPin{path: executable}, nil
+}
+
+func (*daemonLaunchPin) check() error { return nil }
+
+func (*daemonLaunchPin) close() {}
+
 func processExecutableWindows(pid int) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {

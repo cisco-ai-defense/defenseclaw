@@ -1885,12 +1885,19 @@ class TestRestartDefenseGateway(unittest.TestCase):
         from defenseclaw.observability.local_stack import CommandResult
 
         runner = runner_cls.return_value
-        runner.run.return_value = CommandResult(("gateway", "start"), 0, "", "")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir, "installed")
             python = root / "runtime" / "python" / "python.exe"
             gateway = root / "bin" / "defenseclaw-gateway.exe"
             hostile = Path(tmpdir, "hostile")
+
+            def run(argv, **_kwargs):
+                # The installed file is held until the lifecycle exits (#643).
+                with self.assertRaises(OSError):
+                    os.replace(hostile / "defenseclaw-gateway.exe", gateway)
+                return CommandResult(tuple(argv), 0, "", "")
+
+            runner.run.side_effect = run
             python.parent.mkdir(parents=True)
             gateway.parent.mkdir(parents=True)
             hostile.mkdir()
