@@ -166,6 +166,12 @@ To send to a collector of your own on this computer or a private network, add
 writes the same `network_safety` setting. If that collector has no TLS, also
 add `--plaintext`, which writes `tls.insecure: true` like the bundle does.
 
+Every signal carries `host.name` from the operating system, and you can't
+change it. When two computers share a name (a cloned virtual machine, for
+example), add `--environment <name>` to tell them apart. It sets
+`observability.resource.attributes.deployment.environment.name` for everything
+this gateway sends.
+
 ## Bundled Grafana dashboards
 
 The bundle ships a full board set in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
