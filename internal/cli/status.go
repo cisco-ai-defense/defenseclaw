@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -226,16 +227,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printConnectorModes(modes)
 	}
 
-	Section("Subsystems")
-	printSubsystem("Gateway", snap.Gateway)
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Routing", snap.Routing)
-	printSubsystem("Telemetry", snap.Telemetry)
-	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
-	}
+	printSubsystems(&snap)
 
 	printConnectors(&snap)
 	if isLocalStatusTarget(bind) {
@@ -732,8 +724,48 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 	fmt.Printf("    %s%s\n", pxLabel, intercept)
 }
 
+// printSubsystems renders the Subsystems section. "Gateway" is the OpenClaw
+// fleet uplink: when it is disabled and no rostered connector is a proxy
+// connector (OpenClaw, ZeptoClaw), nothing uses it, so its DISABLED state and
+// OpenClaw upstream advice are left out (the TUI does the same).
+func printSubsystems(snap *gateway.HealthSnapshot) {
+	Section("Subsystems")
+	if !fleetUplinkUnused(snap) {
+		printSubsystem("Gateway", snap.Gateway)
+	}
+	printSubsystem("Watcher", snap.Watcher)
+	printSubsystem("API", snap.API)
+	printSubsystem("Guardrail", snap.Guardrail)
+	printSubsystem("Routing", snap.Routing)
+	printSubsystem("Telemetry", snap.Telemetry)
+	if snap.Sandbox != nil {
+		printSubsystem("Sandbox", *snap.Sandbox)
+	}
+}
+
+func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {
+	if snap.Gateway.State != gateway.StateDisabled {
+		return false
+	}
+	conns := snap.Connectors
+	if len(conns) == 0 && snap.Connector != nil {
+		conns = []gateway.ConnectorHealth{*snap.Connector}
+	}
+	if len(conns) == 0 {
+		return false
+	}
+	for _, c := range conns {
+		if connector.IsProxyConnector(c.Name) {
+			return false
+		}
+	}
+	return true
+}
+
 func printSubsystem(name string, h gateway.SubsystemHealth) {
-	label := fmt.Sprintf("%-*s", 10, name+":")
+	// One column wider than the longest label ("Telemetry:"), so the state
+	// never runs into it and lines up with the detail rows below.
+	label := fmt.Sprintf("%-*s", 11, name+":")
 	fmt.Printf("  %s%s", Style(label, "fg=bright_black", "bold"), styledSubsystemState(h.State))
 	if !h.Since.IsZero() {
 		fmt.Printf("%s%s%s", Dim(" (since "), h.Since.Format(time.RFC3339), Dim(")"))
