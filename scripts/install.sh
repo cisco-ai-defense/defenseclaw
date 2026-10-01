@@ -562,8 +562,10 @@ make_venv() {
         || uv venv "${venv}" --quiet --python '>=3.11,<3.14' \
         || return 1
     # The requirements file is the complete hashed lock, so nothing resolves.
-    uv pip install --quiet --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
-        && uv pip install --quiet --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+    # --compile-bytecode: uv skips compiling by default, which moves that cost
+    # to the first start of the CLI and the scanners.
+    uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
+        && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
 }
 make_venv "${STAGING}/venv" || die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
 "${STAGING}/venv/bin/defenseclaw" --version 2>/dev/null | grep -qF "${VERSION}" \

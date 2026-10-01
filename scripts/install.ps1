@@ -764,9 +764,12 @@ function New-Venv([string]$Path) {
         if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", ">=3.11,<3.14")) -ne 0) { return $false }
     }
     # The requirements file is the complete hashed lock, so nothing resolves.
-    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--python", $python, "--require-hashes", "--no-deps",
+    # Compile the bytecode now: uv skips it by default, and the first start of
+    # the CLI and the scanners would otherwise compile thousands of modules
+    # (over a minute on a Windows host while the files are also first scanned).
+    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
             "-r", (Join-Path $Staging $Requirements))) -ne 0) { return $false }
-    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
+    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
 }
 
 function Save-Snapshot {
