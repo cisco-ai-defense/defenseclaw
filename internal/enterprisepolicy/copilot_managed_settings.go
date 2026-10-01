@@ -453,6 +453,8 @@ func copilotVSCodeStatus(opts Options, state *State) {
 		file, plugin := CopilotVSCodeUserState(home, opts.goos(), opts.HookBinary)
 		if file {
 			files++
+		} else if wantFile {
+			state.UserFileDrift = append(state.UserFileDrift, CopilotVSCodeLocalHookFilePath(home))
 		}
 		if plugin {
 			plugins++

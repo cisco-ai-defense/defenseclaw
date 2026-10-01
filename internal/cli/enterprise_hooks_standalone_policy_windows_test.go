@@ -159,3 +159,50 @@ func TestWindowsCopilotVSCodeUserRemovalWithoutLoadedConfig(t *testing.T) {
 		t.Fatalf("standalone removal kept DefenseClaw's hook file: %v", err)
 	}
 }
+
+// The Copilot VS Code Local hook file is the guardian's on managed Windows
+// (WIN-R1-25, #1055): the row's verify fails while a user's copy is missing
+// or edited (so the guardian reinstalls it), and uninstall removes whatever
+// is at its name.
+func TestWindowsCopilotVSCodeUserOwnsTheLocalHookFile(t *testing.T) {
+	previous := enterpriseHookWindowsGuardianOptions
+	t.Cleanup(func() { enterpriseHookWindowsGuardianOptions = previous })
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{HookBinary: `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`}, []string{"copilot"}, true, nil
+	}
+	home := t.TempDir()
+	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	if err := windowsCopilotVSCodeUser(home, true, false); err == nil {
+		t.Fatal("verify must fail before the hook file is written")
+	}
+	if err := windowsCopilotVSCodeUser(home, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsCopilotVSCodeUser(home, true, false); err != nil {
+		t.Fatalf("verify after install: %v", err)
+	}
+	if err := os.WriteFile(hookFile, []byte(`{"hooks":{"PreToolUse":[{"type":"command","command":"user-tool"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsCopilotVSCodeUser(home, true, false); err == nil || !strings.Contains(err.Error(), hookFile) {
+		t.Fatalf("verify must name the edited hook file: %v", err)
+	}
+	if err := windowsCopilotVSCodeUser(home, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsCopilotVSCodeUser(home, true, false); err != nil {
+		t.Fatalf("verify after repair: %v", err)
+	}
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(hookFile, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsCopilotVSCodeUser(home, false, true); err != nil {
+		t.Fatalf("uninstall must remove whatever is at the hook file: %v", err)
+	}
+	if _, err := os.Lstat(hookFile); !os.IsNotExist(err) {
+		t.Fatalf("hook file left behind: %v", err)
+	}
+}
