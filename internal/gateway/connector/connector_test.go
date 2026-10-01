@@ -8481,6 +8481,64 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 	}
 }
 
+// An earlier release's env block can be captured as pristine when a rollback
+// drops the restore metadata. Uninstall must not put its values back.
+func TestClaudeCode_TeardownDropsEarlierReleaseEnvCapturedAsPristine(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	pristine := map[string]interface{}{"env": map[string]interface{}{
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"DEFENSECLAW_FAIL_MODE":        "closed",
+		"OTEL_LOG_USER_PROMPTS":        "1",
+		"OTEL_SERVICE_NAME":            "operator-claude",
+		"PATH":                         "/operator/bin",
+	}}
+	data, err := json.Marshal(pristine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := map[string]interface{}{}
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := restored["env"].(map[string]interface{})
+	for _, key := range []string{"CLAUDE_CODE_ENABLE_TELEMETRY", "DEFENSECLAW_FAIL_MODE", "OTEL_LOG_USER_PROMPTS"} {
+		if value, present := env[key]; present {
+			t.Errorf("earlier-release env[%s]=%v survived teardown", key, value)
+		}
+	}
+	for key, want := range map[string]string{"OTEL_SERVICE_NAME": "operator-claude", "PATH": "/operator/bin"} {
+		if env[key] != want {
+			t.Errorf("env[%s] = %v, want operator value %q", key, env[key], want)
+		}
+	}
+}
+
 func TestClaudeCode_TeardownExactSnapshotPreservesPristineBytes(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")

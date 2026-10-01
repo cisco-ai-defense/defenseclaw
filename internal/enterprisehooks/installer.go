@@ -422,7 +422,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// A hook config file DefenseClaw owns (Kiro, Copilot) lives in a
 		// folder the agent does not create: make its missing parents as the
 		// user, and let Setup write the file itself.
-		var ownedHookConfigs []string
+		var ownedHookConfigs, createdHookConfigParents []string
 		if standalonePerUserRepair(uid) {
 			// Refuse a contract the install cannot meet before creating any
 			// folder, so a refused install leaves the home as it was.
@@ -431,7 +431,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			if err := withOwnerCredentials(uid, gid, func() error {
 				var prepareErr error
-				ownedHookConfigs, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid)
+				ownedHookConfigs, createdHookConfigParents, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid)
 				return prepareErr
 			}); err != nil {
 				return err
@@ -513,6 +513,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
 			}
+			// Setup found the folders made above already there, so it did
+			// not record them for its teardown.
+			connector.RecordHookConfigParentDirs(conn.Name(), dataDir, createdHookConfigParents)
 			present, err := connector.OwnedHooksPresent(conn, setupOpts)
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
