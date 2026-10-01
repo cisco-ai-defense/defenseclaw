@@ -157,8 +157,13 @@ config with no connectors protects nothing. See
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
 Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
-the rule packs built into it. A rule-pack directory you name must exist and
-be writable only by administrators. Setup checks the config with the
+the rule packs built into it. A rule-pack directory you name must exist, be
+writable only by administrators, and be readable by the gateway service
+account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
+`Users` read and execute entry in place). Setup's checks run as SYSTEM, so
+they pass for a folder that only SYSTEM and Administrators can read. The
+gateway then cannot start, and Setup reports only that the service failed to
+start and rolls back. Setup checks the config with the
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
@@ -597,6 +602,14 @@ folder the purge could not remove and why: the uninstall did not run as
 LocalSystem, a file in it could not be removed, or the account's roaming or
 container profile is not on the computer while it is signed out. Remove
 what it names as LocalSystem.
+
+The agents' shared machine folders also stay, because Setup does not record
+whether it created them and another product can use them. Setup removes its
+own files from them but leaves the folders. After a purge on a computer
+where these folders did not exist before, an empty
+`C:\Program Files\ClaudeCode\managed-settings.d` and a
+`C:\ProgramData\opencode\opencode.json` that holds only its `$schema` line
+can remain. Remove them if nothing else uses them.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes

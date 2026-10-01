@@ -100,6 +100,21 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 		!strings.Contains(err.Error(), "enterprise acp enroll") {
 		t.Fatalf("setup kiro on a managed Windows computer: %v", err)
 	}
+	// `doctor` was an unknown command and `status` printed the raw missing
+	// per-user config error (WIN-R1-23).
+	root.SetArgs([]string{"doctor"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("doctor on a managed Windows computer: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	missing := fmt.Errorf("read v8 config C:\\Users\\u\\.defenseclaw\\config.yaml: %w", fs.ErrNotExist)
+	status := &cobra.Command{Use: "status"}
+	root.AddCommand(status)
+	if err := managedWindowsConfigLoadError(status, missing); err == missing ||
+		!strings.Contains(err.Error(), "`status` has no per-user deployment") {
+		t.Fatalf("status on a managed Windows computer: %v", err)
+	}
 }
 
 func TestRefusePerUserGatewayIgnoresAnUntrustedDescriptor(t *testing.T) {
