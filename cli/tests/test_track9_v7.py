@@ -370,3 +370,14 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
         # Unknown envelope keys must be rejected (additionalProperties: false).
         with self.assertRaises(jsonschema.ValidationError):
             validator.validate({**doc, "unexpected": True})
+
+
+class TestScanResultSchemaEmbedded(unittest.TestCase):
+    def test_embedded_matches_repo_schema(self) -> None:
+        emb = ROOT / "internal" / "cli" / "embed" / "scan-result.json"
+        src = ROOT / "schemas" / "scan-result.json"
+        self.assertEqual(emb.read_text(), src.read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()
