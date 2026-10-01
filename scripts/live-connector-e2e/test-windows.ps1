@@ -4600,7 +4600,7 @@ connection.close()
         $harnessText -match "method = 'hooks/list'" -and
         $harnessText -match "trustStatus -cne 'trusted'" -and
         $harnessText -match "source -cne 'user'" -and
-        $harnessText -match "Join-Path \$codexHome 'config\.toml'" -and
+        $harnessText -match 'Join-Path \$codexHome ''config\.toml''' -and
         $harnessText -match '\$hook\.command -cne \$expectedCommand' -and
         $harnessText -match "Properties\['matcher'\]" -and
         $harnessText -match "Properties\['timeoutSec'\]" -and
