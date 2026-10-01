@@ -130,6 +130,10 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	if err != nil || strings.Count(strings.TrimSpace(out), "\n") != 0 || !strings.Contains(out, "allowManagedHooksOnly") {
 		t.Fatalf("claude HKLM export must be one line: %v\n%s", err, out)
 	}
+	enterprisePolicyFormat, enterprisePolicyConnector = "", "kiro"
+	if _, err = runPolicyCommand(t, runEnterprisePolicyExport); err == nil || !strings.Contains(err.Error(), "protected per user") {
+		t.Fatalf("kiro export must say it is per user: %v", err)
+	}
 
 	enterprisePolicyFormat, enterprisePolicyConnector = "", ""
 	dir, _ := enterprisepolicy.ClaudeManagedDir(ctx.opts)
