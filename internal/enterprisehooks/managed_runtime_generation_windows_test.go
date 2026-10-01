@@ -857,8 +857,9 @@ func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, 
 	}
 }
 
-// Kiro has no hook contract gate, so its lock entry records no contract ID;
-// the managed runtime generation must accept that for Kiro only (WIN-R1-20).
+// A managed Windows Kiro lock entry pins one of Kiro's reviewed managed
+// contracts, like every other managed footprint: no contract ID and the
+// sandbox-only Kiro contract are refused (WIN-R1-20).
 func TestWindowsManagedRuntimeValidContractRequiresRegisteredKiroContract(t *testing.T) {
 	if windowsManagedRuntimeValidContract("kiro", "") {
 		t.Fatal("kiro with no contract ID was accepted")

@@ -254,11 +254,6 @@ func writeKiroCustomDefaultAgent(t *testing.T, home string) (custom, settings st
 // Teardown then puts the user's setting back with nothing of DefenseClaw
 // left in their agent.
 func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
-		// no managed Setup follows a per-user one there.
-		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
-	}
 	home := t.TempDir()
 	workspace := t.TempDir()
 	dataDir := t.TempDir()
@@ -350,12 +345,7 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 // the reclaim already took DefenseClaw's hooks out of the user's own
 // agent, which must not stay the default without them.
 func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
-		// no managed Setup follows a per-user one there.
-		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
-	}
-	if os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only folder")
 	}
 	home := t.TempDir()
@@ -371,10 +361,20 @@ func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T
 		t.Fatalf("per-user Setup: %v", err)
 	}
 	hooks := filepath.Join(workspace, ".kiro", "hooks")
-	if err := os.Chmod(hooks, 0o500); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS == "windows" {
+		// A read-only folder does not stop a delete on Windows; an open
+		// handle without delete sharing does.
+		held, err := os.Open(filepath.Join(hooks, kiroManagedHooksName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = held.Close() })
+	} else {
+		if err := os.Chmod(hooks, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 	}
-	t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 
 	managed := perUser
 	managed.ManagedEnterprise = true
