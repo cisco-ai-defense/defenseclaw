@@ -6090,22 +6090,32 @@ func tokenAuthTestServer(t *testing.T, token string) (*APIServer, *bool) {
 	return api, &called
 }
 
+// TestTokenAuth_HealthExempt pins the owner decision on #1049
+// (RHEL-R1-F17): GET /health stays unauthenticated and keeps the full
+// health document. Readiness probes, status, the TUI, the watchdog and
+// in-agent plugins read it without a token.
 func TestTokenAuth_HealthExempt(t *testing.T) {
-	api, called := tokenAuthTestServer(t, "secret-token-123")
-	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*called = true
-		w.WriteHeader(http.StatusOK)
-	}))
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(api.handleHealth))
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("GET /health without token: status = %d, want %d", rr.Code, http.StatusOK)
+		t.Fatalf("GET /health without token: status = %d, want %d, body=%s", rr.Code, http.StatusOK, rr.Body)
 	}
-	if !*called {
-		t.Error("GET /health: next handler was not called")
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("GET /health body: %v", err)
+	}
+	for _, key := range []string{
+		"started_at", "uptime_ms", "gateway", "watcher", "config", "api",
+		"guardrail", "routing", "telemetry", "provenance", "acp",
+	} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("GET /health without token: field %q missing; body=%s", key, rr.Body)
+		}
 	}
 }
 
