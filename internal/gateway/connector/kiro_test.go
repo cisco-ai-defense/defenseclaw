@@ -903,3 +903,38 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 		t.Fatalf("claudecode command changed: %q", got)
 	}
 }
+
+// RHEL-U3-09: a workspace copy stays owned after the workspace setting is
+// gone, so a rolled-back setup and a later teardown both remove it.
+func TestKiroReclaimsWorkspaceCopyAfterWorkspaceIsUnset(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	withWorkspace := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: workspace, HookFailMode: "open"}
+	without := withWorkspace
+	without.WorkspaceDir = ""
+	copyPath := filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName)
+	conn := NewKiroConnector()
+	for _, step := range []string{"setup", "teardown"} {
+		if err := conn.Setup(context.Background(), withWorkspace); err != nil {
+			t.Fatalf("Setup with workspace: %v", err)
+		}
+		if _, err := os.Stat(copyPath); err != nil {
+			t.Fatalf("workspace copy missing after Setup: %v", err)
+		}
+		var err error
+		if step == "setup" {
+			err = conn.Setup(context.Background(), without)
+		} else {
+			err = conn.Teardown(context.Background(), without)
+		}
+		if err != nil {
+			t.Fatalf("%s without workspace: %v", step, err)
+		}
+		if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+			t.Fatalf("workspace copy survived %s without workspace: %v", step, err)
+		}
+	}
+}
