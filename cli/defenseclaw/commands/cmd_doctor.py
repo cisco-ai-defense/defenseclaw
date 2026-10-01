@@ -1755,10 +1755,21 @@ def _check_inventory_storage(cfg, r: _DoctorResult) -> None:
     if total < 1024 * 1024 * 1024:
         return
     retention_days = _configured_local_retention_days(cfg)
-    if retention_days > 0:
+    discovery_enabled = bool(getattr(getattr(cfg, "ai_discovery", None), "enabled", False))
+    if not discovery_enabled:
+        # The gateway only prunes and compacts inventory.db from the running
+        # discovery service, so with discovery off nothing maintains it.
+        remediation = (
+            "the gateway does not maintain inventory.db while ai_discovery is disabled; "
+            "re-enable ai_discovery so the gateway prunes and compacts it, or stop the "
+            "gateway and delete inventory.db (it only holds AI discovery scan history)"
+        )
+    elif retention_days > 0:
         remediation = (
             f"keep the gateway running; it prunes AI discovery scan history older than the "
-            f"{retention_days}-day observability.local.retention_days window and compacts the file"
+            f"{retention_days}-day observability.local.retention_days window and compacts the file; "
+            f"if it stays this large, the history inside the window is itself large, so lower "
+            f"observability.local.retention_days"
         )
     else:
         remediation = (

@@ -19,6 +19,7 @@ package inventory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -40,6 +41,18 @@ var (
 	// dir; ok=false means the platform could not tell and the check is
 	// skipped.
 	inventoryDiskFree = diskFreeBytes
+	// inventoryVacuumTempDir names the directory VACUUM's temporary copy
+	// is written to; "" skips its free-space check.
+	inventoryVacuumTempDir = sqliteTempDir
+	// inventoryVacuumRetryInterval is how long a failed one-time VACUUM
+	// waits before it is attempted again (a restart also retries).
+	inventoryVacuumRetryInterval = 24 * time.Hour
+	// inventoryVacuum runs the VACUUM itself; tests replace it to inject a
+	// failure.
+	inventoryVacuum = func(ctx context.Context, conn *sql.Conn) error {
+		_, err := conn.ExecContext(ctx, `VACUUM`)
+		return err
+	}
 )
 
 // SQLite auto_vacuum modes as reported by PRAGMA auto_vacuum.
@@ -131,8 +144,9 @@ type ScanHistoryCompaction struct {
 //     backlog is drained and free pages dominate the file, a one-time VACUUM
 //     rewrites it and switches it to INCREMENTAL. VACUUM needs about twice
 //     the live data size in free disk space (the rewrite lands in the WAL
-//     and a temporary copy), so it is skipped with a diagnostic when the
-//     volume is short.
+//     and a temporary copy in SQLite's temp directory), so it is skipped
+//     with a diagnostic when either volume is short, and a failed VACUUM is
+//     not retried for inventoryVacuumRetryInterval.
 //
 // A WAL checkpoint(TRUNCATE) follows any change so the -wal file does not
 // stay at the size of the deletes. All statements run on one pinned
@@ -153,6 +167,7 @@ func (s *InventoryStore) CompactScanHistory(ctx context.Context, prune ScanHisto
 	if err != nil {
 		return out, err
 	}
+	var stepErr error
 	switch mode {
 	case sqliteAutoVacuumIncremental:
 		free, err := pragmaInt64(ctx, conn, "freelist_count")
@@ -161,27 +176,27 @@ func (s *InventoryStore) CompactScanHistory(ctx context.Context, prune ScanHisto
 		}
 		if free > 0 {
 			if _, err := conn.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
-				return out, fmt.Errorf("inventory store: incremental vacuum: %w", err)
+				stepErr = fmt.Errorf("inventory store: incremental vacuum: %w", err)
+			} else {
+				out.ReleasedPages = free
 			}
-			out.ReleasedPages = free
 		}
 	case sqliteAutoVacuumNone:
 		if prune.Drained {
-			out.Vacuumed, out.Skipped, err = s.convertToIncrementalVacuum(ctx, conn)
-			if err != nil {
-				return out, err
-			}
+			out.Vacuumed, out.Skipped, stepErr = s.convertToIncrementalVacuum(ctx, conn)
 		}
 	}
-	if prune.ScansDeleted > 0 || out.Vacuumed || out.ReleasedPages > 0 {
+	// A failed vacuum can leave its frames in the WAL, so checkpoint after
+	// failures too.
+	if prune.ScansDeleted > 0 || out.Vacuumed || out.ReleasedPages > 0 || stepErr != nil {
 		// busy=1 (a reader in another process pinned the WAL) is not an
 		// error; the next sweep's checkpoint finishes the truncation.
 		var busy, logPages, checkpointed int64
 		if err := conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logPages, &checkpointed); err != nil {
-			return out, fmt.Errorf("inventory store: wal checkpoint: %w", err)
+			stepErr = errors.Join(stepErr, fmt.Errorf("inventory store: wal checkpoint: %w", err))
 		}
 	}
-	return out, nil
+	return out, stepErr
 }
 
 // convertToIncrementalVacuum runs the one-time VACUUM that switches a
@@ -204,10 +219,23 @@ func (s *InventoryStore) convertToIncrementalVacuum(ctx context.Context, conn *s
 		free*pageSize < inventoryVacuumMinFreeBytes {
 		return false, "", nil
 	}
+	if retry := s.vacuumRetryAfter.Load(); retry != 0 && time.Now().UnixNano() < retry {
+		// The failure was already reported; stay quiet until the retry.
+		return false, "", nil
+	}
+	// VACUUM writes the rewrite to the WAL beside the database and a
+	// temporary copy to SQLite's temp directory, which may be a different,
+	// smaller volume; require the headroom on the tighter of the two.
 	live := uint64(pageCount-free) * uint64(pageSize)
-	if avail, ok := inventoryDiskFree(filepath.Dir(s.path)); ok && avail < 2*live {
+	avail, known := inventoryDiskFree(filepath.Dir(s.path))
+	if dir := inventoryVacuumTempDir(); dir != "" {
+		if tmp, ok := inventoryDiskFree(dir); ok && (!known || tmp < avail) {
+			avail, known = tmp, true
+		}
+	}
+	if known && avail < 2*live {
 		return false, fmt.Sprintf(
-			"compaction needs about %d MiB free disk space and %d MiB is available",
+			"compaction needs about %d MiB free disk space on the database and temporary-file volumes and %d MiB is available",
 			(2*live)>>20, avail>>20,
 		), nil
 	}
@@ -222,9 +250,13 @@ func (s *InventoryStore) convertToIncrementalVacuum(ctx context.Context, conn *s
 		}
 	}
 	defer conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA temp_store = MEMORY`) //nolint:errcheck
-	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
+	if err := inventoryVacuum(ctx, conn); err != nil {
+		if ctx.Err() == nil {
+			s.vacuumRetryAfter.Store(time.Now().Add(inventoryVacuumRetryInterval).UnixNano())
+		}
 		return false, "", fmt.Errorf("inventory store: vacuum: %w", err)
 	}
+	s.vacuumRetryAfter.Store(0)
 	return true, "", nil
 }
 

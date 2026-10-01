@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -54,6 +55,10 @@ type InventoryStore struct {
 	// path is the database file; retention compaction checks the free
 	// space of its volume before rewriting the file.
 	path string
+	// vacuumRetryAfter (unix nanoseconds) holds off the one-time legacy
+	// VACUUM after it failed, so a volume that cannot fit the rewrite is
+	// not filled again on every sweep.
+	vacuumRetryAfter atomic.Int64
 	// closeOnce makes the documented idempotent Close contract explicit. A
 	// discovery service normally closes the store when Run exits, while a
 	// sidecar reload that rejects a prepared (never-run) service closes it from

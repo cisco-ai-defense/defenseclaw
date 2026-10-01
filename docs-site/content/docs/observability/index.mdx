@@ -359,7 +359,9 @@ several passes. Unlike `audit.db`, `inventory.db` returns freed space to the
 filesystem: new files use incremental auto-vacuum, and a file created by an
 earlier release is compacted once after its backlog is pruned when enough free
 disk space is available. `retention_days: 0` keeps inventory history
-indefinitely as well. `defenseclaw doctor` warns
+indefinitely as well. While `ai_discovery.enabled` is `false` nothing
+maintains `inventory.db`; it only holds scan history, so it can be deleted with
+the gateway stopped. `defenseclaw doctor` warns
 (`doctor.state.inventory-storage-size`) when `inventory.db` reaches 1 GiB.
 
 ## Choose an operator view

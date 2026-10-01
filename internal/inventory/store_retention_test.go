@@ -252,3 +252,63 @@ func TestCompactScanHistorySkipsVacuumWithoutDiskHeadroom(t *testing.T) {
 		t.Fatalf("auto_vacuum = %d after skipped conversion", mode)
 	}
 }
+
+func TestCompactScanHistoryChecksTempVolumeHeadroom(t *testing.T) {
+	prevMin, prevFree, prevTemp := inventoryVacuumMinFreeBytes, inventoryDiskFree, inventoryVacuumTempDir
+	inventoryVacuumMinFreeBytes = 0
+	inventoryVacuumTempDir = func() string { return "temp-volume" }
+	inventoryDiskFree = func(dir string) (uint64, bool) {
+		if dir == "temp-volume" {
+			return 1, true // e.g. a small tmpfs
+		}
+		return 1 << 50, true
+	}
+	t.Cleanup(func() {
+		inventoryVacuumMinFreeBytes, inventoryDiskFree, inventoryVacuumTempDir = prevMin, prevFree, prevTemp
+	})
+	st, _ := newLegacyInventoryStore(t)
+	drained, err := st.PruneScanHistory(context.Background(), time.Now().UTC(), time.Minute)
+	if err != nil || !drained.Drained {
+		t.Fatalf("drain = %+v, %v", drained, err)
+	}
+	got, err := st.CompactScanHistory(context.Background(), drained)
+	if err != nil || got.Vacuumed || !strings.Contains(got.Skipped, "temporary-file") {
+		t.Fatalf("compaction = %+v, %v; want a temp-volume skip", got, err)
+	}
+}
+
+func TestCompactScanHistoryBacksOffAfterFailedVacuum(t *testing.T) {
+	prevMin, prevVacuum := inventoryVacuumMinFreeBytes, inventoryVacuum
+	inventoryVacuumMinFreeBytes = 0
+	attempts := 0
+	inventoryVacuum = func(context.Context, *sql.Conn) error {
+		attempts++
+		return errors.New("database or disk is full")
+	}
+	t.Cleanup(func() { inventoryVacuumMinFreeBytes, inventoryVacuum = prevMin, prevVacuum })
+	st, dbPath := newLegacyInventoryStore(t)
+	drained, err := st.PruneScanHistory(context.Background(), time.Now().UTC(), time.Minute)
+	if err != nil || !drained.Drained || drained.ScansDeleted == 0 {
+		t.Fatalf("drain = %+v, %v", drained, err)
+	}
+	if fileSize(t, dbPath+"-wal") == 0 {
+		t.Fatal("expected the prune to leave WAL frames")
+	}
+
+	if _, err := st.CompactScanHistory(context.Background(), drained); err == nil || attempts != 1 {
+		t.Fatalf("failed vacuum: err=%v attempts=%d; want an error after one attempt", err, attempts)
+	}
+	if wal := fileSize(t, dbPath+"-wal"); wal != 0 {
+		t.Fatalf("wal size after failed vacuum = %d, want truncated", wal)
+	}
+	got, err := st.CompactScanHistory(context.Background(), ScanHistoryPrune{Drained: true})
+	if err != nil || got.Vacuumed || got.Skipped != "" || attempts != 1 {
+		t.Fatalf("sweep inside backoff = %+v, %v, attempts=%d; want a silent no-op", got, err, attempts)
+	}
+
+	inventoryVacuum = prevVacuum
+	st.vacuumRetryAfter.Store(time.Now().Add(-time.Second).UnixNano())
+	if got, err := st.CompactScanHistory(context.Background(), ScanHistoryPrune{Drained: true}); err != nil || !got.Vacuumed {
+		t.Fatalf("sweep after backoff = %+v, %v; want VACUUM", got, err)
+	}
+}

@@ -5,7 +5,11 @@
 
 package inventory
 
-import "golang.org/x/sys/windows"
+import (
+	"os"
+
+	"golang.org/x/sys/windows"
+)
 
 // diskFreeBytes returns the bytes available to the calling user on the
 // volume holding dir.
@@ -19,4 +23,10 @@ func diskFreeBytes(dir string) (uint64, bool) {
 		return 0, false
 	}
 	return avail, true
+}
+
+// sqliteTempDir is where SQLite puts VACUUM's temporary copy on Windows
+// (GetTempPath, which os.TempDir also returns).
+func sqliteTempDir() string {
+	return os.TempDir()
 }
