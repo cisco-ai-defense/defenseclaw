@@ -499,8 +499,8 @@ func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.Ent
 				if err != nil {
 					return true, err
 				}
-				if refusal != "" {
-					state.conflict("DefenseClaw's %s no longer meets its write conditions: %s", path, refusal)
+				if refusal.text != "" {
+					state.conflict("DefenseClaw's %s no longer meets its write conditions: %s", path, refusal.text)
 				}
 			} else {
 				state.detail("administrator policy %s=%s keeps Claude Desktop WSL sessions off", path, describeRegValue(*current))
