@@ -60,6 +60,10 @@ const enterpriseWindowsEnumerateCycleTimeout = 60 * time.Second
 // profile, and a burst of session events runs one cycle.
 var enterpriseWindowsEnumerateSessionSettle = 15 * time.Second
 
+// enterpriseWindowsEnumerateSessionSettleAfter arms the settle window. Tests
+// replace it to fire the window on an explicit event instead of a clock.
+var enterpriseWindowsEnumerateSessionSettleAfter = time.After
+
 // enterpriseWindowsEnumerateOptions carries the CLI flags for the
 // `enterprise windows enumerate` subcommand. Parsed in
 // `newEnterpriseWindowsEnumerateCommand`.
@@ -433,23 +437,19 @@ func runEnterpriseWindowsEnumerateInterval(
 	// internal/winsession; never fires otherwise) runs one extra cycle after
 	// a settle delay, so a newly signed-in user is enrolled without waiting
 	// for the next interval tick.
-	session := time.NewTimer(time.Hour)
-	if !session.Stop() {
-		<-session.C
-	}
-	defer session.Stop()
-	sessionPending := false
+	// Sign-ins received while the window is armed join it. A nil channel
+	// never fires, so the window is idle until the first sign-in.
+	var session <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-winsession.Logons():
-			if !sessionPending {
-				session.Reset(enterpriseWindowsEnumerateSessionSettle)
-				sessionPending = true
+			if session == nil {
+				session = enterpriseWindowsEnumerateSessionSettleAfter(enterpriseWindowsEnumerateSessionSettle)
 			}
-		case <-session.C:
-			sessionPending = false
+		case <-session:
+			session = nil
 			fmt.Fprintf(stderr, "[hook-enumerator] session sign-in: running an extra cycle\n")
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
