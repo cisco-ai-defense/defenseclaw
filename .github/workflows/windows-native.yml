@@ -673,8 +673,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne $expected) {
             throw 'pinned Devin CLI archive digest mismatch'
           }
-      - name: Required connector contract with one bounded telemetry retry
-        id: connector_contract
+      - name: Required connector contract
         run: |
           $nativeHarness = (Resolve-Path './scripts/windows-native-ci.ps1').Path
           $standardUserHarness = (Resolve-Path './scripts/invoke-windows-setup-standard-user-ci.ps1').Path
@@ -682,75 +681,21 @@ jobs:
           $contractStateRoot = [IO.Path]::GetFullPath($env:DC_STATE_ROOT)
           $artifactRoot = [IO.Path]::GetFullPath($env:DC_ARTIFACT_ROOT)
           $diagnosticsRoot = [IO.Path]::GetFullPath($env:DC_DIAGNOSTICS)
+          $contractDiagnostics = Join-Path $diagnosticsRoot 'contract-child'
           $pwsh = Join-Path $PSHOME 'pwsh.exe'
-          function Invoke-ConnectorContractAttempt([int]$Attempt) {
-            $attemptDiagnostics = Join-Path $diagnosticsRoot "attempt-$Attempt-child"
-            return Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-              '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $standardUserHarness,
-              '-Mode', 'contract', '-Connector', $env:CONNECTOR,
-              '-StateRoot', $contractStateRoot, '-ArtifactRoot', $artifactRoot,
-              '-DiagnosticsRoot', $attemptDiagnostics, '-TimeoutSeconds', '1800'
-            ) -AllowedExitCodes @(0, 1) -TimeoutSeconds 1860 -LogPath (
-              Join-Path $diagnosticsRoot "attempt-$Attempt-wrapper.log"
-            )
-          }
-          # This returns only after the first wrapper exits and its output drains.
-          $first = Invoke-ConnectorContractAttempt 1
-          if ($first.ExitCode -eq 0) {
-            'retried=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            return
-          }
-          $retrySignal = 'event_history=sqlite_write_failed'
-          $firstOutput = @($first.StdOut, $first.StdErr | Where-Object { $_ }) -join [Environment]::NewLine
-          $cleanupFailurePrefixes = @(
-            'disposable execution boundary:',
-            'interactive desktop ACL restore:',
-            'ancestor ACL lease restore:',
-            'diagnostic handoff:',
-            'account/profile cleanup:',
-            'sandbox cleanup:',
-            'parent-only sibling cleanup:'
+          # The wrapper creates a GUID-named user/profile/sandbox and returns
+          # only after it exits and its output drains.
+          $contract = Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $standardUserHarness,
+            '-Mode', 'contract', '-Connector', $env:CONNECTOR,
+            '-StateRoot', $contractStateRoot, '-ArtifactRoot', $artifactRoot,
+            '-DiagnosticsRoot', $contractDiagnostics, '-TimeoutSeconds', '1800'
+          ) -AllowedExitCodes @(0, 1) -TimeoutSeconds 1860 -LogPath (
+            Join-Path $diagnosticsRoot 'contract-wrapper.log'
           )
-          $cleanupFailure = @($cleanupFailurePrefixes | Where-Object {
-            $firstOutput.Contains($_, [StringComparison]::Ordinal)
-          } | Select-Object -First 1)
-          if ($cleanupFailure.Count -ne 0) {
-            throw 'packaged connector contract reported incomplete disposable-user cleanup'
+          if ($contract.ExitCode -ne 0) {
+            throw 'packaged connector contract failed'
           }
-          if (-not $firstOutput.Contains($retrySignal, [StringComparison]::Ordinal)) {
-            throw 'packaged connector contract failed without the retryable telemetry signal'
-          }
-          Write-BoundedText -Path (Join-Path $diagnosticsRoot "$env:CONNECTOR-event-history-retry.txt") `
-            -MaxBytes 4096 -Text "attempt=1`nsignal=$retrySignal"
-          try {
-            Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-              '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $nativeHarness,
-              '-Operation', 'capture', '-StateRoot', $contractStateRoot,
-              '-DiagnosticsRoot', (Join-Path $diagnosticsRoot 'attempt-1-state')
-            ) -TimeoutSeconds 120 -LogPath (
-              Join-Path $diagnosticsRoot 'attempt-1-capture.log'
-            ) | Out-Null
-          } catch {
-            Write-BoundedText -Path (Join-Path $diagnosticsRoot 'attempt-1-capture-failure.log') `
-              -MaxBytes 32768 -Text $_.Exception.Message
-            Write-Warning 'bounded first-attempt state capture failed; cleanup remains mandatory'
-          }
-          Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $nativeHarness,
-            '-Operation', 'cleanup', '-StateRoot', $contractStateRoot
-          ) -TimeoutSeconds 180 -LogPath (
-            Join-Path $diagnosticsRoot 'attempt-1-cleanup.log'
-          ) | Out-Null
-          if ((Test-Path -LiteralPath $contractStateRoot) -or
-              @(Get-StateProcesses $contractStateRoot).Count -ne 0) {
-            throw 'connector retry cleanup did not remove its exact state and rooted processes'
-          }
-          # The wrapper creates a GUID-named user/profile/sandbox on every call.
-          $second = Invoke-ConnectorContractAttempt 2
-          if ($second.ExitCode -ne 0) {
-            throw 'packaged connector contract failed on its final attempt'
-          }
-          'retried=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload deterministic contract results
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -762,8 +707,8 @@ jobs:
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure or recovered telemetry retry
-        if: ${{ failure() || cancelled() || steps.connector_contract.outputs.retried == 'true' }}
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-native-contract-diagnostics-${{ matrix.connector }}
