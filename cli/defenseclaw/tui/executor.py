@@ -95,7 +95,13 @@ class CommandExecutor:
             try:
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_grace)
             except TimeoutError:
-                process.kill()
+                # The grace wait is torn down across loop iterations, so the
+                # child can exit naturally and its transport can finish right
+                # at the deadline. asyncio then raises ProcessLookupError from
+                # kill(); the process is already gone, so the cancel still
+                # completes with a single cancelled result.
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_force)
             return True
 

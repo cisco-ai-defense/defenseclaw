@@ -438,19 +438,65 @@ async def test_pipe_executor_bounds_newline_free_pending_output(monkeypatch) -> 
     assert [event.text for event in events if event.kind == "output"] == ["abcd", "ef"]
 
 
+@pytest.mark.parametrize("reap_first", [False, True], ids=["in-flight-exit", "reaped-exit"])
 @pytest.mark.asyncio
-async def test_cancel_natural_exit_race_has_one_terminal_result() -> None:
+async def test_cancel_natural_exit_race_has_one_terminal_result(reap_first: bool) -> None:
+    # The child exits on its own right after its readiness line. Cancel is
+    # issued from the consumer while run() is suspended on that line, so it
+    # lands while the natural exit is in flight (either side may win) or,
+    # with reap_first, after the exit has been reaped (cancel must be a no-op).
+    # Synchronizing on the line avoids polling for a short-lived running state.
     executor = CommandExecutor(use_pty=False, cancel_grace=0.05)
-    collect = asyncio.create_task(_collect(executor, ("-c", "import time; time.sleep(0.03)")))
-    await _wait_until_running(executor)
-    await asyncio.sleep(0.02)
+    events = []
+    cancel_results: list[bool] = []
+    async for event in executor.run(sys.executable, ("-u", "-c", "print('ready')")):
+        events.append(event)
+        if event.kind == "output" and event.text == "ready":
+            if reap_first:
+                assert executor._process is not None
+                await executor._process.wait()
+            cancel_results.append(await executor.cancel())
 
-    await executor.cancel()
-    events = await collect
-
+    assert len(cancel_results) == 1
+    if reap_first:
+        assert cancel_results == [False]
     done = [event for event in events if event.kind == "done"]
     assert len(done) == 1
-    assert (done[0].cancelled, done[0].exit_code) in {(True, 130), (False, 0)}
+    assert events[-1] is done[0]
+    expected = (True, 130) if cancel_results[0] else (False, 0)
+    assert (done[0].cancelled, done[0].exit_code) == expected
+    assert executor.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_tolerates_natural_exit_at_grace_deadline() -> None:
+    # asyncio raises ProcessLookupError from kill() once the transport has
+    # finished, which happens when the child exits while the grace wait is
+    # being torn down. Cancel must still complete with one cancelled result.
+    loop = asyncio.get_running_loop()
+    exited = loop.create_future()
+
+    class ExitingProcess:
+        pid = 1
+        stdin = None
+        returncode = None
+
+        def send_signal(self, _sig) -> None:
+            pass
+
+        def kill(self) -> None:
+            self.returncode = 0
+            exited.set_result(0)
+            raise ProcessLookupError
+
+        def wait(self):
+            return exited
+
+    executor = CommandExecutor(use_pty=False, cancel_grace=0.001, cancel_force=5.0)
+    executor._process = ExitingProcess()  # type: ignore[assignment]
+
+    assert await executor.cancel() is True
+    assert exited.done()
 
 
 @pytest.mark.asyncio
