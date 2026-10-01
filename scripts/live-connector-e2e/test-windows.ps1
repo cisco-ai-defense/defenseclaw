@@ -2024,7 +2024,7 @@ import sys
 import time
 from pathlib import Path
 
-database, raw, uncommitted_ready, commit_ready, committed_ready = sys.argv[1:]
+database, raw, uncommitted_ready, commit_ready, committed_ready, bound = sys.argv[1:]
 event = json.loads(raw)
 correlation = event["correlation"]
 connection = sqlite3.connect(database, timeout=5)
@@ -2046,7 +2046,7 @@ connection.execute(
     ),
 )
 Path(uncommitted_ready).write_text("ready", encoding="utf-8")
-deadline = time.monotonic() + 10
+deadline = time.monotonic() + float(bound)
 while not Path(commit_ready).is_file():
     if time.monotonic() >= deadline:
         raise TimeoutError("commit authorization was not published")
@@ -2057,21 +2057,29 @@ Path(committed_ready).write_text("committed", encoding="utf-8")
 '@
         $pythonApplication = (Get-Command 'python.exe' -CommandType Application `
             -ErrorAction Stop | Select-Object -First 1).Source
-        $walWriter = Start-Job -ArgumentList @(
-            $pythonApplication, $walPython, $database, $delayedRaw,
-            $uncommittedReady, $commitReady, $committedReady
-        ) -ScriptBlock {
-            param($Python, $Code, $Database, $Raw, $Uncommitted, $Commit, $Committed)
-            & $Python -c $Code $Database $Raw $Uncommitted $Commit $Committed
-            if ($LASTEXITCODE -ne 0) { throw "SQLite WAL fixture exited $LASTEXITCODE" }
-        }
-        $uncommittedDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        # The writer is a direct child, not a background job, so no second
+        # PowerShell start-up sits in front of it. Its ready files are the
+        # synchronization; the bound is hang protection and uses the
+        # harness launch budget, because interpreter start-up on a loaded
+        # runner is not what this fixture measures.
+        $walBound = $CommandTimeoutSeconds
+        $walStart = [Diagnostics.ProcessStartInfo]::new($pythonApplication)
+        $walStart.UseShellExecute = $false
+        $walStart.CreateNoWindow = $true
+        $walStart.RedirectStandardError = $true
+        foreach ($argument in @(
+            '-c', $walPython, $database, $delayedRaw,
+            $uncommittedReady, $commitReady, $committedReady, [string]$walBound
+        )) { [void]$walStart.ArgumentList.Add($argument) }
+        $walWriter = [Diagnostics.Process]::Start($walStart)
+        $walWriterStderr = $walWriter.StandardError.ReadToEndAsync()
+        $uncommittedDeadline = [DateTime]::UtcNow.AddSeconds($walBound)
         while (-not (Test-Path -LiteralPath $uncommittedReady -PathType Leaf)) {
-            if ($walWriter.State -eq 'Failed') {
-                Receive-Job $walWriter -ErrorAction Stop | Out-Null
+            if ($walWriter.HasExited) {
+                throw "SQLite WAL fixture exited $($walWriter.ExitCode) before its uncommitted row: $($walWriterStderr.Result)"
             }
             if ([DateTime]::UtcNow -ge $uncommittedDeadline) {
-                throw 'SQLite WAL fixture did not publish its uncommitted row'
+                throw "SQLite WAL fixture did not publish its uncommitted row within ${walBound}s"
             }
             Start-Sleep -Milliseconds 50
         }
@@ -2104,11 +2112,10 @@ Path(committed_ready).write_text("committed", encoding="utf-8")
             -not [bool]$delayedObserved.would_block -and
             -not [bool]$delayedObserved.enforced) `
             'session-bound readiness observes the exact canonical decision after WAL commit'
-        Wait-Job -Job $walWriter -Timeout 10 | Out-Null
-        Assert-True ($walWriter.State -eq 'Completed' -and
+        $walExited = $walWriter.WaitForExit($walBound * 1000)
+        Assert-True ($walExited -and $walWriter.ExitCode -eq 0 -and
             (Test-Path -LiteralPath $committedReady -PathType Leaf)) `
             'SQLite WAL writer committed and closed within the bounded fixture'
-        Receive-Job $walWriter -ErrorAction Stop | Out-Null
 
         $validatorSnapshot = New-CanonicalAuditProjectionSnapshot
         try {
@@ -2353,8 +2360,9 @@ threading.Event().wait()
             'a hung projection request fails within its hang-protection bound and kills the projector'
     } finally {
         if ($null -ne $walWriter) {
-            Stop-Job $walWriter -ErrorAction SilentlyContinue
-            Remove-Job $walWriter -Force -ErrorAction SilentlyContinue
+            if (-not $walWriter.HasExited) { $walWriter.Kill($true) }
+            $null = $walWriter.WaitForExit(5000)
+            $walWriter.Dispose()
         }
         $null = Stop-CanonicalAuditProjector
         $script:CanonicalAuditProjectorScript = ''
