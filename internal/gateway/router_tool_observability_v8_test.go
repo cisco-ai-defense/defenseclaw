@@ -108,9 +108,7 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 	// have synchronously exported everything recorded above when it returns.
 	// Polling against the 1s reader interval let a slow runner observe only
 	// part of the export stream.
-	if err := fixture.sidecar.closeOwnedObservabilityV8Runtime(); err != nil {
-		t.Fatalf("drain EventRouter tool runtime: %v", err)
-	}
+	drainEventRouterToolV8Runtime(t, fixture, capture)
 	spans := eventRouterToolSpans(capture)
 	if len(spans) != 2 {
 		t.Fatalf("captured generated tool spans=%d want=2 ids=%v", len(spans), eventRouterToolSpanIDs(spans))
@@ -151,6 +149,29 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 	}
 	assertEventRouterToolLocalLogs(t, databasePath,
 		[]string{"private-call-one", "private-call-two", "private-result-one", "private-result-two"})
+}
+
+// drainEventRouterToolV8Runtime closes the bootstrap-owned runtime until it
+// reports a clean shutdown. Each attempt is bounded by the sidecar close
+// timeout, and Runtime.Close requires callers to retry a degraded close with a
+// fresh context rather than treat it as final, so one slow attempt on a loaded
+// runner must not decide the test. The go test -timeout bounds the loop.
+func drainEventRouterToolV8Runtime(
+	t *testing.T,
+	fixture sidecarV8BootstrapFixture,
+	capture *hookModelV8OTLPCapture,
+) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		err := fixture.sidecar.closeOwnedObservabilityV8Runtime()
+		if err == nil {
+			return
+		}
+		_, metricRequests := capture.snapshot()
+		t.Logf("drain EventRouter tool runtime attempt %d degraded: %v; spans=%d tool call metric total=%v",
+			attempt, err, len(eventRouterToolSpans(capture)),
+			eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls))
+	}
 }
 
 func eventRouterToolMetricTotal(
