@@ -603,6 +603,14 @@ LocalSystem, a file in it could not be removed, or the account's roaming or
 container profile is not on the computer while it is signed out. Remove
 what it names as LocalSystem.
 
+The agents' shared machine folders also stay, because Setup does not record
+whether it created them and another product can use them. Setup removes its
+own files from them but leaves the folders. After a purge on a computer
+where these folders did not exist before, an empty
+`C:\Program Files\ClaudeCode\managed-settings.d` and a
+`C:\ProgramData\opencode\opencode.json` that holds only its `$schema` line
+can remain. Remove them if nothing else uses them.
+
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The
