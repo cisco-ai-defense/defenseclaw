@@ -208,3 +208,6 @@ def test_every_tab_fits_at_80_columns_with_unread_badges(monkeypatch) -> None:
     labels = fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)
     assert labels["logs"] == "8(2)"
     assert strip_width(tuple(labels.values())) <= 66
+    labels = fit_tab_labels(FIFTEEN_PANELS, "overview", unread, 66)
+    assert strip_width(tuple(labels.values())) <= 66
+    assert labels["alerts"] == "2(2)"
