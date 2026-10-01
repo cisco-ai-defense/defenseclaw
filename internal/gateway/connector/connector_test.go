@@ -9578,6 +9578,10 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
+	// This account's gateway is running, so a 401 means its token drifted.
+	if err := os.WriteFile(filepath.Join(dcHome, "gateway.pid"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
@@ -9618,6 +9622,32 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
 		}
+	}
+}
+
+// TestHookScript_401WithoutOwnGateway_NamesAnotherListener covers a shared
+// host (RHEL-U3-07): this account's gateway is stopped and another account's
+// gateway holds the default port, so the 401 is not token drift.
+func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	if err := writeHookScriptsCommonWithFailMode(dir, strings.TrimPrefix(srv.URL, "http://"), "tok-test", "closed", []string{"claude-code-hook.sh"}); err != nil {
+		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	output, _ := cmd.CombinedOutput()
+	text := string(output)
+	if !strings.Contains(text, "this account's gateway is not running, so another account or program answered on its port") ||
+		!strings.Contains(text, "defenseclaw-gateway start") || strings.Contains(text, "token drift") {
+		t.Errorf("hook output should name another listener instead of token drift, got:\n%s", text)
 	}
 }
 
