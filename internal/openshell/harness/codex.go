@@ -115,9 +115,8 @@ var Codex = register(&Spec{
 			ProfileID: profiles.CodexBedrockMantleID,
 			Hosts:     []string{bedrockHostToken},
 			// Mantle does not serve Codex's default OpenAI model (Codex's
-			// requests for it fail with a validation error); gpt-oss-20b is
-			// the Mantle model Codex's hooks and tool calls are verified
-			// with. The run's managed config pins it, so every Codex the
+			// requests for it fail with a validation error). The run's
+			// managed config pins CodexMantleDefaultModel, so every Codex the
 			// sandbox starts gets it; -m picks another.
 			DefaultModel: CodexMantleDefaultModel,
 			LaunchArgs: append(codexProviderArgs(codexMantleProvider),
@@ -126,12 +125,7 @@ var Codex = register(&Spec{
 				"-c", `web_search="disabled"`,
 			),
 			ModelProvider: &codexMantleProvider,
-			// Mantle drops the id and status of the assistant replies Codex
-			// replays and then fails its own validation of them (an SSE error
-			// event Codex reports as a lost stream); a reply sent as plain
-			// string content would pass, which Codex 0.146 cannot be told to do.
-			Caveat: "Bedrock Mantle rejects every turn after the first of a Codex conversation (\"stream disconnected before completion\"): start each request with /new",
-			Note:   "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route (default model " + CodexMantleDefaultModel + ")",
+			Note:          "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle OpenAI Responses route (default model " + CodexMantleDefaultModel + ")",
 		},
 	},
 	customization: []CustomizationPath{
@@ -159,16 +153,21 @@ var Codex = register(&Spec{
 })
 
 // CodexMantleDefaultModel is the model Codex runs on Amazon Bedrock Mantle
-// unless the caller picks another with -m.
-const CodexMantleDefaultModel = "openai.gpt-oss-20b"
+// unless the caller picks another with -m. It is served on the /openai/v1
+// route, the one Codex's own Bedrock provider uses.
+const CodexMantleDefaultModel = "openai.gpt-5.5"
 
 // CodexLauncherPath is the in-image Codex launcher.
 const CodexLauncherPath = LauncherDir + "/codex-launch"
 
 // codexMantleProvider is the Codex custom provider on the Bedrock Mantle
-// Responses route (the host is resolved per region).
+// OpenAI Responses route (the host is resolved per region). Mantle's older
+// /v1 Responses route fails every turn after the first of a conversation:
+// it drops the id and status of the assistant replies Codex replays, then
+// rejects its own copy of them (an SSE error event Codex reports as "stream
+// disconnected before completion"). /openai/v1 accepts the replayed history.
 var codexMantleProvider = connector.SandboxModelProvider{
-	ID: "mantle", Name: "mantle", BaseURL: "https://" + bedrockHostToken + "/v1",
+	ID: "mantle", Name: "mantle", BaseURL: "https://" + bedrockHostToken + "/openai/v1",
 	EnvKey: "BEDROCK_MANTLE_API_KEY", WireAPI: "responses",
 	// Mantle rejects the multi-agent namespace tool and web search
 	// ("Invalid tools: unknown variant namespace"): the run's managed config

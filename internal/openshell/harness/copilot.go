@@ -95,8 +95,8 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 			`[ -n "$(find "$cache/pkg" -mindepth 3 -maxdepth 3 -name .extraction-complete -path '*/` + version + `/*')" ] || { echo "Copilot package was not extracted into $cache" >&2; exit 1; }; ` +
 			`chown -R root:root "$cache"; chmod -R go-w "$cache"`
 		return []InstallStep{{
-			Comment: "Replace the base image's Copilot CLI with the pinned " + version + " in a root-owned prefix and pre-extract its package into a root-owned cache",
-			Run:     run + "; " + extract,
+			Comment: "Replace the base image's Copilot CLI with the pinned " + version + " in a root-owned prefix, pre-extract its package into a root-owned cache and build its pidfd_open fallback",
+			Run:     run + "; " + extract + "; " + copilotPidfdInstall(),
 		}}, nil
 	},
 	launcher: copilotLauncher,
@@ -154,22 +154,13 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 		"COPILOT_AUTO_UPDATE":    "false",
 		"COPILOT_PKG_CACHE_HOME": CopilotPackageCache,
 	},
-	// #966, measured on the Docker driver and in the macOS MicroVM: the
-	// sandbox's seccomp filter makes pidfd_open fail with ENOSYS, so the
-	// pinned CLI's native runtime watches SIGCHLD for its hook processes,
-	// and in the TUI its Node.js side resets SIGCHLD to the default. Each
-	// finished hook stays a zombie until Copilot's 30-second hook timeout.
-	// Headless runs keep the handler. Copilot's HTTP hooks would start no
-	// process but let the tool call run when the request fails, so the
-	// sandbox keeps the fail-closed command hooks.
-	interactiveCaveat: "each Copilot CLI hook waits out its 30-second timeout in a sandbox, so a tool call takes about a minute and a half; --prompt runs are not affected",
 })
 
 // CopilotLauncherPath is the in-image Copilot launcher.
 const CopilotLauncherPath = LauncherDir + "/copilot-launch"
 
 var copilotLauncher = `#!/bin/bash -p
-# defenseclaw-sandbox-launcher v1
+# defenseclaw-sandbox-launcher v2
 # DefenseClaw GitHub Copilot CLI launcher (OpenShell sandbox images,
 # root-owned). Pins the CLI to the package pre-extracted at image build,
 # trusts the working directory, then execs the pinned CLI with the caller's
@@ -205,4 +196,12 @@ esac
 # the TUI (the native CLI it starts does not). This fixed NODE_OPTIONS
 # silences only that warning (Copilot's tool commands inherit it); the
 # caller's NODE_OPTIONS is dropped with the other start-up variables.
-` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)
+# The sandbox refuses pidfd_open, so without the root-owned fallback the
+# image builds (preloaded after the loader scrub above) every hook would wait
+# out Copilot's 30-second hook timeout in the TUI. The native CLI drops
+# LD_PRELOAD at load, so its hooks and tools do not inherit it.
+dc_pidfd=()
+if [ -f ` + CopilotPidfdShim + ` ]; then
+  dc_pidfd=(LD_PRELOAD=` + CopilotPidfdShim + `)
+fi
+` + launcherExec(`"${dc_pidfd[@]}" NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)
