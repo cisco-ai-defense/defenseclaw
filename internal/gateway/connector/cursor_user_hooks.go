@@ -67,9 +67,12 @@ type CursorPerUserInstall struct {
 // entries, their order and the text between them, so an event array whose
 // entries were all removed stays as an empty array.
 //
-// With nothing to remove it returns data and no removals. It returns an error
-// when data is not one JSON object, repeats a key in the top-level or "hooks"
-// object, or exceeds the Cursor hooks size limit. Some older native commands
+// With nothing to remove it returns data and no removals. data is read as the
+// managed Cursor hook reads it, where a repeated key has its last value, so a
+// file that repeats a key but holds nothing to remove is returned as it is.
+// It returns an error when data is not one JSON object or exceeds the Cursor
+// hooks size limit, or when it holds an entry to remove and repeats a key in
+// the top-level or "hooks" object. Some older native commands
 // name paths in the user's home, so a caller acting for another user runs it
 // inside WithUserHomeDir.
 func RemoveCursorPerUserHookRegistrations(data []byte, install CursorPerUserInstall) ([]byte, []CursorUserHookRemoval, error) {
@@ -91,6 +94,19 @@ func RemoveCursorPerUserHookRegistrations(data []byte, install CursorPerUserInst
 // canonicalNativeWindowsInstalledHookBinary and
 // canonicalNativeWindowsInstalledGatewayBinary.
 func cursorNativeHookCommandsInUserFolders(localAppData, userProgramFiles string) []string {
+	binaries := nativeHookBinariesInUserFolders(localAppData, userProgramFiles)
+	commands := make([]string, 0, len(binaries))
+	for _, binary := range binaries {
+		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
+	}
+	return commands
+}
+
+// nativeHookBinariesInUserFolders returns DefenseClaw's executables in the
+// given Known Folders that per-user setup registered directly: the
+// HookRuntime launcher under LocalAppData and the per-user installation's
+// launcher and gateway under UserProgramFiles. An empty folder adds none.
+func nativeHookBinariesInUserFolders(localAppData, userProgramFiles string) []string {
 	var binaries []string
 	if localAppData = strings.TrimSpace(localAppData); localAppData != "" {
 		binaries = append(binaries, filepath.Join(localAppData, "DefenseClaw", "HookRuntime", windowsHookBinaryName))
@@ -99,11 +115,7 @@ func cursorNativeHookCommandsInUserFolders(localAppData, userProgramFiles string
 		bin := filepath.Join(userProgramFiles, "DefenseClaw", "bin")
 		binaries = append(binaries, filepath.Join(bin, windowsHookBinaryName), filepath.Join(bin, windowsGatewayBinaryName))
 	}
-	commands := make([]string, 0, len(binaries))
-	for _, binary := range binaries {
-		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
-	}
-	return commands
+	return binaries
 }
 
 func removeCursorHookRegistrations(data []byte, owned cursorHookCommandMatcher) ([]byte, []CursorUserHookRemoval, error) {
@@ -116,7 +128,11 @@ func removeCursorHookRegistrations(data []byte, owned cursorHookCommandMatcher) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(bytes.TrimSpace(body)) == 0 {
+	// The checks below that the file can be edited exactly apply only to a
+	// file with something to remove. A file without DefenseClaw's entries,
+	// decoded as the managed Cursor hook decodes it, is not why that hook
+	// denies, so it is not reported.
+	if len(bytes.TrimSpace(body)) == 0 || !owned.holdsMatchedEntry(original) {
 		return data, nil, nil
 	}
 	members, err := jsonObjectMemberSpans(body)
@@ -219,6 +235,21 @@ func (matcher cursorHookCommandMatcher) matchedCursorHookCommand(raw interface{}
 		}
 	}
 	return "", true
+}
+
+// holdsMatchedEntry reports whether a decoded hooks document has an entry
+// matcher owns in an event array of its top-level "hooks" object.
+func (matcher cursorHookCommandMatcher) holdsMatchedEntry(config map[string]interface{}) bool {
+	hooks, _ := config["hooks"].(map[string]interface{})
+	for _, event := range hooks {
+		entries, _ := event.([]interface{})
+		for _, entry := range entries {
+			if matcher.matches(entry) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // jsonSpan is a byte range [start, end) of one JSON value.
@@ -324,6 +355,13 @@ func nextJSONValueSpan(decoder *json.Decoder) (jsonSpan, error) {
 // before it; the first kept element takes the text after the opening bracket.
 // An array with no kept element becomes [].
 func jsonArrayWithout(array []byte, elements []jsonSpan, keep []bool) []byte {
+	return jsonArrayRewrite(array, elements, keep, nil)
+}
+
+// jsonArrayRewrite is jsonArrayWithout with each kept element whose
+// replacement is not nil written as that replacement instead of its own
+// bytes. replacements is nil or has one entry per element.
+func jsonArrayRewrite(array []byte, elements []jsonSpan, keep []bool, replacements [][]byte) []byte {
 	out := []byte{'['}
 	last := -1
 	for index, element := range elements {
@@ -335,7 +373,11 @@ func jsonArrayWithout(array []byte, elements []jsonSpan, keep []bool) []byte {
 		} else {
 			out = append(out, array[elements[index-1].end:element.start]...)
 		}
-		out = append(out, array[element.start:element.end]...)
+		if replacements != nil && replacements[index] != nil {
+			out = append(out, replacements[index]...)
+		} else {
+			out = append(out, array[element.start:element.end]...)
+		}
 		last = index
 	}
 	if last < 0 {
