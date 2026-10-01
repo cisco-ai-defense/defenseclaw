@@ -523,9 +523,17 @@ func (d *Daemon) Start(args []string) (int, error) {
 	args = stripTokenArgs(args)
 
 	env := d.childEnv(os.Environ())
-	// The child runs the file this process runs (daemonExecPath) and keeps
-	// the install path as argv[0], which the process identity checks read.
-	cmd := exec.Command(daemonExecPath(executable), args...)
+	// The child runs the file this process checked (pinDaemonLaunch) and
+	// keeps the install path as argv[0], which the process identity checks
+	// read.
+	pin, err := pinDaemonLaunch(executable)
+	if err != nil {
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
+	}
+	defer pin.close()
+	cmd := exec.Command(pin.path, args...)
 	cmd.Args[0] = executable
 	cmd.Env = env
 	cmd.Stdin = devNull
@@ -543,6 +551,13 @@ func (d *Daemon) Start(args []string) (int, error) {
 		devNull.Close()
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: start process: %w", err)
+	}
+	if err := pin.check(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
 	}
 
 	pid := cmd.Process.Pid
