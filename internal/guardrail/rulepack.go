@@ -431,6 +431,9 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 	entries := 0
 	err = filepath.WalkDir(resolvedDir, func(full string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be read by this account (permission denied); folders need 0755 and files 0644")
+			}
 			return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be inspected")
 		}
 		if full == resolvedDir {

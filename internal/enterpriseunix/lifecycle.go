@@ -647,6 +647,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if err := env.checkRulePacksReadable(validated, account); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
 	p.config = validated
 
 	p.secrets, p.secretsSHA, err = env.listSecrets()

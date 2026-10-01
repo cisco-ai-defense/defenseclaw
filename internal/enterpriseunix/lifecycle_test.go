@@ -472,14 +472,25 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	cases := map[string]struct {
 		replace, with, want string
+		packMode            os.FileMode
 	}{
-		"missing admin pack":  {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist"},
-		"service-writable":    {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir"},
-		"unknown vendor pack": {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships"},
+		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist", 0},
+		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700},
+		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0},
+		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			h := newTestHost(t, "linux")
+			if tc.packMode != 0 {
+				pack := h.env.P("/etc/defenseclaw/policies/guardrail/custom")
+				if err := os.MkdirAll(pack, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(pack, tc.packMode); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cfg := filepath.Join(t.TempDir(), "config.yaml")
 			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), tc.replace, tc.with, 1)
 			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
