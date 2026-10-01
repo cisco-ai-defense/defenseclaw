@@ -186,6 +186,30 @@ plus an extensionless `defenseclaw` launcher so the command also works in Git
 Bash.
 The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
 
+## Startup behavior
+
+On Linux and macOS the gateway runs as a background process of your account.
+It starts when you run `defenseclaw quickstart`, `defenseclaw setup`, or
+`defenseclaw-gateway start`. The install adds no systemd unit, LaunchAgent, or
+login item. Instead, when the gateway is not running (after a reboot or a
+sign-out that ended your processes), the next agent hook call starts it with
+`defenseclaw-gateway start` and then sends its request. This applies to the
+shell hooks of Claude Code, Codex, Cursor, GitHub Copilot, Devin, Hermes, Kiro,
+OpenHands, and Antigravity; the OpenCode and Amp plugins do not start it.
+
+A hook does not start the gateway:
+
+- after `defenseclaw-gateway stop`, until you run `defenseclaw-gateway start`
+  or `defenseclaw-gateway restart`;
+- while an install or upgrade runs;
+- for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
+- when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set in the agent's environment.
+
+While the gateway is not running, fail-closed hooks (the action profile) block
+agent calls, and fail-open hooks (the observe default) let them through with a
+`gateway unreachable` line on stderr. On Windows a hook also starts a stopped
+gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
+
 ## Verify
 
 ```bash

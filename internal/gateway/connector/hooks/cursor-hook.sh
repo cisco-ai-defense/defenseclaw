@@ -250,16 +250,23 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/cursor/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "sandbox ingress unreachable"
-}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
-  -H "Content-Type: application/json" \
-  -H "X-DefenseClaw-Client: cursor-hook/1.0" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
-  --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
-  fail_unreachable "gateway unreachable"
+}{{else}}# A refused connection means this account's gateway is not running (after
+# a reboot, for example): start it once and retry. See
+# defenseclaw_gateway_cold_start in _hardening.sh.
+defenseclaw_hook_post() {
+  curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: cursor-hook/1.0" \
+    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+    "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
+    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
+    --max-time 10 \
+    -d "$PAYLOAD" 2>/dev/null
+}
+RESPONSE=$(defenseclaw_hook_post) || {
+  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
+  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
 }{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
