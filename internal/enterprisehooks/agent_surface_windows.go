@@ -337,6 +337,11 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 // extension surfaces, or "". While the owner is signed out it is
 // cliVersion. Rejected surfaces are reported, also next to a CLI.
 func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext, cliVersion string) string {
+	if cliVersion != "" && !rowContext.sessionActive {
+		// The CLI enrolls the row; its surfaces are read in the owner's
+		// next signed-in cycle.
+		return cliVersion
+	}
 	name := strings.ToLower(strings.TrimSpace(row.Connector))
 	admission, ok := windowsStandaloneSurfaces(row, logf, rowContext)
 	if !ok {
