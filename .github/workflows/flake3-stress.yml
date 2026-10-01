@@ -1,0 +1,110 @@
+# Temporary stress proof for ci/flake-3-opencode-node-harness-eof (wip branch only; never merged).
+name: flake3 stress (temporary)
+
+on:
+  push:
+    branches: ['wip/ci/flake-3-stress']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  stress:
+    name: ${{ matrix.variant }} / slot ${{ matrix.slot }}
+    runs-on: windows-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [main15, main60, head]
+        slot: [1, 2]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "flake3-${{ matrix.variant }}-${{ matrix.slot }}" -DiagnosticsLeaf "flake3-diag-${{ matrix.variant }}-${{ matrix.slot }}"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Select test code variant
+        run: |
+          $variant = '${{ matrix.variant }}'
+          if ($variant -ne 'head') {
+            $base = git merge-base HEAD origin/main
+            if ($LASTEXITCODE -ne 0) { throw 'merge-base failed' }
+            git checkout $base -- internal/gateway/connector/opencode_test.go internal/gateway/connector/opencode_plugin_test_helpers_test.go internal/gateway/connector/plugin_install_marker_test.go
+            if ($LASTEXITCODE -ne 0) { throw 'checkout of the main test files failed' }
+            Write-Host "test files from main $base"
+          }
+          if ($variant -eq 'main15') {
+            $f = 'internal/gateway/connector/opencode_plugin_test_helpers_test.go'
+            $c = Get-Content -Raw $f
+            $n = $c.Replace('const nodeHarnessTimeout = 60 * time.Second', 'const nodeHarnessTimeout = 15 * time.Second')
+            if ($n -eq $c) { throw 'nodeHarnessTimeout constant not found' }
+            Set-Content -NoNewline -Path $f -Value $n
+          }
+          git diff --stat
+      - name: Build connector test binary
+        run: go test -c -vet=off -o (Join-Path $env:RUNNER_TEMP 'conn.test.exe') ./internal/gateway/connector
+      - name: Stress the reload test (cold node image per run, CPU load)
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $ErrorActionPreference = 'Continue'
+          $variant = '${{ matrix.variant }}'
+          $bin = Join-Path $env:RUNNER_TEMP 'conn.test.exe'
+          $node = (Get-Command node.exe -ErrorAction Stop).Source
+          $basePath = $env:PATH
+          $pkgDir = (Resolve-Path 'internal/gateway/connector').Path
+          Write-Host "node=$node cpus=$([Environment]::ProcessorCount)"
+          $burners = @(1..8 | ForEach-Object {
+            Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'while ($true) { }') -PassThru -WindowStyle Hidden
+          })
+          $pass = 0; $fail = 0; $failures = [System.Collections.Generic.List[string]]::new()
+          try {
+            foreach ($i in 1..15) {
+              # A node.exe copy at a new path is a never-seen image, so its first
+              # launch pays the image load and real-time scan, like a job's first node.
+              $dir = Join-Path $env:RUNNER_TEMP "node-cold-$i"
+              New-Item -ItemType Directory -Force -Path $dir | Out-Null
+              Copy-Item -Path $node -Destination (Join-Path $dir 'node.exe')
+              $env:PATH = "$dir;$basePath"
+              $out = Join-Path $env:RUNNER_TEMP "run-$i.out"
+              $err = Join-Path $env:RUNNER_TEMP "run-$i.err"
+              $sw = [Diagnostics.Stopwatch]::StartNew()
+              $p = Start-Process -FilePath $bin -WorkingDirectory $pkgDir -NoNewWindow -PassThru -Wait `
+                -RedirectStandardOutput $out -RedirectStandardError $err -ArgumentList @(
+                  '-test.run', '^TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed$',
+                  '-test.count', '1', '-test.cpu', '1,2,8', '-test.timeout', '20m', '-test.v')
+              $sw.Stop()
+              $lines = @(Get-Content -Path $out)
+              $p1 = @($lines | Where-Object { $_ -match '^--- PASS: TestOpenCodePluginReloads' }).Count
+              $f1 = @($lines | Where-Object { $_ -match '^--- FAIL: TestOpenCodePluginReloads' }).Count
+              $pass += $p1; $fail += $f1
+              $durations = (@($lines | Where-Object { $_ -match '^--- (PASS|FAIL): ' } | ForEach-Object { if ($_ -match '\(([0-9.]+s)\)') { $Matches[1] } }) -join ',')
+              Write-Host ("run {0} rc={1} wall={2:n1}s pass={3} fail={4} tests={5}" -f $i, $p.ExitCode, $sw.Elapsed.TotalSeconds, $p1, $f1, $durations)
+              foreach ($l in @($lines | Where-Object { $_ -match '_test\.go:\d+:' -or $_ -match '^panic:' })) {
+                Write-Host "  $l"
+                $failures.Add("run $i $($l.Trim())")
+              }
+              if ($p.ExitCode -ne 0 -and $f1 -eq 0) {
+                $fail += 1
+                $failures.Add("run $i exited $($p.ExitCode) without a test result")
+                Get-Content -Path $err -Tail 20 | ForEach-Object { Write-Host "  stderr: $_" }
+              }
+            }
+          } finally {
+            $burners | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+            $env:PATH = $basePath
+          }
+          $summary = "SUMMARY variant=$variant slot=${{ matrix.slot }} runs=15x(-cpu 1,2,8) pass=$pass fail=$fail"
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          $failures | Select-Object -First 30 | ForEach-Object { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "    $_" }
