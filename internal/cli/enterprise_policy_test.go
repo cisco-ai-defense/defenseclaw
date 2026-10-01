@@ -102,14 +102,16 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("verify --json: %v\n%s", err, out)
 	}
-	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors) {
+	// devin brings its Cascade companion.
+	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors)+1 {
 		t.Fatalf("report: %+v", report)
 	}
 	routes := map[string]string{}
 	for _, state := range report.Result.States {
 		routes[state.Connector] = state.Route
 	}
-	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser {
+	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser ||
+		routes[enterprisepolicy.ConnectorDevinCascade] != enterprisepolicy.RouteMachinePolicy {
 		t.Fatalf("routes: %v", routes)
 	}
 	if !report.Guard["cursor"].Guard || !report.Guard["devin"].Guard || report.Guard["codex"].Guard {

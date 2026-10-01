@@ -54,6 +54,8 @@ var windowsSurfaceExtensions = map[string]struct {
 }{
 	"claudecode": {id: "anthropic.claude-code", engineIsHost: true, desktopProbers: []func(string) (connector.AgentSurface, bool){discoverWindowsClaudeDesktop}},
 	"codex":      {id: "openai.chatgpt", desktopProbers: []func(string) (connector.AgentSurface, bool){discoverWindowsCodexApp}},
+	// Devin Desktop has no extension (surface_probes_devin.go).
+	"devin": {desktopProbers: []func(string) (connector.AgentSurface, bool){discoverWindowsDevinDesktop}},
 }
 
 const windowsSurfaceMaxEntries = 4096
@@ -69,6 +71,9 @@ func DiscoverWindowsAgentSurfaces(profileHome, connectorName string) []connector
 	profileHome = filepath.Clean(profileHome)
 	var out []connector.AgentSurface
 	for _, root := range windowsExtensionRoots {
+		if probe.id == "" {
+			break
+		}
 		dir, version := newestWindowsExtensionDir(filepath.Join(profileHome, root.dir), probe.id)
 		if dir == "" {
 			continue
@@ -125,6 +130,33 @@ func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool) 
 		surface := connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}
 		if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
 			surface.HostVersion = newestWindowsPackageVersion(filepath.Join(programFiles, "WindowsApps"), "OpenAI.Codex_")
+		}
+		return surface, true
+	}
+	return connector.AgentSurface{}, false
+}
+
+// discoverWindowsDevinDesktop finds Devin Desktop's per-user install
+// (%LOCALAPPDATA%\Programs\Devin) or machine install (%ProgramFiles%\Devin)
+// and reads the engine version from the man page of the Devin CLI it
+// bundles.
+func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bool) {
+	dirs := []string{filepath.Join(profileHome, "AppData", "Local", "Programs", "Devin")}
+	if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
+		dirs = append(dirs, filepath.Join(programFiles, "Devin"))
+	}
+	for _, dir := range dirs {
+		if winpath.RejectReparseChain(dir) != nil {
+			continue
+		}
+		if info, err := os.Lstat(filepath.Join(dir, "Devin.exe")); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		surface := connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "devin-desktop", Path: dir}
+		if data, err := readBoundedWindowsAgentPackageJSON(devinDesktopManPage(filepath.Join(dir, "resources", "app"))); err == nil {
+			if version := parseDevinManPageVersion(data); isValidWindowsAgentVersion(version) {
+				surface.EngineVersion = version
+			}
 		}
 		return surface, true
 	}

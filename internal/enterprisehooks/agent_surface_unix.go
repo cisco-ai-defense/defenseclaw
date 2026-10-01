@@ -87,8 +87,16 @@ type unixDesktopProbe struct {
 	// launchers are host launchers whose presence is reported. They are
 	// never executed.
 	launchers []string
-	// engines are bundle-relative engine CLIs that may be run with
-	// --version (live check).
+	// appDirs are Linux install folders (a package's /usr/share/<app>, an
+	// unpacked tarball). Like bundles they show the install, and manPages
+	// and engines are relative to them.
+	appDirs []string
+	// manPages are bundle- or appDir-relative man pages of an engine CLI
+	// the app bundles; the .TH header names the engine version and is read
+	// without running anything.
+	manPages []string
+	// engines are bundle- or appDir-relative engine CLIs that may be run
+	// with --version (live check).
 	engines []string
 }
 
@@ -120,6 +128,15 @@ var unixSurfaceProbes = map[string]unixSurfaceProbe{
 			{goos: "darwin", host: "cursor", packageJSON: []string{"/Applications/Cursor.app/Contents/Resources/app/package.json", "~/Applications/Cursor.app/Contents/Resources/app/package.json"}},
 			// Linux .deb/.rpm install paths; live check.
 			{goos: "linux", host: "cursor", packageJSON: []string{"/usr/share/cursor/resources/app/package.json", "/opt/Cursor/resources/app/package.json"}},
+		},
+	},
+	"devin": {
+		// Devin Desktop runs the Devin CLI it bundles (surface_probes_devin.go).
+		desktop: []unixDesktopProbe{
+			{goos: "darwin", host: "devin-desktop", bundles: []string{"/Applications/Devin.app", "~/Applications/Devin.app"},
+				manPages: []string{devinDesktopManPage("Contents/Resources/app")}, engines: []string{devinDesktopCLI("Contents/Resources/app", "devin")}},
+			{goos: "linux", host: "devin-desktop", appDirs: []string{"/usr/share/devin-desktop", "/opt/Devin", "~/Devin"},
+				manPages: []string{devinDesktopManPage("resources/app")}, engines: []string{devinDesktopCLI("resources/app", "devin")}},
 		},
 	},
 	"antigravity": {
@@ -206,19 +223,24 @@ func discoverUnixDesktop(ctx context.Context, home string, probe unixDesktopProb
 			break
 		}
 	}
-	for _, bundle := range probe.bundles {
-		bundle = unixHomePath(home, bundle)
-		if info, err := os.Lstat(bundle); err != nil || !info.IsDir() {
+	for index, root := range append(append([]string{}, probe.bundles...), probe.appDirs...) {
+		root = unixHomePath(home, root)
+		if info, err := os.Lstat(root); err != nil || !info.IsDir() {
 			continue
 		}
 		found = true
 		if surface.Path == "" {
-			surface.Path = bundle
+			surface.Path = root
 		}
-		if unixDiscoveryCandidateTrusted(home, bundle) {
-			surface.HostVersion = readUnixBundleVersion(filepath.Join(bundle, "Contents", "Info.plist"))
+		if unixDiscoveryCandidateTrusted(home, root) {
+			if index < len(probe.bundles) {
+				surface.HostVersion = readUnixBundleVersion(filepath.Join(root, "Contents", "Info.plist"))
+			}
+			if surface.EngineVersion == "" {
+				surface.EngineVersion = readUnixManPageVersion(home, root, probe.manPages)
+			}
 			if surface.EngineVersion == "" && allowExec {
-				surface.EngineVersion = runUnixBundledEngine(ctx, home, bundle, probe.engines)
+				surface.EngineVersion = runUnixBundledEngine(ctx, home, root, probe.engines)
 			}
 		}
 		break
@@ -330,6 +352,23 @@ func readUnixBundleVersion(path string) string {
 	}
 	if version := strings.TrimSpace(string(match[1])); validUnixAgentVersion(version) {
 		return version
+	}
+	return ""
+}
+
+// readUnixManPageVersion reads the engine version from the first trusted
+// man page under dir.
+func readUnixManPageVersion(home, dir string, pages []string) string {
+	for _, page := range pages {
+		path := filepath.Join(dir, page)
+		if !unixDiscoveryCandidateTrusted(home, path) {
+			continue
+		}
+		if data, ok := readUnixSmallRegularFile(path); ok {
+			if version := parseDevinManPageVersion(data); validUnixAgentVersion(version) {
+				return version
+			}
+		}
 	}
 	return ""
 }

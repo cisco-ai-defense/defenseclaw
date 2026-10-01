@@ -250,10 +250,11 @@ func anyHandler(doc *object, owned func(any) bool) bool {
 // reconciledConnectors lists the machine-policy connectors whose DefenseClaw
 // entries are actually in place after a reconcile or verify pass; the
 // lifecycle records exactly this set in RuntimeDescriptor.MachinePolicyConnectors.
+// Companion targets are not connectors and are left out.
 func reconciledConnectors(states []State) []string {
 	out := []string{}
 	for _, state := range states {
-		if state.Route == RouteMachinePolicy && state.OwnedEntries > 0 {
+		if state.Route == RouteMachinePolicy && state.OwnedEntries > 0 && !isCompanion(state.Connector) {
 			out = append(out, state.Connector)
 		}
 	}

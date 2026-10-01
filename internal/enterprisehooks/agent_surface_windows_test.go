@@ -19,7 +19,8 @@ import (
 )
 
 // A profile with only the Claude Code extension is enrolled at the
-// extension's engine version; the Codex app, which has no engine version,
+// extension's engine version, one with only Devin Desktop at its bundled
+// Devin CLI's version; the Codex app, which has no engine version,
 // is reported; and unverified_versions: refuse refuses the extension.
 func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	home := t.TempDir()
@@ -33,6 +34,16 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, "AppData", "Local", "Packages", "OpenAI.Codex_test"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	devin := filepath.Join(home, "AppData", "Local", "Programs", "Devin")
+	page := devinDesktopManPage(filepath.Join(devin, "resources", "app"))
+	if err := os.MkdirAll(filepath.Dir(page), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string]string{filepath.Join(devin, "Devin.exe"): "MZ", page: ".TH devin 1  \"devin 3000.4.25 (0)\" \n"} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var reported []UnprotectedAgent
 	rowContext := windowsStandaloneRowContext{user: "u", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
 	row := func(name string) *ManifestTarget {
@@ -42,6 +53,9 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 
 	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext); got != "2.1.220" || len(reported) != 0 {
 		t.Fatalf("claudecode extension-only version = %q, reported %+v", got, reported)
+	}
+	if got := windowsStandaloneSurfaceVersion(row("devin"), nil, rowContext); got != "3000.4.25" || len(reported) != 0 {
+		t.Fatalf("devin Desktop-only version = %q, reported %+v", got, reported)
 	}
 	if got := windowsStandaloneSurfaceVersion(row("codex"), nil, rowContext); got != "" || len(reported) != 1 ||
 		reported[0].Code != UnprotectedCodeSurfaceUnverified || reported[0].Surface != "desktop" || reported[0].Refusal != "" {

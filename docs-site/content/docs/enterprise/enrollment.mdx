@@ -167,6 +167,7 @@ agent engine it runs:
 | Claude Code | Claude Desktop | The Claude Code build it keeps under its data folder (macOS, Windows; Linux and the Windows MSIX package are not yet live-checked) |
 | Codex | VS Code-family extension `openai.chatgpt`, Codex app | The bundled `codex` CLI on Linux and macOS, run with `--version` as the user; none on Windows, so these are reported, not enrolled ([vendor docs](https://learn.chatgpt.com/docs/hooks)) |
 | Cursor | Cursor desktop | The app version, as before |
+| Devin | Devin Desktop | The Devin CLI it bundles, read from that CLI's man page on every OS; nothing is run. Devin Desktop 3.10 bundles 3000.10.x, outside the `devin-hooks-v1` pins, so it is reported until the range is reviewed ([Devin](/docs/connectors/devin#devin-desktop-in-a-standalone-enterprise-deployment)) |
 | Antigravity | Antigravity IDE | None: the IDE shares the CLI's hook file ([vendor docs](https://antigravity.google/docs/hooks)) but is never enrolled on its own, and its launcher is never run |
 
 The editor folders searched are `.vscode`, `.vscode-insiders`,
@@ -176,7 +177,7 @@ pre-rename folder ([Renamed and removed connectors](/docs/get-started/upgrade#re
 extensions folder relocated with `VSCODE_EXTENSIONS` or `--extensions-dir`
 is not followed. A host version (the editor's or the app's own version)
 never selects a hook contract. The Devin Desktop app version is not a Devin
-CLI version, so Devin is still enrolled only from its CLI.
+CLI version and is never used.
 
 A version without a known contract is compatible by default, like an
 untested newer CLI; known-broken versions and floors still refuse it.

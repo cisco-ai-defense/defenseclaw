@@ -31,7 +31,7 @@ Only agents you select in the config are protected; see
 | GitHub Copilot CLI (`copilot`) | Machine policy, with the foreign-hook guard | Same |
 | OpenCode (`opencode`) | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard | Same |
 | Amp (`amp`) | Per user, with the foreign-hook guard | Per user (in-agent plugin), with the guard |
-| Devin (`devin`) | Per user, with the foreign-hook guard | Per user (hook binary), with the guard |
+| Devin (`devin`) | Per user, with the foreign-hook guard; Cascade in builds before 3.9.19 is turned off through machine policy (`devincascade`) | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
 | Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
 | Antigravity (`antigravity`) | Per user | Per user (hook binary) |
 | OpenHands (`openhands`), OmniGent (`omnigent`) | Per user | Not managed: the enumerator writes no targets for them, and a manifest row that names one is refused |
@@ -86,13 +86,18 @@ The per-user registrations differ by OS:
 | Cursor | `/etc/cursor/hooks.json` | `/Library/Application Support/Cursor/hooks.json` | `%ProgramData%\Cursor\hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` | `/etc/github-copilot/policy.d/90-defenseclaw.json` | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
 | OpenCode | `/etc/opencode/opencode.json` | `/Library/Application Support/opencode/opencode.json` | `%ProgramData%\opencode\opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` | `/Library/Application Support/Devin/hooks.json` | `%ProgramData%\Devin\hooks.json` |
 
 For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of
-`opencode.json`, as long as it holds no comments.
+`opencode.json`, as long as it holds no comments. The Cascade refusal goes
+into the pre-rename Cascade hooks file instead when only that file exists;
+see [Cascade on older builds](/docs/connectors/devin#cascade-on-older-builds).
+It is published while `devin` is protected and is not a connector of its
+own: it enrolls no user and is not in the runtime descriptor.
 
 ## Who writes machine policy
 
-| OS | Codex | Claude Code, Cursor | Copilot, OpenCode |
+| OS | Codex | Claude Code, Cursor | Copilot, OpenCode, Devin Desktop Cascade |
 | --- | --- | --- | --- |
 | Linux and macOS | The lifecycle (`ensure`, install, upgrade, repair) | The lifecycle | The lifecycle |
 | Windows | The lifecycle at install, upgrade and repair; the guardian repairs it | The guardian, with Windows-specific code | The guardian, with the machine-policy engine that Linux and macOS use |
@@ -481,6 +486,7 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
 | `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/defenseclaw.js`. Deploy it only where that plugin is installed. |
+| `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
 
 - **`verify`** checks coverage and exits 1 when any machine-policy
   connector is not covered, or when `--user` finds a foreign hook that

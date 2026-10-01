@@ -277,6 +277,9 @@ func ownershipRecordNames(opts Options, connector string) []string {
 	if connector == ConnectorCopilot {
 		names = append(names, vscodePolicyRecord)
 	}
+	if connector == ConnectorDevinCascade {
+		names = append(names, devinCascadeLegacyRecord)
+	}
 	return names
 }
 
