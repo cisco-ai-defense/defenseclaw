@@ -508,6 +508,34 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// `rulepack validate` runs as an administrator, so it asks whether the
+// service account could read the pack.
+func TestRulePackServiceReadProblemNamesAnUnreadablePack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	const dir = "/etc/defenseclaw/policies/guardrail/custom"
+	if got := h.env.RulePackServiceReadProblem(context.Background(), dir); got != "" {
+		t.Fatalf("no service account yet, got %q", got)
+	}
+	if _, err := h.env.Accounts.Ensure(context.Background(), h.env.Layout.ServiceUser); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(h.env.P(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(h.env.P(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.env.RulePackServiceReadProblem(context.Background(), dir); !strings.Contains(got, "service account cannot read the rule pack") {
+		t.Fatalf("problem = %q", got)
+	}
+	if err := os.Chmod(h.env.P(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.env.RulePackServiceReadProblem(context.Background(), dir); got != "" {
+		t.Fatalf("readable pack, got %q", got)
+	}
+}
+
 func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))

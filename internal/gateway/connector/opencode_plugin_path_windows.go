@@ -21,16 +21,18 @@ func prepareOpenCodePluginArtifactDestination(path string) error {
 		return fmt.Errorf("create private OpenCode plugin directory: %w", err)
 	}
 	// A directory created for this registration must retain its private DACL.
-	// An existing OpenCode plugin directory may harmlessly grant read/list
-	// access, but it must be current-user owned, non-reparse throughout its
-	// ancestry, and free of foreign write authority.
+	// An existing plugin directory may harmlessly grant read/list access, but
+	// it must be current-user owned, non-reparse throughout its ancestry, and
+	// free of foreign write authority. The profile's inherited Administrators
+	// entry is not foreign: the agent, or the gateway's plugin-folder watch,
+	// creates the folder with the profile's ACL (#1026).
 	if created {
 		err = safefile.ValidatePrivateDirectory(dir)
 	} else {
-		err = safefile.ValidatePrivateDirectoryOwnership(dir)
+		err = safefile.ValidatePrivateDirectoryOwnershipAllowingAdministrators(dir)
 	}
 	if err != nil {
-		return fmt.Errorf("validate OpenCode plugin directory custody: %w", err)
+		return fmt.Errorf("validate plugin directory custody: %w", err)
 	}
 
 	if _, err := os.Lstat(path); os.IsNotExist(err) {

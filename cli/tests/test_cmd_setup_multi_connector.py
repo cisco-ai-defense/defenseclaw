@@ -815,8 +815,11 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_no_restart_keeps_server_admission_rejection_fail_closed(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityError("rejected")
-        with _setup_patches(), self.assertRaises(CanonicalObservabilityError):
-            _invoke(["codex", "--yes", "--no-restart"], self.app)
+        with _setup_patches():
+            result = _invoke(["codex", "--yes", "--no-restart"], self.app)
+        # Still fail-closed, as a plain ClickException (exit 1) since MAC-U2-03.
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("did not accept its setup audit event", result.output)
 
 
 class TestWriteConnectorIdentityUnit(unittest.TestCase):
@@ -1767,6 +1770,23 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
 
         expected = hashlib.sha256(chunk * 17).hexdigest()
         self.assertEqual(fingerprint, f"present:{17 << 20}:{expected}")
+
+    def test_runtime_capture_trusts_the_profile_administrators_entry_on_windows(self):
+        # ~\\.local\\bin\\defenseclaw-hook.exe inherits the profile's
+        # Administrators full-control entry (WIN2-U2-05).
+        path = os.path.join(self.tmp_dir, "defenseclaw-hook.exe")
+        atomic_write_private_bytes(path, b"hook")
+        real = cmd_setup._capture_protected_setup_file
+        seen = {}
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        with patch.object(cmd_setup, "_capture_protected_setup_file", side_effect=spy):
+            cmd_setup._capture_setup_runtime_location(path, "hook runtime")
+
+        self.assertIs(seen.get("trust_windows_administrators"), True)
 
     def test_final_success_proves_complete_registration_union_in_both_fenced_samples(self):
         prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))
