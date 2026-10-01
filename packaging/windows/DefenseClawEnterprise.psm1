@@ -21347,7 +21347,9 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][hashtable]$Sources,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$UntrustedStateRoot,
+        [string]$UntrustedEvidenceReason
     )
     if (-not $Sources.ContainsKey('native_cleanup')) {
         throw 'exact-scope purge requires the authenticated native cleanup executable'
@@ -21544,6 +21546,36 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         }
     }
 
+    if ($UntrustedStateRoot) {
+        # No authenticated install-time StateRoot identity survives a normal
+        # install outside deployment.json. A freshly sampled identity would
+        # pin the current directory but would not establish its ownership or
+        # authorize teardown of profile hooks and shared connector policy.
+        $reason = ConvertTo-DefenseClawBoundedDiagnostic -Value @(
+            $UntrustedEvidenceReason
+        )
+        $incomplete = (
+            'DefenseClaw exact-scope cleanup retired or confirmed absent ' +
+            'services and InstallRoot, but full purge is incomplete: ' +
+            'StateRoot and unattributed user/connector state were not touched ' +
+            "because deployment evidence is untrusted ($reason)"
+        )
+        return [pscustomobject]@{
+            schema_version = 1
+            ok = $false
+            action = 'uninstall'
+            installed = $false
+            purged = $false
+            exact_scope_recovery = $true
+            partial_cleanup = $true
+            state_root_cleanup_skipped = $true
+            unattributed_user_state_preserved = $true
+            cached_enterprise_clients_require_reload = $true
+            error = $incomplete
+            errors = @($incomplete)
+            warnings = @($incomplete)
+        }
+    }
     return [pscustomobject]@{
         schema_version = 1
         ok = $true
@@ -21554,6 +21586,73 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         unattributed_user_state_preserved = $true
         cached_enterprise_clients_require_reload = $true
         errors = @()
+    }
+}
+
+function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    # A live transaction or external receipt may own the next uninstall
+    # action. Do not bypass its replay by running the metadata-free sweep.
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    foreach ($evidence in @(
+        @('pending transaction', [string]$Layout.PendingPath),
+        @('managed-hook lifecycle journal',
+            [string]$Layout.ManagedHooksLifecycleJournalPath),
+        @('managed-hook teardown journal',
+            [string]$Layout.ManagedHooksTeardownJournalPath),
+        @('state-purge intent', [string]$Layout.PurgeIntentPath),
+        @('self-uninstall receipt', [string]$Layout.SelfUninstallReceiptPath),
+        @('install-rollback intent', [string]$Layout.InstallRollbackIntentPath),
+        @('connector cleanup receipt',
+            [string]$Layout.ManagedHookContractCleanupReceiptPath)
+    )) {
+        if ($null -ne
+            $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                [string]$evidence[1]
+            )) {
+            throw (
+                'untrusted deployment evidence requires authenticated ' +
+                "recovery of the existing $($evidence[0]); exact-scope " +
+                'fallback did not modify the deployment'
+            )
+        }
+    }
+    $transactionDirectory =
+        $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+            [string]$Layout.TransactionsDirectory
+        )
+    if ($null -ne $transactionDirectory -and
+        @(Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $Layout.TransactionsDirectory `
+            -Force -ErrorAction Stop |
+            Microsoft.PowerShell.Utility\Select-Object -First 1).Count -gt 0) {
+        throw (
+            'untrusted deployment evidence has an unfinished transaction ' +
+            'directory; exact-scope fallback did not modify the deployment'
+        )
+    }
+    try {
+        return Invoke-DefenseClawExactScopeRecoveryPurge `
+            -Layout $Layout `
+            -Sources $Sources `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -UntrustedStateRoot `
+            -UntrustedEvidenceReason $Reason
+    }
+    catch {
+        throw (
+            'metadata-free exact-scope purge did not finish; verified ' +
+            'services may now be stopped or disabled; StateRoot was not ' +
+            'touched. Retry with external Setup after resolving the ' +
+            "reported blocker: $($_.Exception.Message)"
+        )
     }
 }
 
@@ -21838,9 +21937,12 @@ function Invoke-DefenseClawPreLayoutRecovery {
     }
 
     if ($Action -eq 'Uninstall') {
-        if (-not (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.StateRoot `
-                -PathType Container)) {
+        $preLayoutNativeSecurity = Initialize-DefenseClawNativeSecurity
+        $preLayoutStateRoot =
+            $preLayoutNativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+                [string]$Layout.StateRoot
+            )
+        if ($null -eq $preLayoutStateRoot) {
             # Without authenticated StateRoot metadata, no user runtime or
             # shared connector state can be attributed to this scope. Purge
             # is therefore restricted to the exact four service identities,
@@ -23614,49 +23716,85 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
 
         if ($recoverProductionUninstallAcl) {
-            # Authenticate ownership and repair only recoverable ACL drift
-            # under the lifecycle lock, before any metadata is trusted.
-            $uninstallMetadataExists = Repair-DefenseClawUninstallAdminFileAcl `
-                -Layout $layout `
-                -Kind deployment
-            if ($uninstallMetadataExists) {
-                $uninstallMetadata = Get-DefenseClawDeploymentMetadata `
+            $untrustedEvidenceReason = ''
+            $uninstallMetadataExists = $false
+            try {
+                # Authenticate ownership and repair only recoverable ACL
+                # drift under the lifecycle lock, before trusting metadata.
+                $uninstallMetadataExists = Repair-DefenseClawUninstallAdminFileAcl `
                     -Layout $layout `
-                    -Required
+                    -Kind deployment
+                if ($uninstallMetadataExists) {
+                    $uninstallMetadata = Get-DefenseClawDeploymentMetadata `
+                        -Layout $layout `
+                        -Required
+                }
+            }
+            catch {
+                if (-not $Purge) {
+                    throw
+                }
+                $untrustedEvidenceReason = $_.Exception.Message
+            }
+            if (-not $uninstallMetadataExists -and $Purge -and
+                [string]::IsNullOrWhiteSpace($untrustedEvidenceReason)) {
+                # Test-Path can misreport an ACL-denied StateRoot as absent.
+                # Probe its exact inode before choosing the state-absent path.
+                $nativeSecurity = Initialize-DefenseClawNativeSecurity
+                $stateRootBefore =
+                    $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+                        [string]$layout.StateRoot
+                    )
+                if ($null -ne $stateRootBefore) {
+                    $untrustedEvidenceReason =
+                        'deployment.json is missing from an existing StateRoot'
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace(
+                    $untrustedEvidenceReason)) {
+                return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
+                    -Layout $layout `
+                    -Sources $sources `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -Reason $untrustedEvidenceReason
+            }
+            if ($uninstallMetadataExists) {
+                # Attestation problems remain distinct from deployment
+                # metadata trust failures and must not trigger this fallback.
                 $nativeSecurity = Initialize-DefenseClawNativeSecurity
                 $attestationSnapshot =
                     $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
                         [string]$layout.AgentApplicationControlAttestationPath
                     )
-            }
-            if ($uninstallMetadataExists -and
-                $null -ne $attestationSnapshot) {
-                $attestationHashProperty = $uninstallMetadata.PSObject.Properties[
-                    'agent_application_control_attestation_sha256'
-                ]
-                $attestationHash = if ($null -eq $attestationHashProperty) {
-                    ''
+                if ($null -ne $attestationSnapshot) {
+                    $attestationHashProperty = $uninstallMetadata.PSObject.Properties[
+                        'agent_application_control_attestation_sha256'
+                    ]
+                    $attestationHash = if ($null -eq $attestationHashProperty) {
+                        ''
+                    }
+                    else {
+                        [string]$attestationHashProperty.Value
+                    }
+                    if ($attestationHash -cmatch '^[0-9a-f]{64}$') {
+                        [void](Repair-DefenseClawUninstallAdminFileAcl `
+                            -Layout $layout `
+                            -Kind attestation `
+                            -ExpectedSHA256 $attestationHash)
+                    }
+                    # Older metadata did not bind this file by hash. Preserve
+                    # its original strict read rather than blessing unknown bytes.
+                    $existingApplicationControlAttestation =
+                        Get-DefenseClawAgentApplicationControlAttestation `
+                            -Layout $layout
+                    $layout.AgentApplicationControlAttested = [bool](
+                        $existingApplicationControlAttestation.agent_application_control_enforced
+                    )
+                    $layout.ClaudeEffectivePolicyVerified = [bool](
+                        $existingApplicationControlAttestation.claude_effective_policy_verified
+                    )
                 }
-                else {
-                    [string]$attestationHashProperty.Value
-                }
-                if ($attestationHash -cmatch '^[0-9a-f]{64}$') {
-                    [void](Repair-DefenseClawUninstallAdminFileAcl `
-                        -Layout $layout `
-                        -Kind attestation `
-                        -ExpectedSHA256 $attestationHash)
-                }
-                # Older metadata did not bind this file by hash. Preserve
-                # its original strict read rather than blessing unknown bytes.
-                $existingApplicationControlAttestation =
-                    Get-DefenseClawAgentApplicationControlAttestation `
-                        -Layout $layout
-                $layout.AgentApplicationControlAttested = [bool](
-                    $existingApplicationControlAttestation.agent_application_control_enforced
-                )
-                $layout.ClaudeEffectivePolicyVerified = [bool](
-                    $existingApplicationControlAttestation.claude_effective_policy_verified
-                )
             }
         }
 
