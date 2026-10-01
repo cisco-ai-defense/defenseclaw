@@ -1542,7 +1542,10 @@ try {
 }
 Wait-BeforeClose
 if ($RunAsFile) { exit $code }
-if ($code -eq 4) { throw "DefenseClaw is installed, but quickstart failed; see above" }
-if ($code -ne 0 -and $code -ne 3) { throw "DefenseClaw was not installed" }
+# `irm | iex` cannot exit, so a failure ends in a terminating error. Raising
+# it from a one-line script block keeps PowerShell 7 from printing an excerpt
+# of this file under the failure that was already reported above.
+if ($code -eq 4) { & ([scriptblock]::Create('throw "DefenseClaw is installed, but quickstart failed; see above"')) }
+if ($code -ne 0 -and $code -ne 3) { & ([scriptblock]::Create('throw "DefenseClaw was not installed; see above"')) }
 }
 # DefenseClaw Windows installer complete v2
