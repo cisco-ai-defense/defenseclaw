@@ -77,6 +77,9 @@ type APIServer struct {
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
+	// copilotDedupe answers the second delivery of one Copilot tool call
+	// with the first delivery's verdict.
+	copilotDedupe copilotHookDedupe
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected

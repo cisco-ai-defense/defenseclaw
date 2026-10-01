@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // VS Code device policies for GitHub Copilot in VS Code. Copilot policy.d
@@ -37,8 +39,23 @@ import (
 // the administrator set, including a different one, is kept and reported.
 // Setting names: https://code.visualstudio.com/docs/enterprise/ai-settings
 
-// vscodeDevicePolicyNames are the boolean policies DefenseClaw enables.
-var vscodeDevicePolicyNames = []string{"ChatHooks", "ChatEditorPreferCopilotHarness"}
+// vscodeDevicePolicyNames are the boolean policies DefenseClaw may enable.
+// harness_preference unmanaged leaves ChatEditorPreferCopilotHarness to the
+// administrator, and ChatPluginsEnabled is wanted only while the per-user
+// DefenseClaw plugin is deployed (copilotPluginRoute).
+var vscodeDevicePolicyNames = []string{"ChatHooks", "ChatEditorPreferCopilotHarness", "ChatPluginsEnabled"}
+
+// vscodeWantedPolicies are the policies opts asks DefenseClaw to hold.
+func vscodeWantedPolicies(opts Options) []string {
+	wanted := []string{"ChatHooks"}
+	if opts.copilotHarnessPreference() == config.CopilotHarnessPreferenceSDK {
+		wanted = append(wanted, "ChatEditorPreferCopilotHarness")
+	}
+	if copilotPluginRoute(opts) {
+		wanted = append(wanted, "ChatPluginsEnabled")
+	}
+	return wanted
+}
 
 // vscodePolicyRecord names the ownership record of the VS Code policies.
 const vscodePolicyRecord = "copilot-vscode-policy"
@@ -75,7 +92,7 @@ func vscodeDevicePolicy(opts Options, state *State, write bool) error {
 	store, err := vscodePolicyStoreFor(opts)
 	if errors.Is(err, ErrUnsupported) {
 		if opts.goos() == "darwin" {
-			state.detail("vscode: deploy the VS Code policies %s = true in a configuration profile through MDM; DefenseClaw does not write macOS profiles", strings.Join(vscodeDevicePolicyNames, ", "))
+			state.detail("vscode: deploy the VS Code policies %s = true in a configuration profile through MDM; DefenseClaw does not write macOS profiles", strings.Join(vscodeWantedPolicies(opts), ", "))
 		}
 		return nil
 	}
@@ -97,9 +114,19 @@ func vscodeDevicePolicy(opts Options, state *State, write bool) error {
 			owned[name] = true
 		}
 	}
-	var add, keep []string
+	wanted := vscodeWantedPolicies(opts)
+	var add, keep, drop []string
 	for _, name := range vscodeDevicePolicyNames {
 		enabled, present := current[name]
+		if !containsString(wanted, name) {
+			// No longer wanted (harness_preference unmanaged, or the plugin
+			// route is off): drop only a value DefenseClaw added that still
+			// holds its value.
+			if owned[name] && present && enabled {
+				drop = append(drop, name)
+			}
+			continue
+		}
 		switch {
 		case !present:
 			add = append(add, name)
@@ -115,14 +142,22 @@ func vscodeDevicePolicy(opts Options, state *State, write bool) error {
 		for _, name := range add {
 			state.detail("vscode: policy %s is not set at %s", name, store.where())
 		}
+		for _, name := range drop {
+			state.detail("vscode: policy %s is no longer wanted at %s; reconcile removes DefenseClaw's value", name, store.where())
+		}
 		return nil
 	}
-	if len(add) > 0 {
-		if err := store.apply(add, nil); err != nil {
+	if len(add) > 0 || len(drop) > 0 {
+		if err := store.apply(add, drop); err != nil {
 			return fmt.Errorf("vscode policies at %s: %w", store.where(), err)
 		}
 		state.Changed = true
-		state.detail("vscode: enabled %s at %s", strings.Join(add, ", "), store.where())
+		if len(add) > 0 {
+			state.detail("vscode: enabled %s at %s", strings.Join(add, ", "), store.where())
+		}
+		if len(drop) > 0 {
+			state.detail("vscode: removed %s from %s", strings.Join(drop, ", "), store.where())
+		}
 	}
 	ownedNow := append(keep, add...)
 	if len(ownedNow) == 0 {

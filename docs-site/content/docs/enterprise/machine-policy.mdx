@@ -272,6 +272,37 @@ With the lock on, hooks your developers need run only if you deploy them
 through machine policy. Set `managed_hooks_only: preserve` for a connector
 to leave its lock off; the foreign-hook guard then covers it.
 
+## Copilot in VS Code
+
+Two keys, valid only under `connectors.copilot`, control VS Code's Copilot
+harnesses:
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  machine_policy:
+    connectors:
+      copilot:
+        harness_preference: sdk   # or unmanaged
+        local_harness: govern     # or retire
+```
+
+- **`harness_preference: sdk`** (the default) enables
+  `ChatEditorPreferCopilotHarness`, so new editor chats use the SDK harness,
+  which reads Copilot's `policy.d`. With `unmanaged`, DefenseClaw does not
+  set that policy.
+- **`local_harness: govern`** (the default) places a per-user Local hook
+  file, `~/.copilot/hooks/defenseclaw-vscode.json`. With
+  `managed_hooks_only: enforce` it also places a per-user plugin, which it
+  enables in Copilot's managed settings.
+- **The Local harness lock.** On Linux, DefenseClaw also sets
+  `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json`,
+  but only once every enrolled user has the plugin and every VS Code found
+  is 1.139.x.
+- **`local_harness: retire`** places neither file and sets
+  `sandbox.enabled` in Copilot's managed settings.
+
+See [GitHub Copilot in VS Code](/docs/connectors/copilot#github-copilot-in-vs-code).
+
 ## Ownership modes
 
 ```yaml title="config.yaml (excerpt)"

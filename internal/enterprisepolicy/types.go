@@ -107,6 +107,17 @@ type Options struct {
 	// the deployment's files), so planning puts OpenCode on machine policy
 	// before the file exists. Reconcile still requires the installed file.
 	OpenCodePluginPlanned bool
+	// CopilotHarnessPreference and CopilotLocalHarness are
+	// enterprise.machine_policy.connectors.copilot harness_preference (sdk
+	// or unmanaged) and local_harness (govern or retire); "" takes the
+	// default (sdk, govern).
+	CopilotHarnessPreference string
+	CopilotLocalHarness      string
+	// CopilotUserHomes are the enrolled accounts' homes (from the
+	// administrator's eligible-accounts record, never a user's
+	// environment). The VS Code managed-hooks lock is written only when
+	// every one of them holds DefenseClaw's current Copilot plugin.
+	CopilotUserHomes []string
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
 }

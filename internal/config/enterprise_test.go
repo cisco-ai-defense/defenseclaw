@@ -209,6 +209,42 @@ enterprise:
 			}
 		}
 	})
+
+	t.Run("copilot harness knobs", func(t *testing.T) {
+		const head = "config_version: 8\nenterprise:\n  machine_policy:\n"
+		for name, doc := range map[string]string{
+			"both":     head + "    connectors:\n      copilot:\n        harness_preference: unmanaged\n        local_harness: retire\n        ownership: merge\n",
+			"defaults": head + "    connectors:\n      copilot:\n        harness_preference: sdk\n        local_harness: govern\n",
+		} {
+			document, err := ParseV8YAML(name+".yaml", []byte(doc))
+			if err == nil {
+				err = validateV8Schema(name+".yaml", document)
+			}
+			if err != nil {
+				t.Fatalf("v8 schema rejected %s: %v", name, err)
+			}
+		}
+		for name, doc := range map[string]string{
+			"bad value":         head + "    connectors:\n      copilot:\n        local_harness: remove\n",
+			"another connector": head + "    connectors:\n      cursor:\n        harness_preference: sdk\n",
+			"the default block": head + "    default:\n      local_harness: govern\n",
+		} {
+			document, err := ParseV8YAML(name+".yaml", []byte(doc))
+			if err == nil {
+				err = validateV8Schema(name+".yaml", document)
+			}
+			if err == nil {
+				t.Errorf("v8 schema accepted %s", name)
+			}
+		}
+		if err := validateConnectorPolicy("enterprise.machine_policy.connectors.cursor", EnterpriseConnectorPolicy{LocalHarness: "govern"}); err == nil {
+			t.Error("validation accepted local_harness outside connectors.copilot")
+		}
+		m := EnterpriseMachinePolicyConfig{Connectors: map[string]EnterpriseConnectorPolicy{"copilot": {HarnessPreference: "Unmanaged"}}}
+		if m.CopilotHarnessPreference() != CopilotHarnessPreferenceUnmanaged || m.CopilotLocalHarness() != CopilotLocalHarnessGovern {
+			t.Errorf("effective knobs = %q, %q", m.CopilotHarnessPreference(), m.CopilotLocalHarness())
+		}
+	})
 }
 
 // enterprise.trust.mode "" is the documented default (the hash_pinned

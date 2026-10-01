@@ -72,6 +72,8 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 	}
 	opts.ClaudeVersionFloor = cfg.Enterprise.MachinePolicy.ClaudeVersionFloor()
 	opts.WSL = cfg.Enterprise.MachinePolicy.WindowsWSL
+	opts.CopilotHarnessPreference = cfg.Enterprise.MachinePolicy.CopilotHarnessPreference()
+	opts.CopilotLocalHarness = cfg.Enterprise.MachinePolicy.CopilotLocalHarness()
 	return opts, opts.Validate()
 }
 

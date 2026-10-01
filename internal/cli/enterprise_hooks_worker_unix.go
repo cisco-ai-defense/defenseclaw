@@ -149,6 +149,28 @@ type enterpriseHookWorkerRequest struct {
 	// AIDiscovery carries the settings and signature catalog of the
 	// ai_discovery operation; the worker cannot read the managed config.
 	AIDiscovery *enterpriseHookWorkerAIDiscovery `json:"ai_discovery,omitempty"`
+	// CopilotVSCode asks the foreign_cleanup worker to place or remove
+	// DefenseClaw's VS Code Local hook file and Copilot plugin in the
+	// user's own home.
+	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+}
+
+// enterpriseHookWorkerCopilotVSCode is what the user's home should hold
+// for the VS Code Local harness; the parent resolves it from the
+// administrator's config.
+type enterpriseHookWorkerCopilotVSCode struct {
+	HookBinary string `json:"hook_binary"`
+	HookFile   bool   `json:"hook_file"`
+	Plugin     bool   `json:"plugin"`
+}
+
+// enterpriseHookWorkerCopilotVSCodeReport is the worker's account of it
+// (user-influenced; only logged).
+type enterpriseHookWorkerCopilotVSCodeReport struct {
+	Changed []string `json:"changed,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Kept    []string `json:"kept,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 type enterpriseHookWorkerAIDiscovery struct {
@@ -202,7 +224,9 @@ type enterpriseHookWorkerResponse struct {
 	// AIDiscovery is the user's scan report (user-influenced; the guardian
 	// validates it before the gateway reads it).
 	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
-	Error       string                       `json:"error,omitempty"`
+	// CopilotVSCode reports the VS Code Local hook file and plugin.
+	CopilotVSCode *enterpriseHookWorkerCopilotVSCodeReport `json:"copilot_vscode,omitempty"`
+	Error         string                                   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -312,6 +336,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		now := time.Now()
 		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		if request.CopilotVSCode != nil {
+			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
 		}

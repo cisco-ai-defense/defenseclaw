@@ -132,6 +132,9 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	opts.StartedAt = startedAt
 	deadline := startedAt.Add(hookForeignGuardScanBudget(name, opts.Event))
 	facts := captureHookPayloadFacts(opts)
+	if hookexec.HookSurfaceAllowed(name, opts.HookSurface) {
+		facts.surface = strings.TrimSpace(opts.HookSurface)
+	}
 	event := strings.TrimSpace(opts.Event)
 	if event == "" {
 		event = facts.event
@@ -355,6 +358,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		Policy:              policy,
 		Getenv:              os.Getenv,
 		OwnedCommands:       owned,
+		HookSurface:         facts.surface,
 		Deadline:            deadline,
 		StopAtFirstBlocking: !sessionStart,
 	}
@@ -439,6 +443,9 @@ type hookPayloadFacts struct {
 	// session is the agent's session ID (Claude Code, Codex, Devin and
 	// Copilot session_id or sessionId; Cursor conversation_id).
 	session string
+	// surface is the hook command's --hook-surface marker when the
+	// connector lists it (the VS Code Local harness reads more sources).
+	surface string
 }
 
 // hookForeignGuardSessionKeys name the agent's session ID, in order.

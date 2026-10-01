@@ -4295,6 +4295,42 @@
         }
       }
     },
+    "enterpriseCopilotConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprise.machine_policy.connectors.copilot: the connector policy keys plus harness_preference and local_harness, which govern GitHub Copilot in VS Code.",
+      "properties": {
+        "ownership": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/ownership"
+        },
+        "managed_hooks_only": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/managed_hooks_only"
+        },
+        "foreign_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/foreign_hooks"
+        },
+        "higher_precedence_sources": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/higher_precedence_sources"
+        },
+        "allowed_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/allowed_hooks"
+        },
+        "harness_preference": {
+          "type": "string",
+          "enum": [
+            "sdk",
+            "unmanaged"
+          ]
+        },
+        "local_harness": {
+          "type": "string",
+          "enum": [
+            "govern",
+            "retire"
+          ]
+        }
+      }
+    },
     "enterprise": {
       "type": "object",
       "additionalProperties": false,
@@ -4468,6 +4504,9 @@
               "properties": {
                 "claudecode": {
                   "$ref": "#/$defs/enterpriseClaudeCodeConnectorPolicy"
+                },
+                "copilot": {
+                  "$ref": "#/$defs/enterpriseCopilotConnectorPolicy"
                 }
               },
               "additionalProperties": {

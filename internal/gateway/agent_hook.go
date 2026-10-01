@@ -325,6 +325,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			}
 		}
+		// A second delivery of one Copilot tool call (see
+		// agent_hook_copilot_dedupe.go) gets the first delivery's verdict,
+		// rendered for its own profile, and is not evaluated or audited
+		// again.
+		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
+		defer dedupeTicket.release()
+		if deduped {
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
+			return
+		}
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(r.Context(), profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for export, not for policy
@@ -537,6 +547,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
+		if !panicked {
+			dedupeTicket.complete(resp)
+		}
 		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
 		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
