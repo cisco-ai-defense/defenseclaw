@@ -343,13 +343,9 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
         except ImportError:
             self.skipTest("jsonschema not installed (dev-only dependency)")
 
-        schema = json.loads(
-            (ROOT / "schemas" / "scan-result.json").read_text(encoding="utf-8")
-        )
+        schema = json.loads((ROOT / "schemas" / "scan-result.json").read_text(encoding="utf-8"))
         doc = json.loads(
-            (
-                ROOT / "internal" / "cli" / "testdata" / "scan-code-json.golden.json"
-            ).read_text(encoding="utf-8")
+            (ROOT / "internal" / "cli" / "testdata" / "scan-code-json.golden.json").read_text(encoding="utf-8")
         )
         validator_cls = jsonschema.validators.validator_for(schema)
         validator_cls.check_schema(schema)
