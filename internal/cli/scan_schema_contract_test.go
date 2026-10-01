@@ -18,9 +18,11 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -33,12 +35,16 @@ const (
 	scanCodeJSONGolden = "testdata/scan-code-json.golden.json"
 )
 
-// TestScanCodeJSONCommandValidatesCanonicalSchema runs `defenseclaw scan code
-// <target> --json` through the real command tree in-process: cobra flag
-// parsing, the root pre-run (isolated v8 config load, audit store open) and the
-// persisted-scan branch. It captures the process stdout itself, so the test
-// fails if anything other than the single JSON document reaches it, and it
-// validates that document against the canonical schemas/scan-result.json.
+// TestScanCodeJSONCommandValidatesCanonicalSchema checks the `scan code
+// --json` output contract against the canonical schemas/scan-result.json.
+//
+// The clean and finding subtests run runScanCode in-process with no audit
+// store and capture the command's writer, so the schema and key checks do no
+// I/O beyond the fixture. The command_tree subtest runs `scan code <file>
+// --json` once through rootCmd: cobra flag parsing, the root pre-run with an
+// isolated v8 config and audit store, and the persisted-scan branch. It
+// captures the process stdout, so it fails if anything other than the single
+// JSON document reaches it.
 func TestScanCodeJSONCommandValidatesCanonicalSchema(t *testing.T) {
 	canonical, err := os.ReadFile(filepath.Join("..", "..", "schemas", "scan-result.json"))
 	if err != nil {
@@ -71,91 +77,127 @@ func TestScanCodeJSONCommandValidatesCanonicalSchema(t *testing.T) {
 		t.Fatalf("%s must carry exactly one finding, got %d", scanCodeJSONGolden, len(goldenFindings))
 	}
 
-	isolateScanCodeCommand(t)
-	// One isolated home for both runs: the second reuses the migrated audit
-	// database, as repeated invocations on a real host do.
-	dataDir := isolatedScanCodeHome(t)
+	// checkContract validates one command output and returns its findings.
+	checkContract := func(t *testing.T, document map[string]any, out []byte, wantFindings bool) []any {
+		t.Helper()
+		if err := schema.Validate(document); err != nil {
+			t.Fatalf("scan code --json output does not validate: %v\n%s", err, out)
+		}
+		if got, want := sortedKeys(document), sortedKeys(golden); !slices.Equal(got, want) {
+			t.Fatalf("envelope keys drifted from %s: got %v, want %v", scanCodeJSONGolden, got, want)
+		}
+		findings := document["findings"].([]any)
+		if wantFindings != (len(findings) > 0) {
+			t.Fatalf("findings = %d, want findings: %v\n%s", len(findings), wantFindings, out)
+		}
+		want := sortedKeys(goldenFindings[0].(map[string]any))
+		for _, finding := range findings {
+			if got := sortedKeys(finding.(map[string]any)); !slices.Equal(got, want) {
+				t.Fatalf("finding keys drifted from %s: got %v, want %v", scanCodeJSONGolden, got, want)
+			}
+		}
+		return findings
+	}
 
 	for _, fixture := range []struct {
 		name, file, body string
 		wantFindings     bool
 	}{
 		{name: "clean", file: "x.go", body: "package x\nvar _ = \"x\"\n"},
-		{name: "finding", file: "exec.py", body: "import os\nos.system(cmd)\n", wantFindings: true},
+		{name: "finding", file: "exec.py", body: scanCodeFindingFixture, wantFindings: true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			// The post-run closes the store the pre-run opened, but only on
-			// success; close it here too so a failing run cannot leak the
-			// handle into later tests or keep the temp dir busy on Windows.
-			storeBefore := auditStore
-			t.Cleanup(func() {
-				if auditStore != nil && auditStore != storeBefore {
-					_ = auditStore.Close()
-				}
-			})
-			target := filepath.Join(t.TempDir(), fixture.file)
-			if err := os.WriteFile(target, []byte(fixture.body), 0o600); err != nil {
-				t.Fatal(err)
+			useStorelessScanConfig(t)
+			target := writeScanCodeFixture(t, fixture.file, fixture.body)
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			if err := runScanCode(command, []string{target}); err != nil {
+				t.Fatalf("scan code --json: %v", err)
 			}
-
-			stdout := redirectProcessStdout(t)
-			rootCmd.SetArgs([]string{"scan", "code", target, "--json"})
-			_, runErr := rootCmd.ExecuteC()
-			out := stdout()
-			if runErr != nil {
-				t.Fatalf("scan code --json: %v\nstdout:\n%s", runErr, out)
-			}
-
-			document := decodeSoleScanDocument(t, out)
-			if err := schema.Validate(document); err != nil {
-				t.Fatalf("scan code --json output does not validate: %v\n%s", err, out)
-			}
-			if got, want := sortedKeys(document), sortedKeys(golden); !slices.Equal(got, want) {
-				t.Fatalf("envelope keys drifted from %s: got %v, want %v", scanCodeJSONGolden, got, want)
-			}
-			findings := document["findings"].([]any)
-			if fixture.wantFindings != (len(findings) > 0) {
-				t.Fatalf("findings = %d, want findings: %v\n%s", len(findings), fixture.wantFindings, out)
-			}
-			for _, finding := range findings {
-				got := sortedKeys(finding.(map[string]any))
-				want := sortedKeys(goldenFindings[0].(map[string]any))
-				if !slices.Equal(got, want) {
-					t.Fatalf("finding keys drifted from %s: got %v, want %v", scanCodeJSONGolden, got, want)
-				}
-			}
-
-			// The root pre-run must have loaded the isolated config and the
-			// command must have persisted the scan it reported: the scan_id on
-			// stdout is the one taken from the persisted copy.
-			if cfg == nil || !strings.HasPrefix(cfg.AuditDB, dataDir) {
-				t.Fatalf("the pre-run did not load the isolated config in %s", dataDir)
-			}
-			scanID, _ := document["scan_id"].(string)
-			if scanID == "" {
-				t.Fatalf("scan code --json carried no scan_id\n%s", out)
-			}
-			store, err := audit.NewStore(cfg.AuditDB)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = store.Close() })
-			if raw, err := store.GetScanRawJSON(scanID); err != nil || raw == "" {
-				t.Fatalf("scan %s was not persisted: raw=%q err=%v", scanID, raw, err)
-			}
-			rows, err := store.ListScanFindings(scanID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(rows) != len(findings) {
-				t.Fatalf("persisted %d findings for scan %s, stdout reported %d", len(rows), scanID, len(findings))
-			}
+			checkContract(t, decodeScanDocument(t, stdout.Bytes()), stdout.Bytes(), fixture.wantFindings)
 		})
+	}
+
+	t.Run("command_tree", func(t *testing.T) {
+		isolateScanCodeCommand(t)
+		dataDir := isolatedScanCodeHome(t)
+		target := writeScanCodeFixture(t, "exec.py", scanCodeFindingFixture)
+
+		stdout := redirectProcessStdout(t)
+		rootCmd.SetArgs([]string{"scan", "code", target, "--json"})
+		_, runErr := rootCmd.ExecuteC()
+		out := stdout()
+		if runErr != nil {
+			t.Fatalf("scan code --json: %v\nstdout:\n%s", runErr, out)
+		}
+		document := decodeSoleScanDocument(t, out)
+		findings := checkContract(t, document, out, true)
+
+		// The root pre-run must have loaded the isolated config and the
+		// command must have persisted the scan it reported: the scan_id on
+		// stdout is the one taken from the persisted copy.
+		if cfg == nil || !strings.HasPrefix(cfg.AuditDB, dataDir) {
+			t.Fatalf("the pre-run did not load the isolated config in %s", dataDir)
+		}
+		scanID, _ := document["scan_id"].(string)
+		if scanID == "" {
+			t.Fatalf("scan code --json carried no scan_id\n%s", out)
+		}
+		store, err := audit.NewStore(cfg.AuditDB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		if raw, err := store.GetScanRawJSON(scanID); err != nil || raw == "" {
+			t.Fatalf("scan %s was not persisted: raw=%q err=%v", scanID, raw, err)
+		}
+		rows, err := store.ListScanFindings(scanID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != len(findings) {
+			t.Fatalf("persisted %d findings for scan %s, stdout reported %d", len(rows), scanID, len(findings))
+		}
+	})
+}
+
+const scanCodeFindingFixture = "import os\nos.system(cmd)\n"
+
+func writeScanCodeFixture(t *testing.T, name, body string) string {
+	t.Helper()
+	target := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+// useStorelessScanConfig points the scan globals at a default config with no
+// data dir or audit store, as runScanCode sees them without the root pre-run.
+func useStorelessScanConfig(t *testing.T) {
+	t.Helper()
+	previousConfig, previousStore, previousLog := cfg, auditStore, auditLog
+	previousJSON, previousRaw, previousSchema := scanOutputJSON, scanNoRedact, scanPrintSchema
+	t.Cleanup(func() {
+		cfg, auditStore, auditLog = previousConfig, previousStore, previousLog
+		scanOutputJSON, scanNoRedact, scanPrintSchema = previousJSON, previousRaw, previousSchema
+	})
+	localConfig := config.DefaultConfig()
+	localConfig.DataDir = ""
+	localConfig.Scanners.CodeGuard = ""
+	cfg, auditStore, auditLog = localConfig, nil, nil
+	scanOutputJSON, scanNoRedact, scanPrintSchema = true, false, false
+	for _, key := range []string{
+		"DEFENSECLAW_AGENT_ID", "DEFENSECLAW_AGENT_INSTANCE_ID", "DEFENSECLAW_SIDECAR_INSTANCE_ID",
+	} {
+		t.Setenv(key, "")
 	}
 }
 
 // isolateScanCodeCommand snapshots and restores the package and command-tree
-// state that executing `scan code` through rootCmd mutates.
+// state that executing `scan code` through rootCmd mutates, including the
+// audit store the root pre-run opens.
 func isolateScanCodeCommand(t *testing.T) {
 	t.Helper()
 	previousConfig, previousStore, previousLog := cfg, auditStore, auditLog
@@ -168,6 +210,12 @@ func isolateScanCodeCommand(t *testing.T) {
 		command.SetOut(nil)
 	}
 	t.Cleanup(func() {
+		// The post-run closes the store the pre-run opened, but only on
+		// success; close it here too so a failing run cannot leak the handle
+		// into later tests or keep the data dir busy on Windows.
+		if auditStore != nil && auditStore != previousStore {
+			_ = auditStore.Close()
+		}
 		cfg, auditStore, auditLog = previousConfig, previousStore, previousLog
 		activeObservabilityV8Startup = previousStartup
 		rootCmd.SetArgs(nil)
@@ -195,14 +243,14 @@ func isolateScanCodeCommand(t *testing.T) {
 }
 
 // isolatedScanCodeHome points HOME, DEFENSECLAW_HOME and DEFENSECLAW_CONFIG at
-// a fresh minimal v8 config and returns its data dir.
+// a fresh minimal v8 config and returns its data dir. The data dir comes from
+// testenv.PrivateTempDir: the pre-run refuses an audit store directory the
+// current user does not own, and some Windows images make the Administrators
+// group the owner of directories created under the shared temp tree.
 func isolatedScanCodeHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	dataDir := filepath.Join(home, ".defenseclaw")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	home := testenv.PrivateTempDir(t)
+	dataDir := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(dataDir, "config.yaml")
 	quotedDataDir, err := json.Marshal(dataDir)
 	if err != nil {
