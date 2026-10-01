@@ -210,7 +210,7 @@ def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
         readiness, detail = _omnigent_runtime_readiness(cfg)
     except Exception as exc:  # noqa: BLE001 - presentation must remain available.
         readiness, detail = "warn", f"policy readiness unavailable: {exc}"
-    if readiness != "pass":
+    if readiness not in {"pass", "bound"}:
         return "degraded", detail
     return raw_state, detail
 

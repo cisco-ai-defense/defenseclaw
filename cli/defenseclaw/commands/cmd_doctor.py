@@ -5803,13 +5803,20 @@ def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:
 
 
 def _omnigent_server_command(argv: tuple[str, ...]) -> bool:
-    """Recognize official CLI and ``python -m omnigent server`` shapes."""
+    """Recognize the official CLI and ``python -m omnigent[.cli] server``.
+
+    ``omnigent run`` starts its local server as ``python -P -m omnigent.cli
+    server ...``.
+    """
     if len(argv) < 2:
         return False
     executable = os.path.basename(argv[0]).lower()
     if executable in {"omnigent", "omnigent.exe", "omni", "omni.exe"}:
         return argv[1] == "server"
-    return any(argv[index : index + 3] == ("-m", "omnigent", "server") for index in range(len(argv) - 2))
+    return any(
+        argv[index] == "-m" and argv[index + 1] in {"omnigent", "omnigent.cli"} and argv[index + 2] == "server"
+        for index in range(len(argv) - 2)
+    )
 
 
 def _omnigent_config_argument(argv: tuple[str, ...]) -> str:
@@ -5863,8 +5870,10 @@ def _omnigent_live_config_evidence(config_path: str) -> tuple[str, str]:
             f"{record_detail}; live {source} selects {_omnigent_path_ref('live-config', configured_path)}, "
             f"not {_omnigent_path_ref('managed-config-artifact', config_path)}",
         )
+    # "bound": the live server runs the managed config. That is the most
+    # OmniGent exposes, so Status keeps it running and Doctor warns.
     return (
-        "warn",
+        "bound",
         f"{record_detail}; live {source} selects {_omnigent_path_ref('managed-config-artifact', config_path)}, "
         "but OmniGent "
         "does not expose a loaded policy generation/module/config identity; policy registration "
@@ -5988,7 +5997,7 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
             return
     live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
     _emit(
-        live_status,
+        "warn" if live_status == "bound" else live_status,
         "OmniGent policy",
         f"native-degraded; {live_detail}; {_omnigent_path_ref('managed-module-artifact', module_path)}; "
         f"{_omnigent_path_ref('managed-pth-artifact', pth_path)}",
