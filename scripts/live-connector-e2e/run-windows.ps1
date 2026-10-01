@@ -4288,6 +4288,75 @@ function Read-EventJsonLines([string]$Path) {
     } while ([DateTime]::UtcNow -lt $deadline)
 }
 
+# Redirected-output async reads complete on the thread pool, one pipe buffer
+# at a time. On a saturated runner each of those hops can take tens of
+# milliseconds, so a multi-megabyte history read with ReadLineAsync costs
+# far more than the projection itself. One dedicated thread per projector
+# reads its stdout synchronously instead, and callers take whole lines from
+# it against their own deadline.
+function Initialize-CanonicalAuditProjectorLineHelper {
+    if ('DefenseClaw.CanonicalAuditProjectorLines' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Threading;
+
+namespace DefenseClaw
+{
+    public sealed class CanonicalAuditProjectorLines
+    {
+        private readonly BlockingCollection<string> lines = new BlockingCollection<string>();
+        private readonly TextReader reader;
+
+        public CanonicalAuditProjectorLines(TextReader reader)
+        {
+            if (reader == null) { throw new ArgumentNullException("reader"); }
+            this.reader = reader;
+            Thread pump = new Thread(Pump);
+            pump.IsBackground = true;
+            pump.Name = "canonical-audit-projector-stdout";
+            pump.Start();
+        }
+
+        private void Pump()
+        {
+            try
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null) { lines.Add(line); }
+            }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+            finally { lines.CompleteAdding(); }
+        }
+
+        // Returns exactly count lines, or throws TimeoutException once the
+        // deadline passes and EndOfStreamException when the projector closed
+        // its output first.
+        public string[] Take(int count, DateTime deadlineUtc)
+        {
+            if (count < 0) { throw new ArgumentOutOfRangeException("count"); }
+            string[] result = new string[count];
+            for (int index = 0; index < count; index++)
+            {
+                double remaining = (deadlineUtc - DateTime.UtcNow).TotalMilliseconds;
+                int wait = remaining <= 0 ? 0 : (int)Math.Min(int.MaxValue, Math.Ceiling(remaining));
+                string line;
+                if (!lines.TryTake(out line, wait))
+                {
+                    if (lines.IsCompleted) { throw new EndOfStreamException(); }
+                    throw new TimeoutException();
+                }
+                result[index] = line;
+            }
+            return result;
+        }
+    }
+}
+'@
+}
+
 function Stop-CanonicalAuditProjector([switch]$Kill) {
     $projector = $script:CanonicalAuditProjector
     $script:CanonicalAuditProjector = $null
@@ -4326,28 +4395,33 @@ function Stop-CanonicalAuditProjectorWithFailure([string]$Reason) {
     throw "canonical audit projector $Reason$detail"
 }
 
-function Read-CanonicalAuditProjectorLine(
+function Read-CanonicalAuditProjectorLines(
     [object]$Projector,
+    [int]$Count,
     [DateTime]$Deadline,
     [string]$Phase,
     [int]$TimeoutSeconds
 ) {
+    $failure = ''
     try {
-        $task = $Projector.Process.StandardOutput.ReadLineAsync()
+        $lines = $Projector.Lines.Take($Count, $Deadline)
     } catch {
-        Stop-CanonicalAuditProjectorWithFailure "could not read its $Phase response: $($_.Exception.Message)"
+        $exception = $_.Exception
+        while ($exception -is [Management.Automation.MethodInvocationException] -and
+            $null -ne $exception.InnerException) {
+            $exception = $exception.InnerException
+        }
+        $failure = if ($exception -is [TimeoutException]) {
+            "did not answer its $Phase request within ${TimeoutSeconds}s"
+        } elseif ($exception -is [IO.EndOfStreamException]) {
+            "exited before its $Phase response"
+        } else {
+            "could not read its $Phase response: $($exception.Message)"
+        }
     }
-    if (-not (Wait-RedirectedOutputTask $task $Deadline)) {
-        Stop-CanonicalAuditProjectorWithFailure "did not answer its $Phase request within ${TimeoutSeconds}s"
-    }
-    if ($task.IsFaulted -or $task.IsCanceled) {
-        Stop-CanonicalAuditProjectorWithFailure "could not read its $Phase response"
-    }
-    $line = $task.Result
-    if ($null -eq $line) {
-        Stop-CanonicalAuditProjectorWithFailure "exited before its $Phase response"
-    }
-    return $line
+    # Fail outside the catch so the failure is not reported twice.
+    if ($failure) { Stop-CanonicalAuditProjectorWithFailure $failure }
+    return ,$lines
 }
 
 function Read-CanonicalAuditProjectorResponse(
@@ -4356,7 +4430,7 @@ function Read-CanonicalAuditProjectorResponse(
     [string]$Phase,
     [int]$TimeoutSeconds
 ) {
-    $line = Read-CanonicalAuditProjectorLine $Projector $Deadline $Phase $TimeoutSeconds
+    $line = (Read-CanonicalAuditProjectorLines $Projector 1 $Deadline $Phase $TimeoutSeconds)[0]
     try {
         $response = $line | ConvertFrom-Json -ErrorAction Stop
     } catch {
@@ -4375,6 +4449,7 @@ function Start-CanonicalAuditProjector {
         $script:CanonicalAuditProjectorScript
     }
     $python = (Get-Command 'python.exe' -ErrorAction Stop).Source
+    Initialize-CanonicalAuditProjectorLineHelper
     $utf8 = [Text.UTF8Encoding]::new($false)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $python
@@ -4404,6 +4479,7 @@ function Start-CanonicalAuditProjector {
         ProcessId = $process.Id
         FilePath = $python
         StdErrTask = $process.StandardError.ReadToEndAsync()
+        Lines = [DefenseClaw.CanonicalAuditProjectorLines]::new($process.StandardOutput)
         LogPath = $log
     }
     $script:CanonicalAuditProjector = $projector
@@ -4459,10 +4535,7 @@ function Invoke-CanonicalAuditProjection([string]$AuditDb, [string]$OutputPath =
     }
     # The records share the request deadline: a projector that stalls part
     # way through is killed rather than leaving a half-read stream behind.
-    $records = [string[]]::new($count)
-    for ($index = 0; $index -lt $count; $index++) {
-        $records[$index] = Read-CanonicalAuditProjectorLine $projector $deadline 'projection' $timeout
-    }
+    $records = Read-CanonicalAuditProjectorLines $projector ([int]$count) $deadline 'projection' $timeout
     return $records
 }
 

@@ -4991,7 +4991,9 @@ threading.Event().wait()
         $canonicalEventReader -match '\[guid\]::NewGuid' -and
         $eventLineRouter -match 'Invoke-CanonicalAuditProjection \(\[IO\.Path\]::GetFullPath\(\$script:AuditDb\)\)\)' -and
         $eventLineRouter -notmatch 'New-CanonicalAuditProjectionSnapshot|Read-EventJsonLines \$snapshot' -and
-        $canonicalProjectionRequest -match "Read-CanonicalAuditProjectorLine \`$projector \`$deadline 'projection' \`$timeout" -and
+        $canonicalProjectionRequest -match "Read-CanonicalAuditProjectorLines \`$projector \(\[int\]\`$count\) \`$deadline 'projection' \`$timeout" -and
+        $canonicalProjectionRequest -notmatch 'ReadLineAsync' -and
+        $harnessText -match 'lines\.TryTake\(out line, wait\)' -and
         $harnessText -notmatch '\$script:GatewayJsonl') `
         'Windows live readiness streams the canonical SQLite projection; evidence snapshots stay private and transient'
     Assert-True ($auditProjectorText -match 'mode=ro' -and
