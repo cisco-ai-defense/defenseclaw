@@ -7,6 +7,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -81,6 +82,24 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 				t.Fatalf("pass %d: target = %+v", pass, target)
 			}
 		}
+	}
+	// A run while a credential rotation holds the guardian's record names
+	// that rotation's operation and phase, so the rotation takes no other
+	// run as proof.
+	record, _ := json.Marshal(enterprisehooks.CredentialTransaction{
+		Version: enterprisehooks.CredentialTransactionVersion, OperationID: strings.Repeat("0", 32), Phase: enterprisehooks.CredentialPhaseRollback,
+		ManifestSHA256: strings.Repeat("d", 64), PreviousKeyID: strings.Repeat("a", 64), NextKeyID: strings.Repeat("b", 64),
+	})
+	if err := os.WriteFile(filepath.Join(f.authDir, managed.HookGuardianCredentialTransactionFile), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianCredentialAttestationFile))
+	if attestation, err := enterprisehooks.ParseCredentialAttestation(data); err != nil ||
+		attestation.OperationID != strings.Repeat("0", 32) || attestation.Phase != enterprisehooks.CredentialPhaseRollback {
+		t.Fatalf("a run under a rotation does not name it: %+v %v", attestation, err)
 	}
 	identity := strconv.Itoa(uid)
 	targets := f.workerTargets()

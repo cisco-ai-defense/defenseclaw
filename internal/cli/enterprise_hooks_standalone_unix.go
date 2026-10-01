@@ -856,6 +856,14 @@ func writeEnterpriseHookCredentialAttestation(
 		KeyID:          keyID,
 		Targets:        make([]enterprisehooks.CredentialAttestationTarget, 0, len(rows)),
 	}
+	// Name the rotation this run acted under, so the rotation takes only a
+	// reconcile of its own phase as proof. The record cannot change while
+	// this run holds the reconcile lock.
+	if transaction, err := loadEnterpriseHookCredentialTransaction(cfg.DataDir); err == nil && transaction != nil {
+		attestation.OperationID, attestation.Phase = transaction.OperationID, transaction.Phase
+	} else if err != nil {
+		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: ignoring the credential transaction record: %v\n", err)
+	}
 	ledgerPath := managed.HookGuardianAuthorizationPath(cfg.DataDir)
 	if info, err := os.Lstat(ledgerPath); bound && err == nil {
 		if ledger, err := readEnterpriseHookBoundedFile(ledgerPath, info, enterprisehooks.CredentialAttestationMaxBytes, "hook guardian authorization"); err == nil {
