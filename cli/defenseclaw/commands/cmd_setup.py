@@ -1340,6 +1340,54 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
             flag_value=None,
             non_interactive=False,
         )
+        # Provider-typed prompts: region + auth-mode for bedrock / vertex / azure.
+        # Asked before the key: Bedrock IAM, profile and instance-role auth use
+        # no API key, so the key prompt is skipped for them.
+        prov = (llm.provider or "").strip().lower()
+        auth_value = ""
+        if prov in ("bedrock", "vertex_ai", "vertex", "gemini", "azure", "azure_openai"):
+            region_default = ""
+            if prov == "bedrock" and llm.bedrock is not None:
+                region_default = llm.bedrock.region
+            elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
+                region_default = llm.vertex.region
+            region_value = pick_region(
+                provider=prov,
+                current=region_default,
+                flag_value=None,
+                non_interactive=False,
+            )
+            auth_default = ""
+            if prov == "bedrock" and llm.bedrock is not None:
+                auth_default = llm.bedrock.auth_mode
+            elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
+                auth_default = llm.vertex.auth_mode
+            elif prov in ("azure", "azure_openai") and llm.azure is not None:
+                auth_default = llm.azure.auth_mode
+            auth_value = pick_auth_mode(
+                provider=prov,
+                current=auth_default,
+                flag_value=None,
+                non_interactive=False,
+            )
+            if prov == "bedrock":
+                _apply_llm_provider_typed_flags(
+                    llm,
+                    bedrock_region=region_value,
+                    bedrock_auth_mode=auth_value,
+                )
+            elif prov in ("vertex_ai", "vertex", "gemini"):
+                _apply_llm_provider_typed_flags(
+                    llm,
+                    vertex_region=region_value,
+                    vertex_auth_mode=auth_value,
+                )
+            elif prov in ("azure", "azure_openai"):
+                _apply_llm_provider_typed_flags(
+                    llm,
+                    azure_auth_mode=auth_value,
+                )
+
         # Cloud providers: prompt once for the unified key and store it
         # under DEFENSECLAW_LLM_KEY so every scanner / guardrail call
         # picks it up via Config.resolve_llm(...).
@@ -1354,68 +1402,27 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
         # Surface LiteLLM's native env-var name as a hint when the
         # operator hasn't already pinned a custom one (so they can
         # reuse an existing ANTHROPIC_API_KEY / OPENAI_API_KEY).
-        guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
-        if not existing_env and guessed and guessed != "LLM_API_KEY" and guessed != DEFENSECLAW_LLM_KEY_ENV:
-            click.echo(f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}.")
-        env_name = pick_key_env(
-            provider=llm.provider,
-            current=suggested_env,
-            flag_value=None,
-            non_interactive=False,
-        )
-        _prompt_and_save_secret(env_name, llm.api_key, data_dir)
-        llm.api_key = ""
-        llm.api_key_env = env_name
+        if prov == "bedrock" and auth_value and auth_value != "api_key":
+            llm.api_key = ""
+            llm.api_key_env = ""
+        else:
+            guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
+            if not existing_env and guessed and guessed != "LLM_API_KEY" and guessed != DEFENSECLAW_LLM_KEY_ENV:
+                click.echo(f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}.")
+            env_name = pick_key_env(
+                provider=llm.provider,
+                current=suggested_env,
+                flag_value=None,
+                non_interactive=False,
+            )
+            _prompt_and_save_secret(env_name, llm.api_key, data_dir)
+            llm.api_key = ""
+            llm.api_key_env = env_name
         llm.base_url = click.prompt(
             "  LLM base URL (leave blank to use provider default)",
             default=llm.base_url or "",
             show_default=bool(llm.base_url),
         )
-
-    # Provider-typed prompts: region + auth-mode for bedrock / vertex / azure.
-    prov = (llm.provider or "").strip().lower()
-    if prov in ("bedrock", "vertex_ai", "vertex", "gemini", "azure", "azure_openai"):
-        region_default = ""
-        if prov == "bedrock" and llm.bedrock is not None:
-            region_default = llm.bedrock.region
-        elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
-            region_default = llm.vertex.region
-        region_value = pick_region(
-            provider=prov,
-            current=region_default,
-            flag_value=None,
-            non_interactive=False,
-        )
-        auth_default = ""
-        if prov == "bedrock" and llm.bedrock is not None:
-            auth_default = llm.bedrock.auth_mode
-        elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
-            auth_default = llm.vertex.auth_mode
-        elif prov in ("azure", "azure_openai") and llm.azure is not None:
-            auth_default = llm.azure.auth_mode
-        auth_value = pick_auth_mode(
-            provider=prov,
-            current=auth_default,
-            flag_value=None,
-            non_interactive=False,
-        )
-        if prov == "bedrock":
-            _apply_llm_provider_typed_flags(
-                llm,
-                bedrock_region=region_value,
-                bedrock_auth_mode=auth_value,
-            )
-        elif prov in ("vertex_ai", "vertex", "gemini"):
-            _apply_llm_provider_typed_flags(
-                llm,
-                vertex_region=region_value,
-                vertex_auth_mode=auth_value,
-            )
-        elif prov in ("azure", "azure_openai"):
-            _apply_llm_provider_typed_flags(
-                llm,
-                azure_auth_mode=auth_value,
-            )
 
     llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
     llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries or 2)

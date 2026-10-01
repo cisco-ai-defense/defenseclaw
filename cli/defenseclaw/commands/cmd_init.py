@@ -303,35 +303,36 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         verify=verify,
         json_summary=json_summary,
     ):
-        _run_first_run_cmd(
-            skip_install=skip_install,
-            enable_guardrail=enable_guardrail,
-            sandbox=sandbox,
-            non_interactive=non_interactive,
-            yes=yes,
-            rescan_agents=rescan_agents,
-            connector=connector,
-            profile=profile,
-            observe_all=observe_all,
-            action_connectors=action_connectors,
-            scanner_mode=scanner_mode,
-            with_judge=with_judge,
-            fail_mode=fail_mode,
-            human_approval=human_approval,
-            hilt_min_severity=hilt_min_severity,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
-            llm_api_key=llm_api_key,
-            llm_api_key_env=llm_api_key_env,
-            llm_base_url=llm_base_url,
-            cisco_endpoint=cisco_endpoint,
-            cisco_api_key=cisco_api_key,
-            cisco_api_key_env=cisco_api_key_env,
-            start_gateway=start_gateway,
-            verify=verify,
-            json_summary=json_summary,
-            verbose=verbose,
-        )
+        with agent_discovery.share_fresh_scans():
+            _run_first_run_cmd(
+                skip_install=skip_install,
+                enable_guardrail=enable_guardrail,
+                sandbox=sandbox,
+                non_interactive=non_interactive,
+                yes=yes,
+                rescan_agents=rescan_agents,
+                connector=connector,
+                profile=profile,
+                observe_all=observe_all,
+                action_connectors=action_connectors,
+                scanner_mode=scanner_mode,
+                with_judge=with_judge,
+                fail_mode=fail_mode,
+                human_approval=human_approval,
+                hilt_min_severity=hilt_min_severity,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                llm_api_key=llm_api_key,
+                llm_api_key_env=llm_api_key_env,
+                llm_base_url=llm_base_url,
+                cisco_endpoint=cisco_endpoint,
+                cisco_api_key=cisco_api_key,
+                cisco_api_key_env=cisco_api_key_env,
+                start_gateway=start_gateway,
+                verify=verify,
+                json_summary=json_summary,
+                verbose=verbose,
+            )
         return
 
     from defenseclaw.bootstrap import SANDBOX_FLAG_DEPRECATION
@@ -1260,6 +1261,9 @@ def _supported_action_connectors(
     from defenseclaw.commands.cmd_setup import (
         _check_connector_version_supported_for_setup,
     )
+
+    if candidates and allow_trusted_path_prompt and not quiet:
+        click.echo("  Checking installed agent versions...")
 
     out: list[str] = []
     failed: list[str] = []

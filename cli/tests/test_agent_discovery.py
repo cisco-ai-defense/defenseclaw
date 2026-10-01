@@ -273,6 +273,28 @@ def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
     assert prefixes == ("/opt/enterprise/bin",)
 
 
+def test_shared_fresh_scans_probe_once_until_trust_changes(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    calls: list[str] = []
+    trust = [(False, ())]
+
+    def fake_scan(name: str, **_kwargs) -> ad.AgentSignal:
+        calls.append(name)
+        return _signal(name, name == "codex")
+
+    monkeypatch.setattr(ad, "_scan_agent", fake_scan)
+    monkeypatch.setattr(ad, "_ai_discovery_trust_config", lambda _data_dir=None: trust[0])
+    with ad.share_fresh_scans():
+        first = ad.discover_agents(use_cache=False, refresh=True)
+        assert ad.discover_agents(use_cache=False, refresh=True) is first
+        assert len(calls) == len(ad.DISCOVERABLE_CONNECTORS)
+        trust[0] = (False, ("/opt/agents/bin",))
+        assert ad.discover_agents(use_cache=False, refresh=True) is not first
+    assert len(calls) == 2 * len(ad.DISCOVERABLE_CONNECTORS)
+    ad.discover_agents(use_cache=False, refresh=True)
+    assert len(calls) == 3 * len(ad.DISCOVERABLE_CONNECTORS)
+
+
 def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     now = datetime(2026, 5, 4, 18, 21, tzinfo=timezone.utc)

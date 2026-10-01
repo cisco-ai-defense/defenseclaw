@@ -29,7 +29,10 @@ import stat
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -935,6 +938,25 @@ _SPECS: dict[str, _AgentSpec] = {
 }
 
 
+_FRESH_SCANS: ContextVar[dict[tuple, AgentDiscovery] | None] = ContextVar("_FRESH_SCANS", default=None)
+
+
+@contextmanager
+def share_fresh_scans() -> Iterator[None]:
+    """Let the fresh scans of one command reuse its first full scan.
+
+    Setup's version gate asks for a fresh scan per connector, so a guided
+    init with many connectors probed every agent once per connector and sat
+    silent for a minute. The memo is keyed by the config's trust settings,
+    so trusting another binary prefix still scans again.
+    """
+    token = _FRESH_SCANS.set({})
+    try:
+        yield
+    finally:
+        _FRESH_SCANS.reset(token)
+
+
 def discover_agents(
     *,
     use_cache: bool = True,
@@ -957,6 +979,13 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
+    shared = _FRESH_SCANS.get()
+    shared_key = (str(config_path_for_data_dir(data_dir)), require_trusted, tuple(_prefixes))
+    if shared is not None and shared_key in shared:
+        reused = shared[shared_key]
+        if persist_cache:
+            _write_cache(reused, data_dir=data_dir)
+        return reused
     # Prime manager-derived Windows roots before worker threads request the
     # trusted-prefix set. functools.lru_cache does not coalesce concurrent
     # misses, so warming here prevents duplicate npm/pnpm subprocesses.
@@ -976,6 +1005,8 @@ def discover_agents(
         )
     agents = {signal.name: signal for signal in signals}
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
+    if shared is not None:
+        shared[shared_key] = discovery
     # Cache persistence is deliberately best-effort: the freshly computed
     # discovery result is authoritative and must still be returned when the
     # optional acceleration cache cannot be protected or written.
