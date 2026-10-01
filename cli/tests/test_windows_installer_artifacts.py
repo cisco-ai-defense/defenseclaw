@@ -1174,6 +1174,49 @@ def test_sbom_rejects_case_colliding_authenticode_inventory_path(tmp_path: Path)
         artifacts.build_sbom(args)
 
 
+def test_go_inventory_records_a_source_directory_replacement_apart_from_the_upstream_module(tmp_path: Path) -> None:
+    upstream_sum = "h1:" + base64.b64encode(b"\x02" * 32).decode()
+    ours = artifacts._parse_go_build_info(
+        "defenseclaw.exe: go1.26.4\n"
+        "\tpath\tgithub.com/defenseclaw/defenseclaw/cmd/defenseclaw\n"
+        "\tmod\tgithub.com/defenseclaw/defenseclaw\t(devel)\t\n"
+        "\tdep\tgithub.com/fsnotify/fsnotify\tv1.9.0\n"
+        "\t=>\t./third_party/fsnotify\t(devel)\t\n"
+    )
+    assert ours["dependencies"] == [
+        {
+            "path": "github.com/fsnotify/fsnotify",
+            "version": "v1.9.0",
+            "sum": None,
+            "replace": {"path": "./third_party/fsnotify", "version": "(devel)", "sum": None},
+        }
+    ]
+    theirs = {"path": "github.com/fsnotify/fsnotify", "version": "v1.9.0", "sum": upstream_sum}
+
+    document = artifacts.SpdxDocument("DefenseClaw Windows Setup", "https://example.invalid/sbom", "2026-01-01T00:00:00Z", "0" * 40)
+    components = {}
+    inventory = {"schema_version": 1, "components": {}}
+    for label, dependency in (("gateway", ours["dependencies"][0]), ("cosign", theirs)):
+        digest = hashlib.sha256(label.encode()).hexdigest()
+        components[label] = document.add_package(f"payload:{label}", label, "1.0.0", "APPLICATION", checksum=digest)
+        inventory["components"][label] = {"sha256": digest, "runtime": "go1.26.4", "dependencies": [dependency]}
+
+    inventory_path = tmp_path / "go-components.json"
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    assert artifacts._add_go_inventory(document, inventory_path, components) == 3
+
+    modules = [
+        package for package in document.packages.values() if package["name"] == "github.com/fsnotify/fsnotify"
+    ]
+    assert len(modules) == 2
+    patched = next(package for package in modules if "sourceInfo" in package)
+    upstream = next(package for package in modules if "sourceInfo" not in package)
+    assert patched["versionInfo"] == upstream["versionInfo"] == "v1.9.0"
+    assert "checksums" not in patched
+    assert patched["sourceInfo"] == "github.com/fsnotify/fsnotify@v1.9.0 replaced by the source directory ./third_party/fsnotify"
+    assert upstream["checksums"] == [{"algorithm": "SHA256", "checksumValue": "02" * 32}]
+
+
 def test_sbom_fails_closed_when_go_inventory_is_not_for_exact_binary(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     inventory = json.loads(args.go_inventory.read_text(encoding="utf-8"))
