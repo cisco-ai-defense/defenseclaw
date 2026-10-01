@@ -3037,9 +3037,9 @@ threading.Event().wait()
         $nativeHarnessText,
         '(?s)function Set-WizardCodexLegacyNonWaitingHook\b.*?(?=\r?\nfunction )'
     ).Value
-    Assert-True ($legacyLauncherFixture -match '--event' -and
-        $legacyLauncherFixture -match '--hook-contract' -and
-        $legacyLauncherFixture -match '\$argumentLiterals\.Value -join '' ''') `
+    Assert-True ($legacyLauncherFixture -match '\$bridge = Get-AwaitedHookBridge \$script' -and
+        $legacyLauncherFixture -match '\$bridge\.Invocation \+ ''; exit \$LASTEXITCODE''' -and
+        $legacyLauncherFixture -notmatch 'argumentLiterals') `
         'legacy Codex launcher fixture preserves current event and hook-contract bindings'
     $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
     $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)

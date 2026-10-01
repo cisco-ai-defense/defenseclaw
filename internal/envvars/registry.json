@@ -4621,6 +4621,25 @@
       "since": "1.0.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_AWAITED_HOOK_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that exits at once with a block when it receives the expected hook argument list, so the Windows PowerShell hook bridge tests can check that a fast-exiting hook keeps its exit code and output.",
+      "default": "unset",
+      "accepted_values": [
+        "expected hook argument list",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/awaited_hook_fast_exit_windows_test.go",
+          "description": "Test-only fast-exiting hook helper selector"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_CODEX_MANAGED_DATA",
       "category": "test_fixture",
       "purpose": "Passes the isolated Codex managed data root from the Windows connector-reconcile Go test to its re-execed subprocess so the child resolves managed-Codex artifacts under t.TempDir().",
