@@ -1088,3 +1088,19 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstRunApiPortTests(unittest.TestCase):
+    def test_new_config_moves_off_a_default_port_another_account_holds(self):
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with (
+            patch.object(bootstrap.platform_support, "host_os", return_value="linux"),
+            patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970),
+        ):
+            note = bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+        self.assertIn("uses port 18980", note)

@@ -369,6 +369,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
+        from defenseclaw.bootstrap import choose_first_run_api_port
+
+        port_note = choose_first_run_api_port(cfg)
+        if port_note:
+            click.echo("  API port:      " + ux._style(port_note, fg="yellow"))
     else:
         cfg = load()
         if getattr(cfg, "_source_config_version", None) != 8:
