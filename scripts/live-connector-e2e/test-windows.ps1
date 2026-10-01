@@ -1996,7 +1996,7 @@ connection.close()
             Join-Path $projectionStateRoot '.canonical-event-projection'
         ) -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
         Assert-True ($projectionFiles.Count -eq 0) `
-            'private canonical projection snapshots are deleted immediately after each read'
+            'canonical polls stream records without creating projection snapshots'
 
         $delayedSessionId = 'windows-contract-delayed-session'
         $delayedRequestId = [guid]::NewGuid().ToString()
