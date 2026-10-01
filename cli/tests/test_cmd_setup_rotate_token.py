@@ -1552,7 +1552,7 @@ with locked_file_update(lock_base):
             os.makedirs(hooks, exist_ok=True)
             fixtures = {
                 os.path.join(hooks, "hook_contract_lock.json"): b'{"fixture":"unchanged"}\n',
-                os.path.join(hooks, ".otlp-codex.token"): b"independent-otlp-fixture\n",
+                os.path.join(hooks, ".otlp-codex.token.lock"): b"",
                 os.path.join(td, "otlp-state.json"): b'{"cursor":7}\n',
             }
             for path, body in fixtures.items():
@@ -1566,6 +1566,73 @@ with locked_file_update(lock_base):
             for path, expected in fixtures.items():
                 with open(path, "rb") as fh:
                     self.assertEqual(fh.read(), expected)
+
+    def test_rotation_retires_otlp_path_tokens_before_gateway_b_starts(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["claudecode", "codex"])
+            hooks = os.path.join(td, "hooks")
+            exposed = {
+                scope: os.path.join(hooks, f".otlp-{scope}.token") for scope in ("codex", "claudecode")
+            }
+            for path in exposed.values():
+                cmd_setup.atomic_write_private_bytes(path, b"exposed-otlp-fixture\n")
+            present_at: dict[str, list[str]] = {}
+
+            def lifecycle(_data_dir: str, action: str, **_kwargs: object) -> None:
+                present_at[action] = sorted(
+                    scope for scope, path in exposed.items() if os.path.lexists(path)
+                )
+
+            with mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            # Gateway A stops with its credentials; gateway B starts without
+            # them and mints replacements, so the exposed bearers stop working.
+            self.assertEqual(present_at["stop"], ["claudecode", "codex"])
+            self.assertEqual(present_at["start"], [])
+            self.assertIn("OTLP telemetry credential for codex, claudecode", result.output)
+            self.assertNotIn("exposed-otlp-fixture", result.output)
+
+    def test_failed_b_does_not_restore_retired_otlp_path_tokens(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            token = os.path.join(td, "hooks", ".otlp-codex.token")
+            cmd_setup.atomic_write_private_bytes(token, b"exposed-otlp-fixture\n")
+            actions: list[str] = []
+
+            def lifecycle(_data_dir: str, action: str, *, token: str, **_kwargs: object) -> None:
+                actions.append(action)
+                if action == "start" and token == "b" * 64:
+                    raise click.ClickException("gateway B did not become ready")
+
+            with (
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup.secrets, "token_hex", side_effect=["b" * 64, "c" * 64]),
+            ):
+                CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+
+            self.assertIn("start", actions)
+            self.assertFalse(os.path.lexists(token), "a rollback restored an exposed OTLP bearer")
+
+    @unittest.skipIf(os.name == "nt", "symlink fixture")
+    def test_linked_otlp_path_token_refuses_rotation(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            outside = os.path.join(td, "outside")
+            with open(outside, "wb") as fh:
+                fh.write(b"keep\n")
+            os.mkdir(os.path.join(td, "hooks"), 0o700)
+            os.symlink(outside, os.path.join(td, "hooks", ".otlp-codex.token"))
+            with self.assertRaises(click.ClickException):
+                cmd_setup._rotate_token_retire_otlp_path_tokens(td)
+            with open(outside, "rb") as fh:
+                self.assertEqual(fh.read(), b"keep\n")
 
     def test_unrelated_failure_restores_absent_dotenv_without_retry(self) -> None:
         from tempfile import TemporaryDirectory

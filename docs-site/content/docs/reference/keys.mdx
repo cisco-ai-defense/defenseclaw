@@ -162,7 +162,10 @@ supported process-environment or dotenv source supplies a token, the Go
 sidecar generates a 32-byte random token at first boot and stores its
 hex-encoded value in `~/.defenseclaw/.env` with private permissions. Use
 `defenseclaw setup rotate-token --yes` for an intentional local rotation so
-the running gateway and active connectors change together.
+the running gateway and active connectors change together. The same command
+replaces the scoped OTLP tokens described below: it removes them while the
+gateway is stopped, and the restarted gateway issues new ones and writes them
+into the agent configuration, so the old values stop authenticating.
 
 `OPENCLAW_GATEWAY_TOKEN` is the upstream OpenClaw gateway credential and is
 also retained as a legacy fallback by the sidecar token resolver. Do not treat

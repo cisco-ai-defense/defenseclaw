@@ -3705,6 +3705,43 @@ def _run_rotate_token_lifecycle(
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
 
 
+# Connector-scoped OTLP path tokens (internal/gateway/connector/otlp_token.go).
+# Agents keep them in their own configuration (Claude settings.json, the Codex
+# config), so they are as exposed as the gateway token and rotate with it.
+_ROTATE_TOKEN_OTLP_SCOPES = ("codex", "claudecode", "omnigent", "openhands")
+
+
+def _rotate_token_retire_otlp_path_tokens(data_dir: str) -> list[str]:
+    """Delete every connector OTLP path token while the gateway is stopped.
+
+    The gateway's connector setup mints a new token for each connector that
+    sends OTLP and rewrites the agent configuration when the next gateway
+    starts, so the old bearer stops authenticating. A rollback start mints
+    fresh ones as well: the old tokens are never restored. Returns the scopes
+    whose token was removed. Values are never read.
+    """
+
+    hooks_dir = os.path.join(data_dir, "hooks")
+    retired: list[str] = []
+    for scope in _ROTATE_TOKEN_OTLP_SCOPES:
+        path = os.path.join(hooks_dir, f".otlp-{scope}.token")
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            raise click.ClickException(
+                f"The {scope} OTLP credential is not a regular file; refusing token rotation."
+            )
+        if os.name != "nt" and info.st_uid != os.geteuid():
+            raise click.ClickException(
+                f"The {scope} OTLP credential belongs to another account; refusing token rotation."
+            )
+        os.unlink(path)
+        retired.append(scope)
+    return retired
+
+
 def _rotate_token_transaction(
     app: AppContext,
     dotenv_path: str,
@@ -3714,8 +3751,11 @@ def _rotate_token_transaction(
     recover_previous_runtime: bool = True,
     scoped_connectors: tuple[str, ...] = (),
     require_complete_scoped_roster: bool = False,
-) -> None:
+) -> list[str]:
     """Commit gateway and scoped token B only between stop(A) and start(B).
+
+    Returns the connector scopes whose OTLP path token was retired; gateway B
+    issued their replacements.
 
     Normal operator-initiated rotation restores ready gateway A if B cannot
     activate. Doctor passes ``recover_previous_runtime=False`` when A's token
@@ -3840,6 +3880,7 @@ def _rotate_token_transaction(
                     windows_managed_security=hook_windows_security[connector],
                 )
             os.environ[_GATEWAY_TOKEN_ENV] = new_token
+            retired_otlp_scopes = _rotate_token_retire_otlp_path_tokens(data_dir)
 
             _run_rotate_token_lifecycle(
                 data_dir,
@@ -3858,6 +3899,7 @@ def _rotate_token_transaction(
                 audit_details,
                 allow_offline=False,
             )
+            return retired_otlp_scopes
         except BaseException as primary_error:
             if not old_stopped:
                 raise
@@ -3987,6 +4029,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     refreshes every affected hook/plugin and verifies gateway B. Any post-stop
     failure restores the exact credential snapshots and prior ready generation.
 
+    The connector OTLP path tokens that agents keep in their own configuration
+    are retired while the gateway is stopped; gateway B (or a rollback start)
+    issues new ones and rewrites the agent configuration, and the old ones are
+    never restored.
+
     Rotation is global by design: every eligible configured scoped-hook
     credential and every safely discovered persisted sidecar receive distinct
     least-privilege replacements in the same transaction. ``--connector``
@@ -4039,7 +4086,8 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         click.confirm(
             f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path},\n"
             f"replace every eligible or safely persisted scoped-hook credential ({scope}) with a distinct value,\n"
-            "refresh their hooks/plugins, and restart the gateway. Continue?",
+            "issue new OTLP telemetry credentials to the agents, refresh their hooks/plugins,\n"
+            "and restart the gateway. Continue?",
             abort=True,
         )
 
@@ -4051,10 +4099,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     # The transaction lets this typed error escape only before mutation or
     # after generation A's exact snapshots and required ready runtime have
     # been restored. Unsafe rollback/recovery failures become fatal Click errors.
+    retired_otlp_scopes: list[str] = []
     for attempt in range(2):
         new_token = secrets.token_hex(32)
         try:
-            _rotate_token_transaction(
+            retired_otlp_scopes = _rotate_token_transaction(
                 app,
                 dotenv_path,
                 new_token,
@@ -4078,6 +4127,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         ux.subhead("no connector-scoped hook credentials to rotate")
     else:
         ux.subhead("active connector roster: none")
+    if retired_otlp_scopes:
+        ux.ok(
+            f"Rotated the OTLP telemetry credential for {', '.join(retired_otlp_scopes)}; "
+            "the old one no longer authenticates."
+        )
     click.echo()
     ux.subhead("Next step: restart each agent so it picks up the new token in its")
     ux.subhead("inspect / hook subprocess invocations.")
