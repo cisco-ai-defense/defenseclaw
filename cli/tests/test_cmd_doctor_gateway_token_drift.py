@@ -671,27 +671,25 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         self.assertEqual(trust.code, "unbound_home")
         self.assertNotEqual(trust.code, "identity")
 
-    def test_current_linux_record_does_not_accept_deleted_executable_exception(self):
+    def test_current_linux_record_with_replaced_executable_stays_this_homes_gateway(self):
+        # The binary was replaced while the gateway ran (#1047): it is still
+        # this account's gateway, but only with the same home, install path
+        # and start identity.
         executable = "/opt/defenseclaw/bin/defenseclaw-gateway"
-        trust = _gateway_process_trust(
-            self.cfg,
-            PIDRecord(
-                "ok",
-                pid=self.pid,
-                executable=executable,
-                start_identity="start-1",
-                data_dir=self.tmp,
-            ),
-            ProcessEvidence(
-                "ok",
-                pid=self.pid,
-                executable=executable + " (deleted)",
-                start_identity="start-1",
-            ),
-            platform_name="linux",
-        )
+        retired = "/opt/defenseclaw/bin/.defenseclaw-install-custody/retired-" + "a" * 64
 
-        self.assertEqual(trust.code, "identity")
+        def trust_for(live, *, data_dir=self.tmp, recorded=executable):
+            return _gateway_process_trust(
+                self.cfg,
+                PIDRecord("ok", pid=self.pid, executable=recorded, start_identity="start-1", data_dir=data_dir),
+                ProcessEvidence("ok", pid=self.pid, executable=live, start_identity="start-1"),
+                platform_name="linux",
+            )
+
+        self.assertEqual(trust_for(executable + " (deleted)").code, "trusted")
+        self.assertEqual(trust_for(retired).code, "trusted")
+        self.assertEqual(trust_for(executable + " (deleted)", data_dir=self.tmp + "-other").code, "foreign_home")
+        self.assertEqual(trust_for("/tmp/defenseclaw-gateway (deleted)").code, "identity")
 
     def test_fail_closed_for_unbound_pid_record(self):
         executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway.exe")
