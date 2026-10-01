@@ -3556,6 +3556,8 @@ class TestGatewayOfflineStaging(_BaseSetup):
         # MAC-U3-03: no OpenClaw gateway.port and no internal audit wording.
         self.assertNotIn("gateway.port:", result.output)
         self.assertNotIn("canonical", result.output)
+        # The restart step alone says when the new port applies.
+        self.assertNotIn("takes effect when the gateway starts", result.output)
         openclaw_check.assert_not_called()
 
     def test_api_port_flag_is_used_on_a_terminal(self):
