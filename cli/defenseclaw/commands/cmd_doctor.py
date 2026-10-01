@@ -4569,6 +4569,12 @@ _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS = (
 )
 _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS = 2
 _CURSOR_WINDOWS_RUNTIME_TREE_REAP_SECONDS = 2.0
+# A fresh Windows profile pays Windows PowerShell's first-start cost (JIT,
+# module auto-load, per-user startup caches, file scanning) once. A transport
+# attempt killed at its deadline never persists those caches, so its retry
+# pays the same cold start again. Start the same host once, with its own bound
+# and no hook event, before the transport attempts are timed.
+_CURSOR_WINDOWS_POWERSHELL_WARMUP_TIMEOUT_SECONDS = 60.0
 
 
 def _run_cursor_windows_runtime_process(
@@ -4692,6 +4698,38 @@ def _run_cursor_windows_runtime_process(
             job.close()
 
 
+def _warm_cursor_windows_powershell_host(
+    powershell: str,
+    vendor_input: str,
+    *,
+    env: dict[str, str],
+) -> str | None:
+    """Start the probe's PowerShell host once without running the adapter.
+
+    The script loads the same host and the same ``Get-Content`` module as the
+    transport probe, then exits normally so first-start caches are kept. It
+    sends no hook event and leaves the gateway counters unchanged. Returns a
+    failure detail, or ``None`` when the host started and exited cleanly.
+    """
+    script = f"$null = Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw; exit 0"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    argv = [powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+    try:
+        proc = _run_cursor_windows_runtime_process(
+            argv,
+            env=env,
+            timeout=_CURSOR_WINDOWS_POWERSHELL_WARMUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            "Windows PowerShell did not start within "
+            f"{_CURSOR_WINDOWS_POWERSHELL_WARMUP_TIMEOUT_SECONDS:g}s for the Cursor runtime probe"
+        )
+    if proc.returncode != 0:
+        return f"Windows PowerShell host check exited {proc.returncode} before the Cursor runtime probe"
+    return None
+
+
 def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     """Exercise Cursor's real PowerShell transport and verify gateway receipt.
 
@@ -4760,6 +4798,13 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
             "-EncodedCommand",
             encoded,
         ]
+        warmup_failure = _warm_cursor_windows_powershell_host(
+            powershell,
+            vendor_input,
+            env=child_env,
+        )
+        if warmup_failure:
+            return False, warmup_failure
         # The registered Cursor command contract permits 30 seconds. Doctor
         # allows the adapter's bounded five-second child-drain interval plus
         # Windows PowerShell host startup and cold Add-Type compilation on top
