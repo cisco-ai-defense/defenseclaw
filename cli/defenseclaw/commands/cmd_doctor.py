@@ -5606,6 +5606,34 @@ def _omnigent_setup_repair_command(cfg) -> str:
     return " ".join(args)
 
 
+def _omnigent_config_entries_intact(body: bytes) -> bool:
+    """Return True when OmniGent's config still holds the DefenseClaw entries.
+
+    OmniGent rewrites its own config.yaml during normal use (hosts,
+    providers), so a changed file digest alone is not drift. The entries
+    setup manages are the policy module registration and the
+    ``policies.defenseclaw_guardrail`` function handler.
+    """
+    import yaml
+
+    try:
+        data = yaml.safe_load(body.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    modules = data.get("policy_modules")
+    policies = data.get("policies")
+    if not isinstance(modules, list) or "defenseclaw_omnigent_policy" not in modules:
+        return False
+    entry = policies.get("defenseclaw_guardrail") if isinstance(policies, dict) else None
+    return (
+        isinstance(entry, dict)
+        and entry.get("type") == "function"
+        and entry.get("handler") == "defenseclaw_omnigent_policy.defenseclaw_policy"
+    )
+
+
 def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
     """Return an integrity/custody failure for one OmniGent-managed artifact."""
     record, detail = _omnigent_backup_record(cfg, logical)
@@ -5626,7 +5654,9 @@ def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
     if status != "ok" or body is None:
         return detail
     expected = str(record["post_sha256"])
-    if hashlib.sha256(body).hexdigest() != expected:
+    if hashlib.sha256(body).hexdigest() != expected and not (
+        logical == "config" and _omnigent_config_entries_intact(body)
+    ):
         repair = _omnigent_setup_repair_command(cfg)
         return (
             f"managed OmniGent {logical} drift detected; run "
