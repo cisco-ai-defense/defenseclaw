@@ -2399,67 +2399,10 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		body, _ = json.Marshal(bodyMap)
 	}
 
-	// Guardrail pre-call inspection on the user's input
-	userText := lastUserText(messages)
-	if userText != "" && p.inspector != nil {
-		p.rtMu.RLock()
-		mode := p.mode
-		customBlockMsg := p.blockMessage
-		p.rtMu.RUnlock()
-		label := decision.Provider + "/responses"
-		t0 := time.Now()
-		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, messages, label, mode)
-		elapsed := time.Since(t0)
-		p.logPreCall(label, messages, verdict, elapsed)
-		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
-			verdict.Action == "block" && mode == "action")
-		if verdict.Action == "block" && mode == "action" {
-			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
-			// Return block as a Responses API SSE stream so Codex displays it
-			bID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
-			mID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.WriteHeader(http.StatusOK)
-			bf, _ := w.(http.Flusher)
-			blockSSE := func(d []byte) {
-				fmt.Fprintf(w, "data: %s\n\n", d)
-				if bf != nil { bf.Flush() }
-			}
-			d1, _ := json.Marshal(map[string]interface{}{
-				"type": "response.created",
-				"response": map[string]interface{}{"id": bID, "object": "response", "status": "in_progress", "model": decision.Model, "output": []interface{}{}},
-			})
-			blockSSE(d1)
-			d2, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.added", "output_index": 0,
-				"item": map[string]interface{}{"type": "message", "id": mID, "status": "in_progress", "role": "assistant", "content": []interface{}{}},
-			})
-			blockSSE(d2)
-			d3, _ := json.Marshal(map[string]interface{}{
-				"type": "response.content_part.added", "output_index": 0, "content_index": 0,
-				"part": map[string]interface{}{"type": "output_text", "text": ""},
-			})
-			blockSSE(d3)
-			d4, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": msg,
-			})
-			blockSSE(d4)
-			d5, _ := json.Marshal(map[string]interface{}{
-				"type": "response.completed",
-				"response": map[string]interface{}{
-					"id": bID, "object": "response", "status": "completed", "model": decision.Model,
-					"output": []interface{}{map[string]interface{}{
-						"type": "message", "id": mID, "status": "completed", "role": "assistant",
-						"content": []interface{}{map[string]interface{}{"type": "output_text", "text": msg}},
-					}},
-					"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-				},
-			})
-			blockSSE(d5)
-			return
-		}
-	}
+	// Pre-call and post-call guardrail inspection is handled by Codex's
+	// hook mechanism (UserPromptSubmit, PreToolUse, PostToolUse) which calls
+	// the gateway's API server at :18970. The proxy handler focuses on
+	// routing and Bifrost bridging only.
 
 	respID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
 	msgID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
@@ -2502,30 +2445,11 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	writeSSE(partEvt)
 
 	// Stream through Bifrost
-	responseContent, streamErr := bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
+	_, streamErr := bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
 		writeSSE(chunk)
 	})
 	if streamErr != nil {
 		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", streamErr)
-	}
-
-	// Post-call inspection on the response content
-	if responseContent != "" && p.inspector != nil {
-		p.rtMu.RLock()
-		mode := p.mode
-		p.rtMu.RUnlock()
-		label := decision.Provider + "/responses"
-		respMessages := []ChatMessage{{Role: "assistant", Content: responseContent}}
-		postCtx, postCancel := context.WithTimeout(r.Context(), 10*time.Second)
-		verdict := p.inspector.Inspect(postCtx, "completion", responseContent, respMessages, label, mode)
-		postCancel()
-		if verdict != nil {
-			p.recordTelemetry(r.Context(), "completion", label, verdict, 0, mode,
-				verdict.Action == "block" && mode == "action")
-			if verdict.Action == "block" && mode == "action" {
-				fmt.Fprintf(os.Stderr, "[responses-api] post-call BLOCKED: %s\n", verdict.Reason)
-			}
-		}
 	}
 }
 
