@@ -336,3 +336,20 @@ func TestStandaloneGatewayServiceImageMatches(t *testing.T) {
 		t.Error("an empty gateway path must never match")
 	}
 }
+
+// status and enterprise hooks status load the config without the root pre-run,
+// and the managed Windows answer said "`this command`" instead of naming them.
+func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
+	restore, restoreAccount := managedHostWindowsStandalone, managedHostCurrentAccount
+	t.Cleanup(func() { managedHostWindowsStandalone, managedHostCurrentAccount = restore, restoreAccount })
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	managedHostCurrentAccount = func() string { return `HOST\std1` }
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "absent"))
+	err := loadGatewayCommandConfigFor(statusCmd)
+	if err == nil || !strings.Contains(err.Error(), "`status` has no per-user deployment") ||
+		!strings.Contains(err.Error(), "enterprise policy show --user HOST\\std1") {
+		t.Fatalf("status on a managed Windows computer: %v", err)
+	}
+}

@@ -96,8 +96,8 @@ var (
 	// and avoids the consistent SQLITE_BUSY crash the guardian would hit. The
 	// seam remains overridable so lifecycle tests keep their custom pre-runs.
 	enterpriseHooksFullRootPersistentPreRun   = rootPersistentPreRunNoAuditE
-	enterpriseHooksConfigOnlyPersistentPreRun = func(*cobra.Command, []string) error {
-		return loadGatewayCommandConfigOnly()
+	enterpriseHooksConfigOnlyPersistentPreRun = func(cmd *cobra.Command, _ []string) error {
+		return loadGatewayCommandConfigFor(cmd)
 	}
 	enterpriseHooksPluginRegistryFactory       = newConnectorRegistryWithPlugins
 	enterpriseHooksCertifiedRegistryFactory    = newWindowsEnterpriseCertifiedConnectorRegistry
