@@ -14,7 +14,8 @@ Fifteen tabs with full names need about 170 columns. ``fit_tab_labels``
 starts from the key letter alone and then gives tabs a short name, and then
 their full name, in order of importance (``LABEL_PRIORITY``), stopping at the
 first tab that no longer fits. The active tab always keeps its full name, every tab
-keeps its key letter, and unread badges stay. PANELS order never changes.
+keeps its key letter, and unread badges stay unless even letter-only
+tabs with badges overflow. PANELS order never changes.
 """
 
 from __future__ import annotations
@@ -99,6 +100,13 @@ def fit_tab_labels(
     # as you move between panels instead of shifting with the active tab.
     names = [name for name, _key, _label in panels if name != active]
     ranked = sorted(names, key=lambda name: LABEL_PRIORITY.index(name) if name in LABEL_PRIORITY else len(names))
+    # Plain "8(3)" badges cost three cells, so letter-only tabs with badges
+    # can still overflow; drop the least important tabs' badges until it fits.
+    keys = {name: key for name, key, _label in panels}
+    for name in reversed(ranked):
+        if strip_width(tuple(labels.values())) <= width:
+            break
+        labels[name] = keys[name]
     # Stop at the first tab that doesn't fit, so a named tab is always more
     # important than every letter-only one.
     for tier in (short, full):

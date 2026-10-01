@@ -183,8 +183,15 @@ def validate_rule_pack(
 
 
 def safe_display_path(path: str) -> str:
-    """Quote an operator/config path without emitting terminal control bytes."""
-    return json.dumps(str(path), ensure_ascii=True)
+    """Quote an operator/config path without emitting terminal control bytes.
+
+    Only quotes and non-printable characters are escaped, so a Windows path
+    keeps its single backslashes.
+    """
+    text = "".join(
+        '\\"' if ch == '"' else ch if ch.isprintable() else f"\\u{ord(ch):04x}" for ch in str(path)
+    )
+    return f'"{text}"'
 
 
 def bridge_error_wire(error: RulePackValidationBridgeError) -> dict[str, Any]:

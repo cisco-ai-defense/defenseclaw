@@ -284,9 +284,9 @@ uninstall:
 build: pycli gateway plugin
 	@echo ""
 	@echo "All components built:"
-	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw"
-	@echo "  • Go gateway   → ./$(GATEWAY)"
-	@echo "  • ACP guard    → ./$(ACP_GUARD)"
+	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)"
+	@echo "  • Go gateway   → ./$(GATEWAY)$(EXE)"
+	@echo "  • ACP guard    → ./$(ACP_GUARD)$(EXE)"
 	@echo "  • OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo ""
 	@echo "Build only: checkout artifacts were not published and managed install state was not changed."
@@ -300,9 +300,9 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo ""
 	@echo "All components installed:"
-	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
-	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
-	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
+	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
+	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
@@ -589,9 +589,9 @@ _source-dev-install: _source-install-dev-preflight
 	@$(MAKE) --no-print-directory $(SOURCE_PLUGIN_INSTALL_TARGET)
 	@echo ""
 	@echo "All components installed:"
-	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
-	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
-	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
+	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
+	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
