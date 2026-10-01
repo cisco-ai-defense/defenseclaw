@@ -284,6 +284,31 @@ class TestLLMPickerNonInteractive(unittest.TestCase):
             self.assertIn("guardrail.judge", paths)
 
 
+class TestSetupLLMInteractiveMissingKey(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.helpers import cleanup_app, make_app_context
+
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.addCleanup(cleanup_app, self.app, self.db_path, self.tmp_dir)
+
+    def test_defaults_without_a_key_are_not_saved_unless_confirmed(self) -> None:
+        def fake_configure(cfg, _data_dir, *, target_path=""):
+            cfg.llm.provider, cfg.llm.model, cfg.llm.api_key_env = "anthropic", "claude-test", "DEFENSECLAW_LLM_KEY"
+
+        env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_LLM_KEY"}
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(cmd_setup, "_maybe_inherit_existing_llm", return_value=None),
+            mock.patch.object(cmd_setup, "_configure_llm", side_effect=fake_configure),
+            mock.patch.object(self.app.cfg, "save") as save,
+        ):
+            res = CliRunner().invoke(setup, ["llm"], obj=self.app, input="\n", catch_exceptions=False)
+
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("LLM configuration not saved", res.output)
+        save.assert_not_called()
+
+
 class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
     """``setup llm --non-interactive`` plumbs every regional / TLS /
     instance flag through to ``cfg.llm``.
