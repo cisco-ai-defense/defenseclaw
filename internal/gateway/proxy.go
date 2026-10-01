@@ -2399,10 +2399,31 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		body, _ = json.Marshal(bodyMap)
 	}
 
-	// Pre-call and post-call guardrail inspection is handled by Codex's
-	// hook mechanism (UserPromptSubmit, PreToolUse, PostToolUse) which calls
-	// the gateway's API server at :18970. The proxy handler focuses on
-	// routing and Bifrost bridging only.
+	// Connectors with hook support (Codex, Claude Code, etc.) handle
+	// guardrail inspection via their hook mechanism (UserPromptSubmit,
+	// PreToolUse, PostToolUse → API server at :18970). For connectors
+	// without hooks, run proxy-level inspection here.
+	connectorHasHooks := p.connector != nil
+	if !connectorHasHooks {
+		userText := lastUserText(messages)
+		if userText != "" && p.inspector != nil {
+			p.rtMu.RLock()
+			mode := p.mode
+			p.rtMu.RUnlock()
+			label := decision.Provider + "/responses"
+			t0 := time.Now()
+			verdict := p.inspector.Inspect(r.Context(), "prompt", userText, messages, label, mode)
+			elapsed := time.Since(t0)
+			p.logPreCall(label, messages, verdict, elapsed)
+			p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
+				verdict.Action == "block" && mode == "action")
+			if verdict.Action == "block" && mode == "action" {
+				msg := blockMessage("", "prompt", verdict.Reason)
+				writeOpenAIError(w, http.StatusForbidden, msg)
+				return
+			}
+		}
+	}
 
 	respID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
 	msgID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
@@ -2445,11 +2466,27 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	writeSSE(partEvt)
 
 	// Stream through Bifrost
-	_, streamErr := bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
+	responseContent, streamErr := bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
 		writeSSE(chunk)
 	})
 	if streamErr != nil {
 		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", streamErr)
+	}
+
+	// Post-call inspection for connectors without hooks
+	if !connectorHasHooks && responseContent != "" && p.inspector != nil {
+		p.rtMu.RLock()
+		mode := p.mode
+		p.rtMu.RUnlock()
+		label := decision.Provider + "/responses"
+		respMessages := []ChatMessage{{Role: "assistant", Content: responseContent}}
+		postCtx, postCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		verdict := p.inspector.Inspect(postCtx, "completion", responseContent, respMessages, label, mode)
+		postCancel()
+		if verdict != nil {
+			p.recordTelemetry(r.Context(), "completion", label, verdict, 0, mode,
+				verdict.Action == "block" && mode == "action")
+		}
 	}
 }
 
