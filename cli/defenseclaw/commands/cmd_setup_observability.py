@@ -58,6 +58,7 @@ from defenseclaw.observability.v8_presets import (
 )
 from defenseclaw.observability.v8_presets import (
     adapter_destination_fields,
+    secret_note_is_info,
 )
 from defenseclaw.observability.v8_presets import (
     apply_secret as _apply_secret,
@@ -153,6 +154,11 @@ def observability() -> None:
 @click.option("--method", default=None)
 @click.option("--url-path", "url_path", default=None)
 @click.option("--verify-tls/--no-verify-tls", "verify_tls", default=None)
+@click.option(
+    "--allow-private-networks",
+    is_flag=True,
+    help="Allow an endpoint on this computer or a private network (for a collector you run yourself)",
+)
 @pass_ctx
 def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset prompts
     app: AppContext,
@@ -167,6 +173,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     endpoint, protocol, project, logstream,
     host, port, index, source, sourcetype,
     url, method, url_path, verify_tls,
+    allow_private_networks,
 ) -> None:
     """Configure a telemetry destination.
 
@@ -231,14 +238,20 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             token_value=token_value,
             target=None,
             dry_run=dry_run,
+            allow_private_networks=allow_private_networks,
         )
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        message = str(exc)
+        if "set allow_private_networks" in message and not allow_private_networks:
+            message += (
+                "\nTo send to a collector you run on this computer or a private network, add "
+                "--allow-private-networks (or use the local-otlp preset for the local stack)."
+            )
+        raise click.ClickException(message) from exc
     mode = "DRY-RUN " if dry_run else ""
     changed = "updated" if result.changed else "already configured"
     click.echo(f"  {mode}{preset.display_name}: {changed}")
-    for warning in warnings:
-        click.echo(f"  warning: {warning}")
+    echo_setup_notes(preset, warnings)
 
     if app.logger and not dry_run:
         app.logger.log_action(
@@ -330,6 +343,16 @@ def test_cmd(app: AppContext, name: str, timeout: float, write_probe: bool) -> N
 # ---------------------------------------------------------------------------
 
 
+def echo_setup_notes(preset: Preset, notes: list[str], *, indent: str = "  ") -> None:
+    """Print what a destination setup did to the secret, then its warnings."""
+
+    for note in notes:
+        if secret_note_is_info(preset, note):
+            ux.ok(note, indent=indent)
+        else:
+            ux.warn(note, indent=indent)
+
+
 def _add_v8_destination(
     data_dir: str,
     preset: Preset,
@@ -342,6 +365,7 @@ def _add_v8_destination(
     target: str | None,
     dry_run: bool,
     extra_mutations=(),
+    allow_private_networks: bool = False,
 ):
     """Add or update one v8 destination through the surgical writer."""
 
@@ -362,6 +386,8 @@ def _add_v8_destination(
         signals=signals,
         target=target,
     )
+    if allow_private_networks:
+        destination.setdefault("network_safety", {})["allow_private_networks"] = True
     authored = _v8_authored_destinations(data_dir)
     matches = [
         (index, existing)

@@ -32,6 +32,7 @@ from defenseclaw.commands.cmd_setup_observability import (
     _remove_v8_destination,
     _require_v8_operator_status,
     _set_v8_destination_enabled,
+    echo_setup_notes,
 )
 from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.context import AppContext, pass_ctx
@@ -253,8 +254,7 @@ def _print_v8_setup_result(
     click.echo("  Signals:     traces")
     click.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
     click.echo(f"  Config:      v8 ({'changed' if result.changed else 'already configured'})")
-    for warning in warnings:
-        ux.warn(warning, indent="  ")
+    echo_setup_notes(resolve_preset("galileo"), warnings)
     if not dry_run:
         ux.subhead("Next: defenseclaw setup galileo test")
 
