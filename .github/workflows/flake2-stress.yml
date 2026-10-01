@@ -16,17 +16,17 @@ jobs:
   stress:
     name: ${{ matrix.variant }} / rep ${{ matrix.rep }}
     runs-on: windows-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
         include:
           - { variant: before, rep: 1 }
-          - { variant: before, rep: 2 }
           - { variant: before-adapters-new-test, rep: 1 }
           - { variant: after, rep: 1 }
           - { variant: after, rep: 2 }
           - { variant: after, rep: 3 }
+          - { variant: after, rep: 4 }
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -68,7 +68,7 @@ jobs:
           Write-Host "started connector suite loop, 2 PowerShell churn loops and $n CPU load processes"
           $log = Join-Path $env:RUNNER_TEMP 'stress.log'
           try {
-            & "$env:RUNNER_TEMP\conn.test.exe" '-test.v' '-test.count=3' '-test.cpu=1,2,8' '-test.timeout=45m' "-test.run=$run" *>&1 | Tee-Object -FilePath $log | Out-Null
+            & "$env:RUNNER_TEMP\conn.test.exe" '-test.v' '-test.count=3' '-test.cpu=1,2,8' '-test.timeout=35m' "-test.run=$run" *>&1 | Tee-Object -FilePath $log
             Write-Host "test exit code $LASTEXITCODE"
           }
           finally {
