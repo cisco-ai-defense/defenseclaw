@@ -287,7 +287,7 @@ def test_legacy_source_marker_refuses_before_gateway_mutation(tmp_path: Path) ->
 
     assert completed.returncode != 0
     assert "legacy source-install marker" in completed.stdout + completed.stderr
-    assert "No installed files or services were changed" in completed.stdout + completed.stderr
+    assert "This step changed nothing" in completed.stdout + completed.stderr
     assert installed_gateway.read_bytes() == original
 
 
@@ -636,7 +636,7 @@ def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
 
     assert completed.returncode != 0
     assert "unowned ACP guard already exists" in completed.stdout + completed.stderr
-    assert "No installed files or services were changed" in completed.stdout + completed.stderr
+    assert "This step changed nothing" in completed.stdout + completed.stderr
     if os.name != "nt":
         assert "defenseclaw uninstall --binaries --yes && make all" in completed.stderr
     assert installed_acp.read_bytes() == b"foreign acp\n"
