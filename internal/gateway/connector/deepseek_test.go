@@ -13,12 +13,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func deepseekTestOpts(t *testing.T) SetupOpts {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("DeepSeek preview shell lifecycle is Unix-only; Windows refusal has a separate test")
+	}
 	root := t.TempDir()
 	opts := SetupOpts{DataDir: filepath.Join(root, "defenseclaw"), ConfigHome: filepath.Join(root, "dsh home"), APIAddr: "127.0.0.1:18970", AgentVersion: "0.2.0-rc.2"}
 	for _, path := range []string{opts.DataDir, opts.ConfigHome} {
@@ -288,5 +292,21 @@ func TestDeepSeekRefusesSymlinkAndChangedConfigHome(t *testing.T) {
 	}
 	if ok, err := c.ownedHookContractPresent(opts); err != nil || !ok {
 		t.Fatalf("changed original registration: %v", err)
+	}
+}
+
+func TestDeepSeekWindowsEnrollmentRefused(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows admission check")
+	}
+	root := t.TempDir()
+	opts := SetupOpts{DataDir: filepath.Join(root, "state"), ConfigHome: filepath.Join(root, "dsh")}
+	if err := NewDeepSeekConnector().Setup(context.Background(), opts); err == nil {
+		t.Fatal("accepted uncertified native Windows enrollment")
+	}
+	for _, path := range []string{opts.DataDir, opts.ConfigHome} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("refusal wrote %s", path)
+		}
 	}
 }
