@@ -219,7 +219,7 @@ func TestCanonicalConsumerRoutesRedactsAndGalileoProjectsExactlyOnce(t *testing.
 		t.Fatalf("enqueue = %s failures=%+v", result, fixture.failures.snapshot())
 	}
 	flushCanonical(t, fixture.consumer)
-	batch := waitCanonicalDelivery(t, fixture.adapter.deliveries)
+	batch := canonicalDelivery(t, fixture.adapter.deliveries)
 	if len(batch) != 1 {
 		t.Fatalf("batch items = %d", len(batch))
 	}
@@ -255,7 +255,7 @@ func TestCanonicalConsumerConfiguredRouteDropAndWrongDestinationDoNotLeakToAdapt
 		counters.RouteDropped != 1 || counters.RouteUnmatched != 1 {
 		t.Fatalf("unmatched route accounting = %+v", counters)
 	}
-	assertNoCanonicalDelivery(t, routeDrop.adapter.deliveries)
+	assertNoCanonicalDelivery(t, routeDrop.consumer, routeDrop.adapter.deliveries)
 	shutdownCanonical(t, routeDrop.consumer)
 
 	source := newCanonicalFixture(t, "galileo-source", observability.BucketModelIO, "none", 4)
@@ -274,7 +274,7 @@ func TestCanonicalConsumerConfiguredRouteDropAndWrongDestinationDoNotLeakToAdapt
 	if result := wrong.tryEnqueueRecord(source.modelRecord(t, "safe")); result != telemetry.V8CanonicalSpanEnqueueDropped {
 		t.Fatalf("wrong destination = %s", result)
 	}
-	assertNoCanonicalDelivery(t, wrongAdapter.deliveries)
+	assertNoCanonicalDelivery(t, wrong, wrongAdapter.deliveries)
 	shutdownCanonical(t, wrong)
 	shutdownCanonical(t, source.consumer)
 	shutdownCanonical(t, other.consumer)
@@ -303,7 +303,7 @@ func TestCanonicalConsumerRejectsUnsupportedGalileoShapeAndGenerationMismatch(t 
 	if result := fixture.consumer.tryEnqueueRecord(fixture.diagnosticRecord(t, 6)); result != telemetry.V8CanonicalSpanEnqueueFailed {
 		t.Fatalf("generation mismatch = %s", result)
 	}
-	assertNoCanonicalDelivery(t, fixture.adapter.deliveries)
+	assertNoCanonicalDelivery(t, fixture.consumer, fixture.adapter.deliveries)
 	want := []CanonicalFailure{
 		{Destination: fixture.destination.Name, Generation: 5, Code: CanonicalFailureUnsupportedShape},
 		{Destination: fixture.destination.Name, Generation: 5, Code: CanonicalFailureGenerationMismatch},
@@ -329,7 +329,7 @@ func TestCanonicalConsumerExplicitRouteReportsUnsupportedEligibleOperation(t *te
 	if result := fixture.consumer.tryEnqueueRecord(fixture.modelRecord(t, "eligible route")); result != telemetry.V8CanonicalSpanEnqueueDropped {
 		t.Fatalf("unsupported eligible operation = %s failures=%+v", result, fixture.failures.snapshot())
 	}
-	assertNoCanonicalDelivery(t, fixture.adapter.deliveries)
+	assertNoCanonicalDelivery(t, fixture.consumer, fixture.adapter.deliveries)
 	want := []CanonicalFailure{{
 		Destination: fixture.destination.Name, Generation: 5, Code: CanonicalFailureUnsupportedShape,
 	}}
@@ -350,12 +350,12 @@ func TestCanonicalConsumerCapabilityDefaultDropsNonMemberWithoutFailure(t *testi
 	if result := fixture.consumer.tryEnqueueRecord(fixture.diagnosticRecord(t, 5)); result != telemetry.V8CanonicalSpanEnqueueDropped {
 		t.Fatalf("non-member result = %s", result)
 	}
-	assertNoCanonicalDelivery(t, fixture.adapter.deliveries)
+	assertNoCanonicalDelivery(t, fixture.consumer, fixture.adapter.deliveries)
 	if result := fixture.consumer.tryEnqueueRecord(fixture.modelRecord(t, "eligible")); result != telemetry.V8CanonicalSpanEnqueueAccepted {
 		t.Fatalf("eligible result = %s failures=%+v", result, fixture.failures.snapshot())
 	}
 	flushCanonical(t, fixture.consumer)
-	if batch := waitCanonicalDelivery(t, fixture.adapter.deliveries); len(batch) != 1 {
+	if batch := canonicalDelivery(t, fixture.adapter.deliveries); len(batch) != 1 {
 		t.Fatalf("eligible delivery items = %d", len(batch))
 	}
 	if got := fixture.failures.snapshot(); len(got) != 0 {
@@ -372,12 +372,9 @@ func TestCanonicalConsumerCapabilityDefaultDropsNonMemberWithoutFailure(t *testi
 func TestCanonicalConsumerQueueFullIsBoundedAndFlushLeavesIntakeLive(t *testing.T) {
 	t.Parallel()
 	fixture := newCanonicalFixture(t, "galileo-queue", observability.BucketModelIO, "none", 3)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	if err := fixture.consumer.dispatcher.Close(ctx); err != nil {
-		cancel()
+	if err := fixture.consumer.dispatcher.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	cancel()
 	replacement, err := delivery.NewDispatcher(
 		canonicalDispatcherConfigWithDelay(fixture.destination.Name, 1, 3, time.Hour), fixture.adapter,
 	)
@@ -420,12 +417,9 @@ func TestCanonicalConsumerUnifiesFunnelQueueAndPartialTransportEvidence(t *testi
 	fixture.adapter.transport = otlp.ExportCounters{
 		Accepted: 2, Exported: 1, RejectedPartial: 1,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	if err := fixture.consumer.dispatcher.Close(ctx); err != nil {
-		cancel()
+	if err := fixture.consumer.dispatcher.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	cancel()
 	replacement, err := delivery.NewDispatcher(
 		canonicalDispatcherConfigWithDelay(fixture.destination.Name, 4, 11, time.Hour),
 		fixture.adapter,
@@ -1149,7 +1143,7 @@ func canonicalDispatcherConfigWithDelay(destination string, queue int, generatio
 	return delivery.Config{
 		Destination: destination, Generation: generation, Signal: string(observability.SignalTraces), Enabled: true, MaxQueueItems: queue, MaxQueueBytes: 8 * 1024 * 1024,
 		MaxBatchItems: queue, MaxBatchBytes: 8 * 1024 * 1024, ScheduledDelay: delay,
-		AttemptTimeout: time.Second,
+		AttemptTimeout: testDeliveryDeadline,
 		Retry: delivery.RetryPolicy{
 			MaxAttempts: 1, InitialBackoff: 0, MaxBackoff: 0,
 		},
@@ -1167,31 +1161,37 @@ func flushCanonical(t *testing.T, consumer *CanonicalTraceConsumer) {
 	}
 }
 
+// shutdownCanonical returns once the consumer drained and closed its
+// dispatcher and adapter; the test binary -timeout catches a wedged close.
 func shutdownCanonical(t *testing.T, consumer *CanonicalTraceConsumer) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := consumer.Shutdown(ctx); err != nil {
+	if err := consumer.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 }
 
-func waitCanonicalDelivery(t *testing.T, deliveries <-chan [][]byte) [][]byte {
+// canonicalDelivery returns the batch the capture adapter recorded before the
+// preceding flushCanonical returned.
+func canonicalDelivery(t *testing.T, deliveries <-chan [][]byte) [][]byte {
 	t.Helper()
 	select {
 	case result := <-deliveries:
 		return result
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for canonical Galileo delivery")
+	default:
+		t.Fatal("flush finished without a canonical Galileo delivery")
 		return nil
 	}
 }
 
-func assertNoCanonicalDelivery(t *testing.T, deliveries <-chan [][]byte) {
+// assertNoCanonicalDelivery flushes the consumer first, so every record it
+// accepted has already reached the adapter or a terminal failure. An empty
+// capture channel then proves nothing was delivered, at any speed.
+func assertNoCanonicalDelivery(t *testing.T, consumer *CanonicalTraceConsumer, deliveries <-chan [][]byte) {
 	t.Helper()
+	flushCanonical(t, consumer)
 	select {
 	case result := <-deliveries:
 		t.Fatalf("unexpected canonical Galileo delivery: %d items", len(result))
-	case <-time.After(20 * time.Millisecond):
+	default:
 	}
 }

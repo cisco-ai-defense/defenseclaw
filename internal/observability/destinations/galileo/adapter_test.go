@@ -728,6 +728,15 @@ func TestGalileoPresetOwnsOneSecondV8DefaultWithoutChangingGeneralOTLP(t *testin
 	}
 }
 
+// testDeliveryDeadline bounds each export attempt (dial, HTTP exchange and
+// dispatcher attempt). No test here exercises a deadline: each stub server
+// answers as soon as it reads the request, so the outcome must come from that
+// answer. A loaded Windows runner can stall a loopback exchange for several
+// seconds, which a one- or two-second deadline turns into a retried or
+// rejected batch. The value is the OTLP config maximum; the test binary
+// -timeout catches a wedged exchange.
+const testDeliveryDeadline = 10 * time.Minute
+
 func newTestAdapter(t *testing.T, endpoint string, observer otlp.CanaryAcknowledgementObserver) *Adapter {
 	t.Helper()
 	factory, err := otlp.Prepare(context.Background(), otlp.Config{
@@ -736,7 +745,7 @@ func newTestAdapter(t *testing.T, endpoint string, observer otlp.CanaryAcknowled
 		Headers: map[string]string{
 			"Galileo-API-Key": "unit-test-key", "project": "defenseclaw", "logstream": "tests",
 		},
-		Timeout: 2 * time.Second, TLS: otlp.TLSConfig{Insecure: true},
+		Timeout: testDeliveryDeadline, TLS: otlp.TLSConfig{Insecure: true},
 		NetworkSafety: otlp.NetworkSafety{AllowPrivateNetworks: true},
 		Batch: otlp.BatchConfig{
 			MaxQueueSize: 8, MaxQueueBytes: 8 * 1024 * 1024,
@@ -744,7 +753,7 @@ func newTestAdapter(t *testing.T, endpoint string, observer otlp.CanaryAcknowled
 			ScheduledDelay: time.Second,
 		},
 	}, otlp.Dependencies{
-		Resolver: net.DefaultResolver, Dialer: &net.Dialer{Timeout: time.Second}, CanaryObserver: observer,
+		Resolver: net.DefaultResolver, Dialer: &net.Dialer{Timeout: testDeliveryDeadline}, CanaryObserver: observer,
 	})
 	if err != nil {
 		t.Fatalf("prepare OTLP: %v", err)
@@ -771,7 +780,7 @@ func newTestDispatcher(t *testing.T, adapter *Adapter, batchSize int) *delivery.
 		Destination: "galileo", Enabled: true,
 		MaxQueueItems: 8, MaxQueueBytes: 8 * 1024 * 1024,
 		MaxBatchItems: batchSize, MaxBatchBytes: 8 * 1024 * 1024,
-		ScheduledDelay: time.Hour, AttemptTimeout: 2 * time.Second,
+		ScheduledDelay: time.Hour, AttemptTimeout: testDeliveryDeadline,
 		Retry: delivery.RetryPolicy{MaxAttempts: 2, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 	}, adapter)
 	if err != nil {
@@ -782,8 +791,8 @@ func newTestDispatcher(t *testing.T, adapter *Adapter, batchSize int) *delivery.
 }
 
 // closeDispatcher stops intake, which releases the pending batch, and returns
-// once the worker has finished delivering it. The attempt timeout bounds each
-// delivery; the test binary -timeout catches a wedged worker.
+// once the worker has finished delivering it; the test binary -timeout catches
+// a wedged worker.
 func closeDispatcher(t *testing.T, dispatcher *delivery.Dispatcher) {
 	t.Helper()
 	ctx := context.Background()
