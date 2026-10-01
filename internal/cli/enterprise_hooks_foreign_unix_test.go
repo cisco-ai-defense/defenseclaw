@@ -278,3 +278,33 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 		t.Fatalf("pending %v failed %v", pending, failed)
 	}
 }
+
+func TestRemoveAllRemovesCopilotVSCodeFilesForEveryAvailableAccount(t *testing.T) {
+	previousCheck := enterpriseHookCheckHome
+	t.Cleanup(func() { enterpriseHookCheckHome = previousCheck })
+	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
+		if home == "/home/gone" {
+			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
+		}
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
+	}
+	jobs := map[int]*enterpriseHookWorkerJob{
+		501: {Account: enterpriseHookWorkerAccount{UID: 501, User: "alice", Home: "/home/alice"}, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply}},
+	}
+	accounts := []enterprisehooks.UnixEligibleAccount{
+		{User: "alice", UID: 501, Home: "/home/alice"},
+		{User: "bob", UID: 502, GID: 20, Home: "/home/bob"},
+		{User: "carol", UID: 503, Home: "/home/gone"},
+	}
+	addEnterpriseHookCopilotVSCodeRemovals(jobs, accounts, &enterpriseHookWorkerCopilotVSCode{HookBinary: "/opt/dc/bin/defenseclaw-hook", HookFile: true, Plugin: true})
+
+	if len(jobs) != 2 || jobs[502] == nil || jobs[502].Account.Home != "/home/bob" {
+		t.Fatalf("jobs = %+v, want alice's and bob's (carol's home is not available)", jobs)
+	}
+	for uid, job := range jobs {
+		got := job.Request.CopilotVSCode
+		if got == nil || got.HookBinary != "/opt/dc/bin/defenseclaw-hook" || got.HookFile || got.Plugin {
+			t.Fatalf("uid %d: CopilotVSCode = %+v, want a removal for the hook binary", uid, got)
+		}
+	}
+}

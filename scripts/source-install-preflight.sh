@@ -34,6 +34,26 @@ if [[ "${OS:-}" == "Windows_NT" ]]; then
     IS_WINDOWS=1
 fi
 
+# On Windows, "python3" is often the Microsoft Store alias, which is on PATH
+# but only prints an install hint. Use the first interpreter that runs. A
+# python3 function the caller already defined (BASH_ENV) is kept.
+if ! declare -F python3 >/dev/null; then
+    PYTHON_CMD=()
+    for candidate in python3 python "py -3"; do
+        read -r -a candidate_argv <<< "${candidate}"
+        if command "${candidate_argv[@]}" -c 'import sys' >/dev/null 2>&1; then
+            PYTHON_CMD=("${candidate_argv[@]}")
+            break
+        fi
+    done
+    if [[ ${#PYTHON_CMD[@]} -eq 0 ]]; then
+        echo "source install refused: no working Python 3 interpreter (tried python3, python and py -3); install Python 3 and put it on PATH" >&2
+        exit 1
+    fi
+    readonly PYTHON_CMD
+    python3() { command "${PYTHON_CMD[@]}" "$@"; }
+fi
+
 DEV_RECLAIM_SOURCE=0
 case "${REQUESTED_MODE}" in
     check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp)

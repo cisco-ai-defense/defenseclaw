@@ -33,6 +33,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -220,6 +221,63 @@ class FirstRunReport:
             data["connector_mode_warnings"] = self.connector_mode_warnings
         return data
 
+
+
+_DEFAULT_API_PORT = 18970
+# Step past the sandbox ingress and egress ports (api_port + 1 and + 2).
+_FIRST_RUN_API_PORT_STEP = 10
+_FIRST_RUN_API_PORT_TRIES = 10
+
+
+def _api_port_free(host: str, port: int) -> bool:
+    """Whether this account could listen on ``host:port`` right now."""
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
+            # connection does not count as a holder.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except OSError:
+        return False
+    return True
+
+
+def choose_first_run_api_port(cfg: Config) -> str:
+    """Move a new config off the default API port when something holds it.
+
+    Per-user installs of several accounts on one host all default to 18970.
+    The account installed second would otherwise send its hook calls, with its
+    token, to the first account's gateway, which refuses them. Only a new
+    config that still has the default port moves, and only on Linux and
+    macOS. Returns a line for the first-run output, or "" when nothing moved.
+    """
+    if platform_support.host_os() == "windows":
+        return ""
+    if int(getattr(cfg.gateway, "api_port", 0) or 0) != _DEFAULT_API_PORT:
+        return ""
+    from defenseclaw.config import api_bind_host
+
+    host = api_bind_host(cfg)
+    if host in {"", "localhost"}:
+        host = "127.0.0.1"
+    host = host.strip("[]")
+    if _api_port_free(host, _DEFAULT_API_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _api_port_free(host, port):
+            cfg.gateway.api_port = port
+            return (
+                f"{host}:{_DEFAULT_API_PORT} is in use (often another account's DefenseClaw gateway), "
+                f"so this account's gateway uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_API_PORT} is in use; choose a free port with "
+        "`defenseclaw setup gateway --api-port <free port> --non-interactive`"
+    )
 
 
 def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
@@ -439,6 +497,12 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         # unversioned/legacy objects after the hard cutover.
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
+
+    if new_config:
+        port_note = choose_first_run_api_port(cfg)
+        if port_note:
+            status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
+            setup.append(StepResult("Gateway API port", status, port_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
@@ -719,6 +783,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if any(step.status == "fail" for step in readiness):
             rollback_first_run_transaction = True
 
+        _defer_hooks_to_gateway_start(setup, readiness)
         next_commands = _next_commands(setup, readiness, cfg, profile)
         status = _rollup_status(setup, readiness)
         report = FirstRunReport(
@@ -1449,7 +1514,10 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "started")
     detail = (result.stderr or result.stdout or "start failed").strip().splitlines()
-    return StepResult("Sidecar", "warn", detail[0] if detail else "start failed", "defenseclaw-gateway status")
+    first = detail[0] if detail else "start failed"
+    # A port held by another account names its own fix; lead with it.
+    port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
+    return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
 
 
 def _pid_file_running(pid_file: str) -> bool:
@@ -1720,6 +1788,30 @@ def _rollup_status(setup: list[StepResult], readiness: list[StepResult]) -> str:
     if any(s.status == "warn" for s in all_steps):
         return "partial"
     return "ready"
+
+
+_PLAIN_SETUP_HINT = re.compile(r"defenseclaw setup [a-z][a-z-]*")
+
+
+def _defer_hooks_to_gateway_start(setup: list[StepResult], readiness: list[StepResult]) -> None:
+    """Point missing connector hooks at the gateway when it did not start.
+
+    The sidecar writes every connector's hooks, plugin or policy when it
+    starts, so with the start failed they are missing for that reason alone
+    and ``defenseclaw setup <connector>`` would hit the same wall. Rows whose
+    hint asks for more than the plain setup command (a workspace, a mode
+    fix) keep it.
+    """
+    if not any(step.name == "Sidecar" and step.status in ("warn", "fail") for step in setup):
+        return
+    for step in readiness:
+        if (
+            step.name == "Connector"
+            and step.status == "warn"
+            and _PLAIN_SETUP_HINT.fullmatch(step.next_command or "")
+        ):
+            step.detail += " — written when the gateway starts"
+            step.next_command = "defenseclaw-gateway start"
 
 
 def _next_commands(

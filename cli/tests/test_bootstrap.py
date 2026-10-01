@@ -1088,3 +1088,45 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstRunApiPortTests(unittest.TestCase):
+    def test_new_config_moves_off_a_default_port_another_account_holds(self):
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with (
+            patch.object(bootstrap.platform_support, "host_os", return_value="linux"),
+            patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970),
+        ):
+            note = bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+        self.assertIn("uses port 18980", note)
+
+
+def test_hooks_missing_because_the_gateway_did_not_start_point_at_the_start():
+    from defenseclaw.bootstrap import StepResult, _defer_hooks_to_gateway_start, _next_commands
+
+    setup = [
+        StepResult(
+            "Sidecar",
+            "warn",
+            "Error: cannot start the gateway: ... with: defenseclaw setup gateway --api-port 18971, then run: ...",
+            "defenseclaw setup gateway --api-port 18971",
+        )
+    ]
+    readiness = [
+        StepResult("Connector", "warn", "Kiro hooks not found yet", "defenseclaw setup kiro"),
+        StepResult("Connector", "warn", "Devin project hooks not found", "defenseclaw setup devin --workspace <project>"),
+    ]
+    _defer_hooks_to_gateway_start(setup, readiness)
+
+    assert readiness[0].detail == "Kiro hooks not found yet — written when the gateway starts"
+    assert readiness[1].next_command == "defenseclaw setup devin --workspace <project>"
+    assert _next_commands(setup, readiness, object(), "action")[:3] == [
+        "defenseclaw setup gateway --api-port 18971",
+        "defenseclaw-gateway start",
+        "defenseclaw setup devin --workspace <project>",
+    ]

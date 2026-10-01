@@ -138,6 +138,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			return waitErr
 		}
 		if !retry {
+			if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
+				return answer
+			}
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
@@ -262,6 +265,9 @@ func loadGatewayCommandConfigOnly() error {
 	var err error
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
 	if err != nil {
+		if answer := managedWindowsConfigLoadError(nil, err); answer != err {
+			return answer
+		}
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	version.SetBinaryVersion(appVersion)

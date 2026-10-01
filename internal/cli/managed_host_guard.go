@@ -71,6 +71,26 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	if !present {
 		return
 	}
+	hasDoctor := false
+	for _, command := range root.Commands() {
+		if command.Name() == "doctor" {
+			hasDoctor = true
+		}
+	}
+	if !hasDoctor {
+		// The per-user `doctor` lives in the Python CLI, which a managed
+		// computer does not install, so it was an "unknown command" here.
+		root.AddCommand(&cobra.Command{
+			Use:                "doctor",
+			Hidden:             true,
+			DisableFlagParsing: true,
+			SilenceUsage:       true,
+			Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+			RunE: func(_ *cobra.Command, _ []string) error {
+				return managedWindowsAdminCommandAnswer(where, "doctor")
+			},
+		})
+	}
 	for _, command := range root.Commands() {
 		if command.Name() == "setup" {
 			return
@@ -94,6 +114,38 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 // managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
 // Windows standalone managed computer. Kiro is covered there through the ACP
 // guard, so `setup kiro` names it.
+// managedWindowsAdminCommandAnswer tells a user on a managed Windows computer
+// that a per-user command has no per-user deployment to read.
+func managedWindowsAdminCommandAnswer(where, command string) error {
+	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
+		"deployment to check; an administrator can check the managed deployment with "+
+		"`defenseclaw-gateway enterprise windows status --profile standalone`. Nothing was changed", where, command)
+}
+
+// managedWindowsConfigLoadError replaces the raw "read v8 config ...
+// cannot find the file" error with the managed-computer answer when a user
+// runs a per-user command (for example `status`) on a managed Windows
+// computer, which never has a per-user config.
+func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
+	if err == nil || !errors.Is(err, fs.ErrNotExist) || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return err
+	}
+	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
+		return err
+	}
+	where, present := managedHostWindowsStandalone()
+	if !present {
+		return err
+	}
+	command := "this command"
+	if cmd != nil {
+		if name := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name())); name != "" {
+			command = name
+		}
+	}
+	return managedWindowsAdminCommandAnswer(where, command)
+}
+
 func managedWindowsSetupRefusal(where string, args []string) error {
 	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
 	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "kiro") {

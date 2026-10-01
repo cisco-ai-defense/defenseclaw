@@ -159,6 +159,11 @@ def observability() -> None:
     is_flag=True,
     help="Allow an endpoint on this computer or a private network (for a collector you run yourself)",
 )
+@click.option(
+    "--plaintext",
+    is_flag=True,
+    help="Send OTLP without TLS (for a collector you run yourself that has no TLS)",
+)
 @pass_ctx
 def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset prompts
     app: AppContext,
@@ -174,6 +179,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     host, port, index, source, sourcetype,
     url, method, url_path, verify_tls,
     allow_private_networks,
+    plaintext,
 ) -> None:
     """Configure a telemetry destination.
 
@@ -239,6 +245,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             target=None,
             dry_run=dry_run,
             allow_private_networks=allow_private_networks,
+            plaintext=plaintext,
         )
     except ValueError as exc:
         message = str(exc)
@@ -366,6 +373,7 @@ def _add_v8_destination(
     dry_run: bool,
     extra_mutations=(),
     allow_private_networks: bool = False,
+    plaintext: bool = False,
 ):
     """Add or update one v8 destination through the surgical writer."""
 
@@ -388,6 +396,25 @@ def _add_v8_destination(
     )
     if allow_private_networks:
         destination.setdefault("network_safety", {})["allow_private_networks"] = True
+    warnings: list[str] = []
+    if destination.get("kind") == "otlp":
+        # An http:// endpoint already says "no TLS"; the validator requires
+        # tls.insecure for it, so write it rather than refuse the endpoint.
+        endpoint = str(destination.get("endpoint", ""))
+        if plaintext and endpoint.lower().startswith("https://"):
+            if str(resolved.get("endpoint", "")).lower().startswith("https://"):
+                raise ValueError("--plaintext cannot be used with an https:// endpoint")
+            # The http protocol defaults a bare host:port to https://.
+            destination["endpoint"] = "http://" + endpoint[len("https://"):]
+        if plaintext or endpoint.lower().startswith("http://"):
+            destination["tls"] = {"insecure": True}
+        elif allow_private_networks and not destination.get("tls", {}).get("insecure"):
+            warnings.append(
+                "This destination sends over TLS. If the collector has no TLS "
+                "(like the local observability stack), add --plaintext."
+            )
+    elif plaintext:
+        raise ValueError("--plaintext applies to OTLP destinations only")
     authored = _v8_authored_destinations(data_dir)
     matches = [
         (index, existing)
@@ -414,7 +441,6 @@ def _add_v8_destination(
     mutations.extend(extra_mutations)
 
     stored_secret = token_value
-    warnings: list[str] = []
     if preset.id == "grafana-cloud":
         if stored_secret and not stored_secret.startswith("Basic "):
             stored_secret = "Basic " + stored_secret

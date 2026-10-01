@@ -369,6 +369,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
+        from defenseclaw.bootstrap import choose_first_run_api_port
+
+        port_note = choose_first_run_api_port(cfg)
+        if port_note:
+            click.echo("  API port:      " + ux._style(port_note, fg="yellow"))
     else:
         cfg = load()
         if getattr(cfg, "_source_config_version", None) != 8:
@@ -2114,7 +2119,12 @@ def _describe_connector_set(report, connectors: list[str]) -> None:
     selected its rows named that one connector alone.
     """
     from defenseclaw import config as cfg_mod
-    from defenseclaw.bootstrap import _connector_readiness, _next_commands, _rollup_status
+    from defenseclaw.bootstrap import (
+        _connector_readiness,
+        _defer_hooks_to_gateway_start,
+        _next_commands,
+        _rollup_status,
+    )
 
     try:
         cfg = cfg_mod.load(data_dir=report.data_dir)
@@ -2130,6 +2140,7 @@ def _describe_connector_set(report, connectors: list[str]) -> None:
             readiness.append(step)
         elif not any(item.name == "Connector" for item in readiness):
             readiness.extend(_connector_readiness(cfg, name) for name in connectors)
+    _defer_hooks_to_gateway_start(report.setup, readiness)
     report.readiness = readiness
     report.status = _rollup_status(report.setup, report.readiness)
     report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)

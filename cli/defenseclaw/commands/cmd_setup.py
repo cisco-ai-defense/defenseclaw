@@ -115,7 +115,7 @@ from defenseclaw.file_permissions import (
     windows_acl_write_error,
 )
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.logger import CanonicalObservabilityUnavailableError
+from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
@@ -275,6 +275,14 @@ def _log_setup_action(
             "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change.",
             err=True,
         )
+    except CanonicalObservabilityError as exc:
+        # Still fail-closed, without a traceback: for example another
+        # account's gateway on this port refuses this account's token.
+        raise click.ClickException(
+            f"The change was saved, but the gateway did not accept its setup audit event ({exc.__cause__ or exc}). "
+            "Check with 'defenseclaw doctor' that the gateway on this port is this account's, "
+            "then run the command again."
+        ) from exc
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
@@ -1073,6 +1081,15 @@ def setup_llm(
         _clear_legacy_llm_fields(cfg)
     else:
         _configure_llm(cfg, cfg.data_dir, target_path=target_path)
+        missing_key_env = _interactive_llm_missing_key_env(cfg, target_path)
+        if missing_key_env:
+            ux.warn(
+                f"{missing_key_env} has no value, so the LLM judge and LLM scanners cannot use "
+                f"{cfg.resolve_llm(target_path).model} and doctor reports the key as missing."
+            )
+            if not click.confirm("  Save this LLM configuration without a key?", default=False):
+                click.echo("  LLM configuration not saved. Run 'defenseclaw setup llm' when you have a key.")
+                return
     cfg.save()
 
     click.echo()
@@ -1268,6 +1285,24 @@ def _role_to_target_path(role: str) -> str:
     :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
     """
     return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
+
+
+
+def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
+    """Name the key variable an interactively configured LLM still lacks, or "".
+
+    Only the key prompt sets ``api_key_env``; local providers and the
+    Bedrock, Vertex and Azure credential modes clear it and need no key here.
+    """
+    resolved = cfg.resolve_llm(target_path)
+    env_name = resolved.api_key_env
+    if not env_name or not resolved.model or resolved.is_local_provider():
+        return ""
+    if os.environ.get(env_name, "").strip():
+        return ""
+    if _load_dotenv(os.path.join(cfg.data_dir, ".env")).get(env_name, "").strip():
+        return ""
+    return env_name
 
 
 def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
@@ -4087,8 +4122,11 @@ def setup_gateway(
     previous_api_port = gw.api_port
 
     data_dir = app.cfg.data_dir
+    uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
 
-    if non_interactive:
+    # Values given as flags are used as given, with or without a terminal;
+    # only a bare `setup gateway` asks for them.
+    if non_interactive or any(v is not None for v in (host, port, api_port, token, ssm_param)):
         if host is not None:
             gw.host = host
         if port is not None:
@@ -4120,10 +4158,9 @@ def setup_gateway(
     elif remote:
         _interactive_gateway_remote(gw, data_dir)
     else:
-        _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir)
+        _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir, uses_openclaw=uses_openclaw)
 
     app.cfg.save()
-    uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
     # A new API port takes effect only when the gateway (re)starts, so nothing
     # listens on it yet: the connectivity check and the audit event cannot
     # succeed until then, and the gateway may be down precisely because the
@@ -4158,7 +4195,7 @@ def setup_gateway(
     )
 
 
-def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
+def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str, *, uses_openclaw: bool = True) -> None:
     click.echo()
     ux.section("Gateway Configuration (local)")
     click.echo()
@@ -4171,6 +4208,10 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> 
     if detected:
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected, data_dir)
         click.echo(f"  OpenClaw token saved to ~/.defenseclaw/.env ({_mask(detected)})")
+    # A hook-only roster has no OpenClaw gateway to authenticate to; keep its
+    # gateway token setting as it is.
+    if not (detected or uses_openclaw):
+        return
     gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
     click.echo()
     click.echo("  Auth: token is read from OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env when set.")

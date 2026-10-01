@@ -339,6 +339,20 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import _humanize_details
         self.assertIn("observe", _humanize_details("mode=observe port=4000"))
 
+    def test_humanize_details_keeps_a_block_reason_whole(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        raw = (
+            "result=ok action=block severity=CRITICAL mode=action "
+            "reason=matched: MR1-MARKER-BLOCK:<redacted len=17 sha=b29d56f1> would_block=false elapsed_ms=11 "
+            "agent_version_raw=2.1.286 (Claude Code)"
+        )
+        self.assertEqual(
+            _humanize_details(raw),
+            "action result=ok action=block severity=CRITICAL "
+            "reason=matched: MR1-MARKER-BLOCK:<redacted len=17 sha=b29d56f1> elapsed_ms=11 "
+            "agent_version_raw=2.1.286 (Claude Code)",
+        )
+
     def test_humanize_details_plain_text_unchanged(self):
         from defenseclaw.commands.cmd_alerts import _humanize_details
         self.assertEqual(_humanize_details("starting all subsystems"), "starting all subsystems")
