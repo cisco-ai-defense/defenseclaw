@@ -55,9 +55,17 @@ def _refuse_on_managed_host(command: str) -> None:
 @click.command("upgrade")
 @click.option("--version", "target_version", default=None, metavar="X.Y.Z", help="Install this release.")
 @click.option("--yes", "-y", is_flag=True, help="Do not prompt.")
-def upgrade(target_version: str | None, yes: bool) -> None:
+# Accepted for 0.8.x muscle memory and scripts: recovery is now automatic.
+@click.option("--recover-corrupt-audit", "recover_corrupt_audit", is_flag=True, hidden=True)
+def upgrade(target_version: str | None, yes: bool, recover_corrupt_audit: bool) -> None:
     """Upgrade to the latest release (or X.Y.Z) using that release's installer."""
     _refuse_on_managed_host("upgrade")
+    if recover_corrupt_audit:
+        click.echo(
+            "  --recover-corrupt-audit is no longer needed: the gateway moves a corrupt audit store "
+            "aside and starts a new one by itself (see defenseclaw doctor).",
+            err=True,
+        )
     from defenseclaw.upgrade_shim import run
 
     args = ["upgrade"] + (["--version", target_version] if target_version else []) + (["--yes"] if yes else [])

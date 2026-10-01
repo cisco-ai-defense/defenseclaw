@@ -344,6 +344,8 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	} else {
 		printDaemonStartResult(pid, snap)
 	}
+	// The name records the move to the second; allow for that rounding.
+	printMovedCorruptAuditStores(cfg, startAttemptedAt.Add(-time.Second))
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())

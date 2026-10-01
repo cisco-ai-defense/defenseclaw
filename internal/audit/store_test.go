@@ -616,6 +616,10 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 		!strings.Contains(warn.String(), "damaged entries skipped: 1") {
 		t.Fatalf("moved stores = %v, warning = %q", moved, warn.String())
 	}
+	if listed := MovedCorruptStores(dbPath); len(listed) != 1 || listed[0].MovedAt.IsZero() ||
+		filepath.Base(listed[0].Path) == filepath.Base(dbPath) {
+		t.Fatalf("MovedCorruptStores = %+v; want the one moved store", listed)
+	}
 }
 
 func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {

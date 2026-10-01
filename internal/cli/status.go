@@ -32,6 +32,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -233,9 +234,34 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printConnectors(&snap)
 	if isLocalStatusTarget(bind) {
 		printHookGuardianStatus()
+		printMovedCorruptAuditStores(cfg, time.Time{})
 	}
 
 	return nil
+}
+
+// printMovedCorruptAuditStores tells the operator when the gateway replaced a
+// corrupt audit store (moved at or after since); otherwise only the gateway
+// log said so and status looked like a healthy, empty history.
+func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
+	if cfg == nil {
+		return
+	}
+	var moved []audit.MovedCorruptStore
+	for _, store := range audit.MovedCorruptStores(cfg.AuditDB) {
+		if !store.MovedAt.Before(since) {
+			moved = append(moved, store)
+		}
+	}
+	if len(moved) == 0 {
+		return
+	}
+	newest := moved[len(moved)-1]
+	fmt.Println()
+	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; a new store was started and the block/allow lists were kept.",
+		newest.Path, newest.MovedAt.Local().Format(time.RFC3339)))
+	Subhead("Recover older audit records with: sqlite3 " + newest.Path + " .recover")
+	Subhead("Delete the moved file and its -wal/-shm files when they are no longer needed.")
 }
 
 // lastGatewayExitError returns the error a per-user gateway printed as the
