@@ -4845,7 +4845,7 @@ function Assert-WizardHookRegistration(
             'RedirectStandardError = $true',
             '[Console]::InputEncoding = $utf8NoBom',
             '[Console]::OutputEncoding = $utf8NoBom',
-            '$timeoutMS = 25000',
+            '$timeoutMS = 20000',
             '$process.StandardInput.AutoFlush = $true',
             '$deadline.Restart()',
             '$process.StandardInput.Write($payload)',
@@ -4860,8 +4860,8 @@ function Assert-WizardHookRegistration(
             $adapterText,
             '(?m)^\$timeoutMS = (?<ms>\d+)\r?$'
         )
-        if ($timeoutMatches.Count -ne 1 -or $timeoutMatches[0].Groups['ms'].Value -cne '25000') {
-            throw 'wizard-selected Copilot adapter must contain exactly one 25000ms timeout assignment'
+        if ($timeoutMatches.Count -ne 1 -or $timeoutMatches[0].Groups['ms'].Value -cne '20000') {
+            throw 'wizard-selected Copilot adapter must contain exactly one 20000ms timeout assignment'
         }
         $hookMatches = [regex]::Matches(
             $adapterText,

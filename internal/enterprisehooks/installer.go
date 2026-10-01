@@ -80,6 +80,10 @@ type InstallOptions struct {
 	// ClaudeCodeAllowUnmanagedHooks is the administrator opt-out from the
 	// allowManagedHooksOnly lock in the machine-managed Claude Code policy.
 	ClaudeCodeAllowUnmanagedHooks bool
+	// CursorApprovedForeignHooks is the normalized administrator allowlist of
+	// foreign Cursor hook handler digests published in protected machine
+	// state. nil leaves the currently published allowlist unchanged.
+	CursorApprovedForeignHooks []string
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has

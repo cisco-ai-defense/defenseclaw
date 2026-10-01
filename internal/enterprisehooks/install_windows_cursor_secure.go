@@ -278,6 +278,9 @@ func verifyWindowsCursorManagedResult(
 	if err := verifyWindowsCursorMachineTarget(target); err != nil {
 		return InstallResult{}, err
 	}
+	if err := verifyWindowsCursorPublishedApprovedForeignHooks(opts.CursorApprovedForeignHooks); err != nil {
+		return InstallResult{}, err
+	}
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
 	if err != nil {
 		return InstallResult{}, err

@@ -26,3 +26,7 @@ func enterpriseManagedHookRuntimeConnection(string) (string, string, *string, bo
 // applyStandaloneManagedHookTransport: the standalone unix hook runtime does
 // not exist on this platform.
 func applyStandaloneManagedHookTransport(*hookexec.Options, string) {}
+
+func enterpriseManagedHookRuntimeForeignHookPolicy(string) ([]string, string, string) {
+	return nil, "", ""
+}

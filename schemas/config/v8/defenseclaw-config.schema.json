@@ -2244,6 +2244,14 @@
         },
         "allow_unmanaged_hooks": {
           "type": "boolean"
+        },
+        "approved_foreign_hooks": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:sha256:)?[0-9A-Fa-f]{64}$"
+          }
         }
       }
     },

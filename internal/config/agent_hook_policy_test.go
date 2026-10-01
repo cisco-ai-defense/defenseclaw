@@ -11,16 +11,24 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
 func TestConfigV8SchemaAcceptsManagedHookPolicyKeys(t *testing.T) {
+	digest := strings.Repeat("ab", 32)
 	raw := []byte(`config_version: 8
 claude_code:
   enabled: true
   allow_unmanaged_hooks: true
+connector_hooks:
+  cursor:
+    enabled: true
+    approved_foreign_hooks:
+      - ` + digest + `
+      - sha256:` + strings.ToUpper(digest) + `
 `)
 	compile := func(source string, data []byte) error {
 		_, err := ParseCompileObservabilityV8(source, data, ObservabilityV8CompileOptions{DefaultDataDir: "/tmp/defenseclaw"})
@@ -35,6 +43,23 @@ claude_code:
 	}
 	if !parsed.ClaudeCodeAllowUnmanagedHooks() {
 		t.Fatal("claude_code.allow_unmanaged_hooks was not honored")
+	}
+	approved, err := parsed.ApprovedForeignHooksForConnector("cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approved) != 1 || approved[0] != digest {
+		t.Fatalf("approved foreign hooks = %v, want one normalized digest", approved)
+	}
+
+	bad := []byte(`config_version: 8
+connector_hooks:
+  cursor:
+    approved_foreign_hooks:
+      - not-a-digest
+`)
+	if err := compile("managed-hook-policy-bad-v8.yaml", bad); err == nil {
+		t.Fatal("v8 compiler accepted a malformed approved_foreign_hooks digest")
 	}
 	unknown := []byte(`config_version: 8
 claude_code:
@@ -53,6 +78,16 @@ func TestManagedHookPolicyDefaultsAreSecure(t *testing.T) {
 	empty := &Config{}
 	if empty.ClaudeCodeAllowUnmanagedHooks() {
 		t.Fatal("default config opted out of the Claude managed-hooks-only lock")
+	}
+	approved, err := empty.ApprovedForeignHooksForConnector("cursor")
+	if err != nil || approved == nil || len(approved) != 0 {
+		t.Fatalf("default allowlist = (%v, %v), want non-nil empty", approved, err)
+	}
+	invalid := &Config{ConnectorHooks: map[string]AgentHookConfig{
+		"cursor": {ApprovedForeignHooks: []string{"md5:abc"}},
+	}}
+	if _, err := invalid.ApprovedForeignHooksForConnector("cursor"); err == nil {
+		t.Fatal("malformed allowlist entry accepted")
 	}
 	legacy := &Config{ClaudeCode: AgentHookConfig{AllowUnmanagedHooks: true}}
 	if !legacy.ClaudeCodeAllowUnmanagedHooks() {

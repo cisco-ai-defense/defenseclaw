@@ -96,6 +96,7 @@ var nativeEnterpriseHookRuntimeSnapshot struct {
 	gatewayServiceName string
 	scopedToken        string
 	generationID       string
+	approvedForeign    []string
 	err                error
 }
 
@@ -310,6 +311,7 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
 	nativeEnterpriseHookRuntimeSnapshot.scopedToken = runtime.ScopedToken
 	nativeEnterpriseHookRuntimeSnapshot.generationID = runtime.GenerationID
+	nativeEnterpriseHookRuntimeSnapshot.approvedForeign = splitEnterpriseManagedApprovedForeignHooks(runtime.ApprovedForeignHooks)
 	nativeEnterpriseHookRuntimeSnapshot.err = err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	return enterpriseManagedRuntimeAbsenceNoop(
@@ -457,6 +459,39 @@ func enterpriseManagedHookRuntimeConnection(
 		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
 		&token,
 		true
+}
+
+// enterpriseManagedHookRuntimeForeignHookPolicy returns the administrator
+// foreign-hook allowlist captured with the authenticated managed runtime, the
+// administrator-owned executable that runtime was verified against, and the
+// profile directory that owns the runtime's protected data directory. All are
+// empty unless the runtime resolved cleanly for this connector.
+func enterpriseManagedHookRuntimeForeignHookPolicy(connectorName string) ([]string, string, string) {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if !nativeEnterpriseHookRuntimeSnapshot.prepared ||
+		nativeEnterpriseHookRuntimeSnapshot.err != nil ||
+		nativeEnterpriseHookRuntimeSnapshot.connector != connectorName {
+		return nil, "", ""
+	}
+	profileHome := ""
+	if dataDir := strings.TrimSpace(nativeEnterpriseHookRuntimeSnapshot.home); dataDir != "" && filepath.IsAbs(dataDir) {
+		profileHome = filepath.Dir(filepath.Clean(dataDir))
+	}
+	return append([]string(nil), nativeEnterpriseHookRuntimeSnapshot.approvedForeign...),
+		nativeEnterpriseHookRuntimeSnapshot.executable,
+		profileHome
+}
+
+func splitEnterpriseManagedApprovedForeignHooks(value string) []string {
+	var result []string
+	for _, digest := range strings.Split(value, ",") {
+		if digest = strings.TrimSpace(digest); digest != "" {
+			result = append(result, digest)
+		}
+	}
+	return result
 }
 
 type nativeHookInstallState struct {

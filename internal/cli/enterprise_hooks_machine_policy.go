@@ -18,6 +18,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -25,12 +26,26 @@ import (
 
 // applyEnterpriseHookMachinePolicyPreferences copies the administrator's
 // machine-wide hook-policy choices from config into one install/verify
-// request: the Claude Code managed-hooks-only opt-out.
+// request: the Claude Code managed-hooks-only opt-out and, for Cursor
+// targets, the foreign-hook allowlist. The Cursor allowlist is always
+// non-nil for a Cursor request so the published protected state follows the
+// configuration exactly. Other connectors never read it, so a malformed
+// Cursor entry fails only Cursor install, verify and repair instead of every
+// managed connector.
 func applyEnterpriseHookMachinePolicyPreferences(opts *enterprisehooks.InstallOptions) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks: config is not loaded")
 	}
 	opts.ClaudeCodeAllowUnmanagedHooks = cfg.ClaudeCodeAllowUnmanagedHooks()
+	opts.CursorApprovedForeignHooks = nil
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+		return nil
+	}
+	approved, err := cfg.ApprovedForeignHooksForConnector("cursor")
+	if err != nil {
+		return err
+	}
+	opts.CursorApprovedForeignHooks = approved
 	return nil
 }
 
