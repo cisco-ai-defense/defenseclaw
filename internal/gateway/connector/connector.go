@@ -243,6 +243,13 @@ type SetupOpts struct {
 	// without one), and setup never launches the user's agent executable
 	// from the guardian process. Empty everywhere else.
 	ManagedTargetSID string
+	// ClaudeCodeAllowUnmanagedHooks is the administrator opt-out
+	// (claude_code.allow_unmanaged_hooks) from the managed-hooks-only lock.
+	// By default the machine-managed Claude Code policy sets
+	// allowManagedHooksOnly=true so user, project, local and plugin hooks
+	// cannot run beside DefenseClaw's managed hooks. It has no effect on
+	// per-user hook registrations.
+	ClaudeCodeAllowUnmanagedHooks bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

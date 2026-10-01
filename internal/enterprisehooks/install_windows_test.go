@@ -2493,7 +2493,7 @@ func TestInspectWindowsClaudeFilePolicyCompatibilityRejectsOversizedPolicyBefore
 	if err := setWindowsManagedPolicyProtection(basePath, false, true); err != nil {
 		t.Fatal(err)
 	}
-	err := inspectWindowsClaudeFilePolicyCompatibility(fixture.policyPath)
+	err := inspectWindowsClaudeFilePolicyCompatibility(fixture.policyPath, true)
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "too large") {
 		t.Fatalf("compatibility error = %v, want pre-read size refusal", err)
 	}
