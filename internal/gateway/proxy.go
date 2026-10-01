@@ -2355,6 +2355,7 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		baseURL:      baseURL,
 		extraHeaders: extraHeaders,
 		extraBody:    extraBody,
+		pathOverride: decision.PathOverride,
 	}
 
 	fmt.Fprintf(os.Stderr, "[responses-api] bifrost provider=%s model=%s base=%s\n",
@@ -2372,21 +2373,53 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		body, _ = json.Marshal(bodyMap)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	respID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
+	msgID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
 
-	var responseBuf bytes.Buffer
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+
+	writeSSE := func(data []byte) {
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	// Send initial SSE events before Bifrost starts streaming
+	createdEvt, _ := json.Marshal(map[string]interface{}{
+		"type": "response.created",
+		"response": map[string]interface{}{
+			"id": respID, "object": "response", "status": "in_progress",
+			"model": decision.Model, "output": []interface{}{},
+		},
+	})
+	writeSSE(createdEvt)
+
+	itemEvt, _ := json.Marshal(map[string]interface{}{
+		"type": "response.output_item.added", "output_index": 0,
+		"item": map[string]interface{}{
+			"type": "message", "id": msgID, "status": "in_progress",
+			"role": "assistant", "content": []interface{}{},
+		},
+	})
+	writeSSE(itemEvt)
+
+	partEvt, _ := json.Marshal(map[string]interface{}{
+		"type": "response.content_part.added", "output_index": 0,
+		"content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": ""},
+	})
+	writeSSE(partEvt)
+
+	// Stream through Bifrost
 	err = bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
-		responseBuf.Write(chunk)
+		writeSSE(chunk)
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", err)
-		writeOpenAIError(w, http.StatusBadGateway, "bifrost: "+err.Error())
-		return
 	}
-
-	// Return the Bifrost Responses API JSON directly
-	w.Write(responseBuf.Bytes())
 }
 
 // handleModels returns a minimal OpenAI-compatible /v1/models response.

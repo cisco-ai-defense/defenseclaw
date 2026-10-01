@@ -347,6 +347,7 @@ type RoutingModelBackend struct {
 	APIKeyEnv    string            `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
 	ExtraHeaders map[string]string `mapstructure:"extra_headers"     yaml:"extra_headers,omitempty"`
 	ExtraBody    map[string]string `mapstructure:"extra_body"        yaml:"extra_body,omitempty"`
+	PathOverride string            `mapstructure:"path_override"     yaml:"path_override,omitempty"`
 	Capabilities []string          `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
 }
 

@@ -174,6 +174,8 @@ type ModelRouterDecision struct {
 	ExtraHeaders map[string]string
 	// ExtraBody are additional fields to inject into the upstream request body.
 	ExtraBody map[string]string
+	// PathOverride replaces the default API path (e.g. /chat/completions instead of /v1/chat/completions).
+	PathOverride string
 }
 
 // ModelRouterBackend is the gateway-owned forwarding target for one model
@@ -189,6 +191,7 @@ type ModelRouterBackend struct {
 	APIKeyEnv    string
 	ExtraHeaders map[string]string
 	ExtraBody    map[string]string
+	PathOverride string
 }
 
 // SetModelRouter installs an embedded model router into the proxy.

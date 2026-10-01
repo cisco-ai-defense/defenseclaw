@@ -321,6 +321,7 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 		}
 		decision.ExtraHeaders = backend.ExtraHeaders
 		decision.ExtraBody = backend.ExtraBody
+		decision.PathOverride = backend.PathOverride
 	}
 
 	return outcomeFromDecision(input, decision, time.Since(started))

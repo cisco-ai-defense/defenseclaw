@@ -17,14 +17,11 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -49,6 +46,7 @@ type bifrostProvider struct {
 	tls          tlsOverrides
 	extraHeaders map[string]string
 	extraBody    map[string]string
+	pathOverride string
 	// Effective per-provider sub-blocks (role wins, overlay fills
 	// blanks; see NewProviderForLLMConfig). Pointer-typed so an
 	// absent block contributes nothing to the Bifrost Key.
@@ -671,10 +669,7 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 // and streams SSE chunks back to the caller. Bifrost internally bridges to
 // chat/completions for providers that don't support the Responses API natively.
 func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byte, chunkCb func([]byte)) error {
-	// getBifrostClient is not used for the direct HTTP approach below,
-	// but kept for future Bifrost-native Responses API support.
-	_, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
-	if err != nil {
+	if _, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders); err != nil {
 		return err
 	}
 
@@ -740,105 +735,138 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 		messages = append(messages, map[string]string{"role": role, "content": content})
 	}
 
-	chatBody := map[string]interface{}{
-		"model":    bp.model,
-		"messages": messages,
-	}
-	for k, v := range bp.extraBody {
-		chatBody[k] = v
-	}
-	chatBodyBytes, _ := json.Marshal(chatBody)
-
-	// Direct HTTP call to the provider's chat/completions endpoint.
-	// Bifrost's raw body + VLLM provider combination has issues with
-	// Responses → chat/completions bridging, so we do the HTTP call
-	// directly and convert the response format ourselves.
-	upstreamURL := strings.TrimRight(bp.baseURL, "/") + "/chat/completions"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(chatBodyBytes))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range bp.extraHeaders {
-		req.Header.Set(k, v)
-	}
-	if bp.apiKey != "" && req.Header.Get("api-key") == "" {
-		req.Header.Set("api-key", bp.apiKey)
-	}
-
-	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
-	if err != nil {
-		return fmt.Errorf("upstream request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%d %s", resp.StatusCode, string(respBody))
+	// Use Bifrost's ChatCompletionStream to bridge Responses → chat/completions.
+	// Convert Responses API input messages to ChatMessages, call Bifrost's
+	// native ChatCompletionStream, then convert streaming chat response
+	// chunks to Responses API SSE events.
+	var chatMessages []ChatMessage
+	for _, msg := range input {
+		role := "user"
+		if msg.Role != nil {
+			role = string(*msg.Role)
+		}
+		if role == "developer" {
+			role = "system"
+		}
+		content := ""
+		if msg.Content != nil {
+			if msg.Content.ContentStr != nil {
+				content = *msg.Content.ContentStr
+			} else if len(msg.Content.ContentBlocks) > 0 {
+				var parts []string
+				for _, block := range msg.Content.ContentBlocks {
+					b, _ := json.Marshal(block)
+					var bm map[string]interface{}
+					if json.Unmarshal(b, &bm) == nil {
+						if t, ok := bm["text"].(string); ok {
+							parts = append(parts, t)
+						}
+					}
+				}
+				content = strings.Join(parts, "\n")
+			}
+		}
+		if content == "" {
+			continue
+		}
+		chatMessages = append(chatMessages, ChatMessage{Role: role, Content: content})
 	}
 
-	// Convert chat/completions response to Responses API format
-	var chatResp struct {
-		Choices []struct {
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+	chatReq := &ChatRequest{
+		Model:    bp.model,
+		Messages: chatMessages,
 	}
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
+	// Inject extra_body fields (like user appkey) as ExtraParams
+	if len(bp.extraBody) > 0 {
+		chatReq.ExtraParams = make(map[string]interface{})
+		for k, v := range bp.extraBody {
+			chatReq.ExtraParams[k] = v
+		}
 	}
 
-	content := ""
-	if len(chatResp.Choices) > 0 {
-		content = chatResp.Choices[0].Message.Content
+	respID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
+	msgID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
+	var fullContent strings.Builder
+
+	// Set path override via Go context if the provider needs non-standard paths
+	chatCtx := ctx
+	if bp.pathOverride != "" {
+		chatCtx = context.WithValue(ctx, bifrostURLPathKey{}, bp.pathOverride)
+	}
+	usage, streamErr := bp.ChatCompletionStream(chatCtx, chatReq, func(chunk StreamChunk) {
+		delta := ""
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
+			delta = chunk.Choices[0].Delta.Content
+		}
+		if delta == "" {
+			return
+		}
+		fullContent.WriteString(delta)
+		// Emit SSE delta event
+		evt := map[string]interface{}{
+			"type":          "response.output_text.delta",
+			"output_index":  0,
+			"content_index": 0,
+			"delta":         delta,
+		}
+		data, _ := json.Marshal(evt)
+		chunkCb(data)
+	})
+
+	if streamErr != nil {
+		return streamErr
 	}
 
-	responsesResp := map[string]interface{}{
-		"id":     fmt.Sprintf("resp_%x", time.Now().UnixNano()),
-		"object": "response",
-		"status": "completed",
-		"model":  bp.model,
-		"output": []interface{}{
-			map[string]interface{}{
-				"type":   "message",
-				"id":     fmt.Sprintf("msg_%x", time.Now().UnixNano()),
-				"status": "completed",
-				"role":   "assistant",
-				"content": []interface{}{
-					map[string]interface{}{"type": "output_text", "text": content},
+	// Emit completed event with full response
+	completed := map[string]interface{}{
+		"type": "response.completed",
+		"response": map[string]interface{}{
+			"id":     respID,
+			"object": "response",
+			"status": "completed",
+			"model":  bp.model,
+			"output": []interface{}{
+				map[string]interface{}{
+					"type":   "message",
+					"id":     msgID,
+					"status": "completed",
+					"role":   "assistant",
+					"content": []interface{}{
+						map[string]interface{}{"type": "output_text", "text": fullContent.String()},
+					},
 				},
 			},
-		},
-		"usage": map[string]interface{}{
-			"input_tokens":  chatResp.Usage.PromptTokens,
-			"output_tokens": chatResp.Usage.CompletionTokens,
-			"total_tokens":  chatResp.Usage.TotalTokens,
+			"usage": map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+				"total_tokens":  0,
+			},
 		},
 	}
-
-	data, _ := json.Marshal(responsesResp)
+	if usage != nil {
+		completed["response"].(map[string]interface{})["usage"] = map[string]interface{}{
+			"input_tokens":  usage.PromptTokens,
+			"output_tokens": usage.CompletionTokens,
+			"total_tokens":  usage.TotalTokens,
+		}
+	}
+	data, _ := json.Marshal(completed)
 	chunkCb(data)
 	return nil
 }
 
 // ---------- Type conversion helpers ----------
 
+type bifrostURLPathKey struct{}
+
 func newBifrostRequestContext(ctx context.Context, req *ChatRequest) *schemas.BifrostContext {
 	bCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 	if req != nil && len(req.ExtraParams) > 0 {
 		bCtx.SetValue(schemas.BifrostContextKeyPassthroughExtraParams, true)
+	}
+	// Allow callers to override the URL path via Go context
+	if path, ok := ctx.Value(bifrostURLPathKey{}).(string); ok && path != "" {
+		bCtx.SetValue(schemas.BifrostContextKeyURLPath, path)
 	}
 	return bCtx
 }

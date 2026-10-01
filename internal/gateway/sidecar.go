@@ -817,6 +817,7 @@ func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
 			APIKeyEnv:    model.APIKeyEnv,
 			ExtraHeaders: model.ExtraHeaders,
 			ExtraBody:    model.ExtraBody,
+			PathOverride: model.PathOverride,
 		})
 	}
 	return backends

@@ -3579,6 +3579,10 @@
                 "description": "Additional fields to inject into the upstream request body (e.g. user appkey).",
                 "additionalProperties": { "type": "string" }
               },
+              "path_override": {
+                "type": "string",
+                "description": "Override the API path (e.g. /chat/completions for providers that don't use /v1/ prefix)."
+              },
               "capabilities": {
                 "$ref": "#/$defs/stringList"
               }
