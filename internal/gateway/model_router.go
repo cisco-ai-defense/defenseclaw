@@ -169,19 +169,26 @@ type ModelRouterDecision struct {
 
 	// Reason is a human-readable explanation for observability.
 	Reason string
+
+	// ExtraHeaders are additional HTTP headers to set on the upstream request.
+	ExtraHeaders map[string]string
+	// ExtraBody are additional fields to inject into the upstream request body.
+	ExtraBody map[string]string
 }
 
 // ModelRouterBackend is the gateway-owned forwarding target for one model
 // alias returned by the semantic router. Credentials stay in DefenseClaw and
 // are never sent to the classifier.
 type ModelRouterBackend struct {
-	Name       string
-	Provider   string
-	Model      string
-	BaseURL    string
-	HostHeader string
-	Auth       string // passthrough, api_key, none (resolved via EffectiveAuth)
-	APIKeyEnv  string
+	Name         string
+	Provider     string
+	Model        string
+	BaseURL      string
+	HostHeader   string
+	Auth         string // passthrough, api_key, none (resolved via EffectiveAuth)
+	APIKeyEnv    string
+	ExtraHeaders map[string]string
+	ExtraBody    map[string]string
 }
 
 // SetModelRouter installs an embedded model router into the proxy.

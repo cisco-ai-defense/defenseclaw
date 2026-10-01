@@ -338,14 +338,16 @@ type RoutingConfig struct {
 }
 
 type RoutingModelBackend struct {
-	Name         string   `mapstructure:"name"              yaml:"name"`
-	Provider     string   `mapstructure:"provider"          yaml:"provider"`
-	Model        string   `mapstructure:"model"             yaml:"model"`
-	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
-	HostHeader   string   `mapstructure:"host_header"       yaml:"host_header,omitempty"`
-	Auth         string   `mapstructure:"auth"              yaml:"auth,omitempty"`
-	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
-	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
+	Name         string            `mapstructure:"name"              yaml:"name"`
+	Provider     string            `mapstructure:"provider"          yaml:"provider"`
+	Model        string            `mapstructure:"model"             yaml:"model"`
+	BaseURL      string            `mapstructure:"base_url"          yaml:"base_url,omitempty"`
+	HostHeader   string            `mapstructure:"host_header"       yaml:"host_header,omitempty"`
+	Auth         string            `mapstructure:"auth"              yaml:"auth,omitempty"`
+	APIKeyEnv    string            `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
+	ExtraHeaders map[string]string `mapstructure:"extra_headers"     yaml:"extra_headers,omitempty"`
+	ExtraBody    map[string]string `mapstructure:"extra_body"        yaml:"extra_body,omitempty"`
+	Capabilities []string          `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
 }
 
 // EffectiveAuth returns the resolved auth mode for a routing backend.

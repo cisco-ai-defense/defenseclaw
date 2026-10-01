@@ -808,13 +808,15 @@ func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
 	backends := make([]ModelRouterBackend, 0, len(cfg.Routing.Models))
 	for _, model := range cfg.Routing.Models {
 		backends = append(backends, ModelRouterBackend{
-			Name:       model.Name,
-			Provider:   model.Provider,
-			Model:      model.Model,
-			BaseURL:    model.BaseURL,
-			HostHeader: model.HostHeader,
-			Auth:       model.EffectiveAuth(),
-			APIKeyEnv:  model.APIKeyEnv,
+			Name:         model.Name,
+			Provider:     model.Provider,
+			Model:        model.Model,
+			BaseURL:      model.BaseURL,
+			HostHeader:   model.HostHeader,
+			Auth:         model.EffectiveAuth(),
+			APIKeyEnv:    model.APIKeyEnv,
+			ExtraHeaders: model.ExtraHeaders,
+			ExtraBody:    model.ExtraBody,
 		})
 	}
 	return backends

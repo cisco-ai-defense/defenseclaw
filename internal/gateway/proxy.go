@@ -1529,6 +1529,26 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Apply routing-decision extra headers and body fields.
+	if routerDecision != nil && len(routerDecision.ExtraHeaders) > 0 {
+		for k, v := range routerDecision.ExtraHeaders {
+			upstreamReq.Header.Set(k, v)
+		}
+	}
+	if routerDecision != nil && len(routerDecision.ExtraBody) > 0 {
+		var bodyMap map[string]json.RawMessage
+		if json.Unmarshal(forwardBody, &bodyMap) == nil {
+			for k, v := range routerDecision.ExtraBody {
+				bodyMap[k] = json.RawMessage(`"` + v + `"`)
+			}
+			if patched, err := json.Marshal(bodyMap); err == nil {
+				forwardBody = patched
+				upstreamReq.Body = io.NopCloser(bytes.NewReader(forwardBody))
+				upstreamReq.ContentLength = int64(len(forwardBody))
+			}
+		}
+	}
+
 	// Bedrock translation: rewrite auth headers for the upstream.
 	if bedrockTranslateNeeded && connForwardKey != "" {
 		if bedrockTranslateToOpenAI {
