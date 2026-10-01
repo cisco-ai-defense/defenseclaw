@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -1755,6 +1756,17 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
                 cmd_setup._capture_setup_watchdog_fingerprint(self.app.cfg)
 
         self.assertNotIn("private custody detail", str(raised.exception))
+
+    def test_runtime_capture_streams_files_larger_than_the_old_16mb_cap(self):
+        # The Windows hook executable is about 115 MB (WIN-R1-15).
+        path = os.path.join(self.tmp_dir, "defenseclaw-hook.exe")
+        chunk = b"x" * (1 << 20)
+        atomic_write_private_bytes(path, chunk * 17)
+
+        _normalized, _identity, fingerprint = cmd_setup._capture_setup_runtime_location(path, "hook runtime")
+
+        expected = hashlib.sha256(chunk * 17).hexdigest()
+        self.assertEqual(fingerprint, f"present:{17 << 20}:{expected}")
 
     def test_final_success_proves_complete_registration_union_in_both_fenced_samples(self):
         prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))

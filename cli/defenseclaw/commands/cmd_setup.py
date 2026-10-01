@@ -5880,7 +5880,11 @@ def setup_guardrail(
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        raise click.ClickException(f"cannot establish guardrail setup rollback point: {exc}") from exc
+        raise click.ClickException(
+            f"cannot establish guardrail setup rollback point: {exc}\n"
+            "Nothing was changed. Run the command again; if it still fails, run "
+            "'defenseclaw doctor' and include the bracketed reference in a report."
+        ) from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
     selection_attempted = False
@@ -6596,7 +6600,10 @@ _AGENT_SELECTION_MAX_BYTES = 64 << 10
 _HOOK_CONTRACT_LOCK_MAX_BYTES = 16 << 20
 _SETUP_CONFIG_MAX_BYTES = 16 << 20
 _ACTIVE_CONNECTOR_STATE_MAX_BYTES = 64 << 10
-_SETUP_RUNTIME_ARTIFACT_MAX_BYTES = 16 << 20
+# Runtime evidence is hashed in chunks and never held in memory. The Windows
+# hook executable (about 115 MB) is one of these files, so the cap only stops
+# an endless read.
+_SETUP_RUNTIME_ARTIFACT_MAX_BYTES = 1 << 30
 _SETUP_RUNTIME_RECEIPT_MAX_FILES = 128
 _SETUP_RUNTIME_REGISTRATION_MAX_FILES = 128
 _SETUP_RUNTIME_SNAPSHOT_ATTEMPTS = 6
@@ -6706,8 +6713,12 @@ def _capture_protected_setup_file(
     *,
     repair_owned_read_bits: bool = False,
     skip_if_untrusted: bool = False,
+    hasher: Any = None,
 ) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
     """Read one bounded private regular file without following path redirects.
+
+    With ``hasher``, the content is fed to it in chunks and the returned body
+    is empty, so a large file is fingerprinted without being held in memory.
 
     ``repair_owned_read_bits`` tightens an owner-only file that is merely
     group/other-readable (no extra write bits) so an informational hint
@@ -6760,15 +6771,20 @@ def _capture_protected_setup_file(
                         return False, b"", None
                     raise OSError(f"{label} rollback source is not private")
         body = bytearray()
-        while len(body) <= maximum:
-            chunk = os.read(fd, min(64 << 10, maximum + 1 - len(body)))
+        size = 0
+        while size <= maximum:
+            chunk = os.read(fd, min(1 << 20, maximum + 1 - size))
             if not chunk:
                 break
-            body.extend(chunk)
-        if len(body) > maximum:
+            size += len(chunk)
+            if hasher is None:
+                body.extend(chunk)
+            else:
+                hasher.update(chunk)
+        if size > maximum:
             raise OSError(f"{label} rollback source grew while reading")
         after = os.fstat(fd)
-        if after.st_size != len(body) or not os.path.samestat(info, after):
+        if after.st_size != size or not os.path.samestat(info, after):
             raise OSError(f"{label} rollback source changed while reading")
         try:
             path_after = os.stat(path, follow_symlinks=False)
@@ -6805,17 +6821,19 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
         raise OSError(f"{role} evidence {_setup_runtime_ref(raw)} has an invalid identity")
     normalized = os.path.normcase(os.path.normpath(os.path.abspath(raw)))
     identity = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+    digest = hashlib.sha256()
     try:
-        existed, body, _generation = _capture_protected_setup_file(
+        existed, _body, generation = _capture_protected_setup_file(
             normalized,
             _SETUP_RUNTIME_ARTIFACT_MAX_BYTES,
             role,
+            hasher=digest,
         )
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
-    if not existed:
+    if not existed or generation is None:
         return normalized, identity, "missing"
-    return normalized, identity, f"present:{len(body)}:{hashlib.sha256(body).hexdigest()}"
+    return normalized, identity, f"present:{generation[2]}:{digest.hexdigest()}"
 
 
 def _capture_setup_runtime_file(path: object, role: str) -> tuple[str, str]:
