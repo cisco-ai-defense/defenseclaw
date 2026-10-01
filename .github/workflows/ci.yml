@@ -605,9 +605,11 @@ jobs:
           # The uv that scripts/install.ps1 bootstraps for users.
           version: "0.12.13"
           enable-cache: true
-          # The lanes share setup-uv's UV_PYTHON_INSTALL_DIR; keep the managed
-          # Python the installer's venv step downloads across runs. The key
-          # covers uv.lock and the installer, which names the Python version.
+          # The lanes reuse setup-uv's UV_PYTHON_INSTALL_DIR for any managed
+          # Python the installer's `uv venv --python 3.12` downloads. The key
+          # covers uv.lock, the installer and the runner's Python version.
+          # While the image ships Python 3.12, uv uses it, nothing is
+          # downloaded, and setup-uv skips this save with a warning.
           cache-python: true
           cache-dependency-glob: |
             uv.lock
