@@ -22,6 +22,7 @@ func enterpriseManagedHookRuntimeEndpoint(string) (string, string, bool) {
 func enterpriseManagedHookRuntimeConnection(string) (string, string, *string, bool) {
 	return "", "", nil, false
 }
+
 // applyStandaloneManagedHookTransport: the standalone unix hook runtime does
 // not exist on this platform.
 func applyStandaloneManagedHookTransport(*hookexec.Options, string) {}

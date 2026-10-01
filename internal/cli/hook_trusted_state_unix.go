@@ -133,6 +133,12 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	return standaloneHookRuntime.reason
 }
 
+// Foreign hook preflight is a Windows Secure Client policy; Unix standalone
+// hook admission is governed by the protected runtime descriptor instead.
+func enterpriseManagedHookRuntimeForeignHookPolicy(string) ([]string, string, string) {
+	return nil, "", ""
+}
+
 func enterpriseManagedHookRuntimeEndpoint(connectorName string) (string, string, bool) {
 	addr, service, _, ok := enterpriseManagedHookRuntimeConnection(connectorName)
 	return addr, service, ok
