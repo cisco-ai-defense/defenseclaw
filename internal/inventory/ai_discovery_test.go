@@ -2846,9 +2846,16 @@ func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 	}
 	defer stopRun()
 
-	// Bounded waits on specific events. The bound only limits how long a
-	// broken service can hang the test; it is not part of the contract.
-	const eventWait = time.Minute
+	// Each wait blocks on one specific event. A real scan walks the host
+	// (processes, installed apps), so its duration is not bounded here; the
+	// only limit is the go test deadline, reported with the events seen so
+	// far instead of a bare timeout panic.
+	waitCtx := context.Background()
+	if deadline, ok := t.Deadline(); ok {
+		var cancelWait context.CancelFunc
+		waitCtx, cancelWait = context.WithDeadline(waitCtx, deadline.Add(-5*time.Second))
+		defer cancelWait()
+	}
 	waitScanStart := func(want string) {
 		t.Helper()
 		select {
@@ -2856,8 +2863,8 @@ func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 			if got != want {
 				t.Fatalf("scan started with source %q, want %q (events=%v)", got, want, events.snapshot())
 			}
-		case <-time.After(eventWait):
-			t.Fatalf("no %q scan started within %s (events=%v)", want, eventWait, events.snapshot())
+		case <-waitCtx.Done():
+			t.Fatalf("no %q scan started before the test deadline (events=%v)", want, events.snapshot())
 		}
 	}
 	waitTimer := func() *manualScheduleTimer {
@@ -2865,8 +2872,8 @@ func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 		select {
 		case timer := <-timers:
 			return timer
-		case <-time.After(eventWait):
-			t.Fatalf("Run did not create its schedule timers within %s", eventWait)
+		case <-waitCtx.Done():
+			t.Fatalf("Run did not create its schedule timers before the test deadline")
 			return nil
 		}
 	}
