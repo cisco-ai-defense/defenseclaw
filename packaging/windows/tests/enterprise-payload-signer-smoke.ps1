@@ -319,6 +319,7 @@ $moduleResult = & $module {
     # Valid signature was accepted as a DefenseClaw payload.
     $foreignSigned = $null
     foreach ($candidatePath in @(
+        [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         [IO.Path]::Combine($PSHOME, 'pwsh.exe'),
         [IO.Path]::Combine($PSHOME, 'powershell.exe')
     )) {
