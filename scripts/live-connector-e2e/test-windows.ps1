@@ -3506,7 +3506,11 @@ threading.Event().wait()
         $fixtureCompiler -match 'CSharpCompilation\]::Create' -and
         $fixtureCompiler -match 'Framework64\\v4\.0\.30319\\mscorlib\.dll' -and
         $fixtureCompiler -match 'FileMode\]::CreateNew' -and
+        $fixtureCompiler -match 'CreateDefaultWin32Resources\(\$true, \$false, \$null, \$null\)' -and
+        $fixtureCompiler -match 'Emit\(\$stream, \$null, \$null, \$win32Resources\)' -and
         $fixtureCompiler -notmatch 'Invoke-WindowsNativeProcess|Start-Process|csc\.exe' -and
+        $agentFixtureFunction -match "\(\`$fixture\.ClassName \+ '\.go'\)" -and
+        $agentFixtureFunction -notmatch "'\.cs'" -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesPath' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesBin' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.OpenCodePath' -and
@@ -5009,9 +5013,10 @@ threading.Event().wait()
         $auditProjectorText -match 'ORDER BY rowid' -and
         $auditProjectorText -match 'record_schema_version != 1' -and
         $auditProjectorText -match 'os\.replace\(temporary, output\)' -and
-        $auditProjectorText -notmatch 'os\.fsync\(' -and
         $auditProjectorText -match 'output must differ from the audit database') `
         'canonical SQLite projection is read-only, ordered, schema-bound, and atomically published'
+    Assert-True ($auditProjectorText -notmatch 'os\.fsync\(') `
+        'transient evidence snapshots skip a device flush they do not need (tail latency only; polls never launch an interpreter)'
     Assert-True ($openCodeAssertionText.Contains('const probeID = basename(scratchPath, ".mjs");') -and
         [regex]::Matches(
             $openCodeAssertionText,
