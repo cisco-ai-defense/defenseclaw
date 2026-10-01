@@ -909,7 +909,12 @@ def _preflight_first_run_agent_selections(
 ) -> tuple[object | None, str]:
     """Record one complete protected roster before first-run state mutation."""
 
-    if platform_support.host_os() != "windows":
+    host_os = platform_support.host_os()
+    if host_os == "darwin" and _normalize_connector(connector) == "openhands":
+        # The macOS gateway installs OpenHands hooks only from a setup-selected,
+        # digest-pinned executable, the same receipt `setup openhands` writes.
+        selected_connectors = ("openhands",)
+    elif host_os != "windows":
         return None, ""
 
     from defenseclaw.agent_selection import (

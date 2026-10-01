@@ -3318,6 +3318,33 @@ class TestMultiConnectorInit(unittest.TestCase):
             self.assertEqual(gc.connector, "claudecode")
             self.assertEqual(reloaded.claw.mode, "claudecode")
 
+    def test_activate_additional_connectors_leaves_out_unverified_macos_openhands(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ), patch("defenseclaw.platform_support.host_os", return_value="darwin"), patch(
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+            return_value=None,
+        ) as record:
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.save()
+            extra = {"profile": "action", "fail_mode": None, "human_approval": None, "hilt_min_severity": None}
+            active, _sidecar = _activate_additional_connectors(
+                {"connector": "codex", "profile": "action", "fail_mode": None,
+                 "human_approval": None, "hilt_min_severity": None},
+                [{"connector": "openhands", **extra}, {"connector": "claudecode", **extra}],
+                start_gateway=False,
+            )
+        # The gateway needs the setup-selected OpenHands executable; without
+        # it OpenHands must not be reported or persisted as configured.
+        self.assertEqual(record.call_args.kwargs["required"], {"codex"})
+        self.assertEqual(active, ["claudecode", "codex"])
+        self.assertNotIn("openhands", cfg_mod.load().guardrail.connectors)
+
     def test_activate_additional_connectors_downgrades_unverified_action(self):
         """An extra connector requested in action mode whose installed version
         is not verified against a known hook contract must be downgraded to

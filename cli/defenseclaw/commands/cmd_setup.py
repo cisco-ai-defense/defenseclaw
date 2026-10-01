@@ -4997,7 +4997,7 @@ def _check_connector_version_supported_for_setup(
                 _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
                 if _trusted_prompt_cache is not None:
                     _trusted_prompt_cache[parent] = True
-                ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env); re-checking…")
+                ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml); re-checking…")
                 ux.subhead(
                     "  Note: if this path is version-specific it may need re-trusting "
                     "after an upgrade — `defenseclaw setup trusted-paths add <dir>`."
@@ -9983,7 +9983,7 @@ def _prompt_batch_trusted_prefixes(
         if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
             _add_trusted_bin_prefix(parent, getattr(app.cfg, "data_dir", None) or os.path.expanduser("~/.defenseclaw"))
             cache[parent] = True
-            ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env).")
+            ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml).")
         else:
             cache[parent] = False
     return cache

@@ -1857,6 +1857,26 @@ def _activate_additional_connectors(
                 "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
             )
 
+    if platform_support.host_os() == "darwin" and primary_name != "openhands" and "openhands" in selected_keys:
+        # The macOS gateway installs OpenHands hooks only from a setup-selected,
+        # digest-pinned executable. Record it the way `setup openhands` does;
+        # when it cannot be verified, setup warns with the reason and the
+        # connector is left out instead of being listed as configured.
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _record_windows_setup_agent_selections,
+        )
+
+        openhands_selection = _record_windows_setup_agent_selections(
+            cfg.data_dir,
+            tuple(selected_keys),
+            _prior_snapshot=_capture_setup_config_snapshot(cfg),
+            required={primary_name},
+        )
+        if openhands_selection is None or openhands_selection.record_for("openhands") is None:
+            selected_keys.remove("openhands")
+            extras = [s for s in extras if connector_paths.normalize(s["connector"]) != "openhands"]
+
     # Rebuild the multi map from the connector selection made in this init
     # run. Reusing the old map would keep unchecked/stale connectors active in
     # `guardrail status`.
