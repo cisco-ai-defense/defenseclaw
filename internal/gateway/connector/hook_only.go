@@ -1782,6 +1782,9 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if c.name == "openhands" && runtime.GOOS == "darwin" {
 		return c.teardownOpenHandsWithToken(ctx, opts)
 	}
+	if c.name == "copilot" {
+		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
+	}
 	return c.teardown(ctx, opts, "")
 }
 
@@ -2449,6 +2452,7 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		if err := validateCopilotHookPolicy(opts, path); err != nil {
 			return err
 		}
+		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 	}
 	logicalName := c.managedBackupLogicalName()
 	if err := captureManagedFileBackup(opts.DataDir, c.name, logicalName, path); err != nil {
