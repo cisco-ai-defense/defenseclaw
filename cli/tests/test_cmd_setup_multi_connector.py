@@ -815,8 +815,11 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_no_restart_keeps_server_admission_rejection_fail_closed(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityError("rejected")
-        with _setup_patches(), self.assertRaises(CanonicalObservabilityError):
-            _invoke(["codex", "--yes", "--no-restart"], self.app)
+        with _setup_patches():
+            result = _invoke(["codex", "--yes", "--no-restart"], self.app)
+        # Still fail-closed, as a plain ClickException (exit 1) since MAC-U2-03.
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("did not accept its setup audit event", result.output)
 
 
 class TestWriteConnectorIdentityUnit(unittest.TestCase):
