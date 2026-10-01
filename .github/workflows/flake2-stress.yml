@@ -24,6 +24,7 @@ jobs:
           - { variant: before, rep: 1 }
           - { variant: before, rep: 2 }
           - { variant: before-adapters-new-test, rep: 1 }
+          - { variant: before-adapters-new-test, rep: 2 }
           - { variant: after, rep: 1 }
           - { variant: after, rep: 2 }
           - { variant: after, rep: 3 }
@@ -49,20 +50,30 @@ jobs:
         run: go test -c -o "$env:RUNNER_TEMP\conn.test.exe" ./internal/gateway/connector
       - name: Run deadline tests under CPU load
         run: |
+          # Load modelled on the CI shard: the rest of the connector suite
+          # running beside the target tests, PowerShell process churn, and
+          # CPU-bound processes on half the cores.
           $burners = @()
-          $n = [int]$env:NUMBER_OF_PROCESSORS
+          $run = '^(TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen|TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed)$'
+          $suiteDir = Join-Path $env:RUNNER_TEMP 'suite-load'
+          New-Item -ItemType Directory -Force -Path $suiteDir | Out-Null
+          $suiteLoop = "`$env:TEMP = '$suiteDir'; `$env:TMP = '$suiteDir'; while (`$true) { & '$env:RUNNER_TEMP\conn.test.exe' '-test.count=1' '-test.skip=$run' '-test.timeout=20m' *> `$null }"
+          $burners += Start-Process -FilePath 'pwsh.exe' -ArgumentList '-NoProfile', '-Command', $suiteLoop -WindowStyle Hidden -PassThru
+          for ($b = 0; $b -lt 2; $b++) {
+            $burners += Start-Process -FilePath 'pwsh.exe' -ArgumentList '-NoProfile', '-Command', 'while ($true) { & powershell.exe -NoProfile -NonInteractive -Command "exit 0" }' -WindowStyle Hidden -PassThru
+          }
+          $n = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS / 2)
           for ($b = 0; $b -lt $n; $b++) {
             $burners += Start-Process -FilePath 'pwsh.exe' -ArgumentList '-NoProfile', '-Command', 'while ($true) { $x = 1; for ($i = 0; $i -lt 100000; $i++) { $x = ($x * 7) % 1000003 } }' -WindowStyle Hidden -PassThru
           }
-          Write-Host "started $n CPU load processes"
+          Write-Host "started connector suite loop, 2 PowerShell churn loops and $n CPU load processes"
           $log = Join-Path $env:RUNNER_TEMP 'stress.log'
-          $run = '^(TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen|TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed)$'
           try {
             & "$env:RUNNER_TEMP\conn.test.exe" '-test.v' '-test.count=4' '-test.cpu=1,2,8' '-test.timeout=45m' "-test.run=$run" *>&1 | Tee-Object -FilePath $log | Out-Null
             Write-Host "test exit code $LASTEXITCODE"
           }
           finally {
-            foreach ($bp in $burners) { Stop-Process -Id $bp.Id -Force -ErrorAction SilentlyContinue }
+            foreach ($bp in $burners) { & taskkill.exe /T /F /PID $bp.Id *> $null }
           }
           $text = Get-Content -LiteralPath $log
           $text | Select-String -Pattern '^\s*--- (PASS|FAIL)|adapter (finished|exceeded)|read helper PID' | ForEach-Object { $_.Line.Trim() }
