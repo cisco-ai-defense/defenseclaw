@@ -550,7 +550,16 @@ function Start-Gateway {
 }
 
 function Get-ProcessesUnder([string[]]$Prefixes) {
-    return @(Get-CimInstance Win32_Process | Where-Object {
+    # Win32_Process names every process's image, but WMI refuses a standard
+    # user signed in over the network (an SSH session). Get-Process then still
+    # reads the image of this account's own processes, the only ones that can
+    # run from this install.
+    $all = try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        @(Get-Process | ForEach-Object {
+            [pscustomobject]@{ ProcessId = $_.Id; Name = "$($_.ProcessName).exe"; ExecutablePath = $_.Path }
+        })
+    }
+    return @($all | Where-Object {
         $image = $_.ExecutablePath
         $image -and @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count
     })
