@@ -81,7 +81,8 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	case "timeout":
 		writeAdapterLauncherRecord(os.Getenv(cursorAdapterPIDFileEnv))
-		time.Sleep(30 * time.Second)
+		// Outlive the contract, as the Copilot helper does.
+		time.Sleep(2 * time.Duration(cursorWindowsHookContractTimeoutMS) * time.Millisecond)
 		os.Exit(0)
 	default:
 		// Pre-existing connector fixtures exercise config, trust, CAS, and
@@ -340,20 +341,22 @@ func TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed(t *tes
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv(cursorAdapterHelperMode, "timeout")
 	t.Setenv(cursorAdapterPIDFileEnv, pidFile)
-	const timeoutMS = 1_000
-	adapter := renderCursorAdapterForTest(t, executable, "closed", true, timeoutMS)
+	// Use the production deadline. A shorter one can expire before a starved
+	// helper has recorded its PID, which leaves nothing to check.
+	adapter := renderCursorAdapterForTest(t, executable, "closed", true, cursorWindowsHookAdapterTimeoutMS)
 	// Exceed the typical anonymous-pipe buffer so a synchronous stdin write
-	// would remain stuck until the helper's 30-second sleep completed.
+	// would remain stuck until the helper's sleep completed.
 	payload := `{"source":"cursor-adapter-probe","padding":"` + strings.Repeat("x", 2<<20) + `"}`
 	stdout, stderr, code := runCursorAdapterTest(
 		t, adapter, payload,
 	)
 	finishedAt := time.Now()
 	pid, launchedAt := readAdapterLauncherRecord(t, pidFile, stderr)
-	// As in production, the timeout plus the cleanup reserve must fit from the
-	// moment the launcher exists; PowerShell startup is outside the budget.
-	if elapsed := finishedAt.Sub(launchedAt); elapsed > time.Duration(timeoutMS+cursorWindowsHookCleanupBudgetMS)*time.Millisecond {
-		t.Fatalf("adapter exceeded bounded timeout: %s after the launcher started", elapsed)
+	// As for Copilot, the timeout plus the cleanup reserve must fit Cursor's
+	// contract from the moment the launcher exists; PowerShell startup is
+	// host-dependent and outside the adapter's budget.
+	if elapsed := finishedAt.Sub(launchedAt); elapsed > time.Duration(cursorWindowsHookContractTimeoutMS)*time.Millisecond {
+		t.Fatalf("adapter exceeded the Cursor command-hook deadline: %s after the launcher started", elapsed)
 	}
 	if code != 2 {
 		t.Fatalf("exit code = %d, want fail-closed 2; stderr=%q", code, stderr)
@@ -361,7 +364,7 @@ func TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed(t *tes
 	if !strings.Contains(stdout, `"permission":"deny"`) {
 		t.Fatalf("stdout = %q, want explicit deny", stdout)
 	}
-	if !strings.Contains(stderr, "timed out after 1000ms") {
+	if !strings.Contains(stderr, fmt.Sprintf("timed out after %dms", cursorWindowsHookAdapterTimeoutMS)) {
 		t.Fatalf("stderr = %q, want timeout diagnostic", stderr)
 	}
 	if windowsProcessRunning(pid) {
