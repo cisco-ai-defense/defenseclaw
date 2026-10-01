@@ -1081,6 +1081,15 @@ def setup_llm(
         _clear_legacy_llm_fields(cfg)
     else:
         _configure_llm(cfg, cfg.data_dir, target_path=target_path)
+        missing_key_env = _interactive_llm_missing_key_env(cfg, target_path)
+        if missing_key_env:
+            ux.warn(
+                f"{missing_key_env} has no value, so the LLM judge and LLM scanners cannot use "
+                f"{cfg.resolve_llm(target_path).model} and doctor reports the key as missing."
+            )
+            if not click.confirm("  Save this LLM configuration without a key?", default=False):
+                click.echo("  LLM configuration not saved. Run 'defenseclaw setup llm' when you have a key.")
+                return
     cfg.save()
 
     click.echo()
@@ -1276,6 +1285,24 @@ def _role_to_target_path(role: str) -> str:
     :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
     """
     return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
+
+
+
+def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
+    """Name the key variable an interactively configured LLM still lacks, or "".
+
+    Only the key prompt sets ``api_key_env``; local providers and the
+    Bedrock, Vertex and Azure credential modes clear it and need no key here.
+    """
+    resolved = cfg.resolve_llm(target_path)
+    env_name = resolved.api_key_env
+    if not env_name or not resolved.model or resolved.is_local_provider():
+        return ""
+    if os.environ.get(env_name, "").strip():
+        return ""
+    if _load_dotenv(os.path.join(cfg.data_dir, ".env")).get(env_name, "").strip():
+        return ""
+    return env_name
 
 
 def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
@@ -5895,9 +5922,7 @@ def setup_guardrail(
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
         raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n"
-            "Nothing was changed. Run the command again; if it still fails, run "
-            "'defenseclaw doctor' and include the bracketed reference in a report."
+            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
         ) from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
@@ -6626,6 +6651,12 @@ _SETUP_ROLLBACK_MAX_FAILURES = 64
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x400
 
 
+_SETUP_ROLLBACK_POINT_NEXT_STEP = (
+    "Nothing was changed. Run the command again; if it still fails, run "
+    "'defenseclaw doctor' and include the bracketed reference in a report."
+)
+
+
 def _windows_runtime_rollback(restart: bool) -> bool:
     return restart and platform_support.host_os() == "windows"
 
@@ -6728,6 +6759,7 @@ def _capture_protected_setup_file(
     repair_owned_read_bits: bool = False,
     skip_if_untrusted: bool = False,
     hasher: Any = None,
+    trust_windows_administrators: bool = False,
 ) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
     """Read one bounded private regular file without following path redirects.
 
@@ -6740,6 +6772,9 @@ def _capture_protected_setup_file(
     or foreign-owned files stay untrusted. ``skip_if_untrusted`` treats
     those untrusted hint files as missing instead of failing the
     transaction — used only for advisory files such as ``picked_connector``.
+    ``trust_windows_administrators`` admits the built-in Administrators
+    group's write entry on Windows, which every file under the profile
+    (``~\\.local\\bin`` included) inherits.
     """
 
     try:
@@ -6759,7 +6794,7 @@ def _capture_protected_setup_file(
         if info.st_size > maximum:
             raise OSError(f"{label} rollback source is unexpectedly large")
         if os.name == "nt":
-            acl_error = windows_acl_write_error(path)
+            acl_error = windows_acl_write_error(path, trust_administrators=trust_windows_administrators)
             if acl_error is not None:
                 if skip_if_untrusted:
                     return False, b"", None
@@ -6842,6 +6877,11 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
             _SETUP_RUNTIME_ARTIFACT_MAX_BYTES,
             role,
             hasher=digest,
+            # Runtime evidence is only fingerprinted, never restored from.
+            # The hook executable and agent registrations live in the
+            # profile, which grants Administrators full control, so the
+            # gateway's custody rule (#1026) applies here as well.
+            trust_windows_administrators=True,
         )
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
@@ -8740,7 +8780,11 @@ def _apply_hook_connector_setup(
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        click.echo(f"  ✗ Cannot establish connector setup rollback point: {exc}", err=True)
+        click.echo(
+            f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
+            f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+            err=True,
+        )
         return False
 
     verified = _protected_selection

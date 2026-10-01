@@ -99,6 +99,31 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 	}
 }
 
+// The guardian's per-user worker makes ~/.kiro/hooks before Setup runs, so
+// Setup finds it there; the folders it reports still go at teardown.
+func TestKiroTeardownRemovesHookFoldersTheInstallerCreated(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".kiro")
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	hooks := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	RecordHookConfigParentDirs("kiro", dataDir, []string{home, hooks})
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", ManagedEnterprise: true}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Lstat(home); !os.IsNotExist(err) {
+		t.Fatalf("teardown left the Kiro folder the installer created (err=%v)", err)
+	}
+}
+
 func TestKiroManagedTeardownDisablesCachedHookScript(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()

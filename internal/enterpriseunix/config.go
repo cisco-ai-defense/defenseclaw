@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -273,6 +274,22 @@ func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error 
 		}
 	}
 	return nil
+}
+
+// RulePackServiceReadProblem says why the gateway service account could not
+// read the rule pack at dir. It returns "" when the account can read it or
+// the host has no service account. `rulepack validate` runs as an
+// administrator, who reads any mode, so without this a pack the gateway
+// cannot load still validated.
+func (e *Env) RulePackServiceReadProblem(ctx context.Context, dir string) string {
+	account, ok, err := e.Accounts.Lookup(ctx, e.Layout.ServiceUser)
+	if err != nil || !ok {
+		return ""
+	}
+	if err := e.rulePackReadable(filepath.Clean(dir), account); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func (e *Env) rulePackReadable(dir string, account Account) error {

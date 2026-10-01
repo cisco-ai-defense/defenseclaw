@@ -59,7 +59,7 @@ The sidecar must be running for this command to work.`,
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
-		return loadGatewayCommandConfigOnly()
+		return loadGatewayCommandConfigFor(cmd)
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
 	RunE:              runSidecarStatus,
@@ -773,7 +773,7 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	fmt.Println()
 
 	if h.LastError != "" {
-		fmt.Printf("             %s %s\n", Dim("last error:"), h.LastError)
+		fmt.Printf("             %s %s\n", Dim("last error:"), asciiText(h.LastError))
 	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
@@ -789,7 +789,7 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			if !ok {
 				continue
 			}
-			fmt.Printf("             %s %s\n", Dim(k+":"), line)
+			fmt.Printf("             %s %s\n", Dim(k+":"), asciiText(line))
 		}
 	}
 	fmt.Println()

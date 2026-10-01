@@ -337,4 +337,8 @@ func TestWindowsStandaloneEnsureNamesPerUserInstallLeftovers(t *testing.T) {
 			t.Fatalf("ensure errors %q do not contain %q", message, want)
 		}
 	}
+	// A managed gateway runs as its service identity and is not per-user.
+	if windowsEnterprisePerUserGatewayHolder(`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`, `NT SERVICE\DefenseClawGateway`) {
+		t.Fatal("the managed gateway service was named a per-user gateway")
+	}
 }

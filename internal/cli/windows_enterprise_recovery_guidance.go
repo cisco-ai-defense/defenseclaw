@@ -262,12 +262,21 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 		" out of the profile, then run Setup again."
 }
 
-// windowsEnterprisePerUserGatewayImage reports a listener image that is a
-// DefenseClaw gateway binary (a per-user install's, since the managed
-// gateway's own process is skipped before this check).
-func windowsEnterprisePerUserGatewayImage(image string) bool {
+// windowsEnterprisePerUserGatewayHolder reports a listener that is a
+// per-user install's DefenseClaw gateway: the gateway binary running as an
+// account. A managed gateway runs as a service identity (NT SERVICE or NT
+// AUTHORITY), for example another deployment's while this one's service
+// process is unknown.
+func windowsEnterprisePerUserGatewayHolder(image, account string) bool {
 	base := image[strings.LastIndexAny(image, `\/`)+1:]
-	return strings.EqualFold(base, "defenseclaw-gateway.exe")
+	if !strings.EqualFold(base, "defenseclaw-gateway.exe") {
+		return false
+	}
+	domain, _, found := strings.Cut(strings.TrimSpace(account), `\`)
+	if !found {
+		return false
+	}
+	return !strings.EqualFold(domain, "NT SERVICE") && !strings.EqualFold(domain, "NT AUTHORITY")
 }
 
 // windowsEnterpriseFirstWindowsPath returns the first drive-letter path in

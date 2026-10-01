@@ -117,6 +117,27 @@ def test_dependencies_install_from_the_hashed_lock_only() -> None:
     assert re.search(r"uv pip install [^\n]*--no-deps \"\$\{STAGING\}/\$\{WHEEL\}\"", text)
 
 
+def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
+    # An upgrade starts without fresh discovery; the gateway records agent
+    # versions in the hook contract lock from it, and doctor checks them.
+    posix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    posix_refresh = posix.index("agent discover --refresh --no-emit-otel")
+    windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
+    assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
+    assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+
+
+def test_windows_process_listing_survives_a_wmi_refusal() -> None:
+    # WMI refuses a standard user signed in over SSH; an upgrade must still
+    # find this account's own processes.
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = windows[windows.index("function Get-ProcessesUnder") :]
+    body = body[: body.index("\n}\n")]
+    assert "try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {" in body
+    assert "Get-Process" in body
+
+
 def test_installer_never_uses_retired_asset_names() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
@@ -331,3 +352,11 @@ def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     assert "claudecode's agent changed (2.1.276 (Claude Code) -> 2.1.286 (Claude Code))" in out
     assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start" in out
     assert "an older failure" not in out
+
+
+def test_windows_installer_leaves_unset_variables_unset() -> None:
+    # pwsh 7 turns SetEnvironmentVariable(name, $null) into an empty value (WIN2-U2-08).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    restore = text[text.index("foreach ($name in $savedEnv.Keys)") :][:400]
+    assert 'if ($null -eq $savedEnv[$name]) { Remove-Item -LiteralPath "Env:$name"' in restore
+

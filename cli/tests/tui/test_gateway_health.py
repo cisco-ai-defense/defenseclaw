@@ -512,6 +512,8 @@ def test_hook_only_footer_and_setup_readiness_are_online() -> None:
     hint = HintEngine().hint_for(HintState(active_panel="overview"), status)
     assert status.gateway.state == "running"
     assert "offline" not in hint.lower()
+    # RHEL-U2-11: the status bar named the unused OpenClaw fleet.
+    assert "OpenClaw" not in status.gateway.detail
 
     readiness = build_readiness_checks({}, snapshot, None, ())
     gateway_check = next(check for check in readiness if check.title == "Gateway / API Health")

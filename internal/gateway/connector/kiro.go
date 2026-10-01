@@ -197,6 +197,17 @@ func missingKiroScaffoldDirs() []string {
 	return missing
 }
 
+// RecordHookConfigParentDirs records the hook config folders an installer
+// created for the named connector before its Setup ran, so its teardown
+// removes them while they are still empty. Only Kiro keeps such a list; for
+// any other connector it does nothing. It is best effort.
+func RecordHookConfigParentDirs(name, dataDir string, dirs []string) {
+	if name != "kiro" || strings.TrimSpace(dataDir) == "" || len(dirs) == 0 {
+		return
+	}
+	_ = recordCreatedDirs(filepath.Join(dataDir, kiroCreatedDirsFile), dirs)
+}
+
 // recordKiroCreatedDirs records the folders of missing that Setup created.
 // It is best effort: an unrecorded folder only stays behind after teardown.
 func recordKiroCreatedDirs(opts SetupOpts, missing []string) {

@@ -329,6 +329,9 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             legacy_tmp = Path(tmp).resolve() / "tmp"
             (legacy_tmp / ".defenseclaw-install-custody-1-abc" / "retired-x").mkdir(parents=True)
             (legacy_tmp / "unrelated").mkdir()
+            # MAC-U2-12: pre-1.0 installers also parked retired binaries beside DEFENSECLAW_HOME.
+            home = Path(tmp).resolve() / "home"
+            (home / ".defenseclaw-install-custody" / "retired-x").mkdir(parents=True)
             gateway = "defenseclaw-gateway.exe" if sys.platform == "win32" else "defenseclaw-gateway"
             plan = cmd_uninstall.UninstallPlan(
                 platform_name=sys.platform,
@@ -336,15 +339,19 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 gateway_path=str(root / gateway),
                 binary_targets=(),
                 remove_binaries=True,
+                data_dir=str(home / ".defenseclaw"),
             )
             with (
                 patch.object(cmd_uninstall.shutil, "which", return_value=None),
                 patch.object(cmd_uninstall, "_legacy_custody_parents", return_value=[str(legacy_tmp)]),
+                patch.dict(os.environ, {"HOME": str(home)}),
                 patch.object(cmd_uninstall.ux, "subhead") as subhead,
             ):
                 cmd_uninstall._remove_binaries(plan)
             self.assertEqual(sorted(os.listdir(root)), [])
             self.assertEqual(os.listdir(legacy_tmp), ["unrelated"])
+            if sys.platform != "win32":
+                self.assertEqual(os.listdir(home), [])
             subhead.assert_not_called()
 
     def test_binary_failure_propagates(self):

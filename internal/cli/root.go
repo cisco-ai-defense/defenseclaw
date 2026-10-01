@@ -240,7 +240,7 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 	if err := daemon.RegisterCurrentProcess(); err != nil {
 		return err
 	}
-	if err := loadGatewayCommandConfigOnly(); err != nil {
+	if err := loadGatewayCommandConfigFor(cmd); err != nil {
 		return err
 	}
 	return nil
@@ -252,6 +252,12 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 // SQLite owner beside the running daemon, because closing that connection can
 // unlink the daemon's live WAL/SHM files on supported SQLite implementations.
 func loadGatewayCommandConfigOnly() error {
+	return loadGatewayCommandConfigFor(nil)
+}
+
+// loadGatewayCommandConfigFor is loadGatewayCommandConfigOnly for cmd, so the
+// managed Windows answer names the command the user ran.
+func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 	// Cobra normally executes this process once, but tests and embedders can
 	// execute the command tree repeatedly. Never retain a previous source.
 	activeObservabilityV8Startup = nil
@@ -265,7 +271,7 @@ func loadGatewayCommandConfigOnly() error {
 	var err error
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
 	if err != nil {
-		if answer := managedWindowsConfigLoadError(nil, err); answer != err {
+		if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
 			return answer
 		}
 		return fmt.Errorf("failed to load config: %w", err)

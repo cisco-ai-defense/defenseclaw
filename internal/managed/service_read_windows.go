@@ -31,12 +31,16 @@ var serviceReadTokenSIDs = []windows.WELL_KNOWN_SID_TYPE{
 const allServicesSID = "S-1-5-80-0"
 
 // ValidateServiceCanReadTree reports a folder, or a file in it, that the
-// gateway's NT SERVICE virtual account cannot read. Setup's preflight runs
-// as LocalSystem, which reads everything, so without this check a policy
+// gateway's NT SERVICE virtual account cannot read, and a parent folder it
+// cannot list or read the permissions of. Setup's preflight runs as
+// LocalSystem, which reads everything, so without this check a policy
 // folder only administrators can read passed preflight and the gateway
-// service then failed to start. It checks the allow and deny entries for
-// the service SID and the well-known groups its token carries; an entry
-// whose DACL this process cannot read is skipped.
+// service then failed to start. The gateway inspects the security
+// descriptor of every parent folder (the administrator-controlled check)
+// and resolves the path through each of them, so a parent needs Read &
+// execute too. It checks the allow and deny entries for the service SID and
+// the well-known groups its token carries; an entry whose DACL this process
+// cannot read is skipped.
 func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
 	if err != nil || serviceSID == nil {
@@ -59,6 +63,14 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		}
 		sids = append(sids, sid)
 	}
+	for _, parent := range serviceReadParents(root) {
+		if !serviceHasAccess(parent, sids, serviceParentAccess) {
+			return fmt.Errorf(
+				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
+					"grant it Read & execute on that folder, for example: icacls %q /grant \"%s:RX\", or keep the folder outside %s",
+				label, root, serviceAccount, parent, parent, serviceAccount, parent)
+		}
+	}
 	entries := 0
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -70,7 +82,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		if !entry.IsDir() && !entry.Type().IsRegular() {
 			return nil
 		}
-		if serviceCanRead(path, sids) {
+		if serviceHasAccess(path, sids, serviceTreeAccess) {
 			return nil
 		}
 		return fmt.Errorf(
@@ -79,9 +91,37 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 	})
 }
 
-// serviceCanRead reports whether the DACL of path grants FILE_READ_DATA
-// (FILE_LIST_DIRECTORY for a folder) to one of sids and denies it to none.
-func serviceCanRead(path string, sids []*windows.SID) bool {
+// serviceReadParents lists the parent folders of root up to its volume
+// root; tests replace it to stay inside their temporary folder.
+var serviceReadParents = func(root string) []string {
+	var parents []string
+	clean := filepath.Clean(root)
+	for parent := filepath.Dir(clean); parent != clean; clean, parent = parent, filepath.Dir(parent) {
+		parents = append(parents, parent)
+	}
+	return parents
+}
+
+const (
+	// serviceTreeAccess is FILE_READ_DATA (FILE_LIST_DIRECTORY on a folder).
+	serviceTreeAccess = windows.ACCESS_MASK(0x0001)
+	// serviceParentAccess adds READ_CONTROL: the gateway reads each parent's
+	// security descriptor.
+	serviceParentAccess = serviceTreeAccess | windows.READ_CONTROL
+)
+
+// serviceFileGenericMapping maps generic rights to file rights.
+var serviceFileGenericMapping = [...]struct{ generic, specific windows.ACCESS_MASK }{
+	{windows.GENERIC_READ, 0x120089},
+	{windows.GENERIC_WRITE, 0x120116},
+	{windows.GENERIC_EXECUTE, 0x1200a0},
+	{windows.GENERIC_ALL, 0x1f01ff},
+}
+
+// serviceHasAccess reports whether the DACL of path grants every right in
+// want to one of sids, evaluating allow and deny entries in order as
+// Windows does.
+func serviceHasAccess(path string, sids []*windows.SID, want windows.ACCESS_MASK) bool {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return true
@@ -93,18 +133,17 @@ func serviceCanRead(path string, sids []*windows.SID) bool {
 	if dacl == nil {
 		return true // a NULL DACL grants everyone access
 	}
-	const readBits = windows.ACCESS_MASK(0x0001) | windows.GENERIC_READ | windows.GENERIC_ALL
-	allowed := false
+	var allowed, denied windows.ACCESS_MASK
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil ||
-			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&readBits == 0 {
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		matches := false
-		for _, want := range sids {
-			if sid.Equals(want) {
+		for _, candidate := range sids {
+			if sid.Equals(candidate) {
 				matches = true
 				break
 			}
@@ -112,12 +151,18 @@ func serviceCanRead(path string, sids []*windows.SID) bool {
 		if !matches {
 			continue
 		}
+		mask := ace.Mask
+		for _, mapping := range serviceFileGenericMapping {
+			if mask&mapping.generic != 0 {
+				mask = mask&^mapping.generic | mapping.specific
+			}
+		}
 		switch ace.Header.AceType {
 		case windows.ACCESS_DENIED_ACE_TYPE:
-			return false
+			denied |= mask &^ allowed
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
-			allowed = true
+			allowed |= mask &^ denied
 		}
 	}
-	return allowed
+	return allowed&want == want
 }

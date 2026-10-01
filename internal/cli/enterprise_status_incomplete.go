@@ -18,6 +18,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
+// claudeAttestationHint names the step that verifies Claude Code's machine
+// policy on Windows. Each install and upgrade replaces the hook binary, which
+// makes an earlier attestation stale.
+const claudeAttestationHint = " (it needs an administrator's attestation, and each upgrade makes the last one stale: " +
+	"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
+	"or `enterprise windows repair --profile standalone --attest-claude-effective-policy`)"
+
 // addEnterpriseSecurityIncompleteReasons names why security is not complete
 // when nothing else in the result does. Windows standalone status and verify
 // reported security_complete:false with empty errors and warnings, so an
@@ -41,7 +48,11 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 	for _, name := range names {
 		state := result.MachinePolicy[name]
 		if state.Ownership != "off" && state.Lock == "enforce" && state.EffectiveLock != "enforce" {
-			reasons = append(reasons, fmt.Sprintf("the %s machine policy is not verified in force", name))
+			reason := fmt.Sprintf("the %s machine policy is not verified in force", name)
+			if name == "claudecode" {
+				reason += claudeAttestationHint
+			}
+			reasons = append(reasons, reason)
 		}
 	}
 	if pending := result.Enrollment.Pending; pending > 0 {

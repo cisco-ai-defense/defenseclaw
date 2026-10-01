@@ -96,6 +96,26 @@ def setup_agent_selection_connectors(connectors: Iterable[str]) -> tuple[str, ..
     )
 
 
+def setup_agent_selection_problems(
+    data_dir: str | os.PathLike[str],
+    connectors: Iterable[str],
+) -> dict[str, str]:
+    """Return why each protected connector has no selectable executable.
+
+    Read-only: nothing is recorded. Batch callers use it to leave out a
+    connector that setup would refuse before the protected transaction starts.
+    """
+
+    target_dir = os.path.abspath(os.fspath(data_dir))
+    problems: dict[str, str] = {}
+    for connector in setup_agent_selection_connectors(connectors):
+        try:
+            _select_agent_executable(target_dir, connector)
+        except OSError as exc:
+            problems[connector] = str(exc)
+    return problems
+
+
 def record_setup_agent_selections(
     data_dir: str | os.PathLike[str],
     connectors: Iterable[str],
@@ -153,7 +173,10 @@ def record_setup_agent_selections(
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
-        rejection = "the exact official SST WinGet opencode.exe image was not found or was not trusted"
+        rejection = (
+            "the exact official SST WinGet opencode.exe image was not found or was not trusted; "
+            "install it with 'winget install SST.opencode'"
+        )
     else:
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
     untrusted_found = ""
@@ -471,6 +494,13 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                 pass
         if connector == "codex" and os.path.normcase(os.path.abspath(root)) != paired_codex_root:
             candidates.extend(_codex_npm_native_candidates(root))
+        if connector == "amp" and os.name == "nt":
+            # npm puts only amp.cmd/amp.ps1 shims on PATH; the native image
+            # they launch sits at this fixed package-relative path, the same
+            # one the per-user admission table names.
+            candidate = os.path.join(root, *_AMP_NPM_NATIVE_RELATIVE)
+            if os.path.isfile(candidate):
+                candidates.append(candidate)
 
     # Prefer a native image over a script wrapper. This both avoids shell
     # interpretation and binds the protected digest to the process that
@@ -488,6 +518,9 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             seen.add(key)
             result.append(candidate)
     return tuple(result)
+
+
+_AMP_NPM_NATIVE_RELATIVE = ("node_modules", "@ampcode", "cli", "bin", "amp.exe")
 
 
 def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:

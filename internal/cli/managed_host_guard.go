@@ -116,10 +116,21 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 // guard, so `setup kiro` names it.
 // managedWindowsAdminCommandAnswer tells a user on a managed Windows computer
 // that a per-user command has no per-user deployment to read.
+// It names the administrator's check for this account as well, because the
+// deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check; an administrator can check the managed deployment with "+
-		"`defenseclaw-gateway enterprise windows status --profile standalone`. Nothing was changed", where, command)
+		"`defenseclaw-gateway enterprise windows status --profile standalone`, and your account's agents with "+
+		"`defenseclaw-gateway enterprise policy show --user %s`. Nothing was changed", where, command, managedHostCurrentAccount())
+}
+
+// managedHostCurrentAccount names the signed-in account for the answer above.
+var managedHostCurrentAccount = func() string {
+	if current, err := user.Current(); err == nil && strings.TrimSpace(current.Username) != "" {
+		return current.Username
+	}
+	return "<account>"
 }
 
 // managedWindowsConfigLoadError replaces the raw "read v8 config ...

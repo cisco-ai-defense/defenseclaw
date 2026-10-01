@@ -34,6 +34,7 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 	message := result.Warnings[0].Message
 	if !strings.Contains(message, "claudecode machine policy") || strings.Contains(message, "codex machine policy") ||
+		!strings.Contains(message, "/repair ATTESTCLAUDEEFFECTIVEPOLICY=1") ||
 		!strings.Contains(message, "4 per-user enrollment(s) are pending") {
 		t.Fatalf("message = %q", message)
 	}

@@ -777,6 +777,15 @@ class AlertsPanelModel:
             if self.filter_text or self.filtering:
                 self.clear_filter()
                 return AlertPanelAction(True, hint="Filter cleared.")
+            if self.show_all_severities or self.severity_filter:
+                # The hint for a severity filter says Esc clears it.
+                old = self.severity_filter
+                self.set_actionable_scope()
+                return AlertPanelAction(
+                    True,
+                    hint="Severity filter cleared.",
+                    filter_change=_alert_filter_change(old, self.severity_filter),
+                )
             return AlertPanelAction(False)
         if key == "space":
             self.toggle_select()

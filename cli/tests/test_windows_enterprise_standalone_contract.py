@@ -239,6 +239,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
+    "enterprise-standalone-service-logged-error-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 

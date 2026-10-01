@@ -156,7 +156,8 @@ func InstallOpenCodeManagedPlugin(opts Options) (bool, error) {
 		return false, fmt.Errorf("enterprise policy: %w", err)
 	}
 	current, installed, err := opts.openCodeArtifact()
-	if err == nil && installed && bytes.Equal(current, openCodeManagedPlugin) && opts.openCodeArtifactLoadable() {
+	if err == nil && installed && bytes.Equal(current, openCodeManagedPlugin) && opts.openCodeArtifactLoadable() &&
+		!openCodePluginReadOnly(opts.openCodeArtifactFile()) {
 		return false, nil
 	}
 	if err := releaseOpenCodePluginName(opts, platformPath(opts, opts.openCodeArtifactFile())); err != nil {
@@ -295,6 +296,9 @@ func inspectOpenCode(opts Options, current []byte, state *State) error {
 			opts.OpenCodePluginPath, sha256Hex(artifact), sha256Hex(openCodeManagedPlugin))
 	case !opts.openCodeArtifactLoadable():
 		state.conflict("managed OpenCode plugin %s cannot be loaded by a standard account's OpenCode: Users lack the file access its runtime requests to read a module; repair rewrites it",
+			opts.OpenCodePluginPath)
+	case openCodePluginReadOnly(opts.openCodeArtifactFile()):
+		state.conflict("managed OpenCode plugin %s is marked read-only, so a later release cannot replace it; repair clears the attribute",
 			opts.OpenCodePluginPath)
 	}
 	state.detail("OpenCode ran the managed plugin after user and project plugins in live tests, but plugin order is not a documented contract; the foreign-plugin guard stays on")
