@@ -199,11 +199,7 @@ def _replace_jsonl(output: Path, records: list[str]) -> None:
                 stream.write(record)
                 stream.write("\n")
             stream.flush()
-        # The snapshot is private to one harness read and deleted right after
-        # it, so it needs atomic publication, not durability. An fsync is an
-        # uncancellable wait on the runner disk: on a stalled hosted volume it
-        # held this process past the harness deadline, and its kill could not
-        # complete until the flush returned.
+            os.fsync(stream.fileno())
         os.replace(temporary, output)
     finally:
         try:

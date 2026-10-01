@@ -4247,7 +4247,7 @@ function Invoke-NativeProcess {
             throw "$FilePath redirected output capture failed`n$combined"
         }
         if ($exitCode -notin $AllowedExitCodes) {
-            $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s (phase=$timeoutPhase)" } else { "exited $exitCode" }
+            $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
             throw "$FilePath $reason`n$combined"
         }
         return $result
