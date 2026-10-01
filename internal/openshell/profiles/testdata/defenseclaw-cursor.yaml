@@ -1,0 +1,29 @@
+id: defenseclaw-cursor
+display_name: Cursor service for Cursor Agent (DefenseClaw)
+description: Binds CURSOR_API_KEY to Cursor's service (api2.cursor.sh and its sibling endpoints), which serves authentication and every model request, as a bearer; only the Cursor Agent binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Cursor user or team API key
+    env_vars: [CURSOR_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: api2.cursor.sh
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: api3.cursor.sh
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: repo42.cursor.sh
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/cursor/node"]

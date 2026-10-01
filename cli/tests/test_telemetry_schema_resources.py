@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -150,12 +151,13 @@ def test_telemetry_package_data_is_exact_and_staging_is_untracked() -> None:
         assert ignored.returncode == 0
 
 
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build wheels")
 def test_built_wheel_loads_telemetry_compatibility_resources_from_installed_package_only(
     tmp_path: Path,
 ) -> None:
     dist = tmp_path / "dist"
     completed = subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(dist)],
+        [shutil.which("uv"), "build", "--wheel", "--out-dir", str(dist)],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -194,7 +196,7 @@ from defenseclaw.observability.v8_compatibility import load_packaged_v7_compatib
 raw = v7_exporter_selection_bytes()
 selection = load_packaged_v7_compatibility_selection()
 audit_selector = next(selector for selector in selection.exporter_selectors('audit_sink', 'logs') if selector.actions)
-assert len(audit_selector.actions) == 190
+assert len(audit_selector.actions) == 196
 assert 'setup-redaction-policy' in audit_selector.actions
 print(json.dumps({{
     'v7-exporter-selection': hashlib.sha256(raw).hexdigest(),

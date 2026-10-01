@@ -274,6 +274,15 @@ def test_unsupported_platform_never_plans_or_applies(
     assert result.repairs[0]["platform"] == "freebsd14"
 
 
+def test_watchdog_repair_is_a_quiet_noop_outside_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """doctor --fix warned "repair is unavailable on platform 'linux'" on every run."""
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "linux")
+    spec = next(s for s in cmd_doctor._doctor_repair_specs() if s.repair_id == "doctor.gateway.watchdog.reconcile")
+
+    assert "linux" in spec.platforms
+    assert cmd_doctor._plan_watchdog_runtime(_cfg()).state == "noop"
+
+
 def test_planner_exception_becomes_typed_failure_and_later_repairs_continue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -362,6 +371,38 @@ def test_passive_doctor_never_emits_an_action_fact() -> None:
     cmd_doctor._record_doctor_action(app, _cfg(), result, "check")
 
     logger.log_action.assert_not_called()
+
+
+def test_doctor_action_fact_is_not_sent_to_an_unverified_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another account's process on the API port got the token with this fact (#642)."""
+    import defenseclaw.logger as logger_mod
+
+    monkeypatch.setattr(cmd_doctor, "_plan_canonical_config_preflight", lambda _cfg: RepairDecision("noop", "ok"))
+    monkeypatch.setattr(cmd_doctor, "_daemon_effective_gateway_token", lambda _cfg: ("token", "", "dotenv"))
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust("missing", "managed gateway PID file is missing"),
+    )
+    sent = Mock(return_value=(204, ""))
+    monkeypatch.setattr(cmd_doctor, "_gateway_peer_bound_request", sent)
+    dialed = Mock()
+    monkeypatch.setattr(logger_mod, "OrchestratorClient", dialed)
+    cfg = SimpleNamespace(
+        data_dir="",
+        gateway=SimpleNamespace(token_env="", api_port=18970, resolved_token=lambda: "token"),
+    )
+    app = SimpleNamespace(logger=None)
+    result = cmd_doctor._DoctorResult(mode="check")
+    result.record("pass", "configuration")
+
+    cmd_doctor._record_doctor_action(app, cfg, result, "check")
+
+    sent.assert_not_called()
+    dialed.assert_not_called()
+    assert result.to_dict()["exit_code"] == 0
 
 
 def test_unavailable_action_sink_cannot_replace_doctor_result() -> None:

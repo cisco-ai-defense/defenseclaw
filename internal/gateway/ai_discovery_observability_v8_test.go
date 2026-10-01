@@ -475,7 +475,7 @@ func TestContinuousAIDiscoveryV8CarriesModelProvenanceAcrossLifecycleFamilies(t 
 		report.Signals = append(report.Signals, inventory.AISignal{
 			SignalID: "model-" + item.state, SignatureID: "local-model", Category: inventory.SignalLocalModel,
 			Vendor: "Local", Product: "Local Model Artifact", Confidence: .9, State: item.state,
-			Detector: "model_file",
+			Detector: "model_file", UserID: "1001", UserName: "alice",
 			Model: &inventory.LocalModelInfo{
 				ID: "private-" + item.state, Status: "installed",
 				Provenance: &inventory.LocalModelProvenance{
@@ -502,6 +502,11 @@ func TestContinuousAIDiscoveryV8CarriesModelProvenanceAcrossLifecycleFamilies(t 
 		}
 		if root := body[observability.TelemetryAttributeDefenseClawAIModelProvenanceRootModel]; root != "meta-llama/Llama-3.2-3B" {
 			t.Errorf("%s root=%T(%v)", record.EventName(), root, root)
+		}
+		// A per-user scan's account reaches every lifecycle family, not only
+		// the steady-state observation.
+		if body["user.id"] != "1001" || body["defenseclaw.user.name"] != "alice" {
+			t.Errorf("%s user=%v/%v want 1001/alice", record.EventName(), body["user.id"], body["defenseclaw.user.name"])
 		}
 	}
 	for _, item := range states {

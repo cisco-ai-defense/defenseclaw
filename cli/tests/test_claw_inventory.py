@@ -4063,18 +4063,39 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(second["transport"], "sse")
 
     def test_summary_total_matches_arrays_for_codex(self):
+        # Codex inventories rules/*.rules beside its home and /etc/codex, so
+        # every discovery root points into the fixture: rules the Codex CLI
+        # wrote on the machine running the tests (~/.codex/rules/default.rules)
+        # must not reach the count.
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         skill_root = os.path.join(self.tmp, "skills")
         os.makedirs(skill_root, exist_ok=True)
         _seed_skill(skill_root, "a")
         _seed_skill(skill_root, "b")
-        with self._patch_skill_dirs([skill_root]), \
+        codex_home = Path(self.tmp) / ".codex"
+        user_rules = codex_home / "rules"
+        user_rules.mkdir(parents=True)
+        (user_rules / "user.rules").write_text(
+            'prefix_rule(pattern=["rm"], decision="forbidden")\n',
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {"CODEX_HOME": str(codex_home), "HOME": self.tmp, "USERPROFILE": self.tmp},
+            clear=False,
+        ), patch("defenseclaw.connector_paths.Path.home", return_value=Path(self.tmp)), \
+             patch.object(connector_paths, "rule_dirs", return_value=[str(user_rules)]), \
+             self._patch_skill_dirs([skill_root]), \
              self._patch_plugin_dirs([]), \
              self._patch_mcp([]):
             inv = build_claw_aibom(cfg, live=True)
-        self.assertEqual(inv["summary"]["total_items"], 2)
-        self.assertEqual(inv["summary"]["skills"]["count"], 2)
-        self.assertEqual(inv["summary"]["plugins"]["count"], 0)
+        summary = inv["summary"]
+        self.assertEqual(summary["skills"]["count"], 2)
+        self.assertEqual(summary["plugins"]["count"], 0)
+        self.assertEqual(summary["rules"]["count"], 1)
+        categories = ("skills", "plugins", "mcp", "agents", "rules", "tools", "model_providers", "memory")
+        self.assertEqual(summary["total_items"], sum(len(inv.get(key, [])) for key in categories))
+        self.assertEqual(summary["total_items"], 3)
 
     def test_categories_filter_skills_only_skips_others(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

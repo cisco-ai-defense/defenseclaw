@@ -9,3 +9,7 @@ package connector
 func validateOpenCodeWindowsSetupAdmission(SetupOpts) error { return nil }
 
 func validateOpenCodeWindowsLockPublication(string, HookContractLockEntry) error { return nil }
+
+// OpenCodeWindowsPackageIdentityVerified is Windows-only; other platforms do
+// not select OpenCode images.
+func OpenCodeWindowsPackageIdentityVerified(string) bool { return false }

@@ -1,0 +1,14 @@
+{
+  "title": "Install with an MDM",
+  "pages": [
+    "index",
+    "intune-windows",
+    "intune-macos",
+    "intune-linux",
+    "jamf",
+    "kandji",
+    "workspace-one",
+    "configmgr",
+    "linux-config-management"
+  ]
+}

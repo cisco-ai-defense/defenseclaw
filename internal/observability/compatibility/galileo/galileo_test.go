@@ -452,6 +452,26 @@ func TestProjectToolRemovedContentIsAnExplicitSchemaMiss(t *testing.T) {
 	}
 }
 
+// Amp's built-in modes name no model, so its agent spans carry no provider.
+// Galileo requires one: the agent span failed the projection and those
+// traces never appeared in Galileo. The connector stands in.
+func TestProjectAgentWithoutProviderNamesItsConnector(t *testing.T) {
+	t.Parallel()
+	body := map[string]any{"kind": "INTERNAL", "attributes": map[string]any{
+		"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "medium",
+		"gen_ai.input.messages": messages("user", "inspect"), "gen_ai.output.messages": messages("assistant", "done"),
+	}}
+	record := newTraceRecordWith(t, observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent amp", body,
+		func(input *observability.RecordInput) {
+			input.Source, input.Connector = observability.SourceConnector, "amp"
+		})
+	result := Project(redactRecord(t, record, redaction.ProfileNone), Limits{})
+	projected, err := result.Bytes()
+	if err != nil || !strings.Contains(string(projected), `"gen_ai.provider.name":"amp"`) {
+		t.Fatalf("agent span without a provider = eligible:%v missing:%v err:%v", result.Eligible(), result.MissingFields(), err)
+	}
+}
+
 func TestProjectRejectsSchemaMissAndNativeNonGalileoShapes(t *testing.T) {
 	t.Parallel()
 	missingProvider := projectRecord(t, observability.BucketModelIO, "span.model.chat", "chat model", map[string]any{
@@ -1184,7 +1204,19 @@ func newTraceRecord(
 	body map[string]any,
 ) observability.Record {
 	t.Helper()
-	record, err := observability.NewRecord(observability.RecordInput{
+	return newTraceRecordWith(t, bucket, family, spanName, body, nil)
+}
+
+func newTraceRecordWith(
+	t *testing.T,
+	bucket observability.Bucket,
+	family observability.EventName,
+	spanName string,
+	body map[string]any,
+	edit func(*observability.RecordInput),
+) observability.Record {
+	t.Helper()
+	input := observability.RecordInput{
 		Timestamp: time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC),
 		RecordID:  "galileo-" + strings.ReplaceAll(string(family), ".", "-"),
 		Identity: observability.EventIdentity{
@@ -1203,7 +1235,11 @@ func newTraceRecord(
 			RegistrySchemaVersion: 1, ConfigGeneration: 7,
 		},
 		Body: body, FieldClasses: fieldClasses(body),
-	})
+	}
+	if edit != nil {
+		edit(&input)
+	}
+	record, err := observability.NewRecord(input)
 	if err != nil {
 		t.Fatal(err)
 	}

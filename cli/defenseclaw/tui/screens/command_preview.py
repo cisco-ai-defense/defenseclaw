@@ -22,7 +22,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from defenseclaw.tui.command_line import ParsedCommand, infer_command_risk
+from defenseclaw.tui.command_line import ParsedCommand, display_argv, infer_command_risk
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 SECRET_FLAG_FRAGMENTS = ("key", "token", "secret", "password", "credential")
@@ -43,10 +43,13 @@ class CommandPreview:
     origin: str
     restart: str
     summary: str
+    # What the command receives besides argv, with every value hidden:
+    # "Secret: sent on stdin (hidden)" and "Environment: NAME=<hidden>".
+    hidden_inputs: tuple[str, ...] = ()
 
     @property
     def masked_display(self) -> str:
-        return " ".join(self.masked_argv)
+        return display_argv(self.masked_argv)
 
 
 def build_command_preview(command: ParsedCommand) -> CommandPreview:
@@ -62,7 +65,20 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
         origin=command.category,
         restart=_restart_effect(risk, command.args),
         summary=_risk_summary(risk, command.category),
+        hidden_inputs=hidden_input_lines(command),
     )
+
+
+def hidden_input_lines(command: ParsedCommand) -> tuple[str, ...]:
+    """Describe stdin/env payloads without revealing their values."""
+
+    lines: list[str] = []
+    if command.stdin_input is not None:
+        lines.append("Secret: sent on stdin (hidden)")
+    names = [name for name, _value in command.env_overrides if name]
+    if names:
+        lines.append("Environment: " + ", ".join(f"{name}=<hidden>" for name in names))
+    return tuple(lines)
 
 
 def classify_risk(category: str, args: tuple[str, ...]) -> str:
@@ -219,12 +235,13 @@ class CommandPreviewScreen(ModalScreen[bool]):
         origin = rich_escape(self.preview.origin)
         risk = rich_escape(self.preview.risk)
         restart = rich_escape(self.preview.restart)
+        hidden = "".join(f"\n{rich_escape(line)}" for line in self.preview.hidden_inputs)
         with Vertical(id="preview-dialog"):
             yield Static("Confirm Command", id="preview-title")
             yield Static(f"[{color}]{summary}[/]", id="preview-risk")
             yield Static(
                 "[bold]Command[/]\n"
-                f"{masked}\n\n"
+                f"{masked}{hidden}\n\n"
                 f"[bold]Origin[/] {origin}    "
                 f"[bold]Risk[/] {risk}    "
                 f"[bold]Restart[/] {restart}",

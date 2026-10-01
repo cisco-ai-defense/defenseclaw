@@ -30,10 +30,11 @@ const (
 )
 
 type windowsTargetRuntimeOptions struct {
-	manifest string
-	request  string
-	claims   string
-	output   string
+	manifest   string
+	request    string
+	claims     string
+	output     string
+	validation bool
 }
 
 var (
@@ -65,6 +66,7 @@ func newWindowsTargetRuntimeCommand() *cobra.Command {
 		flags.StringVar(&opts.output, "output", "", "pre-created protected AdminFile report path")
 		if action == "plan" {
 			flags.StringVar(&opts.manifest, "manifest", "", "protected targets.yaml")
+			flags.BoolVar(&opts.validation, "validate-only", false, "Upgrade/Repair plan: validate existing roots and report a deferred account's pending root")
 		} else {
 			flags.StringVar(&opts.request, "request", "", "protected target-runtime plan JSON")
 			if action == "finalize" || action == "cleanup" {
@@ -99,7 +101,12 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 		if err != nil {
 			return err
 		}
-		plan, err := enterprisehooks.PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+		plan := enterprisehooks.WindowsManagedRuntimePlan{}
+		if opts.validation {
+			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRootsForValidation(manifest, manifestPath, digest)
+		} else {
+			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+		}
 		if err != nil {
 			return err
 		}

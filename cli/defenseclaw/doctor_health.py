@@ -223,7 +223,8 @@ def probe_component_evidence(
         cmd_version._gateway_component()
         if gateway_executable is _AUTO_GATEWAY_EXECUTABLE
         else cmd_version._gateway_component_for_binary(
-            gateway_executable if isinstance(gateway_executable, str) else None
+            gateway_executable if isinstance(gateway_executable, str) else None,
+            pinned=True,
         )
     )
     components = (

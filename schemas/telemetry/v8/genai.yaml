@@ -3013,6 +3013,7 @@ groups:
   - content.output
   - error.core
   - genai.tool
+  - security.guardrail.outcome
   attributes:
   - ref: gen_ai.tool.name
     requirement_level: required
@@ -3022,7 +3023,7 @@ groups:
     kinds:
     - INTERNAL
     - CLIENT
-    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+    status_rule: OTel status is ERROR for a technical failure or a guardrail block; other policy decisions remain typed domain fields.
   x-defenseclaw:
     bucket: tool.activity
     family_schema_version: 1
@@ -3039,6 +3040,9 @@ groups:
     route_selector: true
     events:
     - tool.flagged
+    - defenseclaw.guardrail.block
+    - defenseclaw.guardrail.ask
+    - defenseclaw.guardrail.alert
     - approval.requested
     - approval.resolved
     - guardrail.decision
@@ -4543,41 +4547,6 @@ groups:
         label: status
   x-defenseclaw:
     bucket: model.io
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-    legacy_bindings:
-    - source: schemas/otel/metrics.schema.json x-emitted-metrics
-      disposition: preserved
-- id: metric.defenseclaw.openshell.exit
-  type: metric
-  brief: OpenShell subprocess exits by command and exit code
-  stability: stable
-  introduced_in: telemetry-registry-v1
-  extends: []
-  attributes:
-  - ref: defenseclaw.metric.command
-    requirement_level: recommended
-  - ref: defenseclaw.tool.exit_code
-    requirement_level: recommended
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.openshell.exit
-    instrument_type: counter
-    value_type: int64
-    unit: '{exit}'
-    description: OpenShell subprocess exits by command and exit code
-    temporality: delta
-    label_projections:
-    - profile: local-observability-v1
-      mappings:
-      - ref: defenseclaw.metric.command
-        label: command
-      - ref: defenseclaw.tool.exit_code
-        label: exit_code
-  x-defenseclaw:
-    bucket: tool.activity
     family_schema_version: 1
     route_selector: true
     compatibility_profiles:

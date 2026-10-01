@@ -12,8 +12,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import json
 import re
+import types
+import typing
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +26,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
+from defenseclaw.tui.services.sandbox_state import HARNESSES, resolve_harness
 
 ReadinessStatus = Literal["pass", "warn", "fail"]
 ValidationSeverity = Literal["ok", "warning", "error"]
@@ -62,6 +67,10 @@ class SetupCommandIntent:
     # child asks for input. Never read this field alone to decide whether a
     # command needs confirmation.
     risk: SetupPreviewRisk = "read-only"
+    # Hand the terminal to the command (App.suspend) instead of capturing it:
+    # ``sandbox setup`` may run the OpenShell installer under sudo and builds
+    # images for minutes, which need a real terminal.
+    terminal: bool = False
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -490,11 +499,18 @@ def validate_config_field(field: ConfigField) -> ValidationResult:
     value = field.value.strip()
     if field.kind == "header":
         return ValidationResult()
+    if not value and not field.original.strip() and field.kind in {"bool", "int", "choice"}:
+        # Unset in config.yaml and still unset: the runtime default applies.
+        return ValidationResult()
 
     if field.kind == "bool" and value not in {"true", "false"}:
         return ValidationResult("error", "expected true or false")
     if field.kind == "choice" and field.options and value not in field.options:
         return ValidationResult("error", "choose one of: " + ", ".join(field.options))
+    if field.key.startswith("openshell."):
+        openshell_result = _validate_openshell_field(field.key, value)
+        if openshell_result is not None:
+            return openshell_result
     if field.kind == "int":
         try:
             number = int(value)
@@ -550,15 +566,103 @@ def config_diff(sections: Sequence[ConfigSection]) -> tuple[ConfigDiffEntry, ...
 
 
 def validation_errors(sections: Sequence[ConfigSection]) -> tuple[str, ...]:
+    """Every error in the draft, including fields the operator didn't touch."""
+
+    return _collect_errors(sections, changed_only=False)
+
+
+def blocking_validation_errors(sections: Sequence[ConfigSection]) -> tuple[str, ...]:
+    """Errors that block a save: only fields whose value was changed.
+
+    An untouched field is written back exactly as loaded (only changed
+    fields are applied), so a questionable value already on disk must not
+    stop the operator from saving an unrelated edit.
+    """
+
+    return _collect_errors(sections, changed_only=True)
+
+
+def _collect_errors(sections: Sequence[ConfigSection], *, changed_only: bool) -> tuple[str, ...]:
     errors: list[str] = []
     for section in sections:
         for field_ in section.fields:
             if field_.kind == "header":
                 continue
+            if changed_only and field_.value == field_.original:
+                continue
             result = validate_config_field(field_)
             if result.severity == "error":
                 errors.append(f"{field_.key}: {result.message}")
     return tuple(errors)
+
+
+# Key prefixes whose editor writes go through a dedicated writer in
+# :func:`apply_config_field` that builds the typed dataclass entries itself.
+SPECIAL_WRITER_PREFIXES: tuple[str, ...] = (
+    "skill_actions.",
+    "mcp_actions.",
+    "plugin_actions.",
+    "asset_policy.connectors.",
+    "guardrail.connectors.",
+    "guardrail.judge.hook_connectors.",
+    "openshell.",
+)
+
+
+def is_python_modeled(cfg: object | Mapping[str, Any] | None, key: str) -> bool:
+    """Whether ``Config.save()`` persists an edit to ``key``.
+
+    ``Config`` serializes with :func:`dataclasses.asdict`, so a value set on
+    a path the dataclasses don't declare is silently dropped. The walk uses
+    the declared field types (``dict[str, X]`` segments accept any name), so
+    the answer doesn't depend on which optional entries the loaded config
+    happens to contain. ``cfg`` only picks the root type when it is a
+    dataclass; dict and namespace drafts are checked against ``Config``.
+    """
+
+    if not key:
+        return False
+    if key.startswith(SPECIAL_WRITER_PREFIXES):
+        return True
+    root: Any = type(cfg) if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type) else None
+    if root is None:
+        try:
+            from defenseclaw.config import Config  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - no schema available: don't lock rows.
+            return True
+        root = Config
+    return _type_models_path(root, tuple(key.split(".")))
+
+
+@functools.cache
+def _dataclass_hints(cls: type) -> dict[str, Any]:
+    try:
+        return typing.get_type_hints(cls)
+    except Exception:  # noqa: BLE001 - unresolved annotation: fall back to raw types.
+        return {item.name: item.type for item in dataclasses.fields(cls)}
+
+
+def _type_models_path(tp: Any, parts: tuple[str, ...]) -> bool:
+    if not parts:
+        return True
+    if tp is Any:
+        return True
+    origin = typing.get_origin(tp)
+    if origin in (typing.Union, types.UnionType):
+        return any(_type_models_path(arg, parts) for arg in typing.get_args(tp) if arg is not type(None))
+    if origin in (dict, Mapping) or tp is dict:
+        args = typing.get_args(tp)
+        return _type_models_path(args[1] if len(args) == 2 else Any, parts[1:])
+    if isinstance(tp, type) and dataclasses.is_dataclass(tp):
+        hints = _dataclass_hints(tp)
+        names = {item.name for item in dataclasses.fields(tp)}
+        head = parts[0]
+        for name in (head, head + "_"):
+            if name in names:
+                return _type_models_path(hints.get(name, Any), parts[1:])
+        return False
+    # Scalars and lists hold a value, not further named keys.
+    return False
 
 
 def mask_secret(value: str) -> str:
@@ -659,6 +763,9 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
         return
     if key.startswith("guardrail.judge.hook_connectors."):
         _apply_judge_hook_connector_toggle(cfg, key, value)
+        return
+    if key.startswith("openshell."):
+        _apply_openshell_field(cfg, key, value)
         return
     _apply_typed_field(cfg, key, value)
 
@@ -937,6 +1044,152 @@ def _is_secret_name(name: str) -> bool:
         marker in lowered
         for marker in ("password", "secret", "token", "api_key", "apikey", "access_key", "private_key")
     )
+
+
+# --- openshell: (OpenShell 0.1 sandboxes) ------------------------------------
+#
+# Pack-governed keys use the "inherit" choice for unset (empty / nil). The
+# kinds mirror internal/config/openshell.go.
+
+OPENSHELL_INHERIT_CHOICE = "inherit"
+_OPENSHELL_TRISTATE_KEYS = frozenset(
+    {"openshell.yolo", "openshell.mcp.import", "openshell.approvals.agent_proposals"}
+)
+_OPENSHELL_INHERIT_STRING_KEYS = frozenset(
+    {"openshell.profile", "openshell.workdir.mode", "openshell.egress.feed"}
+)
+_OPENSHELL_BOOL_KEYS = frozenset(
+    {
+        "openshell.enabled",
+        "openshell.upstream_telemetry",
+        "openshell.middleware.enabled",
+        "openshell.keep_headless",
+        "openshell.workdir.undo_ignored.enabled",
+        "openshell.egress.block_large_uploads",
+    }
+)
+_OPENSHELL_INT_KEYS = frozenset(
+    {
+        "openshell.ingress_port",
+        "openshell.egress_port",
+        "openshell.workdir.max_upload_mb",
+        "openshell.workdir.git_depth",
+        "openshell.workdir.undo_ignored.max_mb",
+        "openshell.egress.large_upload_mb",
+        "openshell.approvals.debounce_ms",
+    }
+)
+_OPENSHELL_PORT_LIST_KEYS = frozenset({"openshell.egress.ports", "openshell.mcp.host_ports"})
+_OPENSHELL_STRING_LIST_KEYS = frozenset(
+    {
+        "openshell.workdir.masks",
+        "openshell.workdir.unmask",
+        "openshell.egress.block",
+        "openshell.egress.allow",
+        "openshell.egress.unblocked",
+        "openshell.harnesses",
+        "openshell.workdir.undo_ignored.dirs",
+    }
+)
+# Keys only the daemon and the sandbox commands write.
+_OPENSHELL_READ_ONLY_KEYS = frozenset({"openshell.wrappers", "openshell.admin", "openshell.mode"})
+_OPENSHELL_CPU = re.compile(r"^(\d+(\.\d+)?|\d+m)$")
+_OPENSHELL_MEMORY = re.compile(r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T|k)?$")
+# config.openShellNamePattern.
+_OPENSHELL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# config.openShellUndoIgnoredDir: one path segment, not "." or "..".
+_OPENSHELL_UNDO_IGNORED_DIR = re.compile(r"^\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
+    """Validation for ``openshell.*`` keys, or None to fall through."""
+
+    if key in {"openshell.ingress_port", "openshell.egress_port"}:
+        try:
+            port = int(value or "0")
+        except ValueError:
+            return ValidationResult("error", "expected a port number (0 derives it from gateway.api_port)")
+        if not 0 <= port <= 65535:
+            return ValidationResult("error", "port must be 0 (derived) or between 1 and 65535")
+        return ValidationResult()
+    if key in _OPENSHELL_INT_KEYS:
+        try:
+            number = int(value or "0")
+        except ValueError:
+            return ValidationResult("error", "expected an integer")
+        if number < 0:
+            return ValidationResult("error", "value must be zero or greater")
+        if key == "openshell.workdir.undo_ignored.max_mb" and number > 1 << 20:
+            return ValidationResult("error", f"at most {1 << 20} MB")
+        return ValidationResult()
+    if key in _OPENSHELL_PORT_LIST_KEYS:
+        for item in split_csv(value):
+            if not item.isdigit() or not 1 <= int(item) <= 65535:
+                return ValidationResult("error", f"{item!r} is not a port between 1 and 65535")
+        return ValidationResult()
+    if key == "openshell.resources.cpu" and value and not _OPENSHELL_CPU.match(value):
+        return ValidationResult("error", "CPU is cores or millicores, for example 2, 1.5 or 500m")
+    if key == "openshell.resources.memory" and value and not _OPENSHELL_MEMORY.match(value):
+        return ValidationResult("error", "memory is bytes with an optional suffix, for example 512Mi or 4Gi")
+    if key == "openshell.harnesses":
+        return _validate_openshell_harnesses(value)
+    if key == "openshell.workdir.undo_ignored.dirs":
+        for name in split_csv(value):
+            if not _OPENSHELL_UNDO_IGNORED_DIR.match(name) or name == ".git":
+                return ValidationResult("error", f"{name!r} is not a directory name such as node_modules or .venv")
+        return ValidationResult()
+    return None
+
+
+def _validate_openshell_harnesses(value: str) -> ValidationResult:
+    """openshell.harnesses as the gateway loads it and the sandbox commands read it.
+
+    The gateway refuses only a malformed name (config.validateOpenShellNames,
+    the v8 schema's connectorName). ``sandbox setup``, ``doctor`` and
+    ``image`` resolve each entry to a harness (its name, command or display
+    name) and stop at one they do not know: a warning, so it never blocks an
+    unrelated save. The launch dialog offering Claude Code and Codex is its
+    own limit.
+    """
+    names = split_csv(value)
+    for name in names:
+        if not _OPENSHELL_NAME.match(name):
+            return ValidationResult("error", f"{name!r} is not a valid name (letters, digits, '.', '_' and '-')")
+    unknown = [name for name in names if not resolve_harness(name)]
+    if unknown:
+        return ValidationResult(
+            "warning", f"unknown harness {', '.join(unknown)}; sandboxes run: {', '.join(HARNESSES)}"
+        )
+    return ValidationResult()
+
+
+def _apply_openshell_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Write one ``openshell.*`` editor value with its Go type."""
+
+    if key in _OPENSHELL_READ_ONLY_KEYS:
+        return
+    text = value.strip()
+    if key in _OPENSHELL_TRISTATE_KEYS:
+        parsed: Any = {"true": True, "false": False}.get(text.lower())
+    elif key in _OPENSHELL_INHERIT_STRING_KEYS:
+        parsed = "" if text in {"", OPENSHELL_INHERIT_CHOICE} else text
+    elif key in _OPENSHELL_BOOL_KEYS:
+        parsed = text.lower() == "true"
+    elif key in _OPENSHELL_INT_KEYS:
+        try:
+            parsed = int(text or "0")
+        except ValueError:
+            parsed = 0
+    elif key in _OPENSHELL_PORT_LIST_KEYS:
+        parsed = [int(item) for item in split_csv(text) if item.isdigit()]
+    elif key in _OPENSHELL_STRING_LIST_KEYS:
+        parsed = split_csv(text)
+    else:
+        parsed = text
+    if key == "openshell.mcp.import" and not isinstance(cfg, dict):
+        # The dataclass spells the YAML key ``import`` as ``import_``.
+        key = "openshell.mcp.import_"
+    set_config_value(cfg, key, parsed)
 
 
 def _looks_like_url_field(key: str) -> bool:
@@ -1246,4 +1499,4 @@ _CSV_FIELD_KEYS = frozenset(
 
 _KV_CSV_FIELD_KEYS: frozenset[str] = frozenset()
 
-_TRISTATE_FIELD_KEYS = frozenset({"openshell.auto_pair", "openshell.host_networking"})
+_TRISTATE_FIELD_KEYS: frozenset[str] = frozenset()

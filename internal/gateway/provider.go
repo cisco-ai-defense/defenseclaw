@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -684,11 +685,26 @@ func isUnsafeIP(ip net.IP) bool {
 // targets through the shape-branch which is not subject to this gate.
 var passthroughAllowPrivateForTest bool
 
+// secureDialResolverBox holds a test replacement for net.DefaultResolver in
+// secureDialContext (tests map destination names to local servers).
+type secureDialResolverBox struct{ resolver netguard.V8Resolver }
+
+var secureDialResolverOverride atomic.Pointer[secureDialResolverBox]
+
+func secureDialResolver() netguard.V8Resolver {
+	if box := secureDialResolverOverride.Load(); box != nil {
+		return box.resolver
+	}
+	return net.DefaultResolver
+}
+
 // secureDialContext returns a DialContext that re-resolves the
 // destination at dial time and rejects private/loopback/link-local/
 // cloud-metadata IPs (closes F-1306 DNS rebinding). When
 // allowLoopback is true, loopback destinations are permitted (used
-// for test webhooks pointing at httptest.Server).
+// for test webhooks pointing at httptest.Server). A standalone
+// gateway then reaches the checked host through the enterprise.network
+// proxy unless no_proxy excludes it (see SetEnterpriseEgress).
 func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: timeout}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -696,7 +712,7 @@ func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx conte
 		if err != nil {
 			return nil, err
 		}
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		ips, err := secureDialResolver().LookupIPAddr(ctx, host)
 		if err != nil {
 			return nil, err
 		}
@@ -712,7 +728,7 @@ func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx conte
 		// give an attacker a second chance to return a private IP.
 		for _, ip := range ips {
 			if !isUnsafeIP(ip.IP) || (allowLoopback && ip.IP.IsLoopback()) {
-				return d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+				return currentEnterpriseEgress().Dial(netguard.WithDialTarget(ctx, host), d, network, net.JoinHostPort(ip.IP.String(), port))
 			}
 		}
 		return nil, fmt.Errorf("secureDialContext: no safe IP for %s", host)

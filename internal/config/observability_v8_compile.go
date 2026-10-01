@@ -607,6 +607,20 @@ func compileObservabilityV8AdvancedRoutes(source []ObservabilityV8RouteSource, p
 	return result, nil
 }
 
+// Route selector values whose producers were removed. A config written for an
+// earlier release keeps compiling: the value stays in the selector, so the
+// route keeps its meaning (it can no longer match anything, whereas dropping
+// the value could widen an actions or event_names list to "any"), and the
+// plan carries a retired_selector_value warning. Map values say why.
+var (
+	retiredObservabilityV8SelectorActions = map[observability.ProducerKey]string{
+		"init-sandbox": "the legacy openshell-sandbox integration was removed",
+	}
+	retiredObservabilityV8SelectorEventNames = map[observability.EventName]string{
+		"defenseclaw.openshell.exit": "the legacy openshell-sandbox integration was removed",
+	}
+)
+
 func compileObservabilityV8Selector(source ObservabilityV8SelectorSource, path string, buckets []ObservabilityV8EffectiveBucket) (ObservabilityV8EffectiveSelector, error) {
 	selectedBuckets, wildcard, err := compileObservabilityV8BucketSelector(source.Buckets, false, path+".buckets")
 	if err != nil {
@@ -643,12 +657,18 @@ func compileObservabilityV8Selector(source ObservabilityV8SelectorSource, path s
 		if _, gateway := observability.GatewayEventClassification(action); gateway {
 			continue
 		}
-		if _, audit := observability.AuditActionClassification(action); !audit {
+		if _, audit := observability.AuditActionClassification(action); audit {
+			continue
+		}
+		if _, retired := retiredObservabilityV8SelectorActions[action]; !retired {
 			return ObservabilityV8EffectiveSelector{}, fmt.Errorf("%s.actions: unregistered action %q", path, action)
 		}
 	}
 	for _, eventName := range source.EventNames {
-		if eventName != "*" && !observability.IsRegisteredEventName(eventName) {
+		if eventName == "*" || observability.IsRegisteredEventName(eventName) {
+			continue
+		}
+		if _, retired := retiredObservabilityV8SelectorEventNames[eventName]; !retired {
 			return ObservabilityV8EffectiveSelector{}, fmt.Errorf("%s.event_names: unregistered event name %q", path, eventName)
 		}
 	}
@@ -824,6 +844,7 @@ func compileObservabilityV8Transport(
 		Path: source.Path, Listen: source.Listen, Endpoint: source.Endpoint,
 		Protocol: source.Protocol, Method: source.Method,
 		Headers: cloneObservabilityV8Headers(source.Headers), TokenEnv: source.TokenEnv, BearerEnv: source.BearerEnv,
+		TokenCredential: source.TokenCredential, BearerCredential: source.BearerCredential,
 		Index: source.Index, Source: source.Source, SourceType: source.SourceType,
 		SourceTypeOverrides: cloneObservabilityV8SourceTypeOverrides(source.SourceTypeOverrides), LoggerName: source.LoggerName,
 		TimeoutMS:       source.TimeoutMS,
@@ -835,6 +856,20 @@ func compileObservabilityV8Transport(
 	} {
 		if secretReference.reference != "" && !observabilityV8EnvNamePattern.MatchString(secretReference.reference) {
 			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: invalid secret-provider reference name", path, secretReference.field)
+		}
+	}
+	for _, credential := range []struct{ field, name, envField, env string }{
+		{field: "token_credential", name: source.TokenCredential, envField: "token_env", env: source.TokenEnv},
+		{field: "bearer_credential", name: source.BearerCredential, envField: "bearer_env", env: source.BearerEnv},
+	} {
+		if credential.name == "" {
+			continue
+		}
+		if !ValidEnterpriseCredentialName(credential.name) {
+			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: invalid protected credential name (lowercase letters, digits and dashes)", path, credential.field)
+		}
+		if credential.env != "" {
+			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: set either %s or %s, not both", path, credential.field, credential.envField, credential.field)
 		}
 	}
 	if len(source.Path) > 4_096 || len(source.TLS.CACert) > 4_096 {
@@ -863,8 +898,8 @@ func compileObservabilityV8Transport(
 			return ObservabilityV8TransportPlan{}, err
 		}
 	case ObservabilityV8DestinationSplunkHEC:
-		if strings.TrimSpace(source.TokenEnv) == "" {
-			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.token_env: required for splunk_hec", path)
+		if strings.TrimSpace(source.TokenEnv) == "" && source.TokenCredential == "" {
+			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.token_env: required for splunk_hec (or token_credential)", path)
 		}
 		if err := validateObservabilityV8SourceTypeOverrides(source.SourceTypeOverrides, path+".sourcetype_overrides"); err != nil {
 			return ObservabilityV8TransportPlan{}, err
@@ -924,7 +959,8 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 		"preset": source.Preset != "", "path": source.Path != "", "rotation": observabilityV8RotationConfigured(source.Rotation),
 		"listen": source.Listen != "", "endpoint": source.Endpoint != "", "protocol": source.Protocol != "",
 		"method": source.Method != "", "headers": source.Headers != nil, "token_env": source.TokenEnv != "",
-		"bearer_env": source.BearerEnv != "", "index": source.Index != "", "source": source.Source != "",
+		"bearer_env": source.BearerEnv != "", "token_credential": source.TokenCredential != "",
+		"bearer_credential": source.BearerCredential != "", "index": source.Index != "", "source": source.Source != "",
 		"sourcetype": source.SourceType != "", "sourcetype_overrides": source.SourceTypeOverrides != nil,
 		"logger_name": source.LoggerName != "", "timeout_ms": source.TimeoutMS != 0,
 		"tls": observabilityV8TLSConfigured(source.TLS), "batch": observabilityV8BatchConfigured(source.Batch),
@@ -935,8 +971,8 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 		ObservabilityV8DestinationJSONL:      setObservabilityV8Fields("path", "rotation", "batch"),
 		ObservabilityV8DestinationConsole:    setObservabilityV8Fields("batch"),
 		ObservabilityV8DestinationPrometheus: setObservabilityV8Fields("listen", "path"),
-		ObservabilityV8DestinationSplunkHEC:  setObservabilityV8Fields("endpoint", "token_env", "index", "source", "sourcetype", "sourcetype_overrides", "timeout_ms", "tls", "batch", "network_safety"),
-		ObservabilityV8DestinationHTTPJSONL:  setObservabilityV8Fields("endpoint", "method", "headers", "bearer_env", "timeout_ms", "tls", "batch", "network_safety"),
+		ObservabilityV8DestinationSplunkHEC:  setObservabilityV8Fields("endpoint", "token_env", "token_credential", "index", "source", "sourcetype", "sourcetype_overrides", "timeout_ms", "tls", "batch", "network_safety"),
+		ObservabilityV8DestinationHTTPJSONL:  setObservabilityV8Fields("endpoint", "method", "headers", "bearer_env", "bearer_credential", "timeout_ms", "tls", "batch", "network_safety"),
 		ObservabilityV8DestinationOTLP:       setObservabilityV8Fields("preset", "endpoint", "protocol", "headers", "logger_name", "timeout_ms", "tls", "batch", "network_safety", "signal_overrides"),
 	}
 	allowedFields, ok := allowed[source.Kind]
@@ -945,7 +981,7 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 	}
 	order := []string{
 		"preset", "path", "rotation", "listen", "endpoint", "protocol", "method", "headers",
-		"token_env", "bearer_env", "index", "source", "sourcetype", "sourcetype_overrides", "logger_name", "timeout_ms", "tls", "batch",
+		"token_env", "token_credential", "bearer_env", "bearer_credential", "index", "source", "sourcetype", "sourcetype_overrides", "logger_name", "timeout_ms", "tls", "batch",
 		"network_safety", "signal_overrides",
 	}
 	for _, field := range order {
@@ -1391,10 +1427,16 @@ func validateObservabilityV8Headers(
 		if (value.Static == nil) == (value.Secret == nil) {
 			return fmt.Errorf("%s.%s: exactly one of static value or secret reference is required", path, name)
 		}
-		if value.Secret != nil && strings.TrimSpace(value.Secret.Env) == "" {
+		if value.Secret != nil && value.Secret.Credential != "" {
+			if value.Secret.Env != "" {
+				return fmt.Errorf("%s.%s: set either env or credential, not both", path, name)
+			}
+			if !ValidEnterpriseCredentialName(value.Secret.Credential) {
+				return fmt.Errorf("%s.%s.credential: invalid protected credential name (lowercase letters, digits and dashes)", path, name)
+			}
+		} else if value.Secret != nil && strings.TrimSpace(value.Secret.Env) == "" {
 			return fmt.Errorf("%s.%s.env: must not be empty", path, name)
-		}
-		if value.Secret != nil && !observabilityV8EnvNamePattern.MatchString(value.Secret.Env) {
+		} else if value.Secret != nil && !observabilityV8EnvNamePattern.MatchString(value.Secret.Env) {
 			return fmt.Errorf("%s.%s.env: invalid secret-provider reference name", path, name)
 		}
 		if value.Static != nil && len(*value.Static) > 16_384 {
@@ -1679,6 +1721,25 @@ func compileObservabilityV8Warnings(
 			continue
 		}
 		base := "observability.destinations[" + destination.Name + "]"
+		for _, route := range destination.Routes {
+			routeBase := base + ".routes[" + route.Name + "].selector"
+			for _, action := range route.Selector.Actions {
+				if reason, retired := retiredObservabilityV8SelectorActions[action]; retired {
+					warnings = append(warnings, ObservabilityV8Warning{
+						Code: "retired_selector_value", Path: routeBase + ".actions",
+						Summary: fmt.Sprintf("action %q is retired (%s) and matches nothing; remove it", action, reason),
+					})
+				}
+			}
+			for _, eventName := range route.Selector.EventNames {
+				if reason, retired := retiredObservabilityV8SelectorEventNames[eventName]; retired {
+					warnings = append(warnings, ObservabilityV8Warning{
+						Code: "retired_selector_value", Path: routeBase + ".event_names",
+						Summary: fmt.Sprintf("event name %q is retired (%s) and matches nothing; remove it", eventName, reason),
+					})
+				}
+			}
+		}
 		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "tls_verification_disabled", Path: base + ".tls",

@@ -899,16 +899,15 @@ func (rp *RulePack) validateRuleFiles() error {
 				}
 				program, code := compiler.Compile(rule.Expression)
 				if code != semantic.CompileOK {
-					return rulePackErr(
-						rel,
-						"semantic_"+string(code),
-						fmt.Sprintf("rule %d expression is invalid", ruleIndex),
-					)
+					return rulePackErr(rel, "semantic_"+string(code), semanticCompileReason(ruleIndex, code))
 				}
 				if rule.Enabled == nil || *rule.Enabled {
 					semanticCost += program.StaticCost()
 					if semanticCost > maxEnabledSemanticStaticCost {
-						return rulePackErr(rel, "semantic_catalog_cost_limit", "enabled semantic rules exceed the catalog cost limit")
+						return rulePackErr(rel, "semantic_catalog_cost_limit", fmt.Sprintf(
+							"enabled semantic rules exceed the catalog cost limit of %d (rule %d brings the estimated total to %d); "+
+								"disable or simplify semantic rules, or split them across packs",
+							maxEnabledSemanticStaticCost, ruleIndex, semanticCost))
 					}
 				}
 			}
@@ -1403,4 +1402,29 @@ func (rp *RulePack) String() string {
 		summary.RuleFileCount,
 		summary.RuleCount,
 	)
+}
+
+// semanticRuleStaticCostLimit mirrors the semantic compiler's per-rule
+// worst-case cost bound (internal/guardrail/semantic limits.go,
+// maxRuleStaticCost), which it does not export. It is only quoted in the
+// refusal; the compiler enforces its own value, and a test keeps the two
+// equal.
+const semanticRuleStaticCostLimit uint64 = 6_000_000
+
+// semanticCompileReason explains a refused semantic expression without
+// echoing it. The cost refusals name the limit and how to get under it; an
+// author otherwise saw only "rule N expression is invalid".
+func semanticCompileReason(ruleIndex int, code semantic.CompileCode) string {
+	switch code {
+	case semantic.CompileStaticCost:
+		return fmt.Sprintf("rule %d expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
+			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
+			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
+			"a nested macro, or split the check into separate rules", ruleIndex, semanticRuleStaticCostLimit)
+	case semantic.CompileStaticCostUnbounded:
+		return fmt.Sprintf("rule %d expression has no bounded worst-case evaluation cost (it uses a value whose size "+
+			"cannot be bounded); test the rule-pack fields directly", ruleIndex)
+	default:
+		return fmt.Sprintf("rule %d expression is invalid", ruleIndex)
+	}
 }

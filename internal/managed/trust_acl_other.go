@@ -1,4 +1,4 @@
-//go:build !darwin && !windows
+//go:build !darwin && !windows && !linux
 
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 //

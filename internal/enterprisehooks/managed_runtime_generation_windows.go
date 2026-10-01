@@ -307,19 +307,21 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 	}
 
 	for attempt := 0; attempt < windowsManagedRuntimeSelectorReadAttempts; attempt++ {
-		selector, first, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, false)
+		selector, first, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return result, err
 		}
 		if !exists {
-			return result, errors.New(
-				"enterprise hooks: managed runtime generation selector is absent",
+			return result, fmt.Errorf(
+				"enterprise hooks: managed runtime generation selector is absent: %w",
+				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
 		entry, ok := windowsManagedRuntimeSelectorTargetForSID(selector, opts.TargetSID)
 		if !ok {
-			return result, errors.New(
-				"enterprise hooks: registered SID is absent from the managed runtime generation selector",
+			return result, fmt.Errorf(
+				"enterprise hooks: registered SID is absent from the managed runtime generation selector: %w",
+				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
 		if err := validateWindowsManagedRuntimeSelectorTargetAgainstResolve(entry, opts); err != nil {
@@ -807,6 +809,15 @@ func restoreWindowsManagedRuntimeSelectorCASPlatform(
 				return err
 			}
 			if _, _, _, err := loadWindowsManagedRuntimeBundle(entry, target); err != nil {
+				// A snapshot entry whose bundle no longer exists, such as a
+				// deleted account's, was already unusable before the
+				// transaction: restoring it exactly keeps that account failing
+				// closed, while refusing would leave the whole rollback pending
+				// with the services stopped. A bundle that exists but fails its
+				// checks is still refused.
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				return fmt.Errorf(
 					"enterprise hooks: refusing full selector restore with invalid %s bundle: %w",
 					entry.SID,
@@ -887,7 +898,13 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	// has published the first immutable generation. Authenticate the existing
 	// target-owned data root independently so that an absent hooks child can be
 	// distinguished from an untrusted data root without weakening the strict
-	// two-root validator used by publication and verification.
+	// two-root validator used by publication and verification. A standalone
+	// data directory the account created itself holds no managed runtime (it
+	// has no hooks child), so it has nothing to retire, as for an absent one:
+	// before enrollment, or after an enrolled account moved DefenseClaw's
+	// folder, and its selected generation with it, away. The guardian adopts
+	// it in the account's session.
+	accountCreated := false
 	if err := validateWindowsUserPathElement(
 		validated.DataDir,
 		target,
@@ -895,10 +912,13 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		true,
 		true,
 	); err != nil {
-		return 0, fmt.Errorf(
-			"enterprise hooks: managed runtime generation directory is untrusted: %w",
-			err,
-		)
+		if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+			return 0, fmt.Errorf(
+				"enterprise hooks: managed runtime generation directory is untrusted: %w",
+				err,
+			)
+		}
+		accountCreated = true
 	}
 	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
@@ -918,6 +938,12 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 
 		// Re-authenticate DataDir while holding the selector transaction before
 		// using selector absence to authorize the empty pre-activation case.
+		if accountCreated {
+			if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+				return errors.New("enterprise hooks: managed runtime generation directory changed while it was retired")
+			}
+			return nil
+		}
 		if err := validateWindowsUserPathElement(
 			validated.DataDir,
 			target,
@@ -944,7 +970,18 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			return err
 		}
 		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
-			return err
+			// A guardian stopped between relaxing the hooks directory for a
+			// connector setup and hardening it again leaves the relaxed
+			// owner-private DACL behind. Restore the canonical DACL instead
+			// of refusing every lifecycle retire for this user; any other
+			// shape stays refused.
+			recovered, recoverErr := windowsRecoverSetupRelaxedHookDirectory(validated.DataDir, target)
+			if recoverErr != nil || !recovered {
+				return errors.Join(err, recoverErr)
+			}
+			if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
+				return err
+			}
 		}
 
 		entries, err := os.ReadDir(hookDir)
@@ -1357,9 +1394,15 @@ func canonicalWindowsManagedRuntimeConnector(raw string) (string, error) {
 	switch raw {
 	case "claudecode", "codex", "cursor":
 		return raw, nil
-	default:
-		return "", fmt.Errorf("unsupported managed connector %q", raw)
 	}
+	// Standalone per-user connectors. Hook-binary connectors publish their
+	// selector beside the per-user machine enrollment, their primary
+	// registration; plugin connectors never publish one, so teardown can
+	// still prove its absence.
+	if _, ok := windowsStandalonePerUserConnector(raw); ok {
+		return raw, nil
+	}
+	return "", fmt.Errorf("unsupported managed connector %q", raw)
 }
 
 func validateWindowsManagedRuntimeGenerationPath(path, requiredLeaf string) error {
@@ -1483,7 +1526,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "opencode"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue
@@ -1697,6 +1740,11 @@ func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, err
 			return "", err
 		}
 		directory = filepath.Dir(requirementsPath)
+	case "copilot", "antigravity", "devin", "hermes", "opencode", "amp":
+		directory, err = windowsPerUserManagedRuntimeDir(name)
+		if err != nil {
+			return "", err
+		}
 	default:
 		return "", fmt.Errorf("enterprise hooks: unsupported managed runtime selector connector %q", name)
 	}

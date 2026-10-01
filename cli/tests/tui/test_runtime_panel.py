@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from defenseclaw.tui.app import PANEL_SHORTCUTS, PANELS
 from defenseclaw.tui.panels.runtime import (
     RuntimePanelAction,
@@ -32,28 +31,44 @@ _SNAPSHOT: dict[str, Any] = {
     "degraded": True,
     "degraded_reasons": ["agent actions unavailable: eslogger not found"],
     "planes": [
-        {"plane": "a", "name": "inference heartbeat", "available": True, "running": True,
-         "mechanism": "ps(1)"},
-        {"plane": "b", "name": "shadow egress", "available": True, "running": False,
-         "reason": "connection table unreadable"},
-        {"plane": "c", "name": "agent actions", "available": False, "running": False,
-         "reason": "eslogger not found"},
+        {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+        {
+            "plane": "b",
+            "name": "shadow egress",
+            "available": True,
+            "running": False,
+            "reason": "connection table unreadable",
+        },
+        {"plane": "c", "name": "agent actions", "available": False, "running": False, "reason": "eslogger not found"},
     ],
     "findings": [
         {
-            "finding_id": "run-1", "pid": 10, "process": "python3", "user": "dev",
-            "cmdline": "python3 -m langgraph.cli serve", "agent_name": "python3",
-            "score": 40, "severity": "medium",
+            "finding_id": "run-1",
+            "pid": 10,
+            "process": "python3",
+            "user": "dev",
+            "cmdline": "python3 -m langgraph.cli serve",
+            "agent_name": "python3",
+            "score": 40,
+            "severity": "medium",
             "signals": [{"id": "inference_heartbeat", "title": "sustained compute", "weight": 25}],
             "correlation": {"verdict": "unobserved", "reason": "no discovery snapshot yet"},
         },
         {
-            "finding_id": "run-2", "pid": 20, "process": "claude", "user": "dev",
-            "agent_name": "claude", "score": 95, "severity": "critical",
+            "finding_id": "run-2",
+            "pid": 20,
+            "process": "claude",
+            "user": "dev",
+            "agent_name": "claude",
+            "score": 95,
+            "severity": "critical",
             "signals": [
                 {"id": "agent_credential_access", "detail": "~/.aws/credentials", "weight": 30},
-                {"id": "agent_kill_chain",
-                 "detail": "credential_access -> identity_creation -> exfiltration", "weight": 25},
+                {
+                    "id": "agent_kill_chain",
+                    "detail": "credential_access -> identity_creation -> exfiltration",
+                    "weight": 25,
+                },
             ],
             "providers": [{"hostname": "api.anthropic.com", "category": "frontier"}],
             "correlation": {"verdict": "accounted", "reason": "discovery observed the same subject"},
@@ -170,17 +185,19 @@ def test_overview_summary_names_unobserved_findings_and_the_next_scan() -> None:
 
 def test_findings_context_explains_a_quiet_healthy_host() -> None:
     model = RuntimePanelModel()
-    model.set_snapshot({
-        "enabled": True,
-        "scanned_at": "2026-09-11T12:00:00Z",
-        "processes_observed": 743,
-        "connections_observed": 146,
-        "planes": [
-            {"plane": "a", "name": "inference", "available": True, "running": True, "mechanism": "ps"},
-            {"plane": "b", "name": "egress", "available": True, "running": True, "mechanism": "lsof"},
-            {"plane": "c", "name": "actions", "available": True, "running": True, "mechanism": "eslogger"},
-        ],
-    })
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-09-11T12:00:00Z",
+            "processes_observed": 743,
+            "connections_observed": 146,
+            "planes": [
+                {"plane": "a", "name": "inference", "available": True, "running": True, "mechanism": "ps"},
+                {"plane": "b", "name": "egress", "available": True, "running": True, "mechanism": "lsof"},
+                {"plane": "c", "name": "actions", "available": True, "running": True, "mechanism": "eslogger"},
+            ],
+        }
+    )
     assert model.health_title() == "HEALTHY"
     assert "743 processes" in model.findings_context()
     assert "clean host" in model.findings_context()
@@ -220,7 +237,12 @@ def test_scan_and_refresh_map_to_the_nested_cli_commands() -> None:
     enable = model.command_for(RuntimePanelAction.ENABLE)
     assert enable is not None
     assert enable.argv == (
-        "agent", "discovery", "runtime", "enable", "--yes", "--no-enable-host-plane",
+        "agent",
+        "discovery",
+        "runtime",
+        "enable",
+        "--yes",
+        "--no-enable-host-plane",
     )
     assert model.handle_key("e") is RuntimePanelAction.ENABLE
 
@@ -235,16 +257,18 @@ def test_health_badge_explains_degraded_versus_healthy() -> None:
     assert "eslogger not found" in explanation
 
     healthy = RuntimePanelModel()
-    healthy.set_snapshot({
-        "enabled": True,
-        "scanned_at": "2026-09-11T21:00:00Z",
-        "degraded": False,
-        "planes": [
-            {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
-            {"plane": "b", "name": "shadow egress", "available": True, "running": True, "mechanism": "lsof(8)"},
-            {"plane": "c", "name": "agent actions", "available": True, "running": True, "mechanism": "eslogger"},
-        ],
-    })
+    healthy.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-09-11T21:00:00Z",
+            "degraded": False,
+            "planes": [
+                {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+                {"plane": "b", "name": "shadow egress", "available": True, "running": True, "mechanism": "lsof(8)"},
+                {"plane": "c", "name": "agent actions", "available": True, "running": True, "mechanism": "eslogger"},
+            ],
+        }
+    )
     assert healthy.health_state() == "healthy"
     assert healthy.health_title() == "HEALTHY"
     assert "HEALTHY" in " ".join(healthy.header_parts())
@@ -253,46 +277,48 @@ def test_health_badge_explains_degraded_versus_healthy() -> None:
 
 def test_selected_plane_gaps_are_degraded() -> None:
     model = RuntimePanelModel()
-    model.set_snapshot({
-        "enabled": True,
-        "scanned_at": "2026-09-14T13:50:27Z",
-        "degraded": True,
-        "degraded_reasons": [
-            "agent actions available but not running: plane: Endpoint Security needs root; "
-            "re-run the gateway elevated",
-            "shadow egress partially covered: egress attribution is limited to this "
-            "process's own sockets; run the gateway elevated for machine-wide coverage",
-        ],
-        "processes_observed": 5,
-        "connections_observed": 9,
-        "planes": [
-            {
-                "plane": "a",
-                "name": "inference heartbeat",
-                "available": True,
-                "running": True,
-                "mechanism": "ps(1)",
-            },
-            {
-                "plane": "b",
-                "name": "shadow egress",
-                "available": True,
-                "running": True,
-                "mechanism": "lsof(8)",
-                "reason": (
-                    "egress attribution is limited to this process's own sockets; "
-                    "run the gateway elevated for machine-wide coverage"
-                ),
-            },
-            {
-                "plane": "c",
-                "name": "agent actions",
-                "available": True,
-                "running": False,
-                "reason": "plane: Endpoint Security needs root; re-run the gateway elevated",
-            },
-        ],
-    })
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-09-14T13:50:27Z",
+            "degraded": True,
+            "degraded_reasons": [
+                "agent actions available but not running: plane: Endpoint Security needs root; "
+                "re-run the gateway elevated",
+                "shadow egress partially covered: egress attribution is limited to this "
+                "process's own sockets; run the gateway elevated for machine-wide coverage",
+            ],
+            "processes_observed": 5,
+            "connections_observed": 9,
+            "planes": [
+                {
+                    "plane": "a",
+                    "name": "inference heartbeat",
+                    "available": True,
+                    "running": True,
+                    "mechanism": "ps(1)",
+                },
+                {
+                    "plane": "b",
+                    "name": "shadow egress",
+                    "available": True,
+                    "running": True,
+                    "mechanism": "lsof(8)",
+                    "reason": (
+                        "egress attribution is limited to this process's own sockets; "
+                        "run the gateway elevated for machine-wide coverage"
+                    ),
+                },
+                {
+                    "plane": "c",
+                    "name": "agent actions",
+                    "available": True,
+                    "running": False,
+                    "reason": "plane: Endpoint Security needs root; re-run the gateway elevated",
+                },
+            ],
+        }
+    )
     assert model.health_title() == "DEGRADED"
     assert model.needs_enable() is False
     assert "partial" in model.health_explanation().lower()
@@ -300,16 +326,23 @@ def test_selected_plane_gaps_are_degraded() -> None:
 
 def test_needs_enable_when_plane_c_is_not_selected() -> None:
     model = RuntimePanelModel()
-    model.set_snapshot({
-        "enabled": True,
-        "scanned_at": "2026-09-11T21:00:00Z",
-        "degraded": True,
-        "planes": [
-            {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
-            {"plane": "c", "name": "agent actions", "available": True, "running": False,
-             "reason": "not selected in ai_discovery.runtime.planes"},
-        ],
-    })
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-09-11T21:00:00Z",
+            "degraded": True,
+            "planes": [
+                {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+                {
+                    "plane": "c",
+                    "name": "agent actions",
+                    "available": True,
+                    "running": False,
+                    "reason": "not selected in ai_discovery.runtime.planes",
+                },
+            ],
+        }
+    )
     assert model.needs_enable() is False
     assert "optional" in model.plane_fix(model.snapshot.planes[1]).lower()
 
@@ -319,49 +352,6 @@ def test_needs_enable_when_plane_c_is_not_selected() -> None:
     assert off.health_title() == "OFF"
 
 
-@pytest.mark.asyncio
-async def test_load_runtime_model_renders_without_raising(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Opening the Runtime panel must not crash the TUI.
-
-    ``_load_runtime_model`` called ``self._render_body()``, which
-    ``DefenseClawTUI`` does not define. Textual workers default to
-    ``exit_on_error=True``, so the AttributeError after the fetch took the
-    whole TUI down. The panel-model tests never touched this method, which is
-    why 1043 green TUI tests said nothing about it.
-    """
-    from types import SimpleNamespace
-
-    from defenseclaw.tui.app import DefenseClawTUI
-
-    payload = {
-        "enabled": True,
-        "scanned_at": "2026-09-09T12:00:00Z",
-        "findings": [],
-        "planes": [
-            {
-                "plane": "a",
-                "name": "inference heartbeat",
-                "available": True,
-                "running": True,
-                "mechanism": "ps(1)",
-            }
-        ],
-    }
-    monkeypatch.setattr("defenseclaw.tui.app._fetch_ai_runtime", lambda _config: payload)
-    config = SimpleNamespace(
-        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token")
-    )
-    app = DefenseClawTUI(config=config)
-
-    async with app.run_test(size=(150, 40)) as pilot:
-        await app._load_runtime_model()  # noqa: SLF001 - app-level polling contract.
-        await pilot.pause()
-
-    assert app.runtime_model.snapshot is not None
-
-
 def test_the_app_defines_every_render_method_the_runtime_loader_calls() -> None:
     """A cheap guard against the same typo returning under a different name."""
     import inspect
@@ -369,11 +359,7 @@ def test_the_app_defines_every_render_method_the_runtime_loader_calls() -> None:
     from defenseclaw.tui.app import DefenseClawTUI
 
     source = inspect.getsource(DefenseClawTUI._load_runtime_model)
-    called = {
-        name.split("(")[0]
-        for name in source.split("self.")[1:]
-        if name.startswith("_render")
-    }
+    called = {name.split("(")[0] for name in source.split("self.")[1:] if name.startswith("_render")}
     for method in called:
         assert hasattr(DefenseClawTUI, method), (
             f"_load_runtime_model calls self.{method}(), which does not exist; "

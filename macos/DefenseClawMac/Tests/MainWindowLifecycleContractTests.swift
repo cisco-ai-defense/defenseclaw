@@ -34,6 +34,27 @@ enum MainWindowLifecycleContractTests {
         let mainWindowSource = try source(
             at: root.appendingPathComponent("DefenseClawMac/Features/MainWindow.swift")
         )
+        let inspectorLayoutSource = try source(
+            at: root.appendingPathComponent("DefenseClawMac/DesignSystem/InspectorLayoutPolicy.swift")
+        )
+
+        expect(appSource.contains("AppDelegate.startApplication = { [weak state] in state?.start() }"),
+               "shared state must receive the application launch callback")
+        let didLaunch = appSource.components(separatedBy: "func applicationDidFinishLaunching").last ?? ""
+        expect(didLaunch.components(separatedBy: "/// The menu bar").first?.contains("Self.startApplication?()") == true,
+               "minimized and hidden launches must start without waiting for a window appearance")
+        let appStateSource = try source(at: root.appendingPathComponent("DefenseClawMac/App/AppState.swift"))
+        let startParts = appStateSource.components(separatedBy: "func start() {")
+        expect(startParts.count > 1, "AppState must declare start()")
+        let startup = (startParts.count > 1 ? startParts[1] : "")
+            .components(separatedBy: "private func gatewayStartupSnapshot").first ?? ""
+        let onceGuard = startup.range(of: "guard !hasStarted else { return }")?.lowerBound
+        let startupTask = startup.range(of: "Task {")?.lowerBound
+        expect(onceGuard != nil && startupTask != nil, "start() must guard repeated launches and then start its task")
+        if let onceGuard, let startupTask {
+            expect(onceGuard < startupTask,
+                   "application launch and repeated window appearances must be deduplicated before suspension")
+        }
 
         expect(appSource.contains(#"Window("DefenseClaw", id: "main")"#),
                "the primary dashboard must use a singleton Window scene")
@@ -68,6 +89,9 @@ enum MainWindowLifecycleContractTests {
                    "legacy inspector/sidebar coupling returned: \(forbiddenSymbol)")
         }
 
+        expect(!inspectorLayoutSource.contains(".inspector(isPresented:"),
+               "the shared detail pane must not recreate the native inspector constraint loop")
+
         for relativePath in [
             "DefenseClawMac/Features/ActivityView.swift",
             "DefenseClawMac/Features/AlertsView.swift",
@@ -75,10 +99,10 @@ enum MainWindowLifecycleContractTests {
             "DefenseClawMac/Features/LogsView.swift",
         ] {
             let featureSource = try source(at: root.appendingPathComponent(relativePath))
-            expect(featureSource.contains(".inspector(isPresented:"),
-                   "\(relativePath) must retain its native inspector")
-            expect(featureSource.contains(".dcInspectorColumnWidth()"),
-                   "\(relativePath) must retain bounded inspector sizing")
+            expect(featureSource.contains(".dcInspector(isPresented:"),
+                   "\(relativePath) must use the shared inline detail pane")
+            expect(!featureSource.contains(".inspector(isPresented:"),
+                   "\(relativePath) must not restore a nested native inspector")
         }
 
         print("MainWindowLifecycleContractTests passed")

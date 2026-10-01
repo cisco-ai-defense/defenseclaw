@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -274,6 +275,46 @@ func TestLoadRuntimeV8FromBytesRejectsV7BeforeCompatibilityDecode(t *testing.T) 
 	_, err := LoadRuntimeV8FromBytes("config.yaml", []byte("config_version: 7\notel:\n  enabled: true\n"))
 	if err == nil {
 		t.Fatal("v7 compatibility source was accepted by target runtime loader")
+	}
+}
+
+func TestRuntimeConfigVersionGate(t *testing.T) {
+	for _, test := range []struct {
+		version int
+		want    string
+	}{
+		{version: 0, want: "config_version 0 is older than 8; run `defenseclaw migrate`"},
+		{version: 7, want: "config_version 7 is older than 8; run `defenseclaw migrate`"},
+		{version: ObservabilityV8ConfigVersion},
+		{version: MaxSupportedConfigVersion},
+		{
+			version: MaxSupportedConfigVersion + 1,
+			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); "+
+				"upgrade DefenseClaw or restore ~/.defenseclaw/previous", MaxSupportedConfigVersion+1),
+		},
+	} {
+		err := checkRuntimeConfigVersion(test.version)
+		if test.want == "" {
+			if err != nil {
+				t.Fatalf("config_version %d rejected: %v", test.version, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("config_version %d error = %v, want %q", test.version, err, test.want)
+		}
+	}
+
+	// The inspection loader decodes without the YAML entrypoint, so it reaches
+	// the runtime gate directly. The gate must report the declared version, not
+	// the v7 stamp the compatibility decoder applies to older sources.
+	_, err := ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 5\n"))
+	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
+		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
+	}
+	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 9\n"))
+	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 9)") {
+		t.Fatalf("newer inspection error = %v, want newer-release guidance", err)
 	}
 }
 

@@ -40,18 +40,12 @@ from __future__ import annotations
 import ctypes
 import ntpath
 import os
-import secrets
-import shutil
-import stat
 import struct
-import subprocess
-import sys
 import threading
-import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 
 _ERROR_SUCCESS = 0
 _SE_FILE_OBJECT = 1
@@ -417,6 +411,18 @@ def _staged_security_for_observed_dacl(
             requested.sacl_protected,
         )
     return requested
+
+
+def _sacl_protection(control: int, mandatory_label: bytes | None) -> bool:
+    """Report SACL protection only where it guards a mandatory label.
+
+    Without a label the bit only stops a file inheriting audit entries, and a
+    new file cannot take it on without SeSecurityPrivilege. PowerShell's
+    Set-Acl sets it, so 0.8.x Windows config files often carry it; counting
+    it would make them impossible to replace.
+    """
+
+    return bool(control & _SE_SACL_PROTECTED) and mandatory_label is not None
 
 
 def _explicit_dacl_copy(dacl: bytes) -> bytes:
@@ -822,7 +828,7 @@ class _CtypesWindowsApi:
                 dacl=ctypes.string_at(dacl, acl_size),
                 dacl_protected=bool(control.value & _SE_DACL_PROTECTED),
                 mandatory_label=mandatory_label_bytes,
-                sacl_protected=bool(control.value & _SE_SACL_PROTECTED),
+                sacl_protected=_sacl_protection(control.value, mandatory_label_bytes),
             )
         finally:
             if descriptor.value:
@@ -1651,322 +1657,6 @@ def private_security_for_directory(
     return _get_api().private_security(parent.owner)
 
 
-_HANDLE_INHERITANCE_LOCK = threading.Lock()
-_PHASE_TWO_MUTATOR_MARKER = "--defenseclaw-phase-two-mutator"
-_PHASE_TWO_LEASE_WAIT_SECONDS = 600.0
-
-
-def _assert_real_phase_two_lease(path: str) -> os.stat_result:
-    try:
-        info = os.lstat(path)
-    except OSError as exc:
-        raise WindowsAclError("phase-two mutator lease is unavailable") from exc
-    if (
-        stat.S_ISLNK(info.st_mode)
-        or getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
-        or not stat.S_ISREG(info.st_mode)
-        or info.st_size != 0
-    ):
-        raise WindowsAclError("phase-two mutator lease must be a real empty file")
-    return info
-
-
-def _expected_phase_two_lease_security(path: str) -> WindowsFileSecurity:
-    parent = os.path.dirname(os.path.abspath(path))
-    parent_info = os.lstat(parent)
-    if (
-        stat.S_ISLNK(parent_info.st_mode)
-        or getattr(parent_info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
-        or not stat.S_ISDIR(parent_info.st_mode)
-    ):
-        raise WindowsAclError("phase-two recovery root must be a real directory")
-    return private_security_for_directory(parent)
-
-
-def ensure_phase_two_mutator_lease(path: str) -> None:
-    """Create and exactly verify the fixed private Windows mutator lease."""
-
-    if os.name != "nt":
-        raise WindowsAclError("Windows phase-two mutator leases require Windows")
-    path = os.path.abspath(path)
-    expected = _expected_phase_two_lease_security(path)
-    if not os.path.lexists(path):
-        try:
-            write_new_file(path, b"", expected)
-        except WindowsAclError:
-            if not os.path.lexists(path):
-                raise
-    _assert_real_phase_two_lease(path)
-    if capture_path(path) != expected:
-        raise WindowsAclError("phase-two mutator lease owner/DACL is not private")
-
-
-def _sharing_violation(exc: WindowsAclError) -> bool:
-    return getattr(exc, "winerror", None) in {32, 33} or getattr(exc, "errno", None) in {32, 33}
-
-
-@contextmanager
-def hold_phase_two_mutator_lease(
-    path: str,
-    *,
-    timeout: float | None = _PHASE_TWO_LEASE_WAIT_SECONDS,
-) -> Iterator[_HeldPhaseTwoMutatorLease]:
-    """Block until the fixed lease can be held with an exclusive share mode."""
-
-    if os.name != "nt":
-        raise WindowsAclError("Windows phase-two mutator leases require Windows")
-    path = os.path.abspath(path)
-    expected = _expected_phase_two_lease_security(path)
-    before = _assert_real_phase_two_lease(path)
-    api = _get_api()
-    deadline = None if timeout is None else time.monotonic() + max(float(timeout), 0.0)
-    while True:
-        try:
-            handle = api.open_exclusive_file(path)
-            break
-        except WindowsAclError as exc:
-            if not _sharing_violation(exc):
-                raise
-            if deadline is not None and time.monotonic() >= deadline:
-                raise WindowsAclError(
-                    "phase-two mutator lease remained held; recovery did not race the live or orphaned child"
-                ) from exc
-            time.sleep(0.05)
-    try:
-        after = _assert_real_phase_two_lease(path)
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-            raise WindowsAclError("phase-two mutator lease changed while acquiring it")
-        if api.get_security(handle) != expected:
-            raise WindowsAclError("phase-two mutator lease owner/DACL changed")
-        yield _HeldPhaseTwoMutatorLease(path=path, handle=handle)
-    finally:
-        api.close_handle(handle)
-
-
-def _startupinfo_for_handle(handle: int):
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.lpAttributeList = {"handle_list": [handle]}
-    return startupinfo
-
-
-def _popen_with_inherited_lease(
-    command: list[str],
-    *,
-    handle: int,
-    stdout: Any = None,
-    stderr: Any = None,
-    text: bool = False,
-    env: dict[str, str] | None = None,
-) -> subprocess.Popen:
-    with _HANDLE_INHERITANCE_LOCK:
-        os.set_handle_inheritable(handle, True)
-        try:
-            return subprocess.Popen(
-                command,
-                close_fds=True,
-                startupinfo=_startupinfo_for_handle(handle),
-                stdout=stdout,
-                stderr=stderr,
-                text=text,
-                env=env,
-            )
-        finally:
-            os.set_handle_inheritable(handle, False)
-
-
-def _terminate_windows_process_tree(process: subprocess.Popen) -> bool:
-    taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
-    try:
-        terminated = subprocess.run(
-            [taskkill, "/PID", str(process.pid), "/T", "/F"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=15,
-        )
-        if terminated.returncode == 0:
-            return True
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        process.kill()
-    except OSError:
-        pass
-    return False
-
-
-def _resolved_windows_command(command: list[str], env: dict[str, str] | None) -> list[str]:
-    if not command or not isinstance(command[0], str) or not command[0]:
-        raise ValueError("phase-two mutator command must be a non-empty string list")
-    result = [os.fspath(value) for value in command]
-    executable = result[0]
-    search_path = env.get("PATH") if env is not None else None
-    if os.path.dirname(executable):
-        resolved = os.path.abspath(executable)
-        if not os.path.isfile(resolved):
-            raise FileNotFoundError(resolved)
-    else:
-        resolved = shutil.which(executable, path=search_path)
-        if resolved is None:
-            raise FileNotFoundError(executable)
-    result[0] = resolved
-    return result
-
-
-def _run_phase_two_wrapper(
-    command: list[str],
-    *,
-    lease: _HeldPhaseTwoMutatorLease,
-    check: bool,
-    capture_output: bool,
-    text: bool,
-    timeout: float | None,
-    env: dict[str, str] | None,
-) -> subprocess.CompletedProcess:
-    wrapper = [
-        sys.executable,
-        "-I",
-        "-m",
-        "defenseclaw.windows_acl",
-        _PHASE_TWO_MUTATOR_MARKER,
-        lease.path,
-        str(lease.handle),
-        "--",
-        *command,
-    ]
-    pipe = subprocess.PIPE if capture_output else None
-    process = _popen_with_inherited_lease(
-        wrapper,
-        handle=lease.handle,
-        stdout=pipe,
-        stderr=pipe,
-        text=text,
-        env=env,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_windows_process_tree(process)
-        try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = exc.output, exc.stderr
-        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
-    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-    if check:
-        completed.check_returncode()
-    return completed
-
-
-def run_phase_two_mutator(
-    command: list[str],
-    *,
-    lease_path: str,
-    held_lease: object | None = None,
-    **kwargs: Any,
-) -> subprocess.CompletedProcess:
-    """Run a mutating child behind a lease that survives controller death."""
-
-    if os.name != "nt":
-        raise WindowsAclError("Windows phase-two mutator wrappers require Windows")
-    allowed = {"check", "capture_output", "text", "timeout", "env"}
-    unexpected = set(kwargs) - allowed
-    if unexpected:
-        raise TypeError(f"unsupported phase-two mutator subprocess options: {sorted(unexpected)}")
-    check = bool(kwargs.get("check", False))
-    capture_output = bool(kwargs.get("capture_output", False))
-    text = bool(kwargs.get("text", False))
-    timeout = kwargs.get("timeout")
-    env = kwargs.get("env")
-    resolved = _resolved_windows_command(command, env)
-    normalized_lease_path = os.path.abspath(lease_path)
-    if held_lease is not None:
-        if not isinstance(held_lease, _HeldPhaseTwoMutatorLease):
-            raise TypeError("held_lease is not a Windows phase-two mutator lease")
-        if os.path.normcase(held_lease.path) != os.path.normcase(normalized_lease_path):
-            raise WindowsAclError("held phase-two mutator lease targets a different path")
-        return _run_phase_two_wrapper(
-            resolved,
-            lease=held_lease,
-            check=check,
-            capture_output=capture_output,
-            text=text,
-            timeout=timeout,
-            env=env,
-        )
-    with hold_phase_two_mutator_lease(normalized_lease_path) as acquired:
-        return _run_phase_two_wrapper(
-            resolved,
-            lease=acquired,
-            check=check,
-            capture_output=capture_output,
-            text=text,
-            timeout=timeout,
-            env=env,
-        )
-
-
-def _new_private_mutator_spool(lease_path: str, label: str) -> str:
-    parent = os.path.dirname(lease_path)
-    security = _expected_phase_two_lease_security(lease_path)
-    for _ in range(128):
-        path = os.path.join(parent, f".phase-two-mutator-{label}-{secrets.token_hex(16)}.spool")
-        try:
-            write_new_file(path, b"", security)
-            return path
-        except WindowsAclError:
-            if not os.path.lexists(path):
-                raise
-    raise WindowsAclError("could not allocate a private phase-two mutator output spool")
-
-
-def _phase_two_mutator_wrapper_main(arguments: list[str]) -> int:
-    if len(arguments) < 5 or arguments[0] != _PHASE_TWO_MUTATOR_MARKER or arguments[3] != "--":
-        raise SystemExit("invalid phase-two mutator wrapper invocation")
-    lease_path = os.path.abspath(arguments[1])
-    try:
-        handle = int(arguments[2], 10)
-    except ValueError as exc:
-        raise SystemExit("invalid inherited phase-two lease handle") from exc
-    command = arguments[4:]
-    if not command:
-        raise SystemExit("phase-two mutator wrapper command is empty")
-    expected = _expected_phase_two_lease_security(lease_path)
-    _assert_real_phase_two_lease(lease_path)
-    if _get_api().get_security(handle) != expected:
-        raise WindowsAclError("inherited phase-two mutator lease is invalid")
-    stdout_path = _new_private_mutator_spool(lease_path, "stdout")
-    stderr_path = _new_private_mutator_spool(lease_path, "stderr")
-    try:
-        with (
-            open(stdout_path, "w+b", buffering=0) as stdout_stream,
-            open(stderr_path, "w+b", buffering=0) as stderr_stream,
-        ):
-            process = _popen_with_inherited_lease(
-                command,
-                handle=handle,
-                stdout=stdout_stream,
-                stderr=stderr_stream,
-            )
-            returncode = process.wait()
-            stdout_stream.seek(0)
-            stderr_stream.seek(0)
-            stdout = stdout_stream.read()
-            stderr = stderr_stream.read()
-        if stdout:
-            sys.stdout.buffer.write(stdout)
-            sys.stdout.buffer.flush()
-        if stderr:
-            sys.stderr.buffer.write(stderr)
-            sys.stderr.buffer.flush()
-        return returncode
-    finally:
-        for path in (stdout_path, stderr_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
 
 def assert_trusted_owner(security: WindowsFileSecurity) -> None:
     owner = _sid_string(security.owner)
@@ -2051,10 +1741,6 @@ def _sid_string(sid: bytes) -> str:
     return f"S-{revision}-{authority}" + (f"-{suffix}" if suffix else "")
 
 
-if __name__ == "__main__":
-    raise SystemExit(_phase_two_mutator_wrapper_main(sys.argv[1:]))
-
-
 __all__ = [
     "WindowsAclError",
     "WindowsFileSecurity",
@@ -2066,13 +1752,11 @@ __all__ = [
     "capture_fd",
     "capture_path",
     "delete_regular_fd",
-    "ensure_phase_two_mutator_lease",
     "delete_regular_file_by_handle",
     "flush_path",
     "flush_fd",
     "hold_directory",
     "hold_directory_chain",
-    "hold_phase_two_mutator_lease",
     "move_file_no_replace",
     "move_regular_fd_no_replace",
     "open_regular_flush_fd",
@@ -2082,6 +1766,5 @@ __all__ = [
     "private_security_for_directory",
     "replace_regular_file_by_handle",
     "replace_file",
-    "run_phase_two_mutator",
     "write_new_file",
 ]

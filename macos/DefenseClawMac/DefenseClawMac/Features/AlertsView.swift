@@ -128,13 +128,14 @@ struct AlertsView: View {
                 }
             }
         }
-        .inspector(isPresented: Binding(
+        .dcInspector(isPresented: Binding(
             get: { selectedRow != nil },
             set: { if !$0 { selection = [] } }
         )) {
-            if let row = selectedInspectorRow {
-                alertInspector(row)
-                    .dcInspectorColumnWidth()
+            VStack(spacing: 0) {
+                if let row = selectedInspectorRow {
+                    alertInspector(row)
+                }
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search action, target, details")

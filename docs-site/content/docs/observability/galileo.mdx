@@ -65,6 +65,43 @@ defenseclaw setup galileo \
 
 TLS verification is always enabled for Galileo setup and canary requests.
 
+## Standalone enterprise deployments
+
+The enterprise packages do not ship `defenseclaw setup galileo`, and the
+managed gateway service does not get the environment variables of an
+administrator's shell, so `{env: GALILEO_API_KEY}` does not work there.
+Store the key as a protected credential instead and reference it with
+`{credential: NAME}`. On Linux:
+
+```bash
+read -rs GALILEO_API_KEY
+printf '%s' "$GALILEO_API_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin
+unset GALILEO_API_KEY
+```
+
+On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`; on
+Windows, see [Store the key](/docs/enterprise/ai-defense-key#store-the-key).
+Then add the destination to the administrator's config
+([where it lives](/docs/enterprise/configuration#where-the-config-lives)):
+
+```yaml title="config.yaml (excerpt)"
+observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      preset: galileo
+      protocol: http/protobuf
+      endpoint: https://api.galileo.ai/otel/traces
+      headers:
+        Galileo-API-Key: {credential: galileo-api-key}
+        project: defenseclaw
+        logstream: production
+```
+
+The lifecycle refuses the config until the credential is stored, and the
+key never appears in the config or in logs. See
+[Observability credentials](/docs/enterprise/configuration#observability-credentials).
+
 ## Keep local observability and Galileo together
 
 ```bash
@@ -258,6 +295,32 @@ DefenseClaw applies the Galileo route's v8 redaction profile before this data
 leaves the gateway. Fresh v8 destinations default to `none` (unredacted), so
 shared deployments should explicitly select `sensitive`, `content`, `strict`,
 or a reviewed custom profile.
+
+### Guardrail decisions: find blocked, confirmed, and alerted tool calls
+
+A tool call that a guardrail blocks, asks the user to confirm, or alerts on
+carries the decision on its tool span:
+
+- A blocked call never runs, so its span ends at the decision with status
+  `ERROR`; the status description and the tool result are the redacted reason.
+  Confirmed and alerted calls keep status `OK`.
+- A `defenseclaw.guardrail.block`, `defenseclaw.guardrail.ask`, or
+  `defenseclaw.guardrail.alert` span event names the rule, severity, connector,
+  user, and redacted reason.
+- The flat `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id`, and
+  `defenseclaw.guardrail.severity` attributes, next to `user.id` and
+  `defenseclaw.user.name`, let you filter spans by one value.
+
+Galileo does not read the OTLP span status or these attributes into its span
+record, so a blocked call's status code there stays `0`. The Galileo preset
+also sends the decision as the OpenInference `metadata` attribute, which
+Galileo shows as the span's metadata: the three guardrail fields, the user,
+and `status: ERROR` for a block. Filter Galileo spans on those metadata keys.
+
+Decisions that do not belong to a tool call, such as a blocked prompt, produce
+an `apply_guardrail` span with the same status, event, and attributes. Galileo
+has no span type for it, so it reaches local observability and other OTLP
+destinations but not Galileo.
 
 Galileo and Agent360 are complementary rather than competing views:
 

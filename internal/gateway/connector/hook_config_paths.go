@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -252,7 +253,7 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("validate opencode managed plugin receipt: %w", err)
 	}
-	if err := safefile.ValidatePrivateFile(boundPath); err != nil {
+	if err := validateOpenCodeManagedPluginProtection(boundPath, opts); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -265,22 +266,114 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if info == nil || !managedFileBackupMatchesSnapshot(&backup, data, true) {
 		return false, nil
 	}
-	for _, marker := range [][]byte{
+	markers := [][]byte{
 		[]byte("// defenseclaw-managed-plugin v7"),
 		[]byte(`"/api/v1/opencode/hook"`),
 		[]byte(`"tool.execute.before": async`),
-		[]byte(`if (verdict && verdict.reason) throw new Error(verdict.reason);`),
+		openCodePluginBlockThrow(opts, "verdict.reason", "verdict && verdict.reason"),
 		[]byte(`verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE`),
 		[]byte(`hook_event_name: "defenseclaw.plugin.loaded"`),
 		[]byte(`"tool.execute.after": async`),
 		[]byte(`input && input.args`),
 		[]byte(`payload.tool_result = toolResult`),
-	} {
+	}
+	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD = ", ";\n"); guard != nil {
+		markers = append(markers, guard, openCodePluginBlockThrow(opts, "blocked", "blocked"))
+	}
+	// A plugin rendered before the listener proof existed would still send
+	// its credential to whoever holds the TCP port; it is repaired.
+	if managedPluginListenerProof(opts) {
+		markers = append(markers,
+			[]byte("const DC_LISTENER_PROOF = \"1\";\n"),
+			[]byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);"),
+		)
+	}
+	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil
 		}
 	}
 	return true, nil
+}
+
+// openCodePluginBlockThrow is the rendered statement that fails a blocked
+// tool call: the plain block error, also shown as an error notice
+// (defenseclawBlock), in per-user and standalone renders, and the reason
+// alone in the Secure Client render. A plugin rendered before the block
+// notice existed is repaired.
+func openCodePluginBlockThrow(opts SetupOpts, reason, condition string) []byte {
+	if pluginSecureClientProfile(opts) {
+		return []byte("if (" + condition + ") throw new Error(" + reason + ");")
+	}
+	return []byte("if (" + condition + ") throw defenseclawBlock(client, " + reason + ");")
+}
+
+// validateOpenCodeManagedPluginProtection checks the plugin's custody. A
+// setup for the current user requires the safefile owner-private shape for
+// that user. A Windows enterprise guardian verifying a per-user target
+// (ManagedTargetSID) runs as LocalSystem or an administrator without that
+// user's token, so the current-user shape cannot apply; the guardian pins the
+// exact managed plugin DACL itself, and here the plugin needs the same custody
+// Amp's plugin does: an owner trusted for the target account and no untrusted
+// write authority on the file or its directory.
+func validateOpenCodeManagedPluginProtection(path string, opts SetupOpts) error {
+	if strings.TrimSpace(opts.ManagedTargetSID) != "" {
+		return validatePluginArtifactDestinationFor(path, opts.ManagedTargetSID)
+	}
+	return safefile.ValidatePrivateFile(path)
+}
+
+// readHookConfigFile reads a vendor hook config. The file is opened without
+// blocking and must be a regular file (a symlink to one is still followed),
+// so a named pipe or device in its place is reported by path instead of
+// stalling the per-user worker until its deadline.
+func readHookConfigFile(path string) ([]byte, error) {
+	file, err := openHookConfigForRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is %s, not a regular file; replace it with a regular file", path, hookConfigFileKind(info.Mode()))
+	}
+	return io.ReadAll(file)
+}
+
+func hookConfigFileKind(mode os.FileMode) string {
+	switch {
+	case mode.IsDir():
+		return "a directory"
+	case mode&os.ModeNamedPipe != 0:
+		return "a named pipe"
+	default:
+		return "a special file"
+	}
+}
+
+// OwnedHookConfigReferences returns the hook config files of conn that still
+// reference DefenseClaw's own hook commands for opts. After a teardown it
+// names a registration the teardown left, for example one its restore of the
+// pre-setup file brought back.
+func OwnedHookConfigReferences(conn Connector, opts SetupOpts) ([]string, error) {
+	needles := ownedHookCommandNeedles(opts, conn)
+	if len(needles) == 0 {
+		return nil, nil
+	}
+	var remaining []string
+	for _, path := range HookConfigPathsForConnector(conn, opts) {
+		present, err := configFileReferencesHook(path, needles)
+		if err != nil {
+			return remaining, err
+		}
+		if present {
+			remaining = append(remaining, path)
+		}
+	}
+	return remaining, nil
 }
 
 // configFileReferencesHook reports whether the file at path contains any of
@@ -289,7 +382,7 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 // the guard re-installs. Any other read error is surfaced so the guard can log
 // and skip rather than heal on incomplete information.
 func configFileReferencesHook(path string, needles []string) (bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil

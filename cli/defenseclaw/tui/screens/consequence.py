@@ -139,9 +139,15 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
         align: center middle;
     }}
 
+    /* Fit 80x24: the dialog used to be 82 wide with no height limit, so
+       the right border, Cancel and the "press Enter again" danger hint
+       fell off the screen. It now shrinks and scrolls instead. */
     #consequence-dialog {{
         width: 82;
+        max-width: 96%;
         height: auto;
+        max-height: 96%;
+        overflow-y: auto;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
         background: {DEFAULT_TOKENS.surface_panel};
@@ -175,7 +181,8 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
 
     .consequence-action-row {{
         width: 100%;
-        height: 3;
+        height: auto;
+        min-height: 3;
         margin-bottom: 1;
         content-align: left middle;
         border: round {DEFAULT_TOKENS.border_muted};
@@ -223,6 +230,9 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
                 yield Static(details, id="consequence-details")
             if self.model.consequence:
                 yield Static(self.model.consequence, id="consequence-warning")
+            # The hint sits above the actions so the danger step's
+            # "press Enter again" is on screen, not below the fold.
+            yield Static(_HINT_DEFAULT, id="consequence-hint")
             for index, action in enumerate(self.model.actions):
                 label = action.display_label
                 if action.description:
@@ -239,7 +249,6 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
                 button.active_effect_duration = 0
                 yield button
             yield Button("Cancel", id="consequence-cancel", variant="default")
-            yield Static(_HINT_DEFAULT, id="consequence-hint")
 
     def on_mount(self) -> None:
         self._sync_selection()
@@ -333,6 +342,10 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
             if "consequence-action-row" not in button.classes:
                 continue
             button.set_class(index == self.selected_index, "-selected")
+            if index == self.selected_index and self.is_mounted:
+                # The dialog scrolls on short terminals; keep the chosen
+                # row (and its description) in view.
+                button.scroll_visible(animate=False)
 
 
 def _button_index(button_id: str | None) -> int | None:

@@ -838,6 +838,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		HookBinary:         hookExecutable,
 		ManagedStatePath:   statePath,
 		CodexTargetEnabled: true,
+		HookContractID:     WindowsCodexStandaloneHookContract(hookExecutable),
 	}
 	if !stateExists {
 		contains, markerErr := windowsCodexRequirementsContainExactManagedHook(
@@ -1755,4 +1756,20 @@ func validateWindowsCodexMachineVolume(path string) error {
 		return fmt.Errorf("Codex machine path is not on a trusted mount-manager NTFS drive: %w", err)
 	}
 	return nil
+}
+
+// WindowsCodexStandaloneHookContract is the hook contract the standalone
+// profile binds into every Codex machine-requirements command when
+// hookBinary is the standalone install's hook launcher, and "" for any
+// other launcher: the Secure Client profile keeps its certified unbound
+// command. The standalone launcher path derives from the protected HKLM
+// Program Files registration, never the caller's environment, so the hook
+// process (which runs with the agent's environment) and the SYSTEM
+// lifecycle render and verify the same commands.
+func WindowsCodexStandaloneHookContract(hookBinary string) string {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return ""
+	}
+	return windowsCodexStandaloneHookContractFor(layout, hookBinary)
 }

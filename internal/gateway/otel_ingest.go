@@ -1025,8 +1025,8 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 	}
 	user := resolveHTTPUserIdentity(r, nil)
 	promptID := firstNonEmpty(
-		a.lastHookPromptIDForTurn("codex", sessionID, turnID),
-		a.lastHookPromptID("codex", sessionID),
+		a.lastHookPromptIDForTurn(ctx, "codex", sessionID, turnID),
+		a.lastHookPromptID(ctx, "codex", sessionID),
 		promptIDForTurn("codex", sessionID, turnID),
 	)
 	meta := llmEventMeta{
@@ -1047,7 +1047,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		emittedPromptID := a.emitLLMPromptEventV8(ctx, meta, prompt, nil)
 		if emittedPromptID != "" {
 			meta.PromptID = emittedPromptID
-			a.rememberHookPromptID("codex", sessionID, turnID, emittedPromptID)
+			a.rememberHookPromptID(ctx, "codex", sessionID, turnID, emittedPromptID)
 		}
 		spanMeta := meta
 		spanMeta.Source = "codex"

@@ -1,56 +1,50 @@
+# DefenseClaw sensor helper — holds the privileges the gateway does not and
+# answers a fixed, fieldless set of questions about processes, connections
+# and host events for AI Discovery.
+#
+# The socket lives in the helper's own runtime directory, so a gateway
+# restart never removes it. The helper resolves the gateway account itself
+# and reads the watched homes from the protected guardian manifest; no
+# environment file is involved.
+#
+# SystemCallFilter: start from @system-service plus @network-io (netlink and
+# packet sockets), plus fanotify_init and fanotify_mark for the Plane C
+# file-access watch on credential roots: they belong to @privileged, which
+# @system-service does not include, and the filter would answer EPERM even
+# with CAP_SYS_ADMIN granted. Re-derive on a new kernel with SystemCallLog=
+# in audit mode before tightening further.
+
 [Unit]
-Description=DefenseClaw Sensor Helper (privileged AI runtime acquisition)
-Documentation=https://docs.defenseclaw.ai/docs/ai-discovery
-After=network-online.target
+Description=DefenseClaw sensor helper (privileged AI runtime acquisition)
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/ai-discovery/
 Wants=network-online.target
+After=network-online.target
 Before=defenseclaw-gateway.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# Root, deliberately, and this is the only DefenseClaw service that reads
-# the kernel on the gateway's behalf. The gateway itself keeps every
-# restriction in defenseclaw-gateway.service: it cannot see other processes,
-# has no capabilities, and cannot open a netlink or packet socket. That is
-# the point of splitting this out -- the privilege lives in a process that
-# does nothing else, rather than being granted to the network-facing one.
-#
-# What this process will do is fixed at compile time. It serves three
-# read-only questions over a local socket -- the process table, the
-# connection table, the kernel event stream -- and accepts no instruction
-# about what to read. Its watch scope comes from --home-dirs below, set by
-# the installer, never by a client.
 User=root
 Group=root
-ExecStart=/opt/defenseclaw/bin/defenseclaw-sensor-helper \
-  --managed-enterprise \
-  --socket-gid ${DEFENSECLAW_GATEWAY_GID} \
-  --allow-uid ${DEFENSECLAW_GATEWAY_UID} \
-  --home-dirs ${DEFENSECLAW_HOME_DIRS}
-EnvironmentFile=/etc/defenseclaw/sensor-helper.env
-Restart=on-failure
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
+ExecStart=/opt/defenseclaw/bin/defenseclaw-sensor-helper --managed-enterprise --service-account defenseclaw --home-dirs-from-manifest /etc/defenseclaw/hook-guardian/targets.yaml
+Restart=always
 RestartSec=5s
+RuntimeDirectory=defenseclaw-sensor
+RuntimeDirectoryMode=0750
 WorkingDirectory=/
 UMask=0007
 
-# Hardening. Root is required for fanotify (CAP_SYS_ADMIN), the netlink
-# process connector, and reading every /proc/<pid>/fd; everything not
-# required for those is still removed.
 NoNewPrivileges=true
-# CAP_CHOWN and CAP_FOWNER are needed for the socket itself, not for
-# acquisition: without them a root service cannot hand the socket to the
-# gateway's group, the gateway cannot open it, and the helper comes up
-# reporting success while brokering nothing. ListenSecured verifies the
-# ownership took and refuses to start rather than allow that.
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_RAW CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_CHOWN CAP_FOWNER
 AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_RAW CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_CHOWN CAP_FOWNER
-# The helper reads homes; it must never write one. ProtectHome=read-only
-# rather than true, because the credential paths Plane C watches live there
-# and the whole job is observing them.
+PrivateTmp=true
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths=/run
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
 ProtectClock=true
+ProtectControlGroups=true
 ProtectHostname=true
 ProtectKernelLogs=true
 ProtectKernelModules=true
@@ -59,13 +53,17 @@ RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
-SystemCallArchitectures=native
+# No MemoryDenyWriteExecute: this binary links bytedance/sonic through
+# internal/ipc -> internal/gateway. On x86_64 sonic maps executable memory in
+# package init, and under the directive mprotect(PROT_EXEC) fails with EPERM
+# and the helper panics at start (seen on RHEL 9 x86_64).
 RemoveIPC=true
-# AF_NETLINK for the process connector, AF_PACKET for DNS capture, AF_UNIX
-# for the socket this serves. No AF_INET of any kind: this process has no
-# reason to reach the network and must not be able to.
-RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_PACKET
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_PACKET AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io
+SystemCallFilter=fanotify_init fanotify_mark
+SystemCallFilter=~@clock @cpu-emulation @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

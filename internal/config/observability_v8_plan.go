@@ -167,7 +167,9 @@ type ObservabilityV8TransportPlan struct {
 	Method              string                                                       `json:"method,omitempty"`
 	Headers             map[string]ObservabilityV8HeaderValue                        `json:"headers,omitempty"`
 	TokenEnv            string                                                       `json:"token_env,omitempty"`
+	TokenCredential     string                                                       `json:"token_credential,omitempty"`
 	BearerEnv           string                                                       `json:"bearer_env,omitempty"`
+	BearerCredential    string                                                       `json:"bearer_credential,omitempty"`
 	Index               string                                                       `json:"index,omitempty"`
 	Source              string                                                       `json:"source,omitempty"`
 	SourceType          string                                                       `json:"sourcetype,omitempty"`

@@ -1,9 +1,6 @@
 # Release-candidate gates compare these reviewed sources byte-for-byte across
 # Linux, macOS, and Windows runners. Keep their checkout representation stable.
-scripts/upgrade.sh text eol=lf
-scripts/upgrade.ps1 text eol=lf
-scripts/defenseclaw-rescue.sh text eol=lf
-scripts/defenseclaw-rescue.ps1 text eol=lf
+scripts/defenseclaw-upgrade.sh text eol=lf
 scripts/install-openshell-sandbox.sh text eol=lf
 scripts/install.sh text eol=lf
 scripts/install.ps1 text eol=lf
@@ -16,6 +13,18 @@ extensions/defenseclaw/openclaw.plugin.json text eol=lf
 internal/configs/providers.json text eol=lf
 internal/gateway/connector/hooks/amp-plugin.ts text eol=lf
 internal/gateway/connector/hooks/opencode-plugin.js text eol=lf
+internal/gateway/connector/hooks/amp-plugin-secure-client.ts text eol=lf
+internal/gateway/connector/hooks/opencode-plugin-secure-client.js text eol=lf
+internal/gateway/connector/hooks/*.sh text eol=lf
+internal/enterprisepolicy/opencode_managed_plugin.js text eol=lf
+# The host variants of the Amp and OpenCode bridges; the plugin scanner pins
+# their SHA-256, so a Windows checkout must keep them LF as well.
+internal/gateway/connector/testdata/bridge_host/** text eol=lf
+
+# The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
+# ones run under /bin/sh; keep them LF on Windows checkouts too.
+packaging/mdm/**/*.sh text eol=lf
+packaging/mdm/**/*.ps1 text eol=lf
 
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the

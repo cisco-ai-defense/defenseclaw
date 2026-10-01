@@ -9,7 +9,7 @@
       "author": "Maintainer"
     },
     {
-      "content": "Documentation should prioritize practical operator flows: installation, quick start, scanner usage, guardrail setup and tuning, sandbox setup, observability, Splunk/local Grafana, TUI operation, policy authoring, plugin development, and testing. Keep durable Markdown docs under docs/ and keep package-local READMEs beside bundles or examples that need local context.",
+      "content": "Documentation should prioritize practical operator flows: installation, quick start, scanner usage, guardrail setup and tuning, legacy sandbox cleanup, observability, Splunk/local Grafana, TUI operation, policy authoring, plugin development, and testing. Keep durable Markdown docs under docs/ and keep package-local READMEs beside bundles or examples that need local context.",
       "author": "Maintainer"
     },
     {
@@ -28,7 +28,7 @@
     },
     {
       "title": "Key Concepts and Security Model",
-      "purpose": "Explain core concepts: skills, MCP servers, plugins, agent-generated code, admission control, observe vs action mode, scan verdicts, block/allow policy, runtime guardrails, sandboxing, audit evidence, and the limits of automated security controls. Reference docs/ARCHITECTURE.md, docs/GUARDRAIL.md, docs/SANDBOX.md, internal/policy/, and policies/.",
+      "purpose": "Explain core concepts: skills, MCP servers, plugins, agent-generated code, admission control, observe vs action mode, scan verdicts, block/allow policy, runtime guardrails, subprocess shims, audit evidence, and the limits of automated security controls. Reference docs/ARCHITECTURE.md, docs/GUARDRAIL.md, internal/policy/, and policies/.",
       "parent": "Home"
     },
     {
@@ -43,12 +43,12 @@
     },
     {
       "title": "Architecture",
-      "purpose": "System architecture for the Python CLI, Go gateway sidecar, OpenClaw plugin, policy engine, scanner wrappers, guardrail proxy, audit store, telemetry exporters, and sandbox integration. Include component boundaries and request/data flow. Reference docs/ARCHITECTURE.md, docs/reference/GATEWAY_SPEC.md, internal/gateway/, internal/scanner/, internal/audit/, internal/telemetry/, and extensions/defenseclaw/src/.",
+      "purpose": "System architecture for the Python CLI, Go gateway sidecar, OpenClaw plugin, policy engine, scanner wrappers, guardrail proxy, audit store, and telemetry exporters. Include component boundaries and request/data flow. Reference docs/ARCHITECTURE.md, docs/reference/GATEWAY_SPEC.md, internal/gateway/, internal/scanner/, internal/audit/, internal/telemetry/, and extensions/defenseclaw/src/.",
       "parent": "Home"
     },
     {
       "title": "CLI and Gateway Commands",
-      "purpose": "Operator guide for defenseclaw CLI commands and defenseclaw-gateway commands: init, doctor, setup, skill, mcp, plugin, codeguard, policy, audit, alerts, tui, sandbox, status, start/stop/restart, scan, watchdog, and provenance. Reference docs/CLI.md, internal/cli/, cli/defenseclaw/commands/, and cmd/defenseclaw/main.go.",
+      "purpose": "Operator guide for defenseclaw CLI commands and defenseclaw-gateway commands: init, doctor, setup, skill, mcp, plugin, codeguard, policy, audit, alerts, tui, sandbox legacy-cleanup, status, start/stop/restart, scan, watchdog, and provenance. Reference docs/CLI.md, internal/cli/, cli/defenseclaw/commands/, and cmd/defenseclaw/main.go.",
       "parent": "Home"
     },
     {
@@ -68,12 +68,12 @@
     },
     {
       "title": "Policy and Rego",
-      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, sandbox/firewall Rego modules, data files, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
+      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, firewall Rego modules, data files, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
       "parent": "Home"
     },
     {
-      "title": "Sandbox and Firewall",
-      "purpose": "Explain OpenShell sandbox setup, Linux system requirements, network namespace behavior, firewall policy, sandbox events, monitoring, debugging, and macOS fallback boundaries. Reference docs/SANDBOX.md, docs/SANDBOX_ARCHITECTURE.md, docs/SANDBOX_SETUP.md, docs/SANDBOX_MONITORING.md, docs/SANDBOX_DEBUGGING.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/sandbox/, internal/firewall/, and policies/openshell/.",
+      "title": "Firewall and Legacy Sandbox Cleanup",
+      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, the removal of the legacy openshell-sandbox 0.0.x standalone integration, defenseclaw sandbox legacy-cleanup, and the legacy bind shim and degraded sandbox health state that remain until cleanup runs. NVIDIA OpenShell 0.1 support is coming in a future release; do not describe it. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/config/legacy_openshell.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
       "parent": "Home"
     },
     {

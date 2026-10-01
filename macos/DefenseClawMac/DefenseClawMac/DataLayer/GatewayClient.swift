@@ -107,7 +107,10 @@ actor GatewayClient {
             guard let http = response as? HTTPURLResponse else {
                 throw GatewayError.badResponse("non-HTTP response")
             }
-            if http.statusCode == 401 || http.statusCode == 403 {
+            // The sandbox API answers policy and organization refusals with
+            // 403 and a {"code","error"} body; those are not token failures.
+            let sandboxRefusal = http.statusCode == 403 && path.hasPrefix(Self.sandboxPrefix)
+            if http.statusCode == 401 || (http.statusCode == 403 && !sandboxRefusal) {
                 throw GatewayError.unauthorized
             }
             let expectedLength = http.expectedContentLength
@@ -582,20 +585,82 @@ actor GatewayClient {
 
     /// Fetch the runtime-plane snapshot.
     ///
-    /// Throws on a malformed payload so the caller keeps the last good
-    /// snapshot: replacing a stale-but-true coverage report with an empty one
-    /// would read as a clean host rather than as a lost connection.
+    /// Throws on a malformed or incomplete payload so the caller keeps the
+    /// last good snapshot: replacing a stale-but-true coverage report with an
+    /// empty one would read as a clean host rather than as a lost connection.
     func aiRuntime() async throws -> AIRuntimeSnapshot {
         let json = try await getJSON("/api/v1/ai-usage/runtime")
-        guard json is [String: Any] else {
-            throw GatewayError.badResponse("/api/v1/ai-usage/runtime not an object")
+        guard let object = json as? [String: Any],
+              object["enabled"] is Bool, object["planes"] is [Any],
+              object["findings"] is [Any] else {
+            throw GatewayError.badResponse("Runtime coverage response is incomplete.")
         }
-        return AIRuntimeDecoding.snapshot(from: json)
+        return AIRuntimeDecoding.snapshot(from: object)
     }
 
     /// Trigger one immediate runtime-plane poll.
     func scanAIRuntime() async throws {
         try await post("/api/v1/ai-usage/runtime/scan", timeout: Self.scanTimeout)
+    }
+
+    // MARK: - OpenShell sandboxes (/api/v1/sandbox, internal/openshell/sandboxapi)
+
+    static let sandboxPrefix = "/api/v1/sandbox/"
+    // Stop and undo run the CLI (SandboxesView), which says when the stop
+    // ends a detached run and remembers what a copy held as it stopped; the
+    // daemon's stop keeps the run's log for `sandbox logs`.
+
+    func sandboxStatus() async throws -> SandboxStatus {
+        let json = try await getJSON("/api/v1/sandbox/status")
+        guard json is [String: Any] else { throw GatewayError.badResponse("/api/v1/sandbox/status not an object") }
+        return SandboxDecoding.status(from: json)
+    }
+
+    func sandboxes() async throws -> [SandboxRow] {
+        let json = try await getJSON("/api/v1/sandbox/sandboxes")
+        guard (json as? [String: Any])?["sandboxes"] is [Any] else {
+            throw GatewayError.badResponse("/api/v1/sandbox/sandboxes has no sandboxes list")
+        }
+        return SandboxDecoding.sandboxes(from: json)
+    }
+
+    func sandboxApprovals() async throws -> [SandboxAsk] {
+        let json = try await getJSON("/api/v1/sandbox/approvals")
+        guard (json as? [String: Any])?["approvals"] is [Any] else {
+            throw GatewayError.badResponse("/api/v1/sandbox/approvals has no approvals list")
+        }
+        return SandboxDecoding.approvals(from: json)
+    }
+
+    /// Buffered activity after `since` (the app polls; the TUI streams).
+    func sandboxActivity(since: Int) async throws -> [SandboxActivity] {
+        let items = since > 0 ? [URLQueryItem(name: "since", value: String(since))] : []
+        let data = try await request("GET", "/api/v1/sandbox/activity", queryItems: items)
+        let json = try JSONSerialization.jsonObject(with: data)
+        guard (json as? [String: Any])?["events"] is [Any] else {
+            throw GatewayError.badResponse("/api/v1/sandbox/activity has no events list")
+        }
+        return SandboxDecoding.activity(from: json)
+    }
+
+    /// Lift an egress block for one sandbox, or with `always` for every sandbox.
+    @discardableResult
+    func unblockSandboxEgress(host: String, sandbox: String, always: Bool) async throws -> String {
+        var body: [String: Any] = ["host": host]
+        if !sandbox.isEmpty { body["sandbox"] = sandbox }
+        if always { body["always"] = true }
+        let json = try await post("/api/v1/sandbox/egress/unblock", body, timeout: 30)
+        return ((json as? [String: Any])?["message"] as? String) ?? "\(host) unblocked"
+    }
+
+    /// Approve or reject one ask; `always` keeps the decision for future sandboxes.
+    @discardableResult
+    func decideSandboxApproval(id: String, approve: Bool, always: Bool) async throws -> String {
+        var body: [String: Any] = ["decision": approve ? "approve" : "reject"]
+        if always { body["always"] = true }
+        let path = "/api/v1/sandbox/approvals/\(try encodedPathSegment(id))"
+        let json = try await post(path, body, timeout: 30)
+        return ((json as? [String: Any])?["message"] as? String) ?? (approve ? "Approved" : "Rejected")
     }
 
     func aiComponents() async throws -> [AIComponent] {

@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "cli",
+    "sandbox-cli",
     "gateway-api",
     "configuration",
     "keys",

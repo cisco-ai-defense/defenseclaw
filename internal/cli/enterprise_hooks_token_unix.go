@@ -16,11 +16,73 @@ import (
 )
 
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
-	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
-		return err
-	}
 	tokenPath, err := connector.HookAPITokenFilePath(dataDir, connectorName)
 	if err != nil {
+		return err
+	}
+	return validateEnterpriseHookTokenPathLocation(dataDir, tokenPath, "hook token")
+}
+
+func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
+	tokenPath, err := connector.HookAPITokenFilePath(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	return alignEnterpriseHookTokenPathOwner(dataDir, tokenPath, "hook token")
+}
+
+func validateEnterpriseHookUserTokenKeyLocation(dataDir string) error {
+	keyPath, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return err
+	}
+	return validateEnterpriseHookTokenPathLocation(dataDir, keyPath, "per-user credential key")
+}
+
+// loadEnterpriseHookPendingUserTokenKey reads the key a credential rotation
+// staged (connector.PendingUserScopedTokenKeyPath), with the committed key's
+// location and trust checks; "" when no rotation is in progress.
+func loadEnterpriseHookPendingUserTokenKey(dataDir string) (string, error) {
+	path, err := connector.PendingUserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return "", err
+	}
+	if err := validateEnterpriseHookTokenPathLocation(dataDir, path, "staged per-user credential key"); err != nil {
+		return "", err
+	}
+	key, err := connector.LoadPendingUserScopedTokenKey(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: %w", err)
+	}
+	return key, nil
+}
+
+// currentEnterpriseHookUserTokenKeyID is the fingerprint of the key targets
+// are rendered from right now: a rotation's staged key, else the committed
+// one; "" when neither exists yet.
+func currentEnterpriseHookUserTokenKeyID(dataDir string) (string, error) {
+	key, err := loadEnterpriseHookPendingUserTokenKey(dataDir)
+	if err == nil && key == "" {
+		if err = validateEnterpriseHookUserTokenKeyLocation(dataDir); err == nil {
+			key, err = connector.LoadUserScopedTokenKey(dataDir)
+		}
+	}
+	if err != nil || key == "" {
+		return "", err
+	}
+	return connector.UserScopedTokenKeyFingerprint(key), nil
+}
+
+func alignEnterpriseHookUserTokenKeyOwner(dataDir string) error {
+	keyPath, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return err
+	}
+	return alignEnterpriseHookTokenPathOwner(dataDir, keyPath, "per-user credential key")
+}
+
+func validateEnterpriseHookTokenPathLocation(dataDir, tokenPath, label string) error {
+	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
 		return err
 	}
 	tokenDir := filepath.Dir(tokenPath)
@@ -29,18 +91,18 @@ func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) er
 	}
 	if info, err := os.Lstat(tokenPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("enterprise hooks: refusing symlink hook token: %s", tokenPath)
+			return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, tokenPath)
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("enterprise hooks: hook token is not a regular file: %s", tokenPath)
+			return fmt.Errorf("enterprise hooks: %s is not a regular file: %s", label, tokenPath)
 		}
 	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("enterprise hooks: inspect hook token %s: %w", tokenPath, err)
+		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, tokenPath, err)
 	}
 	return nil
 }
 
-func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
+func alignEnterpriseHookTokenPathOwner(dataDir, tokenPath, label string) error {
 	info, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true)
 	if err != nil {
 		return err
@@ -50,37 +112,41 @@ func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
 		return fmt.Errorf("enterprise hooks: cannot inspect managed data_dir owner")
 	}
 	uid, gid := int(st.Uid), int(st.Gid)
-	tokenPath, err := connector.HookAPITokenFilePath(dataDir, connectorName)
-	if err != nil {
-		return err
-	}
 	tokenDir := filepath.Dir(tokenPath)
 	if _, err := validateEnterpriseHookManagedDir(tokenDir, "hook token dir", true); err != nil {
 		return err
 	}
 	tokenInfo, err := os.Lstat(tokenPath)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect hook token %s: %w", tokenPath, err)
+		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, tokenPath, err)
 	}
 	if tokenInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("enterprise hooks: refusing symlink hook token: %s", tokenPath)
+		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, tokenPath)
 	}
 	if !tokenInfo.Mode().IsRegular() {
-		return fmt.Errorf("enterprise hooks: hook token is not a regular file: %s", tokenPath)
+		return fmt.Errorf("enterprise hooks: %s is not a regular file: %s", label, tokenPath)
+	}
+	// Fix the mode while root still owns the file and only when it is
+	// wrong: the standalone guardian runs without CAP_FOWNER, so it cannot
+	// chmod a token after handing it to the service account.
+	if tokenInfo.Mode().Perm() != 0o600 {
+		if err := enterpriseHookTokenChmod(tokenPath, 0o600); err != nil {
+			return fmt.Errorf("enterprise hooks: chmod %s: %w", label, err)
+		}
 	}
 	if os.Geteuid() == 0 {
 		if err := os.Lchown(tokenDir, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown hook token dir: %w", err)
 		}
 		if err := os.Lchown(tokenPath, uid, gid); err != nil {
-			return fmt.Errorf("enterprise hooks: lchown hook token: %w", err)
+			return fmt.Errorf("enterprise hooks: lchown %s: %w", label, err)
 		}
-	}
-	if err := os.Chmod(tokenPath, 0o600); err != nil {
-		return fmt.Errorf("enterprise hooks: chmod hook token: %w", err)
 	}
 	return nil
 }
+
+// enterpriseHookTokenChmod is replaced in tests.
+var enterpriseHookTokenChmod = os.Chmod
 
 func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
 	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
@@ -135,6 +201,12 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 	if !tokenInfo.Mode().IsRegular() {
 		return fmt.Errorf("enterprise hooks: OTLP token is not a regular file: %s", tokenPath)
 	}
+	// As for the hook token: chmod only a wrong mode, before the hand-off.
+	if tokenInfo.Mode().Perm() != 0o600 {
+		if err := enterpriseHookTokenChmod(tokenPath, 0o600); err != nil {
+			return fmt.Errorf("enterprise hooks: chmod OTLP token: %w", err)
+		}
+	}
 	if os.Geteuid() == 0 {
 		if err := os.Lchown(tokenDir, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown OTLP token dir: %w", err)
@@ -142,9 +214,6 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 		if err := os.Lchown(tokenPath, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown OTLP token: %w", err)
 		}
-	}
-	if err := os.Chmod(tokenPath, 0o600); err != nil {
-		return fmt.Errorf("enterprise hooks: chmod OTLP token: %w", err)
 	}
 	return nil
 }

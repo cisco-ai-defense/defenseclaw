@@ -26,6 +26,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import http.client
 import io
 import ipaddress
 import json
@@ -34,6 +35,7 @@ import queue
 import re
 import shlex
 import shutil
+import socket
 import ssl
 import stat
 import subprocess
@@ -74,6 +76,7 @@ from defenseclaw.connector_paths import (
     hermes_profile_unsupported_reason,
     normalize,
     omnigent_config_path,
+    opencode_writable_plugin_folder,
     rule_paths,
 )
 from defenseclaw.context import AppContext, pass_ctx
@@ -101,6 +104,7 @@ from defenseclaw.doctor_gateway import (
     pid_file_fingerprint,
     pid_file_fingerprint_from_fd,
     read_pid_record,
+    trusted_lsof_path,
 )
 from defenseclaw.doctor_hooks import (
     WindowsHookCheck,
@@ -128,6 +132,11 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.openclaw_presence import (
+    OPENCLAW_NOT_INSTALLED_DETAIL,
+    openclaw_implied_but_not_installed,
+)
+from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -706,6 +715,7 @@ def _http_probe(
     response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
     allow_truncation: bool = True,
     bypass_proxy: bool = False,
+    bound_peer: _GatewayTrust | None = None,
 ) -> tuple[int, str]:
     """Run one HTTP probe with a portable total wall-clock deadline.
 
@@ -714,6 +724,10 @@ def _http_probe(
     every read timeout.  A daemon worker bounds the entire open/read sequence
     on Linux, macOS, and Windows.  A timed-out worker owns no mutable Doctor
     state and cannot delay process exit.
+
+    Pass ``bound_peer`` (a trusted gateway listener) for any request that
+    carries the gateway token: the request is then written only on a
+    connection whose accepting process is that verified gateway.
     """
 
     if timeout <= 0:
@@ -722,17 +736,29 @@ def _http_probe(
 
     def _run() -> None:
         try:
-            value = _http_probe_once(
-                url,
-                method=method,
-                headers=headers,
-                body=body,
-                timeout=timeout,
-                verify_tls=verify_tls,
-                response_limit=response_limit,
-                allow_truncation=allow_truncation,
-                bypass_proxy=bypass_proxy,
-            )
+            if bound_peer is not None:
+                value = _gateway_peer_bound_request(
+                    url,
+                    bound_peer,
+                    method=method,
+                    headers=headers,
+                    body=body,
+                    timeout=timeout,
+                    response_limit=response_limit,
+                    allow_truncation=allow_truncation,
+                )
+            else:
+                value = _http_probe_once(
+                    url,
+                    method=method,
+                    headers=headers,
+                    body=body,
+                    timeout=timeout,
+                    verify_tls=verify_tls,
+                    response_limit=response_limit,
+                    allow_truncation=allow_truncation,
+                    bypass_proxy=bypass_proxy,
+                )
         except Exception as exc:  # noqa: BLE001 - redact arbitrary transport detail.
             value = (0, f"{type(exc).__name__}: probe failed")
         try:
@@ -831,9 +857,262 @@ def _http_probe_once(
         return 0, str(exc)
 
 
+# Upper bound for the accepted server socket to show up in the verified
+# gateway's descriptors. Go's accept loop takes microseconds; this only covers
+# a loaded host.
+_GATEWAY_PEER_BIND_SECONDS = 2.0
+_GATEWAY_TOKEN_REFUSED = "; refusing to send the gateway token"
+
+
+class _PeerBoundHTTPConnection(http.client.HTTPConnection):
+    """HTTP on one socket that is already connected and peer-verified."""
+
+    def __init__(self, host: str, port: int, sock: socket.socket, timeout: float) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self._verified_sock: socket.socket | None = sock
+
+    def connect(self) -> None:
+        # Never dial again: a new connection could reach a different listener.
+        if self._verified_sock is None:
+            raise http.client.NotConnected("the verified gateway connection is closed")
+        self.sock, self._verified_sock = self._verified_sock, None
+
+
+def _gateway_peer_bound_request(
+    url: str,
+    bound_peer: _GatewayTrust,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: float = 3.0,
+    response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
+    allow_truncation: bool = True,
+    evidence: GatewayEvidence | None = None,
+) -> tuple[int, str]:
+    """Send one token-bearing request only over a connection the gateway accepted.
+
+    Listener inspection says which process owned the endpoint a moment ago,
+    but the request needs its own connection, and the endpoint can change
+    hands in between. So connect first, require the kernel to attribute the
+    accepted server socket to the verified gateway PID, confirm that PID is
+    still the same process generation, and only then write the request on
+    that same socket. A listener that took the endpoint over in between gets
+    a connection and no bytes.
+    """
+    refused = _GATEWAY_TOKEN_REFUSED
+    parts = urllib.parse.urlsplit(url)
+    try:
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        host, port = None, None
+    if parts.scheme != "http" or not host or not port:
+        return 0, "a gateway token request needs a local http endpoint" + refused
+    process = bound_peer.process
+    if not bound_peer.trusted or process is None or process.status != "ok" or not process.start_identity:
+        return 0, "the verified gateway process identity is unavailable" + refused
+    evidence = evidence or GatewayEvidence()
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError as exc:
+        return 0, str(exc)
+    try:
+        client, server = sock.getsockname(), sock.getpeername()
+        deadline = time.monotonic() + min(timeout, _GATEWAY_PEER_BIND_SECONDS)
+        owner = evidence.connection_owner(bound_peer.pid, client, server)
+        while owner.status == "missing" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            owner = evidence.connection_owner(bound_peer.pid, client, server)
+        if owner.status != "ok" or owner.pid != bound_peer.pid:
+            return 0, "the connected gateway endpoint is not served by the verified gateway process" + refused
+        current = evidence.process(bound_peer.pid)
+        if (
+            current.status != "ok"
+            or current.start_identity != process.start_identity
+            or current.executable != process.executable
+        ):
+            return 0, "the verified gateway process changed while the connection was checked" + refused
+        connection = _PeerBoundHTTPConnection(host, port, sock, timeout)
+        sock = None
+        try:
+            target = parts.path or "/"
+            if parts.query:
+                target = f"{target}?{parts.query}"
+            connection.request(method, target, body=body, headers=headers or {})
+            response = connection.getresponse()
+            if 300 <= response.status < 400:
+                return 0, f"refused to follow a gateway redirect (HTTP {response.status})"
+            raw = response.read(response_limit + 1)
+            if len(raw) > response_limit and not allow_truncation:
+                return response.status, f"response exceeds {response_limit}-byte limit"
+            return response.status, raw[:response_limit].decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        return 0, str(exc)
+    finally:
+        if sock is not None:
+            sock.close()
+
+
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
+
+def _check_legacy_sandbox(cfg, r: _DoctorResult) -> None:
+    """Point a host that still carries the removed openshell-sandbox mode at cleanup.
+
+    Silent when nothing is found. The legacy mode keeps the gateway API on
+    the sandbox veth host until ``defenseclaw sandbox legacy-cleanup`` resets
+    the config, and its root units, ACLs, and ownership changes stay behind.
+    """
+    from defenseclaw import sandbox_legacy
+
+    try:
+        evidence = sandbox_legacy.quick_evidence(cfg)
+    except Exception:  # noqa: BLE001 - a diagnostic must never abort doctor
+        return
+    if not evidence:
+        return
+    _emit(
+        "warn",
+        "Legacy sandbox",
+        "legacy openshell-sandbox standalone install detected (" + ", ".join(evidence) + ")",
+        r=r,
+        check_id="doctor.sandbox.legacy-install",
+        reason_code="legacy-standalone-sandbox",
+        remediation="run 'defenseclaw sandbox legacy-cleanup --dry-run', then 'defenseclaw sandbox legacy-cleanup'",
+    )
+
+
+# ``defenseclaw-gateway sandbox doctor --json`` probes Docker, the OpenShell
+# service and CLI, and the daemon; each probe has its own short deadline.
+SANDBOX_DOCTOR_TIMEOUT_SECONDS = 90
+_SANDBOX_DOCTOR_MAX_OUTPUT_CHARS = 1_000_000
+_SANDBOX_DOCTOR_STATUSES = frozenset({"pass", "warn", "fail", "skip"})
+
+
+def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
+    """Run the Go sandbox doctor and return its JSON report, or why not.
+
+    Also the TUI Sandbox wizard's machine check.
+    """
+    try:
+        completed = subprocess.run(
+            [binary, "sandbox", "doctor", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=SANDBOX_DOCTOR_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"'defenseclaw-gateway sandbox doctor' did not finish within {SANDBOX_DOCTOR_TIMEOUT_SECONDS}s"
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not run 'defenseclaw-gateway sandbox doctor': {exc}"
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    if len(stdout) > _SANDBOX_DOCTOR_MAX_OUTPUT_CHARS:
+        return None, "'defenseclaw-gateway sandbox doctor' returned an oversized report"
+    try:
+        report = json.loads(stdout) if stdout.strip() else None
+    except json.JSONDecodeError:
+        report = None
+    if not isinstance(report, dict) or not isinstance(report.get("checks"), list):
+        stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+        first = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        first = first.lstrip("✗").strip()
+        if first:
+            return None, first
+        return None, (
+            f"'defenseclaw-gateway sandbox doctor --json' exited {completed.returncode} without a report; "
+            "this gateway may predate OpenShell 0.1 sandboxes (run 'defenseclaw upgrade')"
+        )
+    return report, ""
+
+
+def _check_sandbox(cfg, r: _DoctorResult) -> None:
+    """The Sandbox section: the Go ``sandbox doctor`` checks, one row each.
+
+    Skipped (one row) while ``openshell.enabled`` is off, so hosts that never
+    set sandboxes up do not pay for Docker and OpenShell probes.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    openshell = getattr(cfg, "openshell", None)
+    # Identity check: a stand-in config object must not read as enabled.
+    enabled = getattr(openshell, "enabled", False) is True
+    if host_os() == "windows":
+        _emit(
+            "warn" if enabled else "skip",
+            "Sandboxes",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            r=r,
+            check_id="doctor.sandbox.platform",
+            reason_code="sandbox-platform-unsupported",
+        )
+        return
+    if not enabled:
+        _emit(
+            "skip",
+            "Sandboxes",
+            "off (openshell.enabled is false); run 'defenseclaw sandbox setup' to run agents in OpenShell sandboxes",
+            r=r,
+            check_id="doctor.sandbox.enabled",
+            reason_code="sandbox-disabled",
+        )
+        return
+    binary = resolve_gateway_binary()
+    if not binary:
+        _emit(
+            "fail",
+            "Sandbox doctor",
+            "defenseclaw-gateway is not installed, so the sandbox checks cannot run",
+            r=r,
+            check_id="doctor.sandbox.gateway-binary",
+            reason_code="sandbox-gateway-missing",
+            remediation="run 'defenseclaw upgrade' to install the gateway binary",
+        )
+        return
+    report, problem = sandbox_doctor_report(binary)
+    if report is None:
+        _emit(
+            "warn",
+            "Sandbox doctor",
+            problem,
+            r=r,
+            check_id="doctor.sandbox.report",
+            reason_code="sandbox-doctor-unavailable",
+            remediation="run 'defenseclaw sandbox doctor' for the full output",
+        )
+        return
+    for check in report["checks"]:
+        if not isinstance(check, dict):
+            continue
+        status = str(check.get("status") or "").strip().lower()
+        tag = status if status in _SANDBOX_DOCTOR_STATUSES else "warn"
+        check_id = str(check.get("id") or "").strip()
+        title = str(check.get("title") or check_id or "Sandbox check").strip()
+        detail = str(check.get("detail") or "").strip()
+        fix = check.get("fix") if isinstance(check.get("fix"), dict) else {}
+        remediation = str(fix.get("summary") or "").strip()
+        command = str(fix.get("command") or "").strip()
+        if command:
+            remediation = f"{remediation}: {command}" if remediation else command
+        if fix.get("automatic") and tag != "pass":
+            remediation += " (or 'defenseclaw sandbox doctor --fix')"
+        _emit(
+            tag,
+            title,
+            detail,
+            r=r,
+            check_id=f"doctor.sandbox.{check_id}" if check_id else "",
+            reason_code=f"sandbox-{check_id}" if check_id and tag != "pass" else "",
+            remediation=remediation if tag != "pass" else "",
+        )
+        if tag in {"warn", "fail"} and remediation:
+            _emit_hint(remediation)
 
 
 def _check_config(cfg, r: _DoctorResult) -> None:
@@ -1285,7 +1564,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Human approval",
-            "OpenCode v1.18.10-v1.18.19 publishes permission.ask, but the DefenseClaw bridge "
+            "OpenCode v1.18.10-v1.18.33 publishes permission.ask, but the DefenseClaw bridge "
             "intentionally does not implement or claim that surface",
             r=r,
         )
@@ -1362,7 +1641,7 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
         reason = health.reason_code
         if reason == "audit-db-schema-incomplete":
             detail = "required schema is incomplete"
-            remediation = "defenseclaw migrations apply"
+            remediation = "defenseclaw-gateway restart"
         elif reason == "audit-db-corrupt":
             detail = "SQLite quick_check reported corruption"
             remediation = "restore the audit database from a trusted backup"
@@ -1525,6 +1804,19 @@ def _health_remediation_text(choices: tuple[object, ...]) -> str:
     return str(getattr(choice, "summary", "") or "")
 
 
+def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
+    """Whether the OpenClaw plugin is a required component.
+
+    Only an enabled OpenClaw connector needs it. The ``claw.mode`` openclaw
+    default on a machine without OpenClaw (#958) is not one: the OpenClaw
+    gateway row reads "off (OpenClaw is not installed)", and ``defenseclaw
+    version`` lists the plugin as ``(not used)``.
+    """
+    if "openclaw" not in enabled_connectors:
+        return False
+    return not openclaw_implied_but_not_installed(cfg)
+
+
 def _check_component_connector_compatibility(
     cfg,
     connectors: list[str],
@@ -1565,7 +1857,7 @@ def _check_component_connector_compatibility(
         return
 
     component_required = {"cli", "gateway"}
-    if "openclaw" in enabled:
+    if _openclaw_plugin_required(cfg, enabled):
         component_required.add("plugin")
     for finding in report.components:
         label = f"Component compatibility: {finding.component}"
@@ -1635,6 +1927,29 @@ def _check_component_connector_compatibility(
         )
 
 
+_DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
+
+
+def _scanner_repair_hint() -> str:
+    """The command that repairs the skill-scanner launcher of this install.
+
+    On macOS and Linux the release upgrade resolver reconciles the launcher
+    with the managed virtualenv, at the installed version too (the built-in
+    ``defenseclaw upgrade`` stops early when the version is already current);
+    on Windows, DefenseClaw Setup's repair does.
+    """
+
+    if os.name == "nt":
+        return (
+            "repair the install with `DefenseClawSetup-x64.exe /repair` "
+            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
+        )
+    return (
+        "repair the launcher with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
+        f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
+    )
+
+
 def _check_scanners(cfg, r: _DoctorResult) -> None:
     bins = [
         ("skill-scanner", cfg.scanners.skill_scanner.binary),
@@ -1670,14 +1985,17 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 env=trusted_system_subprocess_env(),
-                timeout=10.0,
+                # The first run after an install compiles the scanner's
+                # modules and took longer than 10 s on a test host.
+                timeout=30.0,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} timed out during --version; run the authenticated upgrade/repair path",
+                f"{probe_path} did not answer --version within 30 s; a busy machine can cause this, so run "
+                f"`defenseclaw doctor` again, and if it keeps failing, {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -1685,7 +2003,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} could not start: {exc}; run the authenticated upgrade/repair path",
+                f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -1698,7 +2016,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             detail = f"{probe_path} failed --version (exit {probe.returncode})"
             if output:
                 detail += f": {output}"
-            detail += "; run the authenticated upgrade/repair path"
+            detail += "; " + _scanner_repair_hint()
             _emit("fail", f"Scanner: {name}", detail, r=r)
             continue
         _emit(
@@ -1721,21 +2039,50 @@ def _gateway_fleet_expected_enabled(cfg) -> bool:
     if not _doctor_active_connectors(cfg):
         return False
     connector = _active_connector(cfg)
-    if connector in {"openclaw", "zeptoclaw"}:
+    if connector == "zeptoclaw":
         return True
-    if connector not in {"codex", "claudecode"}:
+    if connector not in {"openclaw", "codex", "claudecode"}:
         return False
     host = str(getattr(gateway, "host", "") or "").strip()
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
     if not host or host.casefold() == "localhost":
-        return False
+        loopback = True
+    else:
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            # The Go runtime intentionally does not resolve DNS here; a
+            # non-empty hostname expresses an external fleet endpoint.
+            loopback = False
+    if connector == "openclaw":
+        # The gateway reports the fleet uplink off instead of dialing when
+        # claw.mode alone names OpenClaw and OpenClaw is not installed (#958),
+        # or when discovery found no OpenClaw behind a loopback host.
+        return not (
+            openclaw_implied_but_not_installed(cfg)
+            or (loopback and _discovery_found_no_openclaw(cfg))
+        )
+    return not loopback
+
+
+def _discovery_found_no_openclaw(cfg) -> bool:
+    """Mirror the gateway's ``connector.CachedAgentNotFound("openclaw")``.
+
+    True only when ``agent_discovery.json`` records a scan that found no
+    OpenClaw binary; a missing or unreadable cache keeps the dial expected.
+    """
+    path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "agent_discovery.json")
     try:
-        return not ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        # The Go runtime intentionally does not resolve DNS here; a non-empty
-        # hostname expresses an external fleet endpoint.
-        return True
+        with open(path, encoding="utf-8") as fh:
+            entry = (json.load(fh).get("agents") or {}).get("openclaw")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return (
+        isinstance(entry, dict)
+        and entry.get("installed") is False
+        and not str(entry.get("binary_path") or "").strip()
+    )
 
 
 def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
@@ -1782,13 +2129,61 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
                 return any(enabled_states)
         return True
     if sub == "sandbox":
+        # The gateway runs the sandbox subsystem when OpenShell sandboxes are
+        # on (openshell.enabled: running, or degraded while a listener or the
+        # manager fails) and reports it degraded for a legacy standalone
+        # install until legacy-cleanup runs. Where sandboxes are unsupported
+        # (a platform other than Linux or macOS, managed_enterprise) it
+        # reports them disabled on purpose, which is no stale sidecar.
         oc = getattr(cfg, "openshell", None)
         if oc is None:
             return None
         is_standalone = getattr(oc, "is_standalone", None)
-        return bool(is_standalone()) if callable(is_standalone) else False
+        if callable(is_standalone) and is_standalone():
+            return True
+        if not bool(getattr(oc, "enabled", False)):
+            return False
+        if not sys.platform.startswith(("linux", "darwin")):
+            return None
+        if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            return None
+        return True
     # The local API has no off switch.
     return None
+
+
+def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str:
+    """Name the other accounts whose sockets listen on ``port`` (Linux only)."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    uids: set[int] = set()
+    for table_name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+                rows = table.readlines()[1:]
+        except (OSError, UnicodeError):
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 8 or fields[3] != "0A" or not fields[7].isdigit():
+                continue
+            try:
+                if int(fields[1].rsplit(":", 1)[1], 16) == port:
+                    uids.add(int(fields[7]))
+            except (IndexError, ValueError):
+                continue
+    if not uids:
+        return ""
+    uids.discard(os.getuid())
+    names = []
+    for uid in sorted(uids):
+        try:
+            import pwd
+
+            names.append(f"uid {uid} ({pwd.getpwuid(uid).pw_name})")
+        except (ImportError, KeyError):
+            names.append(f"uid {uid}")
+    return ", ".join(names)
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
@@ -1802,7 +2197,22 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         bypass_proxy=True,
     )
     if code == 200:
-        _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        trust = _trusted_gateway_listener(cfg)
+        if trust.trusted:
+            _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        else:
+            # /health is public: any process on the port answers it. This row
+            # passed while another account's listener held the API port.
+            holders = _linux_foreign_listener_accounts(cfg.gateway.api_port)
+            held = f"; the port is held by {holders}" if holders else ""
+            _emit(
+                "warn",
+                "Sidecar API",
+                f"{bind}:{cfg.gateway.api_port} answers, but not as this account's verified gateway "
+                f"({trust.detail}){held}. Stop that process or set gateway.api_port to a free port, "
+                "then run `defenseclaw-gateway restart`",
+                r=r,
+            )
 
         try:
             health = json.loads(body)
@@ -1891,6 +2301,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                                 summary = raw.strip()
                         detail_msg = f"disabled — {summary}" if summary else "disabled (reported by sidecar)"
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
+                elif normalized_state == "degraded":
+                    # Up but needs operator action (the sandbox subsystem
+                    # with a failed listener or manager, or the legacy
+                    # standalone sandbox shim), so warn rather than fail.
+                    last_error = info.get("last_error")
+                    reason = last_error.strip() if isinstance(last_error, str) else ""
+                    _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
             return health
@@ -1936,6 +2353,7 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=trust,
     )
     if code == 200:
         runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
@@ -1958,7 +2376,9 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         _emit(
             "fail",
             "Gateway authentication",
-            "gateway authentication could not be verified because the trusted status endpoint was unreachable",
+            body
+            if body.endswith(_GATEWAY_TOKEN_REFUSED)
+            else "gateway authentication could not be verified because the trusted status endpoint was unreachable",
             r=r,
         )
     else:
@@ -2008,6 +2428,11 @@ def _authenticated_runtime_matches(cfg, trusted_pid: int, body: str) -> tuple[bo
 
 
 def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
+    if openclaw_implied_but_not_installed(cfg):
+        # Only claw.mode's default names OpenClaw and nothing on this machine
+        # is OpenClaw, so there is no OpenClaw gateway to reach (#958).
+        _emit("skip", "OpenClaw gateway", OPENCLAW_NOT_INSTALLED_DETAIL, r=r)
+        return
     url = f"http://{cfg.gateway.host}:{cfg.gateway.port}/health"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
@@ -2467,6 +2892,7 @@ def _authenticated_origin_main_gateway_lifecycle_trust(
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=endpoint_trust,
     )
     if code != 200:
         detail = "transport failure" if code == 0 else f"HTTP {code}"
@@ -2792,6 +3218,7 @@ def _check_windows_gateway_diagnostics(
             response_limit=64 * 1024,
             allow_truncation=False,
             bypass_proxy=True,
+            bound_peer=trust,
         )
         status_error = ""
 
@@ -2844,7 +3271,9 @@ def _check_windows_gateway_diagnostics(
         _emit(
             "fail",
             "Gateway token drift",
-            "gateway authentication could not be verified because the trusted status endpoint was unreachable",
+            status_body
+            if status_body.endswith(_GATEWAY_TOKEN_REFUSED)
+            else "gateway authentication could not be verified because the trusted status endpoint was unreachable",
             r=r,
         )
     elif status_code != 200:
@@ -3183,10 +3612,7 @@ def _gateway_listener_pid(port: int, *, host: str = "") -> int:
 
 def _trusted_lsof_path() -> str:
     """Return a fixed system lsof path, never a PATH-resolved executable."""
-    for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof"):
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return ""
+    return trusted_lsof_path()
 
 
 def _lsof_listener_address_matches(endpoint: str, host: str, port: int) -> bool:
@@ -3681,13 +4107,24 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             r=r,
         )
         return
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit(
+            "skip",
+            "Codex OTel runtime",
+            f"authenticated runtime telemetry status is unavailable: {trust.detail}",
+            r=r,
+        )
+        return
 
     code, body = _http_probe(
-        f"http://127.0.0.1:{api_port}/status",
+        _gateway_api_url(cfg, "/status"),
         headers={"Authorization": f"Bearer {token}"},
         timeout=3.0,
         response_limit=64 * 1024,
         allow_truncation=False,
+        bypass_proxy=True,
+        bound_peer=trust,
     )
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
@@ -3854,6 +4291,44 @@ _HOOK_HEALTH_LABELS = {
 }
 
 
+def _check_kiro_global_scope(r: _DoctorResult) -> None:
+    """Report the Kiro hook scope of an install without claw.workspace_dir.
+
+    Kiro merges hooks from every scope, and its global scope is
+    ``~/.kiro/hooks/`` (kiro.dev/docs/configuration: "Hooks: All scopes
+    merged"). Kiro IDE 1.0.182 and later and ``kiro-cli --v3`` read the global
+    ``~/.kiro/hooks/defenseclaw.json`` that setup writes, and bare
+    ``kiro-cli`` runs the defenseclaw agent. Kiro IDE builds before 1.0.182
+    read only the project's ``.kiro/hooks``; doctor cannot tell which build
+    is installed, so the pass names that limit. Without the global
+    registration nothing runs DefenseClaw's hooks.
+    """
+    global_hooks = os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")
+    if _file_references_marker(global_hooks, _HOOK_HEALTH_FALLBACK["kiro"][1]):
+        _emit(
+            "pass",
+            "Connector scope",
+            f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
+            "load it. Kiro IDE builds before 1.0.182 read only the project's "
+            ".kiro/hooks: set claw.workspace_dir for them",
+            r=r,
+        )
+        return
+    _emit(
+        "fail",
+        "Connector scope",
+        f"no DefenseClaw hooks in {global_hooks} and claw.workspace_dir is unset, "
+        "so Kiro runs none of DefenseClaw's hooks",
+        r=r,
+        reason_code="kiro_hooks_not_workspace_scoped",
+        remediation=(
+            "Run `defenseclaw setup kiro`, which writes ~/.kiro/hooks/defenseclaw.json "
+            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); for older Kiro IDE builds also "
+            "set claw.workspace_dir to the project root"
+        ),
+    )
+
+
 def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     """Report whether the file at ``path`` contains any ``markers`` substring.
 
@@ -3953,6 +4428,7 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
 
 
+
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     """Report whether the managed OpenCode bridge actually loaded.
 
@@ -3985,6 +4461,7 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=trust,
     )
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
@@ -4126,15 +4603,18 @@ def _run_cursor_windows_runtime_process(
     from defenseclaw.tui.windows_process import WindowsJob
 
     creationflags |= getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
-    process = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        env=env,
-        creationflags=creationflags,
-    )
+    # Hold the custody-checked PowerShell image open without write or delete
+    # sharing until the process exists, so it is the file that was checked.
+    with pinned_executable(argv[0]) as pinned:
+        process = pinned.popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            creationflags=creationflags,
+        )
     job = None
     try:
         try:
@@ -5165,6 +5645,19 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
+        if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
+            # The gateway refuses to publish the plugin into a folder other
+            # accounts can write, and stops; the other rows only showed the
+            # gateway down.
+            _emit(
+                "fail",
+                label,
+                f"{loose} can be written by other accounts, so the gateway refuses to install the "
+                f"OpenCode plugin there and does not start. Run `chmod go-w {shlex.quote(loose)}`, "
+                "then `defenseclaw-gateway restart`",
+                r=r,
+            )
+            return
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
         return
     for path in present:
@@ -5182,13 +5675,16 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
+                    access = (
+                        "Setup targets user/administrator-only access, but this row "
+                        "does not revalidate the Windows DACL and is not tamper-proof"
+                        if os.name == "nt"
+                        else "this row does not recheck the plugin's file permissions and is not tamper-proof"
+                    )
                     _emit(
                         status,
                         label,
-                        f"managed plugin digest current at {path}; "
-                        "Setup targets user/administrator-only access, but this row "
-                        "does not revalidate the Windows DACL and is not tamper-proof; "
-                        f"{runtime_detail}",
+                        f"managed plugin digest current at {path}; {access}; {runtime_detail}",
                         r=r,
                     )
             elif connector == "hermes":
@@ -7238,6 +7734,50 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _VerifiedGatewayRecorder:
+    """Doctor's canonical recorder: only the verified gateway gets the token.
+
+    The action fact authenticates with the gateway token. The generic CLI
+    recorder dialed whatever listened on the API port, so another account's
+    process there received the token although Doctor's own probes refused
+    it (#642). This one sends the fact over a connection the verified gateway
+    accepted, or not at all.
+    """
+
+    def __init__(self, cfg) -> None:
+        self._cfg = cfg
+
+    def emit_cli_observability(self, payload) -> None:
+        from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+        token, _token_env, _token_source = _daemon_effective_gateway_token(self._cfg)
+        if not token:
+            raise CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+        trust = _trusted_gateway_listener(self._cfg)
+        if not trust.trusted:
+            raise CanonicalObservabilityUnavailableError(trust.detail + _GATEWAY_TOKEN_REFUSED)
+        code, detail = _gateway_peer_bound_request(
+            _gateway_api_url(self._cfg, "/api/v1/observability/cli"),
+            trust,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-DC-Auth": f"Bearer {token}",
+                "X-DefenseClaw-Client": "python-cli",
+                "Content-Type": "application/json",
+            },
+            body=json.dumps(dict(payload)).encode("utf-8"),
+            timeout=10.0,
+        )
+        if code != 204:
+            raise CanonicalObservabilityError(
+                f"canonical observability admission was not acknowledged: {code or detail}"
+            )
+
+    def close(self) -> None:
+        return
+
+
 def _record_doctor_action(app: AppContext, cfg, r: _DoctorResult, mode: str) -> None:
     """Emit one canonical action fact unless the operator requested passivity."""
 
@@ -7253,7 +7793,7 @@ def _record_doctor_action(app: AppContext, cfg, r: _DoctorResult, mode: str) -> 
             # Main deliberately avoids Store.init() for Doctor so inspection
             # cannot create a missing database. The canonical recorder is lazy
             # and needs no Store, network, or secret lookup at construction.
-            logger = Logger.from_config(cfg)
+            logger = Logger(_VerifiedGatewayRecorder(cfg))
             app.logger = logger
         if logger is None:
             return
@@ -7443,6 +7983,7 @@ def doctor(
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_device_identity(cfg, r)
+    _check_legacy_sandbox(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -7591,6 +8132,10 @@ def doctor(
         _doctor_subsection("Webhooks")
     r.set_section("webhooks")
     _check_webhooks(cfg, r)
+    if not json_out:
+        _doctor_subsection("Sandbox")
+    r.set_section("sandbox")
+    _check_sandbox(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
     # The registry at internal/envvars/registry.json is the single
@@ -7842,7 +8387,7 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
         AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
     }:
         remediation = (
-            "run `defenseclaw migrations apply` after a trusted backup review"
+            "run `defenseclaw-gateway restart` (it applies audit database migrations) after a trusted backup review"
             if health.reason_code == "audit-db-schema-incomplete"
             else "restore the audit database from a trusted backup"
         )
@@ -8230,7 +8775,7 @@ def _component_compatibility_problems_for_executable(
     enabled_connectors = {
         connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector)
     }
-    if "openclaw" in enabled_connectors:
+    if _openclaw_plugin_required(cfg, enabled_connectors):
         required.add("plugin")
     findings = assess_component_health(
         _doctor_component_evidence_for_executable(gateway_executable)
@@ -8351,10 +8896,11 @@ def _plan_watchdog_runtime(cfg) -> RepairDecision:
 
     repair, detail = _watchdog_repair_posture(cfg)
     if repair:
-        if not shutil.which("defenseclaw-gateway"):
+        if not _watchdog_lifecycle_executable():
             return RepairDecision(
                 "manual",
-                f"{detail}; defenseclaw-gateway is not on PATH, so no supported repair is available",
+                f"{detail}; no verified defenseclaw-gateway executable is installed, so no supported "
+                "repair is available",
                 effects=_WATCHDOG_REPAIR_EFFECTS,
                 blockers=("verified watchdog lifecycle executable is unavailable",),
             )
@@ -8581,7 +9127,9 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             ),
             effects=_WATCHDOG_REPAIR_EFFECTS,
             may_restart=True,
-            platforms=("win32",),
+            # Listed on every platform: outside Windows the planner reports
+            # it not applicable (noop). As a Windows-only spec it warned
+            # "repair is unavailable on platform" on every Linux and macOS run.
         ),
     ]
     for (
@@ -9375,24 +9923,7 @@ def _check_connector_inventory(
     if workspace:
         _emit("pass", "Connector scope", f"workspace ({workspace})", r=r)
     elif connector == "kiro":
-        # Kiro discovers hooks ONLY from .kiro/hooks/*.json relative to the
-        # project root (kiro.dev/docs/hooks: "Location: .kiro/hooks/ in your
-        # project root"). There is no documented ~/.kiro/hooks. A global-only
-        # install therefore enforces nothing, and reporting it as a pass is
-        # how an operator ends up believing an unguarded Kiro is guarded.
-        _emit(
-            "fail",
-            "Connector scope",
-            "global user config only; Kiro loads hooks from the project root, "
-            "so the installed hooks never run",
-            r=r,
-            reason_code="kiro_hooks_not_workspace_scoped",
-            remediation=(
-                "Set claw.workspace_dir to the project root and re-run "
-                "`defenseclaw setup kiro`, which writes "
-                "<workspace>/.kiro/hooks/defenseclaw.json"
-            ),
-        )
+        _check_kiro_global_scope(r)
     else:
         _emit("pass", "Connector scope", "global user config", r=r)
 
@@ -10589,17 +11120,24 @@ def _watchdog_repair_posture(
     return (False, f"watchdog lifecycle cannot be inspected safely: {detail}")
 
 
+def _watchdog_lifecycle_executable() -> str | None:
+    """Resolve the custody-checked gateway controller, as other lifecycle repairs do."""
+    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
+
+    return _gateway_lifecycle_executable(native=True)
+
+
 def _preview_watchdog_runtime_fix(cfg) -> tuple[str, str]:
     repair, detail = _watchdog_repair_posture(cfg)
     if not repair:
         tag = "warn" if detail.startswith(("refusing", "watchdog lifecycle cannot")) else "skip"
         return (tag, f"{detail} (dry-run; no changes made)")
-    gw_binary = shutil.which("defenseclaw-gateway")
+    gw_binary = _watchdog_lifecycle_executable()
     if not gw_binary:
         return (
             "warn",
-            f"{detail}; defenseclaw-gateway is not on PATH, so no supported repair is available "
-            "(dry-run; no changes made)",
+            f"{detail}; no verified defenseclaw-gateway executable is installed, so no supported "
+            "repair is available (dry-run; no changes made)",
         )
     return (
         "skip",
@@ -10615,19 +11153,21 @@ def _fix_watchdog_runtime(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not repair:
         tag = "warn" if detail.startswith(("refusing", "watchdog lifecycle cannot")) else "skip"
         return (tag, detail)
-    gw_binary = shutil.which("defenseclaw-gateway")
+    gw_binary = _watchdog_lifecycle_executable()
     if not gw_binary:
-        return ("warn", f"{detail}; defenseclaw-gateway is not on PATH")
+        return ("warn", f"{detail}; no verified defenseclaw-gateway executable is installed")
     if not assume_yes and not click.confirm(
         "    Start the enabled stopped watchdog through the guarded gateway lifecycle?",
         default=True,
     ):
         return ("skip", "declined by user")
     try:
-        result = subprocess.run(
+        result = run_pinned_executable(
             [gw_binary, "watchdog", "start"],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
             timeout=30,
             check=False,
         )
@@ -10672,6 +11212,27 @@ def _gateway_lifecycle_selection(
     )
 
 
+def _untrusted_gateway_on_path(search_path: str) -> str:
+    """Name a defenseclaw-gateway on the search path that failed the custody check.
+
+    The lifecycle refuses such a binary, and the repair used to report it as
+    "binary not found".
+    """
+    if os.name == "nt":
+        return ""
+    from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path
+    from defenseclaw.gateway import GATEWAY_BIN_NAME
+
+    found = shutil.which(GATEWAY_BIN_NAME, path=search_path)
+    if not found or not os.path.isabs(found):
+        return ""
+    try:
+        trusted_posix_executable_path(found)
+    except UnsafePathError as exc:
+        return f"refusing to run {found}: {exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
+    return ""
+
+
 def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str]:
     """Run setup's ownership-aware gateway lifecycle in the selected home.
 
@@ -10703,7 +11264,7 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
     if selection.executable is None:
         if selection.requires_running_process:
             return False, "verified running gateway executable is unavailable"
-        return False, "binary not found"
+        return False, _untrusted_gateway_on_path(child_env.get("PATH", os.defpath)) or "binary not found"
     from defenseclaw.commands.cmd_setup import _trusted_gateway_lifecycle_executable
 
     revalidated_executable = _trusted_gateway_lifecycle_executable(
@@ -10898,6 +11459,7 @@ def _fix_gateway_token_drift(
             response_limit=64 * 1024,
             allow_truncation=False,
             bypass_proxy=True,
+            bound_peer=trust,
         )
         if code == 200:
             runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
@@ -10976,6 +11538,7 @@ def _fix_gateway_token_drift(
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=replacement_trust,
     )
     if code != 200:
         return ("fail", f"gateway restarted but still rejects configured authentication (HTTP {code})")
@@ -11028,6 +11591,12 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             invalid_reasons.append(f"{subsystem} has malformed health state")
             continue
         state = raw_state.strip().lower()
+        if subsystem == "sandbox" and state == "degraded":
+            # The legacy sandbox shim, or a sandbox listener or manager that
+            # failed: a gateway restart cannot be relied on to fix either,
+            # and neither may block repairs of real drift. The legacy check
+            # and `defenseclaw sandbox doctor` report them.
+            continue
 
         if expected is True and state in inactive_states:
             repair_reasons.append(f"{subsystem} is enabled in config but reports {state}")
@@ -11271,7 +11840,7 @@ def _fix_gateway_service(
             "warn",
             f"gateway service {action}ed and ownership verified; {verified_detail}",
         )
-    return ("pass", f"gateway service {action}ed: {reason}")
+    return ("pass", f"gateway service {action}ed and ownership verified (repaired because {reason})")
 
 
 def _fix_dotenv_perms(

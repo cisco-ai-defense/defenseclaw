@@ -1,0 +1,98 @@
+# DefenseClaw sandbox policy pack: strict
+#
+# No web: the DefenseClaw egress proxy is off and only the harness's provider
+# hosts are reachable through OpenShell. Every OpenShell proposal is asked,
+# the harness keeps its own permission prompts, the agent works on a copy of
+# the project (changes come back as a patch or branch), MCP servers stay
+# behind, and no host port is ever opened.
+version: 1
+name: strict
+description: No web beyond the harness provider; manual approvals; copy mode; harness prompts kept; no MCP import.
+
+network:
+  mode: deny
+
+approvals:
+  mode: manual
+
+egress:
+  feeds: [builtin]
+  block: []
+  allow: []
+  ports: [443]
+  large_upload_mb: 5
+
+workspace:
+  mode: copy
+  # Secret files appear empty inside the sandbox (--unmask PATH shares one).
+  masks:
+    - .env
+    - .env.*
+    - "*.pem"
+    - "*.key"
+    - "*.p12"
+    - "*.pfx"
+    - "*.jks"
+    - "*.keystore"
+    - id_rsa*
+    - id_dsa*
+    - id_ecdsa*
+    - id_ed25519*
+    - .netrc
+    - .npmrc
+    - .pypirc
+    - .git-credentials
+    - .pgpass
+    - .vault-token
+    - .aws/credentials
+    - .kube/config
+    - .docker/config.json
+    - credentials.json
+    - service-account*.json
+    - "*.tfvars"
+  # Committed templates of masked files stay visible.
+  unmask:
+    - .env.example
+    - .env.sample
+    - .env.template
+    - .env.dist
+  # Changed files that can run code on your machine; the end-of-session
+  # review lists them before you run anything.
+  review:
+    - package.json
+    - Makefile
+    - GNUmakefile
+    - makefile
+    - Justfile
+    - Taskfile.yml
+    - .envrc
+    - .vscode/**
+    - .idea/**
+    - .devcontainer/**
+    - .github/workflows/**
+    - .gitlab-ci.yml
+    - .gitattributes
+    - .gitmodules
+    - .husky/**
+    - .pre-commit-config.yaml
+    - setup.py
+    - pyproject.toml
+    - docker-compose*.yml
+    - compose*.yaml
+  max_upload_mb: 200
+
+harness:
+  yolo: false
+  allowed: []
+
+mcp:
+  import: false
+  host_ports: false
+  blocked_tools: []
+  # MCP servers a repository defines (.mcp.json, .codex/config.toml) start
+  # without a tool call, unseen by DefenseClaw hooks: keep them stopped.
+  project_servers: block
+
+hooks:
+  fail_mode: closed
+  on_tamper: stop

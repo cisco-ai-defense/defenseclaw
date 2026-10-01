@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // TestResolveManagedIPCSocketPathWindowsHonoursExplicitOverride
@@ -59,5 +60,30 @@ func TestResolveManagedIPCSocketPathWindowsProducesProgramFilesPath(t *testing.T
 	}
 	if !strings.Contains(got, `Cisco\Cisco Secure Client\DefenseClaw`) {
 		t.Fatalf("socket path missing Cisco Secure Client segment: got %q", got)
+	}
+}
+
+func TestValidateWindowsSocketPathFollowsTheEnterpriseProfilePin(t *testing.T) {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil || programFiles == "" {
+		t.Skipf("trusted Program Files unavailable: %v", err)
+	}
+	secureClient := filepath.Join(programFiles, winpath.ManagedIPCRelativeDir, "defenseclaw-sensor.sock")
+	standalone := filepath.Join(programFiles, winpath.StandaloneManagedIPCRelativeDir, "defenseclaw-sensor.sock")
+
+	t.Setenv(winpath.EnterpriseProfileEnv, "")
+	if err := validateWindowsSocketPathFor(secureClient, "defenseclaw-sensor.sock"); err != nil {
+		t.Fatalf("unpinned service refused the Secure Client directory: %v", err)
+	}
+	if err := validateWindowsSocketPathFor(standalone, "defenseclaw-sensor.sock"); err == nil {
+		t.Fatal("unpinned service accepted the standalone directory")
+	}
+
+	t.Setenv(winpath.EnterpriseProfileEnv, winpath.EnterpriseProfileStandalone)
+	if err := validateWindowsSocketPathFor(standalone, "defenseclaw-sensor.sock"); err != nil {
+		t.Fatalf("standalone-pinned service refused its own directory: %v", err)
+	}
+	if err := validateWindowsSocketPathFor(secureClient, "defenseclaw-sensor.sock"); err == nil {
+		t.Fatal("standalone-pinned service accepted the Secure Client directory")
 	}
 }

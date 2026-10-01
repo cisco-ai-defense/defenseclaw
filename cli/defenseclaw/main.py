@@ -42,7 +42,7 @@ from defenseclaw.commands.cmd_guardrail import guardrail
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_mcp import mcp
-from defenseclaw.commands.cmd_migrations import migrations_cmd
+from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.commands.cmd_observability import observability_cmd
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
@@ -56,48 +56,45 @@ from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
 from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
-from defenseclaw.commands.cmd_upgrade import (
-    _maybe_delegate_public_upgrade,
-    _reject_unsupported_intel_macos,
-    upgrade,
-)
+from defenseclaw.commands.cmd_upgrade import rollback, upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
-from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 SKIP_LOAD_COMMANDS = {
     "agent",
     "config",
     "init",
-    "migrations",
+    "migrate",
     "observability",
     "quickstart",
+    "rollback",
     "sandbox",
     "tui",
     "uninstall",
     "reset",
+    "upgrade",
     "version",
 }
 
 # Commands that may legitimately run before config.yaml exists or while
 # it is being rewritten. The auto-validate hook below skips them to
 # avoid bricking recovery workflows when the file is temporarily bad.
-# ``migrations`` joins the recovery set because operators reach for it
-# precisely when something on disk is wrong; refusing to run because
-# config didn't validate would defeat its purpose.
-SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "upgrade", "version"}
+# ``migrate``, ``upgrade`` and ``rollback`` join the recovery set because
+# operators reach for them precisely when something on disk is wrong.
+SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "version"}
 
 # These commands are the only top-level boundaries permitted to operate on an
 # existing pre-v8 document. They either create/replace a configuration,
-# perform the explicit upgrade, remove an installation, or (for ``config``)
+# migrate or replace the installation, remove it, or (for ``config``)
 # delegate the read-only/mutation boundary to that group's subcommand guard.
 # Every other group preflights the raw schema discriminator before a Python
 # compatibility dataclass can be constructed.
 LEGACY_CONFIG_BOUNDARY_COMMANDS = {
     "config",
     "init",
-    "migrations",
+    "migrate",
     "reset",
+    "rollback",
     "uninstall",
     "upgrade",
     "version",
@@ -137,6 +134,33 @@ def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
         guardrail_index + 1 < len(argv)
         and argv[guardrail_index + 1] == "validate-pack"
     )
+
+
+def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
+    """Return whether a ``sandbox`` stub runs without a DefenseClaw config.
+
+    The Go command tree loads the configuration itself. These commands work
+    without one, mirroring internal/cli/sandbox.go: ``sandbox teardown`` (an
+    uninstall of a half-installed host), a nested ``sandbox run`` inside a
+    sandbox, which runs the harness natively, and the read-only ``sandbox
+    pack list|show|validate`` (an administrator reads a pack's digest before
+    writing the config that pins it). An existing non-v8 document is still
+    refused by the preflight.
+    """
+    if ctx.invoked_subcommand != "sandbox":
+        return False
+    argv = sys.argv[1:]
+    try:
+        index = argv.index("sandbox")
+    except ValueError:
+        return False
+    child = argv[index + 1] if index + 1 < len(argv) else ""
+    if child == "teardown":
+        return True
+    if child == "pack":
+        grandchild = argv[index + 2] if index + 2 < len(argv) else ""
+        return grandchild in {"list", "show", "validate"}
+    return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
 
 
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
@@ -188,21 +212,6 @@ def cli(ctx: click.Context) -> None:
     app = ctx.obj
 
     invoked = ctx.invoked_subcommand
-    if invoked == "upgrade" and not _is_help_invocation(ctx):
-        _reject_unsupported_intel_macos()
-        recovery_home = os.path.abspath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
-        recovery_root = os.path.join(recovery_home, ".upgrade-recovery")
-        recovery_journals = tuple(
-            os.path.join(recovery_root, name) for name in ("phase-one-active.json", "phase-two-active.json")
-        )
-        if any(os.path.lexists(path) for path in recovery_journals):
-            ux.echo(
-                "Interrupted staged-upgrade recovery requires the release-owned resolver. "
-                "Use the target-tag command below without --version/-Version; "
-                "no recovery mutation was attempted.\n" + authenticated_resolver_instructions(__version__),
-                err=True,
-            )
-            raise SystemExit(1)
     if _is_help_invocation(ctx):
         return
     if _is_offline_rulepack_validation(ctx):
@@ -213,7 +222,9 @@ def cli(ctx: click.Context) -> None:
     if invoked in SKIP_LOAD_COMMANDS:
         if invoked not in LEGACY_CONFIG_BOUNDARY_COMMANDS:
             try:
-                cfg_mod.require_v8_config(allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT)
+                cfg_mod.require_v8_config(
+                    allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT or _is_config_optional_sandbox_command(ctx),
+                )
             except cfg_mod.ConfigVersionError as exc:
                 ux.echo(str(exc), err=True)
                 raise SystemExit(1) from exc
@@ -263,12 +274,6 @@ def cli(ctx: click.Context) -> None:
     # turn a missing/corrupt-store diagnosis into a false pass before Doctor
     # gets a chance to inspect it. Doctor owns any explicitly requested repair.
     if invoked == "doctor":
-        return
-
-    # The upgrade controller owns its authenticated preflight, receipts, and
-    # rollback transaction. Do not initialize generic audit state before that
-    # preflight: a refused direct upgrade must not create or alter audit.db.
-    if invoked == "upgrade":
         return
 
     from defenseclaw.db import Store
@@ -357,7 +362,8 @@ cli.add_command(doctor)
 cli.add_command(guardrail)
 cli.add_command(sandbox)
 cli.add_command(upgrade)
-cli.add_command(migrations_cmd, "migrations")
+cli.add_command(rollback)
+cli.add_command(migrate_cmd, "migrate")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
 cli.add_command(observability_cmd, "observability")
@@ -423,7 +429,6 @@ def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
     _force_utf8_io()
-    _maybe_delegate_public_upgrade(sys.argv[1:])
     if not _try_launch_tui():
         cli()
 

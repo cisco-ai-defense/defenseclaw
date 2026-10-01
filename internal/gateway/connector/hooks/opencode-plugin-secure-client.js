@@ -1,0 +1,569 @@
+// defenseclaw-managed-plugin v7
+// DefenseClaw opencode bridge plugin — DO NOT EDIT.
+//
+// opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ at
+// startup (https://opencode.ai/docs/plugins/). This dependency-free
+// bridge forwards each tool call to the local DefenseClaw gateway and
+// aborts the tool — by throwing, exactly like opencode's own
+// .env-protection example — when the gateway returns a block decision.
+//
+// The gateway address, stable scoped-token sidecar path, and fail mode are
+// substituted in at setup time. The token itself is loaded and validated for
+// every request, so a transactional rotation never leaves a replacement
+// credential in this longer-lived plugin. DefenseClaw's Teardown removes this
+// file (managed-file backup heal).
+//
+// Wire contract: POST {hook_event_name, tool_name, tool_input,
+// tool_response, cwd} to
+// /api/v1/opencode/hook; the response carries hook_output={decision,
+// reason}; decision "deny"/"block" aborts the tool.
+
+import { execFile } from "node:child_process";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { lstat, open } from "node:fs/promises";
+import { userInfo } from "node:os";
+import { dirname } from "node:path";
+
+// DC_-prefixed constants are non-secret values baked in at setup time, not
+// env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
+const DC_API_ADDR = "{{.APIAddr}}";
+const DC_TOKEN_FILE = "{{.TokenFileJS}}";
+const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+// Standalone managed installs talk to the gateway's peer-authorized unix
+// hook socket instead of the TCP API: the gateway identifies the caller by
+// kernel-verified uid, so no bearer token leaves this process, and a user
+// who binds the TCP port during a gateway restart receives nothing. Empty
+// keeps the TCP transport (per-user installs).
+const DC_HOOK_SOCKET = "{{.HookSocketJS}}";
+const DC_SERVICE_UID = Number("{{.ServiceUID}}");
+// Standalone managed installs also run the administrator-owned hook binary
+// before each tool call: it applies the organization's foreign-hook guard
+// (unapproved project or user plugins that could change a tool call after
+// DefenseClaw checks it). Empty skips the check (per-user installs).
+const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
+// Windows standalone installs name an administrator-owned directory that
+// exists exactly while the deployment is installed. Uninstall removes it but
+// cannot remove this plugin from a signed-out user's profile, so once the
+// gateway is unreachable or the credential is gone AND the marker is gone,
+// the deployment was uninstalled and this plugin stops failing closed. A
+// standard user cannot remove the marker. Empty keeps the fail mode.
+const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
+// Windows standalone installs reach the gateway over loopback TCP, where a
+// local user can hold the port while the gateway restarts, and this plugin
+// cannot compare the listener with the gateway service the way the hook
+// binary does. "1" makes it ask the listener to prove it can derive this
+// user's credential before sending that credential or any hook payload: the
+// proof request carries only the credential's SHA-256 and a fresh nonce, so
+// an impostor gets nothing to replay and no chance to answer with a
+// verdict. Empty skips the proof (per-user installs, Secure Client, and the
+// hook socket, whose owner is verified instead).
+const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
+const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
+const DC_TIMEOUT_MS = 10000;
+const DC_PLUGIN_URL = import.meta.url;
+const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const DC_MAX_TOKEN_FILE_BYTES = 4096;
+
+// OpenCode v1.18.10-v1.18.19 passes the effective config (including its derived
+// plugin_origins list) to every plugin's config hook after external plugins
+// have loaded. Hooks then run sequentially in that same order. DefenseClaw's
+// global plugin is authoritative over final args only when no external plugin
+// follows it. Start conservative until the config hook proves that condition.
+let DC_ARGUMENTS_AUTHORITATIVE = false;
+let DC_LATER_PLUGIN_COUNT = 0;
+let DC_MCP_SERVERS = [];
+let DC_MCP_IDENTITY_STATUS = "unverified";
+
+// defenseclawIdentityHeaders reports which end user this plugin runs as.
+//
+// Under a managed install the gateway runs as a service account, so it cannot
+// see whose session a request belongs to; the plugin is in-session and can.
+// A value that is not a safe header field is dropped rather than sanitized, so
+// a hostile account name cannot smuggle a second header into every hook call.
+function defenseclawIdentityHeaders() {
+  const headers = {};
+  let info;
+  try {
+    info = userInfo();
+  } catch (_) {
+    // No identity is a supported outcome: the record is emitted unattributed
+    // rather than wrongly attributed.
+    return headers;
+  }
+  // uid is -1 on Windows, where no POSIX uid exists. Reporting it would put a
+  // value in user.id that belongs to neither identifier namespace.
+  if (typeof info.uid === "number" && info.uid >= 0) {
+    headers["X-DefenseClaw-User-Id"] = String(info.uid);
+  }
+  if (defenseclawSafeIdentityValue(info.username)) {
+    headers["X-DefenseClaw-User-Name"] = info.username;
+  }
+  return headers;
+}
+
+// defenseclawSafeIdentityValue mirrors the account-name allowlist the POSIX
+// hooks apply in their shared hardening helper.
+function defenseclawSafeIdentityValue(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    /^[A-Za-z0-9._-]+$/.test(value);
+}
+
+function defenseclawPluginSpecifier(origin) {
+  const spec = origin && origin.spec;
+  if (Array.isArray(spec)) return typeof spec[0] === "string" ? spec[0] : "";
+  return typeof spec === "string" ? spec : "";
+}
+
+function defenseclawNormalizedPluginURL(spec) {
+  if (!spec || !spec.startsWith("file:")) return "";
+  try {
+    return new URL(spec).href;
+  } catch (_) {
+    return "";
+  }
+}
+
+// This is OpenCode v1.18.10-v1.18.19's published MCP tool-name sanitizer, mirrored
+// exactly from packages/opencode/src/mcp/catalog.ts.
+function defenseclawSanitizeMCPName(value) {
+  return String(value || "").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function defenseclawConfigure(config) {
+  const origins = config && Array.isArray(config.plugin_origins) ? config.plugin_origins : [];
+  const selfURL = defenseclawNormalizedPluginURL(DC_PLUGIN_URL);
+  const ownIndex = origins.findIndex(
+    (origin) => defenseclawNormalizedPluginURL(defenseclawPluginSpecifier(origin)) === selfURL,
+  );
+  DC_LATER_PLUGIN_COUNT = ownIndex >= 0 ? origins.length - ownIndex - 1 : origins.length;
+  DC_ARGUMENTS_AUTHORITATIVE = ownIndex >= 0 && DC_LATER_PLUGIN_COUNT === 0;
+
+  const mcp = config && config.mcp;
+  if (!mcp || typeof mcp !== "object" || Array.isArray(mcp)) {
+    DC_MCP_SERVERS = [];
+    DC_MCP_IDENTITY_STATUS = "authoritative";
+    return;
+  }
+  DC_MCP_SERVERS = Object.keys(mcp)
+    .filter((name) => mcp[name] && typeof mcp[name] === "object" && mcp[name].enabled !== false)
+    .map((name) => ({ name, sanitized: defenseclawSanitizeMCPName(name) }))
+    .filter((entry) => entry.sanitized);
+  const seen = new Set();
+  DC_MCP_IDENTITY_STATUS = "authoritative";
+  for (const entry of DC_MCP_SERVERS) {
+    if (seen.has(entry.sanitized)) {
+      DC_MCP_IDENTITY_STATUS = "collision";
+      break;
+    }
+    seen.add(entry.sanitized);
+  }
+}
+
+function defenseclawResolveMCPServer(toolName) {
+  const tool = String(toolName || "");
+  const candidates = DC_MCP_SERVERS.filter((entry) => tool.startsWith(entry.sanitized + "_"));
+  if (candidates.length === 0) return { status: "not_mcp", name: "" };
+  if (DC_MCP_IDENTITY_STATUS !== "authoritative" || candidates.length !== 1) {
+    return { status: "ambiguous", name: "" };
+  }
+  return { status: "authoritative", name: candidates[0].name };
+}
+
+// defenseclawDeploymentRemoved reports whether the managed deployment that
+// rendered this plugin was uninstalled: its install marker is definitively
+// absent. Any other inspection result keeps the plugin enforcing.
+async function defenseclawDeploymentRemoved() {
+  if (!DC_INSTALL_MARKER) return false;
+  try {
+    await lstat(DC_INSTALL_MARKER);
+    return false;
+  } catch (err) {
+    return !!err && err.code === "ENOENT";
+  }
+}
+
+async function defenseclawToken() {
+  const file = await open(DC_TOKEN_FILE, "r");
+  try {
+    const raw = new Uint8Array(DC_MAX_TOKEN_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < raw.byteLength) {
+      const { bytesRead } = await file.read(raw, offset, raw.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > DC_MAX_TOKEN_FILE_BYTES) throw new Error("oversized scoped hook credential");
+    const token = new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(0, offset)).trim();
+    if (!DC_TOKEN_PATTERN.test(token)) throw new Error("invalid scoped hook credential");
+    return token;
+  } finally {
+    await file.close();
+  }
+}
+
+function defenseclawTrustedSocketOwner(uid) {
+  return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID);
+}
+
+// defenseclawVerifyHookSocket refuses a hook socket (or its directory, or the
+// directory's parent) that root or the gateway service account does not own,
+// or that another account could write. Only root or the service account can
+// create a socket there, so a verified path cannot be an impostor listener.
+async function defenseclawVerifyHookSocket() {
+  const dir = dirname(DC_HOOK_SOCKET);
+  for (const path of [dirname(dir), dir]) {
+    const info = await lstat(path);
+    if (!info.isDirectory() || !defenseclawTrustedSocketOwner(info.uid) || (info.mode & 0o022) !== 0) {
+      throw new Error("the DefenseClaw hook socket directory is not trusted");
+    }
+  }
+  const socket = await lstat(DC_HOOK_SOCKET);
+  if (!socket.isSocket() || !defenseclawTrustedSocketOwner(socket.uid)) {
+    throw new Error("the DefenseClaw hook socket is not trusted");
+  }
+}
+
+// defenseclawSocketRequest sends one request over the verified unix socket
+// with node:http when the Bun unix fetch option is unavailable.
+async function defenseclawSocketRequest(path, init) {
+  const { request } = await import("node:http");
+  return await new Promise((resolve, reject) => {
+    const req = request({ socketPath: DC_HOOK_SOCKET, path, method: init.method || "POST", headers: init.headers }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > 1048576) {
+          req.destroy(new Error("oversized DefenseClaw gateway response"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          json: async () => JSON.parse(text),
+        });
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    if (init.signal) init.signal.addEventListener("abort", () => req.destroy(new Error("DefenseClaw gateway timeout")), { once: true });
+    req.end(init.body);
+  });
+}
+
+// defenseclawProveListener resolves once the TCP listener has proven it can
+// derive token (the gateway's listener proof); anything else rejects, and
+// the caller then sends the listener nothing else.
+async function defenseclawProveListener(token, signal) {
+  if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential");
+  const nonce = randomBytes(32).toString("hex");
+  const res = await fetch("http://" + DC_API_ADDR + "/api/v1/hook-listener-proof", {
+    method: "GET",
+    headers: {
+      "X-DefenseClaw-Connector": "opencode",
+      "X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
+      "X-DefenseClaw-Listener-Nonce": nonce,
+    },
+    signal,
+  });
+  const proof = String(res.headers.get("x-defenseclaw-listener-proof") || "");
+  if (res.body) {
+    try {
+      await res.body.cancel();
+    } catch (_) {
+      // Nothing is read from the proof response body.
+    }
+  }
+  const want = createHmac("sha256", token)
+    .update(DC_LISTENER_PROOF_DOMAIN + "\u0000opencode\u0000" + nonce)
+    .digest("hex");
+  if (res.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
+    throw new Error("the DefenseClaw gateway listener did not prove its identity");
+  }
+}
+
+// defenseclawFetch posts to the gateway over the managed hook socket when one
+// is configured (after verifying it), and over TCP otherwise; a TCP request
+// that carries a per-user credential first requires the listener proof.
+async function defenseclawFetch(path, init, token) {
+  if (!DC_HOOK_SOCKET) {
+    if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);
+    return fetch("http://" + DC_API_ADDR + path, init);
+  }
+  await defenseclawVerifyHookSocket();
+  if (globalThis.Bun) return fetch("http://localhost" + path, { ...init, unix: DC_HOOK_SOCKET });
+  return defenseclawSocketRequest(path, init);
+}
+
+// defenseclawForeignHookCheck asks the administrator-owned hook binary for
+// the foreign-hook guard's decision and resolves to a block reason, or ""
+// when no unapproved plugin or hook is present. A binary that cannot be
+// run, times out, or answers anything but {"deny": false} blocks, unless
+// the managed deployment was uninstalled (its install marker is gone):
+// uninstall removes the hook binary too, and this plugin then stops failing
+// closed as it does for the gateway call.
+function defenseclawForeignHookCheck(event, cwd) {
+  if (!DC_FOREIGN_GUARD) return Promise.resolve("");
+  return new Promise((resolve) => {
+    const fail = (why) => {
+      void defenseclawDeploymentRemoved().then((removed) => resolve(removed
+        ? ""
+        : "DefenseClaw could not check for unapproved plugins (" + why + "), so this tool call is blocked."));
+    };
+    try {
+      const child = execFile(
+        DC_FOREIGN_GUARD,
+        ["hook", "--connector", "opencode", "--foreign-hook-check"],
+        { timeout: DC_TIMEOUT_MS, maxBuffer: 65536, windowsHide: true },
+        (err, stdout) => {
+          if (err) {
+            fail(err && err.message ? err.message : String(err));
+            return;
+          }
+          let verdict;
+          try {
+            verdict = JSON.parse(String(stdout));
+          } catch (_) {
+            fail("invalid response");
+            return;
+          }
+          if (verdict && verdict.deny === false) {
+            resolve("");
+            return;
+          }
+          resolve(verdict && typeof verdict.reason === "string" && verdict.reason
+            ? verdict.reason
+            : "DefenseClaw blocked this tool call because an unapproved plugin is present.");
+        },
+      );
+      if (child.stdin) {
+        child.stdin.on("error", () => {});
+        child.stdin.end(JSON.stringify({ hook_event_name: event, cwd: cwd || "" }));
+      }
+    } catch (err) {
+      fail(err && err.message ? err.message : String(err));
+    }
+  });
+}
+
+async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+  let token;
+  try {
+    token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
+  } catch (_) {
+    // Missing, unreadable, or malformed credentials are never safe at a
+    // pre-execution boundary, even when transport fail-open was selected,
+    // unless the managed deployment itself was uninstalled.
+    if (await defenseclawDeploymentRemoved()) return null;
+    if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
+    return null;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  if (token) headers["Authorization"] = "Bearer " + token;
+  try {
+    const payload = {
+      hook_event_name: event,
+      tool_name: toolName || "",
+      tool_input: toolInput || {},
+      session_id: context && (context.sessionID || context.sessionId) || "",
+      turn_id: context && (context.messageID || context.messageId) || "",
+      tool_call_id: context && (context.callID || context.callId) || "",
+      agent_name: context && context.agent || "",
+      cwd: cwd || "",
+      load_heartbeat: true,
+      arguments_authoritative: DC_ARGUMENTS_AUTHORITATIVE,
+      mcp_identity_status: mcpIdentity && mcpIdentity.status || "not_mcp",
+    };
+    if (mcpIdentity && mcpIdentity.status === "authoritative") {
+      payload.mcp_server_name = mcpIdentity.name;
+    }
+    if (toolResult !== undefined) {
+      payload.tool_response = toolResult;
+      payload.tool_result = toolResult;
+    }
+    const res = await defenseclawFetch("/api/v1/opencode/hook", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    }, token);
+    if (!res.ok) {
+      // Gateway answered with a bad status (auth/5xx). Honor fail mode.
+      if (DC_FAIL_MODE === "closed") {
+        return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
+      }
+      return null;
+    }
+    const data = await res.json();
+    const out = data && data.hook_output;
+    if (out && (out.decision === "deny" || out.decision === "block")) {
+      return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
+    }
+    return { reason: "", mode: data && data.mode || "" };
+  } catch (err) {
+    // Transport failure (gateway unreachable / timeout). Honor fail mode:
+    // closed → block, open → allow. An uninstalled deployment allows.
+    if (await defenseclawDeploymentRemoved()) return null;
+    if (DC_FAIL_MODE === "closed") {
+      return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function defenseclawPostLoadHeartbeat(cwd) {
+  let token;
+  try {
+    token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
+  } catch (_) {
+    // Load health is diagnostic only; tool hooks enforce credential failures.
+    return;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  if (token) headers["Authorization"] = "Bearer " + token;
+  try {
+    await defenseclawFetch("/api/v1/opencode/hook", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        hook_event_name: "defenseclaw.plugin.loaded",
+        load_heartbeat: true,
+        arguments_authoritative: DC_ARGUMENTS_AUTHORITATIVE,
+        later_plugin_count: DC_LATER_PLUGIN_COUNT,
+        mcp_identity_status: DC_MCP_IDENTITY_STATUS,
+        cwd: cwd || "",
+      }),
+      signal: controller.signal,
+    }, token);
+  } catch (_) {
+    // Load health is diagnostic only; tool hooks still apply the configured
+    // fail mode independently when the gateway cannot be reached.
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function defenseclawPostLifecycle(event, cwd) {
+  if (!event || !event.type) return;
+  let token;
+  try {
+    token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
+  } catch (_) {
+    // Lifecycle telemetry is observe-only; an unavailable credential skips it.
+    return;
+  }
+  const properties = event.properties || {};
+  const info = properties.info || {};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  if (token) headers["Authorization"] = "Bearer " + token;
+  try {
+    await defenseclawFetch("/api/v1/opencode/hook", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        hook_event_name: event.type,
+        event_type: event.type,
+        source_event_id: event.id || "",
+        session_id: properties.sessionID || properties.sessionId || info.id || "",
+        parent_session_id: properties.parentID || properties.parentId || info.parentID || info.parentId || "",
+        agent_id: properties.agentID || properties.agentId || info.agentID || info.agentId || "",
+        agent_name: properties.agent || info.agent || "",
+        status: event.type === "session.error" ? "error" : (properties.status || info.status || ""),
+        cwd: cwd || "",
+        load_heartbeat: true,
+        event: properties,
+      }),
+      signal: controller.signal,
+    }, token);
+  } catch (_) {
+    // Lifecycle telemetry is observe-only and never blocks OpenCode.
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const DefenseClaw = async ({ directory, worktree }) => {
+  const cwd = directory || worktree || "";
+  // OpenCode loads plugins once at startup: a foreign plugin present now
+  // keeps running for this process even if its file is deleted later, so a
+  // block found at load holds for the whole process.
+  const defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+  return {
+    config: async (config) => {
+      defenseclawConfigure(config);
+      await defenseclawPostLoadHeartbeat(cwd);
+    },
+    // OpenCode publishes its session lifecycle through the generic event
+    // hook. OpenCode does not await this hook dispatch, so lifecycle delivery
+    // is best-effort telemetry only. Child sessions carry info.parentID, which
+    // DefenseClaw maps to a parent-agent relationship while preserving the
+    // child session ID.
+    event: async ({ event }) => {
+      if (!event || ![
+        "session.created", "session.updated", "session.status", "session.idle",
+        "session.compacted", "session.error", "session.deleted",
+      ].includes(event.type)) return;
+      await defenseclawPostLifecycle(event, cwd);
+    },
+    // tool.execute.before is opencode's pre-tool hook. Throwing here
+    // aborts the tool (same mechanism as the .env-protection example).
+    // The decision is resolved BEFORE the throw so a fail-open transport
+    // error never turns into an accidental block.
+    "tool.execute.before": async (input, output) => {
+      const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", cwd));
+      if (blocked) throw new Error(blocked);
+      const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
+      const verdict = await defenseclawPost(
+        "tool.execute.before",
+        input && input.tool,
+        output && output.args,
+        cwd,
+        input,
+        undefined,
+        mcpIdentity,
+        true,
+      );
+      if (verdict && verdict.reason) throw new Error(verdict.reason);
+      if (verdict && verdict.mode === "action" && mcpIdentity.status === "ambiguous") {
+        throw new Error("DefenseClaw refused an OpenCode tool with ambiguous MCP server identity.");
+      }
+      if (verdict && verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE) {
+        throw new Error(
+          "DefenseClaw refused an OpenCode action because later plugin argument mutations are not observable.",
+        );
+      }
+    },
+    // tool.execute.after is observe-only telemetry. Await delivery so the
+    // gateway can attribute this outcome to the exact call before a later tool
+    // starts; transport and fail-mode results remain advisory and are ignored.
+    "tool.execute.after": async (input, output) => {
+      const result = output && {
+        title: output.title,
+        output: output.output,
+        metadata: output.metadata,
+      };
+      await defenseclawPost(
+        "tool.execute.after",
+        input && input.tool,
+        input && input.args,
+        cwd,
+        input,
+        result,
+        defenseclawResolveMCPServer(input && input.tool),
+        false,
+      );
+    },
+  };
+};

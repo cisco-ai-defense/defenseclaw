@@ -13,6 +13,7 @@ package galileo
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"sort"
@@ -77,6 +78,7 @@ func Project(input redaction.Projection, configured Limits) Result {
 	if len(missing) > 0 {
 		return rejected(ReasonSchemaMissingRequired, missing...)
 	}
+	setGuardrailMetadata(projectedAttributes, envelope.Body["status"])
 	correlationKeys, valid := mergeCanonicalCorrelationAttributes(projectedAttributes, envelope.Correlation)
 	if !valid {
 		return rejected(ReasonInvalidProjection)
@@ -340,6 +342,18 @@ func prepareRequiredProjection(
 	}
 	if contract.family == "span.guardrail.judge" {
 		attributes["defenseclaw.guardrail.judge"] = true
+	}
+	if contract.shape == ShapeAgent {
+		// Galileo requires a provider on an agent span. Amp's built-in modes
+		// name no model, so its agent spans carry none, the span failed this
+		// projection, and those traces never appeared in Galileo. The
+		// connector stands in, as every other hook connector's spans already
+		// name it when no model says otherwise.
+		if provider, _ := attributes["gen_ai.provider.name"].(string); strings.TrimSpace(provider) == "" {
+			if connector := strings.TrimSpace(envelope.Connector); observability.IsStableToken(connector) {
+				attributes["gen_ai.provider.name"] = connector
+			}
+		}
 	}
 	for _, key := range contract.requiredAttributes {
 		requireNonEmptyString(attributes, key, &missing)
@@ -1100,6 +1114,39 @@ func projectStatus(value any, maximum int) map[string]any {
 		output["description"] = description
 	}
 	return output
+}
+
+// guardrailMetadataKeys are the decision fields a guardrail span carries that
+// Galileo shows as the span's metadata.
+var guardrailMetadataKeys = []string{
+	"defenseclaw.guardrail.action", "defenseclaw.guardrail.rule_id", "defenseclaw.guardrail.severity",
+	"user.id", "defenseclaw.user.name",
+}
+
+// setGuardrailMetadata copies a guardrail decision into the OpenInference
+// metadata attribute, a JSON object Galileo shows as the span's
+// user_metadata. Galileo's OTLP ingest reads neither the span status nor
+// other attributes into its span record, so a blocked tool call showed
+// status_code 0 and no rule or user there. Spans without a guardrail
+// decision are unchanged.
+func setGuardrailMetadata(attributes map[string]any, status any) {
+	if _, decided := stringAttribute(attributes, "defenseclaw.guardrail.action"); !decided {
+		return
+	}
+	metadata := make(map[string]string, len(guardrailMetadataKeys)+1)
+	for _, key := range guardrailMetadataKeys {
+		if value, ok := stringAttribute(attributes, key); ok {
+			metadata[key] = value
+		}
+	}
+	if projected := projectStatus(status, 256); projected != nil {
+		if code := strings.ToUpper(fmt.Sprint(projected["code"])); strings.Contains(code, "ERROR") || code == "2" {
+			metadata["status"] = "ERROR"
+		}
+	}
+	if encoded, err := json.Marshal(metadata); err == nil {
+		attributes["metadata"] = string(encoded)
+	}
 }
 
 func requireNonEmptyString(attributes map[string]any, key string, missing *[]string) {

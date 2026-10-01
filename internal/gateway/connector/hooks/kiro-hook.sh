@@ -40,12 +40,43 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
 fi
 {{end}}
 
-. "${HOOK_DIR}/_hardening.sh"
+{{if .Sandbox}}# OpenShell sandbox: Kiro vetoes a tool only on exit 2 (preToolUse); it
+# shows any other failure as a warning and runs the tool. Every exit path
+# below is explicit, and the EXIT trap installed after
+# defenseclaw_harden_env turns an unexpected status (set -e, set -u) into 2
+# as well.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! . "${HOOK_DIR}/_hardening.sh"; then
+  echo "defenseclaw: hook hardening helper unavailable, blocking kiro tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+# _sandbox.sh drops every inherited variable the hook does not read and pins
+# the baked PATH before the first child process (mktemp in
+# defenseclaw_harden_env) or helper call.
+if [ ! -r "${HOOK_DIR}/_sandbox.sh" ] || ! . "${HOOK_DIR}/_sandbox.sh"; then
+  echo "defenseclaw: sandbox transport helper unavailable, blocking kiro tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+if ! defenseclaw_harden_resources; then
+  echo "defenseclaw: resource hardening failed, blocking kiro tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+if ! defenseclaw_harden_env; then
+  echo "defenseclaw: environment hardening failed, blocking kiro tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+trap '_dc_kiro_rc=$?; _defenseclaw_hook_cleanup; case "$_dc_kiro_rc" in 0|2) ;; *) exit 2 ;; esac' EXIT
+
+# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status, so no failed, refused or unparseable reply may turn into an allow.
+FAIL_MODE="closed"
+readonly FAIL_MODE
+{{else}}. "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
-DEFENSECLAW_HOOK_CONNECTOR="kiro"
+{{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
@@ -73,7 +104,29 @@ if [ -n "$HOOK_SURFACE" ]; then
   SURFACE_HEADER_ARGS=(-H "X-DefenseClaw-Kiro-Surface: ${HOOK_SURFACE}")
 fi
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+{{if .Sandbox}}defenseclaw_sandbox_require_token kiro kiro-hook "kiro tool"
+
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: kiro hook refusing oversized payload, blocking kiro tool (sandbox hooks fail closed)" >&2
+  exit 2
+}
+# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
+
+fail_unreachable() {
+  defenseclaw_log_hook_failure kiro kiro-hook "$1" transport "$FAIL_MODE"
+  echo "defenseclaw: sandbox ingress unreachable, blocking kiro tool (sandbox hooks fail closed): $1" >&2
+  exit 2
+}
+
+fail_response() {
+  defenseclaw_log_hook_failure kiro kiro-hook "$1" response "$FAIL_MODE"
+  echo "defenseclaw: kiro hook error, blocking kiro tool (sandbox hooks fail closed): $1" >&2
+  exit 2
+}
+{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token kiro kiro-hook "kiro hook"
 fi
 
@@ -114,8 +167,8 @@ fail_response() {
   fi
   exit 2
 }
-
-AUTH_HEADER_ARGS=()
+{{end}}
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -137,18 +190,29 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/kiro/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/kiro/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: kiro-hook/1.0" \
+  "${SURFACE_HEADER_ARGS[@]+"${SURFACE_HEADER_ARGS[@]}"}" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/kiro/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: kiro-hook/1.0" \
   "${SURFACE_HEADER_ARGS[@]+"${SURFACE_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
+  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -161,17 +225,51 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+# Kiro shows the veto's stderr after "PreToolHook blocked the tool
+# execution:". DefenseClaw's own reasons name it already ("Blocked by
+# DefenseClaw rule ..."); any other reason gets the prefix, so the user
+# knows what blocked the tool.
+kiro_block_reason() {
+  case "$1" in
+    *[Dd][Ee][Ff][Ee][Nn][Ss][Ee][Cc][Ll][Aa][Ww]*) printf '%s\n' "$1" >&2 ;;
+    *) printf 'defenseclaw: %s\n' "$1" >&2 ;;
+  esac
+}
+
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
+{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|block|confirm|alert) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+DECISION=""
+REASON=""
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || DECISION=""
+  REASON=$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+fi
+# A block verdict denies with or without the event-native hook_output: exit
+# 2 is Kiro's only tool veto. Stdout stays empty (Kiro adds it to the agent
+# context).
+if [ "$ACTION" = "block" ] || [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
+  if [ -z "$REASON" ]; then
+    REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+  fi
+  kiro_block_reason "${REASON:-Blocked by DefenseClaw Kiro policy.}"
+  exit 2
+fi
+exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
   REASON=$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null || true)
   if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
     if [ -n "$REASON" ]; then
-      echo "defenseclaw: $REASON" >&2
+      kiro_block_reason "$REASON"
     fi
     exit 2
   fi
 fi
-exit 0
+exit 0{{end}}

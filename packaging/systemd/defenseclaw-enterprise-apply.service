@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply DefenseClaw managed configuration changes
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=DEFENSECLAW_LIFECYCLE_UNIT=defenseclaw-enterprise-apply.service
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --reason path --lock-wait 10m --json

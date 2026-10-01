@@ -10,21 +10,76 @@
 // DefenseClaw may allow, reject, or ask through Amp's native confirmation UI.
 // Amp does not define ordering across sibling plugin handlers.
 //
-// The file is rendered at setup time with a stable scoped-token sidecar path.
+{{if .Sandbox}}// OpenShell sandbox variant: DefenseClaw's overlay image installs this file in
+// the sandbox user's ~/.config/amp/plugins (Amp has no system plugin
+// location, so this is the user tamper tier). The hook ingress address and
+// the fail mode are baked at image build and the plugin always fails closed.
+// The only runtime input is the per-sandbox binding token, an OpenShell
+// provider placeholder read from the process environment for every request;
+// the supervisor swaps in the real credential only on the ingress endpoint.
+// Each request carries a fresh idempotency key and is retried once on a
+// transport failure or relay 502/503/504.
+{{else}}// The file is rendered at setup time with a stable scoped-token sidecar path.
 // It loads and validates the credential for every request, so rotation never
 // leaves a replacement credential in this longer-lived plugin. It deliberately
 // does not read secrets or policy from process environment variables.
-
+{{end}}
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
+import { execFile } from 'node:child_process'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { lstat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
+import { dirname } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
-const DC_TOKEN_FILE = "{{.TokenFileJS}}"
+{{if .Sandbox}}const DC_FAIL_MODE: string = "closed" // sandbox hooks always fail closed
+const DC_TIMEOUT_MS = {{.SandboxMaxTime}}000
+const DC_RETRY_TIMEOUT_MS = {{.SandboxRetryMaxTime}}000
+// OpenShell placeholders (openshell:resolve:env:v<revision>_<KEY>) and the
+// host token alphabet; anything else is never sent.
+const DC_TOKEN_PATTERN = /^[A-Za-z0-9:._-]{1,512}$/
+// The standalone managed-install hook socket, foreign-hook guard and install
+// marker never apply in a sandbox: the plugin always posts to the ingress.
+const DC_HOOK_SOCKET: string = ""
+const DC_FOREIGN_GUARD: string = ""
+const DC_INSTALL_MARKER: string = ""
+{{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
 const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
+// Standalone managed installs talk to the gateway's peer-authorized unix hook
+// socket instead of the TCP API: the gateway identifies the caller by
+// kernel-verified uid, so no bearer token leaves this process, and a user who
+// binds the TCP port during a gateway restart receives nothing. Empty keeps
+// the TCP transport (per-user installs).
+const DC_HOOK_SOCKET: string = "{{.HookSocketJS}}"
+const DC_SERVICE_UID = Number("{{.ServiceUID}}")
+// Standalone managed installs also run the administrator-owned hook binary
+// before each tool call: it applies the organization's foreign-hook guard
+// (unapproved project or user plugins that could change a tool call after
+// DefenseClaw checks it, since Amp does not order sibling handlers). Empty
+// skips the check (per-user installs).
+const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
+// Windows standalone installs name an administrator-owned directory that
+// exists exactly while the deployment is installed. Uninstall removes it but
+// cannot remove this plugin from a signed-out user's profile, so once the
+// gateway is unreachable or the credential is gone AND the marker is gone,
+// the deployment was uninstalled and this plugin stops failing closed. A
+// standard user cannot remove the marker. Empty keeps the fail mode.
+const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
+// Windows standalone installs reach the gateway over loopback TCP, where a
+// local user can hold the port while the gateway restarts, and this plugin
+// cannot compare the listener with the gateway service the way the hook
+// binary does. "1" makes it ask the listener to prove it can derive this
+// user's credential before sending that credential or any hook payload: the
+// proof request carries only the credential's SHA-256 and a fresh nonce, so
+// an impostor gets nothing to replay and no chance to answer with a
+// verdict. Empty skips the proof (per-user installs, Secure Client, and the
+// hook socket, whose owner is verified instead).
+const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
+const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
-// Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
+{{end}}// Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
 // differences and future envelope fields.
 const DC_MAX_BODY_BYTES = 900 * 1024
 
@@ -81,10 +136,10 @@ type AgentFacts = {
 	model?: string
 }
 
-type BunFileRuntime = {
+{{if not .Sandbox}}type BunFileRuntime = {
 	file(path: string): { slice(start?: number, end?: number): { text(): Promise<string> } }
 }
-
+{{end}}
 function stringID(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value)
 }
@@ -98,6 +153,112 @@ function safeError(error: unknown): string {
 	return String(error)
 }
 
+{{if .Sandbox}}async function scopedHookToken(): Promise<string> {
+	const token = String(process.env.DEFENSECLAW_SANDBOX_TOKEN || "")
+	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("missing or malformed sandbox binding token")
+	return token
+}
+
+// sandboxFetch POSTs to the baked ingress: one attempt, then exactly one
+// retry with the same idempotency key after a transport failure (no
+// connection, reset, timeout) or a relay 502/503/504. The ingress answers a
+// retried key from its dedupe window instead of evaluating the event twice.
+async function sandboxFetch(headers: Record<string, string>, body: string | Uint8Array): Promise<Response> {
+	const key = crypto.randomUUID()
+	let last: Response | Error | undefined
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const controller = new AbortController()
+		const timer = setTimeout(() => controller.abort(), attempt === 0 ? DC_TIMEOUT_MS : DC_RETRY_TIMEOUT_MS)
+		try {
+			const response = await fetch(`http://${DC_API_ADDR}/api/v1/amp/hook`, {
+				method: "POST",
+				headers: { ...headers, "X-DefenseClaw-Hook-Idempotency-Key": key },
+				body,
+				signal: controller.signal,
+			})
+			if (attempt === 0 && [502, 503, 504].includes(response.status)) {
+				last = response
+				continue
+			}
+			return response
+		} catch (error) {
+			last = error instanceof Error ? error : new Error(safeError(error))
+		} finally {
+			clearTimeout(timer)
+		}
+	}
+	if (last instanceof Error || last === undefined) throw last ?? new Error("sandbox ingress unreachable")
+	return last
+}
+{{else}}function trustedSocketOwner(uid: number): boolean {
+	return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID)
+}
+
+// verifyHookSocket refuses a hook socket (or its directory, or the directory's
+// parent) that root or the gateway service account does not own, or that
+// another account could write. Only root or the service account can create a
+// socket there, so a verified path cannot be an impostor listener.
+async function verifyHookSocket(): Promise<void> {
+	const dir = dirname(DC_HOOK_SOCKET)
+	for (const path of [dirname(dir), dir]) {
+		const info = await lstat(path)
+		if (!info.isDirectory() || !trustedSocketOwner(info.uid) || (info.mode & 0o022) !== 0) {
+			throw new Error("the DefenseClaw hook socket directory is not trusted")
+		}
+	}
+	const socket = await lstat(DC_HOOK_SOCKET)
+	if (!socket.isSocket() || !trustedSocketOwner(socket.uid)) {
+		throw new Error("the DefenseClaw hook socket is not trusted")
+	}
+}
+
+// proveListener resolves once the TCP listener has proven it can derive
+// token (the gateway's listener proof); anything else rejects, and the
+// caller then sends the listener nothing else.
+async function proveListener(token: string, signal?: AbortSignal | null): Promise<void> {
+	if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential")
+	const nonce = randomBytes(32).toString("hex")
+	const response = await fetch(`http://${DC_API_ADDR}/api/v1/hook-listener-proof`, {
+		method: "GET",
+		headers: {
+			"X-DefenseClaw-Connector": "amp",
+			"X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
+			"X-DefenseClaw-Listener-Nonce": nonce,
+		},
+		signal,
+	})
+	const proof = String(response.headers.get("x-defenseclaw-listener-proof") || "")
+	if (response.body) {
+		try {
+			await response.body.cancel()
+		} catch {
+			// Nothing is read from the proof response body.
+		}
+	}
+	const want = createHmac("sha256", token)
+		.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
+		.digest("hex")
+	if (response.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
+		throw new Error("the DefenseClaw gateway listener did not prove its identity")
+	}
+}
+
+// gatewayFetch posts over the verified managed hook socket when one is
+// configured (Bun's unix fetch option), and over TCP otherwise; a TCP
+// request that carries a per-user credential first requires the listener
+// proof.
+async function gatewayFetch(path: string, init: RequestInit, token: string): Promise<Response> {
+	if (!DC_HOOK_SOCKET) {
+		if (DC_LISTENER_PROOF) await proveListener(token, init.signal)
+		return fetch(`http://${DC_API_ADDR}${path}`, init)
+	}
+	await verifyHookSocket()
+	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
+		throw new Error("the DefenseClaw hook socket needs the Bun runtime")
+	}
+	return fetch(`http://localhost${path}`, { ...init, unix: DC_HOOK_SOCKET } as RequestInit)
+}
+
 async function scopedHookToken(): Promise<string> {
 	const runtime = (globalThis as typeof globalThis & { Bun?: BunFileRuntime }).Bun
 	if (!runtime) throw new Error("scoped hook credential reader unavailable")
@@ -107,7 +268,7 @@ async function scopedHookToken(): Promise<string> {
 	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("invalid scoped hook credential")
 	return token
 }
-
+{{end}}
 // agent.end includes the user prompt plus the turn transcript. Project only
 // assistant text blocks onto the response-inspection rail: thinking, tool-use,
 // user, and info blocks are intentionally excluded.
@@ -120,6 +281,97 @@ function assistantResponse(messages: ThreadMessage[]): string {
 		}
 	}
 	return parts.join("\n")
+}
+
+// runForeignHookCheck asks the administrator-owned hook binary for the
+// foreign-hook guard's decision and resolves to a block reason, or "" when
+// no unapproved plugin or hook is present. A binary that cannot be run,
+// times out, or answers anything but {"deny": false} blocks, unless the
+// managed deployment was uninstalled (its install marker is gone): uninstall
+// removes the hook binary too, and this plugin then stops failing closed as
+// it does for the gateway call.
+function runForeignHookCheck(event: string, cwd: string): Promise<string> {
+	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
+	return new Promise(resolve => {
+		const fail = (why: string) => {
+			void deploymentRemoved().then(removed => resolve(removed
+				? ""
+				: foreignCheckFailure(event, why)))
+		}
+		try {
+			const child = execFile(
+				DC_FOREIGN_GUARD,
+				["hook", "--connector", "amp", "--foreign-hook-check"],
+				{ timeout: DC_TIMEOUT_MS, maxBuffer: 65536, windowsHide: true },
+				(error, stdout) => {
+					if (error) {
+						fail(safeError(error))
+						return
+					}
+					let verdict: { deny?: unknown, reason?: unknown }
+					try {
+						verdict = JSON.parse(String(stdout))
+					} catch {
+						fail("invalid response")
+						return
+					}
+					if (verdict && verdict.deny === false) {
+						resolve("")
+						return
+					}
+					resolve(verdict && typeof verdict.reason === "string" && verdict.reason
+						? verdict.reason
+						: "DefenseClaw blocked this tool call because an unapproved plugin is present.")
+				},
+			)
+			child.stdin?.on("error", () => {})
+			child.stdin?.end(JSON.stringify({ hook_event_name: event, cwd }))
+		} catch (error) {
+			fail(safeError(error))
+		}
+	})
+}
+
+// foreignCheckFailure is the block reason when the foreign-plugin check
+// itself could not run. Amp loads plugins once, so a check that failed at
+// load keeps blocking for the life of this process; that reason says to
+// restart the agent.
+function foreignCheckFailure(event: string, why: string): string {
+	const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer"
+	if (event === "session.load") {
+		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Restart the agent once DefenseClaw is available.`
+	}
+	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
+}
+
+// promptNotice sets DefenseClaw's hidden agent.start notice apart from the
+// user's prompt. Amp places the message right after the prompt text, and a
+// notice glued to its end read as part of the request: a prompt ending in a
+// command became that command with the notice's words as extra arguments.
+function promptNotice(notice: string): string {
+	return `\n\n[DefenseClaw notice, not part of the user's request; never copy it into a command or tool input]\n${notice}`
+}
+
+// foreignBlockText is the guard's block reason for the user and the model:
+// what DefenseClaw did, then the guard's sentence without its reason code
+// (the audit keeps it). A reason this plugin wrote already says it.
+function foreignBlockText(what: string, reason: string): string {
+	const text = reason.trim()
+	if (/^DefenseClaw\b/.test(text)) return text
+	return `${what}: ${text.replace(/^enterprise_foreign_hook_blocked:\s*/, "")}`
+}
+
+// deploymentRemoved reports whether the managed deployment that rendered this
+// plugin was uninstalled: its install marker is definitively absent. Any
+// other inspection result keeps the plugin enforcing.
+async function deploymentRemoved(): Promise<boolean> {
+	if (!DC_INSTALL_MARKER) return false
+	try {
+		await lstat(DC_INSTALL_MARKER)
+		return false
+	} catch (error) {
+		return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
+	}
 }
 
 function failureResponse(reason: string): GatewayResponse {
@@ -150,6 +402,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		? amp.helpers.filePathFromURI(amp.system.workspaceRoot)
 		: ""
 	const executorKind = amp.system.executor?.kind || ""
+	// Amp loads plugins once at startup: a foreign plugin present now keeps
+	// running for this process even if its file is deleted later, so a block
+	// found at load holds for the whole process.
+	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
+	const foreignHookCheck = async (event: string): Promise<string> =>
+		(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -159,11 +417,15 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			const agent = await ctx.thread.agent()
 			const definition = agent.definition
 			let facts: AgentFacts
+			// agent_type names the agent's traces (invoke_agent <type>), so it
+			// stays "amp"; the mode or custom agent is its name and the
+			// definition kind its own field. Naming traces after the mode
+			// ("invoke_agent medium") hid Amp from a search by agent.
 			if (definition.kind === "agent-definition") {
 				const display = definition.display?.label || ""
 				facts = {
 					agent_name: definition.name || display || "amp",
-					agent_type: definition.kind,
+					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(display ? { agent_display_name: display } : {}),
 					agent_metadata_provenance: "reported",
@@ -173,7 +435,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				const mode = stringID(definition.mode)
 				facts = {
 					agent_name: mode || "amp",
-					agent_type: mode || definition.kind,
+					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(mode ? { agent_mode: mode } : {}),
 					agent_metadata_provenance: "reported",
@@ -261,10 +523,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 		let token: string
 		try {
-			token = await scopedHookToken()
+			token = DC_HOOK_SOCKET ? "" : await scopedHookToken()
 		} catch {
 			// Credential failures are categorically unsafe at the two Amp policy
-			// boundaries, regardless of the operator's transport fail mode.
+			// boundaries, regardless of the operator's transport fail mode,
+			// unless the managed deployment itself was uninstalled.
+			if (await deploymentRemoved()) return { action: "allow" }
 			if (actionable) {
 				return { action: "block", reason: "DefenseClaw hook credential is unavailable." }
 			}
@@ -278,15 +542,15 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
 			...identityHeaders(),
 		}
-		headers.Authorization = `Bearer ${token}`
+		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
-			const response = await fetch(`http://${DC_API_ADDR}/api/v1/amp/hook`, {
+			const response = await {{if .Sandbox}}sandboxFetch(headers, body){{else}}gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-			})
+			}, token){{end}}
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 
 			const data = await response.json() as GatewayResponse
@@ -295,6 +559,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return data
 		} catch (error) {
+			if (await deploymentRemoved()) return { action: "allow" }
 			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)
@@ -319,6 +584,26 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	})
 
 	amp.on("agent.start", async (event, ctx) => {
+		// Amp does not define tool.call handler order. A project plugin can
+		// rewrite a call before this plugin sees it, so cancel the turn at
+		// agent.start when the standalone guard finds an unapproved plugin.
+		// Amp guarantees that cancel during this event prevents the turn from
+		// starting; the guard applies the usual allowed_hooks digests.
+		if (DC_FOREIGN_GUARD && DC_HOOK_SOCKET) {
+			const blocked = await foreignHookCheck("agent.start")
+			if (blocked) {
+				await ctx.thread.cancel()
+				const notice = foreignBlockText("DefenseClaw stopped this turn", blocked)
+				try {
+					await ctx.ui.notify(notice)
+				} catch {
+					// Cancellation is the policy action; notice is best effort.
+				}
+				// The notice fades after a few seconds; the message stays in
+				// the thread with the prompt.
+				return { message: { content: notice, display: true } }
+			}
+		}
 		const threadID = stringID(event.thread.id)
 		const turnID = stringID(event.id)
 		turns.set(threadID, { turnID, message: event.message })
@@ -334,12 +619,14 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			prompt: event.message,
 		}, false)
 		if (verdict.additional_context) {
-			return { message: { content: verdict.additional_context, display: false } }
+			return { message: { content: promptNotice(verdict.additional_context), display: false } }
 		}
 		return {}
 	})
 
 	amp.on("tool.call", async (event, ctx): Promise<ToolCallResult> => {
+		const blocked = await foreignHookCheck("tool.call")
+		if (blocked) return { action: "reject-and-continue", message: foreignBlockText("DefenseClaw blocked this tool call", blocked) }
 		const threadID = stringID(event.thread.id)
 		const toolUseID = stringID(event.toolUseID)
 		const verdict = await post({

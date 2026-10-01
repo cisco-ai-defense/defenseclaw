@@ -280,3 +280,92 @@ current `.agents/rules`, legacy `.agent/rules`, and plugin `rules/*.md` sources.
 
 Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization
 policy surfaces are outside this connector contract and remain unverified.
+
+## OpenShell sandbox
+
+DefenseClaw can build an Antigravity OpenShell overlay image. The files below
+exist only in the image; nothing on your host changes.
+
+- **Hooks in the user tier.** agy reads its global hooks from
+  `~/.gemini/config/hooks.json`, and the reviewed 1.2.x build has no system or
+  managed hook location. The image seeds the reviewed file and keeps a
+  root-owned copy under `/usr/local/lib/defenseclaw/antigravity/`. The
+  launcher restores the user file from that copy before every start, so an
+  edit made during a session is undone at the next launch. If
+  `~/.gemini/config/hooks.json` is anything but a regular file (a directory,
+  for example), the launcher refuses to start agy and names the path; remove
+  it and start again.
+- **Workspace hooks.** agy also loads `<workspace>/.agents/hooks.json`. The
+  launcher refuses to start when that file reuses one of DefenseClaw's
+  `defenseclaw-antigravity-*` hook keys. Workspace hooks under their own keys
+  still load alongside DefenseClaw's.
+- **Fail closed.** agy enforces only a synchronous PreToolUse
+  `{"decision":"deny"}`. The sandbox hook prints that deny on every
+  PreToolUse failure: missing token, ingress down, or a bad reply. Its
+  reason says which: "DefenseClaw policy service is unavailable." only when
+  DefenseClaw cannot be reached or answers with a server error, "DefenseClaw
+  hook request was refused (HTTP 400), so the tool call is blocked." for a
+  refused request (such as a malformed hook input), and a reply without a
+  verdict or a missing binding token are named as such.
+- **Known gaps.** The agent can edit `~/.gemini/config/hooks.json`, or start
+  a second agy with another `HOME`, from a tool call. DefenseClaw sees that
+  tool call first, and hook-silence detection is the backstop. Command rules
+  judge `run_command` calls, and the input `send_command_input` types into a
+  running command (judged as a shell command). A command that a script runs,
+  when the agent writes the script to a file and runs it, is judged by the
+  command that starts the script.
+- **Install pin.** The image installs agy 1.2.12 from the tarball Google's
+  installer manifest names. It checks the tarball against the manifest's
+  SHA-512, which DefenseClaw pins per architecture (arm64, x86_64). The build
+  refuses a version without a pinned download or below the reviewed hook
+  contract (`>=1.1.8`).
+- **Model access.** Use the `defenseclaw-gemini` provider profile. It sends
+  `GEMINI_API_KEY` as `x-goog-api-key` to `generativelanguage.googleapis.com`,
+  and the placeholder resolves only for the agy binary. When the key is set,
+  the launcher selects agy's `gemini` model provider in
+  `~/.gemini/antigravity-cli/settings.json`, and the key skips the Google
+  sign-in. Signing in with a Google account inside a sandbox is untested.
+  `defenseclaw sandbox run antigravity` shares `GEMINI_API_KEY` when it is
+  set.
+- **First-run screens.** A sandbox starts at agy's prompt. The image
+  completes agy's onboarding for you, which means DefenseClaw accepts the
+  Google Antigravity CLI Terms of Service (https://antigravity.google/terms)
+  on your behalf with data sharing off: the onboarding's "help improve
+  Antigravity CLI by allowing Google to collect and use my Interactions
+  data" box, ticked by default, is never ticked, `/settings` shows Enable
+  Telemetry off, and the colour scheme is agy's default (`terminal`; change
+  it in `/settings`). The launcher also trusts the working directory, so
+  agy does not ask whether to trust the folder. A start without
+  `GEMINI_API_KEY` still asks how to sign in, and a Business sign-in with a
+  Google Cloud project keeps its own terms. Delete
+  `~/.gemini/antigravity-cli/cache/onboarding.json` in the sandbox to see
+  the onboarding screens again.
+- **Launch flags.** Skip-permissions mode adds
+  `--dangerously-skip-permissions`. A run with `--safe` drops it in every
+  form agy accepts (one or two dashes, `=true`). A headless run is
+  `agy -p <prompt>`; pass `-- -p "TEXT"` to `sandbox run` for a detached run.
+- **Other traffic.** Apart from the model, a mock-model run reached only
+  `antigravity-unleash.goog` (feature flags) and `play.googleapis.com` (usage
+  logging). In a two-prompt daemon run, the proxy counted about 600 KB sent,
+  nearly all of it to those two hosts, and Enable Telemetry off does not
+  stop either (measured at an interactive start). That traffic goes through
+  the DefenseClaw egress proxy, which logs it and applies the blocklist.
+  Block either host with `openshell.egress.block` if your organization
+  requires it.
+- **Command directory.** DefenseClaw judges a `run_command` call in the
+  directory its `Cwd` names, which is where agy runs it, rather than in the
+  session's workspace.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, on a Gemini-API mock behind a credential binding,
+  showed:
+  - hooks reaching the sandbox ingress, with OpenShell substituting the model
+    key;
+  - a command that a DefenseClaw rule blocks refused by the PreToolUse hook,
+    with the rule's reason passed back to the model;
+  - egress through the proxy, including a blocklisted host that a
+    sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe. In that probe a replaced user
+  `hooks.json` is restored, and the launcher refuses to start when the hooks
+  file is a directory. Signing in with a Google account inside a sandbox, and
+  the `defenseclaw-gemini` profile with a real Gemini key, are untested.

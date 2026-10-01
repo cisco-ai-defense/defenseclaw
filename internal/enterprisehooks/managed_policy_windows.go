@@ -889,11 +889,11 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 	if !ok {
 		return errors.New("enterprise hooks: Claude Code connector has no managed policy verifier")
 	}
-	opts := connector.SetupOpts{
+	opts := withWindowsClaudeManagedHooksOnly(connector.SetupOpts{
 		DataDir:           target.dataDir,
 		ManagedEnterprise: true,
 		HookExecutable:    target.hookExecutable,
-	}
+	})
 	if err := provider.VerifyManagedHookPolicy(target.policyData, opts); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed policy runtime identity is invalid: %w", err)
 	}
@@ -1272,6 +1272,26 @@ func rejectWindowsClaudeRegistryPolicyWriteACEs(label string, dacl *windows.ACL)
 		}
 	}
 	return nil
+}
+
+// WithWindowsClaudeManagedPolicyTransaction runs fn, given the
+// managed-settings.d directory, under the Claude Code managed policy
+// transaction lock the lifecycle and the per-target installer hold. The
+// standalone profile writes its version floor drop-in, a separate file in
+// that directory, this way so it never races them; fn must not touch
+// 90-defenseclaw.json or its ownership sidecar. Secure Client processes are
+// refused: that profile has no version floor.
+func WithWindowsClaudeManagedPolicyTransaction(fn func(policyDir string) error) error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return errors.New("enterprise hooks: the Claude Code version floor applies only to the standalone profile")
+	}
+	return windowsClaudeManagedPolicyTransaction(func() error {
+		path, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return err
+		}
+		return fn(filepath.Dir(path))
+	})
 }
 
 func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {

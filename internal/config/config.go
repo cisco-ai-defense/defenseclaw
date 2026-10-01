@@ -232,6 +232,17 @@ const CurrentConfigVersion = 7
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
 	ConfigFilePath string `mapstructure:"-" yaml:"-"`
+	// declaredEnterpriseProfile is enterprise.profile as the config source
+	// declared it, before the service pin or the per-OS default filled it
+	// in. Set only by the loader; not serialized.
+	declaredEnterpriseProfile string
+	// rulePackDirDeclared records that the config source sets
+	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
+	// never rewrites an explicit value. Set only by the loader.
+	rulePackDirDeclared bool
+	// legacyConnectorRouteSelectors names the observability route selectors
+	// that list a retired connector ID, for the migration notice.
+	legacyConnectorRouteSelectors []string
 	// LegacyConnectorNotices records connector IDs this load moved to their
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
@@ -318,7 +329,10 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+	// Enterprise selects the managed_enterprise profile (Secure Client or
+	// standalone) and tunes the standalone profile. See enterprise.go.
+	Enterprise EnterpriseConfig `mapstructure:"enterprise" yaml:"enterprise,omitempty"`
+	Routing    RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1165,7 +1179,7 @@ func (c OTelConfig) ValidateNamedDestinations() error {
 // capability as a canonical destination; the legacy decoder uses the same
 // predicate only to avoid rejecting a managed source before migration.
 func (c *Config) HasManagedAIDLogSink() bool {
-	return c != nil && managed.IsManagedEnterprise(c.DeploymentMode) &&
+	return c != nil && c.SecureClientIntegration() &&
 		strings.TrimSpace(c.CiscoAIDefense.Endpoint) != ""
 }
 
@@ -1524,60 +1538,6 @@ type ScannersConfig struct {
 	CodeGuard        string    `mapstructure:"codeguard"       yaml:"codeguard"`
 }
 
-type OpenShellConfig struct {
-	Binary         string `mapstructure:"binary"        yaml:"binary"`
-	PolicyDir      string `mapstructure:"policy_dir"    yaml:"policy_dir"`
-	Mode           string `mapstructure:"mode"           yaml:"mode,omitempty"`
-	Version        string `mapstructure:"version"        yaml:"version,omitempty"`
-	SandboxHome    string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
-	AutoPair       *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
-	HostNetworking *bool  `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
-}
-
-const DefaultOpenShellVersion = "0.6.2"
-const DefaultSandboxHome = "/home/sandbox"
-
-// IsStandalone returns true when openshell-sandbox is running in standalone
-// Linux supervisor mode (Landlock + seccomp + network namespace, no Docker).
-func (o *OpenShellConfig) IsStandalone() bool {
-	return o.Mode == "standalone"
-}
-
-// EffectiveVersion returns the configured OpenShell version or the default.
-func (o *OpenShellConfig) EffectiveVersion() string {
-	if o.Version != "" {
-		return o.Version
-	}
-	return DefaultOpenShellVersion
-}
-
-// EffectiveSandboxHome returns the configured sandbox home or the default.
-func (o *OpenShellConfig) EffectiveSandboxHome() string {
-	if o.SandboxHome != "" {
-		return o.SandboxHome
-	}
-	return DefaultSandboxHome
-}
-
-// ShouldAutoPair returns whether device pre-pairing is enabled.
-// Defaults to true when not explicitly set.
-func (o *OpenShellConfig) ShouldAutoPair() bool {
-	if o.AutoPair != nil {
-		return *o.AutoPair
-	}
-	return true
-}
-
-// HostNetworkingEnabled returns whether DefenseClaw should manage host-side
-// iptables rules for the sandbox (DNS forwarding, UI port forwarding,
-// guardrail redirect, MASQUERADE). Defaults to true when not explicitly set.
-func (o *OpenShellConfig) HostNetworkingEnabled() bool {
-	if o.HostNetworking != nil {
-		return *o.HostNetworking
-	}
-	return true
-}
-
 type GatewayWatcherSkillConfig struct {
 	Enabled    bool     `mapstructure:"enabled"      yaml:"enabled"`
 	TakeAction bool     `mapstructure:"take_action"   yaml:"take_action"`
@@ -1701,6 +1661,20 @@ type GuardrailConfig struct {
 	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+
+	// BlockAt and AlertAt replace the block and alert levels the rule
+	// pack's profile implies (strict / default / permissive) when the
+	// gateway maps a finding's severity to an action: BlockAt is the
+	// lowest severity that blocks, AlertAt the lowest that alerts.
+	// Values are CRITICAL, HIGH, MEDIUM or LOW in any case; empty (the
+	// default) keeps the pack's level. A guardrail.connectors entry's own
+	// value wins over these. They never reach OPA, so the named policy's
+	// thresholds for LLM traffic through the guardrail proxy are
+	// unaffected. Resolve through EffectiveBlockAt / EffectiveAlertAt,
+	// never by reading the fields. Hook decisions read the start-time
+	// config, so guardrailNeedsRestart restarts on a change to either.
+	BlockAt string `mapstructure:"block_at" yaml:"block_at,omitempty"`
+	AlertAt string `mapstructure:"alert_at" yaml:"alert_at,omitempty"`
 
 	// Detection strategy: "regex_only", "regex_judge" (default), "judge_first".
 	// Per-direction overrides take precedence over the global setting.
@@ -1838,6 +1812,15 @@ type PerConnectorGuardrailConfig struct {
 	HookFailMode string      `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
 	BlockMessage string      `mapstructure:"block_message"  yaml:"block_message,omitempty"`
 	RulePackDir  string      `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+
+	// BlockAt / AlertAt set this connector's block and alert levels,
+	// winning over guardrail.block_at / alert_at and over the levels of
+	// the connector's rule pack (see GuardrailConfig.BlockAt for values
+	// and meaning). This struct also types the application_protection
+	// guardrail overlays, which do not support these two keys:
+	// ApplicationProtectionConfig.Validate rejects them there.
+	BlockAt string `mapstructure:"block_at" yaml:"block_at,omitempty"`
+	AlertAt string `mapstructure:"alert_at" yaml:"alert_at,omitempty"`
 
 	// Enabled is the per-connector on/off switch toggled by
 	// `defenseclaw guardrail disable --connector X` (and its enable
@@ -2003,18 +1986,83 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 	return g.RulePackDir
 }
 
+// EffectiveBlockAt returns the lowest severity that blocks for the named
+// connector: its guardrail.connectors block_at when set, else the global
+// guardrail.block_at, as a canonical uppercase level (CRITICAL, HIGH,
+// MEDIUM, LOW). "" means neither is set, so the connector's rule pack
+// profile decides. A value Validate would reject counts as unset, so a
+// config that skipped Validate can never produce an out-of-range level.
+// Pure lookup — never errors, never mutates, never touches I/O.
+func (g *GuardrailConfig) EffectiveBlockAt(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if level := canonicalGuardrailLevel(pc.BlockAt); level != "" {
+			return level
+		}
+	}
+	return canonicalGuardrailLevel(g.BlockAt)
+}
+
+// EffectiveAlertAt is EffectiveBlockAt for the lowest severity that
+// alerts (per-connector alert_at, else global alert_at, else ""). It does
+// not clamp the alert level to the block level: the gateway does that
+// after resolving both against the connector's rule pack. Pure lookup.
+func (g *GuardrailConfig) EffectiveAlertAt(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if level := canonicalGuardrailLevel(pc.AlertAt); level != "" {
+			return level
+		}
+	}
+	return canonicalGuardrailLevel(g.AlertAt)
+}
+
+// canonicalGuardrailLevel trims and uppercases a block_at / alert_at value
+// and returns it when it is CRITICAL, HIGH, MEDIUM or LOW, else "".
+func canonicalGuardrailLevel(value string) string {
+	level := strings.ToUpper(strings.TrimSpace(value))
+	switch level {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+		return level
+	default:
+		return ""
+	}
+}
+
+// validateGuardrailLevel accepts "" (inherit) and the four levels in any
+// case. field names the key in the error, e.g. "guardrail.block_at".
+func validateGuardrailLevel(field, value string) error {
+	if strings.TrimSpace(value) == "" || canonicalGuardrailLevel(value) != "" {
+		return nil
+	}
+	return fmt.Errorf("%s: must be one of CRITICAL, HIGH, MEDIUM, LOW (got %q)", field, value)
+}
+
 // Validate checks per-connector guardrail VALUE invariants only — the
 // NEW guardrail.connectors map. For each override it inspects enum
-// values (mode, hook_fail_mode, hilt.min_severity) and rejects empty
-// connector names. It deliberately does NOT re-validate the global
-// guardrail fields: those predate multi-connector support and were
-// never gated by Load(), so validating them here could reject configs
-// that load fine today. It never imports the connector registry — the
-// "entries must be hook connectors" guard lives in the gateway boot
-// loop, where the registry is in hand. Wired into Load().
+// values (mode, hook_fail_mode, hilt.min_severity, block_at, alert_at)
+// and rejects empty connector names. It deliberately does NOT
+// re-validate the older global guardrail fields: those predate
+// multi-connector support and were never gated by Load(), so validating
+// them here could reject configs that load fine today. The exception is
+// the global block_at / alert_at pair: it is new, so no existing config
+// can carry a bad value, and it is checked like its per-connector
+// counterpart. It never imports the connector registry — the "entries
+// must be hook connectors" guard lives in the gateway boot loop, where
+// the registry is in hand. Wired into Load().
 func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
+	}
+	if err := validateGuardrailLevel("guardrail.block_at", g.BlockAt); err != nil {
+		return err
+	}
+	if err := validateGuardrailLevel("guardrail.alert_at", g.AlertAt); err != nil {
+		return err
 	}
 	// Per-connector overrides, in sorted order for deterministic errors.
 	names := make([]string, 0, len(g.Connectors))
@@ -2053,6 +2101,12 @@ func (g *GuardrailConfig) Validate() error {
 			if err := validateGuardrailMinSeverity(pc.HILT.MinSeverity); err != nil {
 				return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
 			}
+		}
+		if err := validateGuardrailLevel("block_at", pc.BlockAt); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+		}
+		if err := validateGuardrailLevel("alert_at", pc.AlertAt); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
 		}
 	}
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
@@ -2328,8 +2382,11 @@ type GatewayConfig struct {
 	// gatewayShouldConnectForConfiguredConnector. Three values:
 	//
 	//   "" / "auto"   — derive from connector + host. openclaw/zeptoclaw
-	//                   always dial; codex/claudecode dial only if
-	//                   gateway.host is non-loopback.
+	//                   dial; codex/claudecode dial only if
+	//                   gateway.host is non-loopback. An openclaw
+	//                   connector implied only by claw.mode, on a
+	//                   loopback host, does not dial when OpenClaw is
+	//                   not installed (no openclaw.json, no binary).
 	//   "enabled"     — always dial regardless of connector/host. Use
 	//                   when running a local OpenClaw daemon on
 	//                   127.0.0.1 alongside a codex/claudecode connector
@@ -2449,21 +2506,21 @@ func (g *GatewayConfig) RequiresTLS() bool {
 	}
 }
 
-// RequiresTLSWithMode is like RequiresTLS but treats openshell standalone mode as
-// point-to-point (no TLS) unless gateway.tls forces it on.
-func (g *GatewayConfig) RequiresTLSWithMode(openshell *OpenShellConfig) bool {
-	if g.TLS {
-		return true
+// APIBindHost returns the address the gateway REST API listens on: an explicit
+// gateway.api_bind, else the legacy standalone shim's host, else loopback.
+// Every listener, hook/plugin address, and health probe derives the API host
+// from here so they cannot disagree.
+func APIBindHost(cfg *Config) string {
+	if cfg == nil {
+		return "127.0.0.1"
 	}
-	if openshell != nil && openshell.IsStandalone() {
-		return false
+	if cfg.Gateway.APIBind != "" {
+		return cfg.Gateway.APIBind
 	}
-	switch g.Host {
-	case "", "127.0.0.1", "localhost", "::1", "[::1]":
-		return false
-	default:
-		return true
+	if host, ok := LegacyStandaloneAPIHost(cfg); ok {
+		return host
 	}
+	return "127.0.0.1"
 }
 
 type RuntimeAction string
@@ -2624,6 +2681,7 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 	}
 	return ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    candidate.DeploymentMode,
+		Profile:           candidate.EnterpriseProfile(),
 		Endpoint:          candidate.CiscoAIDefense.Endpoint,
 		SourceContentHash: ObservabilityV8SourceContentHash(raw),
 	}, nil
@@ -2666,6 +2724,16 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("policy_dir") {
 		candidate.PolicyDir = filepath.Join(dataDir, "policies")
+		if candidate.StandaloneEnterprise() {
+			if layout, ok := standaloneUnixLayoutForConfig(candidate.ConfigFilePath); ok {
+				// The gateway service can write data_dir, and the gateway
+				// loads its Rego policies from policy_dir. On the Linux and
+				// macOS layout an omitted policy_dir is the root-owned
+				// vendor policy folder, as in the lifecycle's built-in
+				// config, never a folder inside data_dir.
+				candidate.PolicyDir = layout.VendorPolicyDir
+			}
+		}
 	}
 	if !has("scanners", "codeguard") {
 		candidate.Scanners.CodeGuard = filepath.Join(dataDir, "codeguard-rules")
@@ -2681,6 +2749,12 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("guardrail", "rule_pack_dir") {
 		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
+		if candidate.StandaloneEnterprise() {
+			standaloneRulePackDefault(candidate, dataDir, runtime.GOOS)
+		}
+	}
+	if !has("openshell", "pack_dir") {
+		candidate.OpenShell.PackDir = filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
@@ -2726,6 +2800,12 @@ func loadConfigSource(
 	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
 		filepath.Clean(configuredPath) == configFile {
 		dataDir = DefaultDataPath()
+	}
+	// A managed standalone config at the Linux or macOS layout path that
+	// leaves data_dir unset uses the layout's data directory, the one the
+	// services and the lifecycle require, instead of the config's folder.
+	if layoutDataDir, ok := standaloneLayoutDataDirForSource(configFile, sourceBytes, sourceProvided); ok {
+		dataDir = layoutDataDir
 	}
 	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
@@ -2830,6 +2910,8 @@ func loadConfigSource(
 		}
 	}
 	cfg.ConfigFilePath = configFile
+	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
@@ -2840,13 +2922,16 @@ func loadConfigSource(
 		cfg.OTel.Resource.Attributes = otelAttrs
 	}
 
+	// migrateConfig stamps pre-v7 compatibility sources as v7, so the runtime
+	// gate reports the version the file actually declares.
+	sourceConfigVersion := cfg.ConfigVersion
 	migrateConfig(&cfg)
 	if !runtimeV8 {
 		normalizeRelativeGatewayDeviceKeyFile(&cfg)
 	}
 	if runtimeV8 {
-		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
-			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")
+		if err := checkRuntimeConfigVersion(sourceConfigVersion); err != nil {
+			return nil, err
 		}
 		clearLegacyObservabilityRuntimeConfig(&cfg)
 	} else {
@@ -2863,6 +2948,12 @@ func loadConfigSource(
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+	if err := resolveEnterpriseConfig(&cfg, runtime.GOOS, os.Getenv(managed.EnterpriseProfileEnv)); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "enterprise_config_invalid")
 		}
 		return nil, err
 	}
@@ -2888,6 +2979,12 @@ func loadConfigSource(
 		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+			}
+			return nil, err
+		}
+		if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
 			}
 			return nil, err
 		}
@@ -2998,6 +3095,12 @@ func loadConfigSource(
 		}
 		return nil, fmt.Errorf("config: application_protection: %w", err)
 	}
+	if err := cfg.ValidateOpenShell(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "openshell_invalid")
+		}
+		return nil, fmt.Errorf("config: openshell: %w", err)
+	}
 
 	// Validate registry source kind/content shapes. The Python CLI
 	// is the authoritative writer for ``registries.sources`` (it
@@ -3031,9 +3134,7 @@ func loadConfigSource(
 		}
 	}
 
-	if cfg.OpenShell.IsStandalone() {
-		cfg.Gateway.SandboxHome = cfg.OpenShell.EffectiveSandboxHome()
-	}
+	cfg.Gateway.SandboxHome = LegacySandboxHome(&cfg)
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
@@ -3410,6 +3511,21 @@ func yamlKindName(k yaml.Kind) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", k)
 	}
+}
+
+// checkRuntimeConfigVersion admits config_version 8 through
+// MaxSupportedConfigVersion. Older sources are rewritten by the CLI migration;
+// newer ones belong to a newer DefenseClaw and are never guessed at.
+func checkRuntimeConfigVersion(version int) error {
+	switch {
+	case version < ObservabilityV8ConfigVersion:
+		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
+			version, ObservabilityV8ConfigVersion)
+	case version > MaxSupportedConfigVersion:
+		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); "+
+			"upgrade DefenseClaw or restore ~/.defenseclaw/previous", version)
+	}
+	return nil
 }
 
 // migrateConfig applies forward migrations when config_version is behind
@@ -3936,10 +4052,18 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
 	viper.SetDefault("scanners.plugin_scanner", "defenseclaw")
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
-	viper.SetDefault("openshell.binary", "openshell")
-	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
-	viper.SetDefault("openshell.version", DefaultOpenShellVersion)
-	viper.SetDefault("openshell.host_networking", true)
+	// Pack-governed openshell keys (profile, yolo, workdir.mode, upload caps,
+	// egress lists, mcp.import) deliberately have no loader default so an
+	// unset key inherits the selected sandbox policy pack.
+	viper.SetDefault("openshell.binary", DefaultOpenShellBinary)
+	viper.SetDefault("openshell.pack_dir", filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName))
+	viper.SetDefault("openshell.workdir.git_depth", DefaultOpenShellGitDepth)
+	viper.SetDefault("openshell.workdir.on_exit", DefaultOpenShellOnExit)
+	viper.SetDefault("openshell.workdir.undo_ignored.max_mb", DefaultOpenShellUndoIgnoredMaxMB)
+	viper.SetDefault("openshell.workdir.undo_ignored.dirs", DefaultOpenShellUndoIgnoredDirs)
+	viper.SetDefault("openshell.approvals.debounce_ms", DefaultOpenShellApprovalDebounceMs)
+	viper.SetDefault("openshell.token_delivery", DefaultOpenShellTokenDelivery)
+	viper.SetDefault("openshell.llm", DefaultOpenShellLLM)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

@@ -20,6 +20,7 @@ exact command (and therefore the security implication) before it runs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -34,9 +35,11 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 
 TOKENS = DEFAULT_TOKENS
 _LOGGER = logging.getLogger(__name__)
+CHECKING_BINARIES_MESSAGE = "Checking agent binaries…"
 
 
 @dataclass(frozen=True)
@@ -63,7 +66,9 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
 
     #trusted-editor-dialog {{
         width: 116;
+        max-width: 96%;
         height: 32;
+        max-height: 100%;
         padding: 1 2;
         border: round {TOKENS.border_active};
         background: {TOKENS.surface_panel};
@@ -78,7 +83,8 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
     }}
 
     #trusted-editor-table {{
-        height: 16;
+        height: 1fr;
+        min-height: 3;
         margin-bottom: 1;
     }}
 
@@ -141,7 +147,7 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="trusted-editor-dialog"):
             yield Static("Trusted Binary Locations", id="trusted-editor-title")
-            yield DataTable(id="trusted-editor-table", cursor_type="row", zebra_stripes=True)
+            yield MeasuredDataTable(id="trusted-editor-table", cursor_type="row", zebra_stripes=True)
             yield Input(
                 placeholder="Directory to trust (e.g. ~/.local/bin) — Enter to add",
                 id="trusted-editor-add",
@@ -176,12 +182,20 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
             self._set_status(self._context_text)
         else:
             # Browsed directly: proactively highlight any connector whose
-            # binary currently resolves into an untrusted directory.
-            summary = self._untrusted_summary()
-            if summary:
-                self._set_status(summary)
+            # binary currently resolves into an untrusted directory. That is
+            # a full agent-discovery scan (it runs each binary), so it runs
+            # off the UI thread while the editor is already usable.
+            self._set_status(CHECKING_BINARIES_MESSAGE)
+            self.run_worker(self._check_untrusted_binaries(), exclusive=True, thread=False)
         # Focus the input so the operator can immediately add (or edit) a path.
         add_input.focus()
+
+    async def _check_untrusted_binaries(self) -> None:
+        summary = await asyncio.to_thread(self._untrusted_summary)
+        if not self.is_attached or self._status_message != CHECKING_BINARIES_MESSAGE:
+            # Closed, or an action already put its own message there.
+            return
+        self._set_status(summary or self._status_text())
 
     def _untrusted_summary(self) -> str:
         """One-line summary of connectors whose binary is in an untrusted dir."""

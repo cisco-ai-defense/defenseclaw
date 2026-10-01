@@ -1,0 +1,65 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"strings"
+	"testing"
+
+	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
+)
+
+// unitSyscallFilter returns the allow-listed and deny-listed entries of a
+// unit's SystemCallFilter lines.
+func unitSyscallFilter(t *testing.T, unit string) (allow, deny map[string]bool) {
+	t.Helper()
+	data, err := systemdunits.ReadFile(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow, deny = map[string]bool{}, map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "SystemCallFilter=")
+		if !ok {
+			continue
+		}
+		target := allow
+		if rest, negated := strings.CutPrefix(value, "~"); negated {
+			target, value = deny, rest
+		}
+		for _, entry := range strings.Fields(value) {
+			target[entry] = true
+		}
+	}
+	return allow, deny
+}
+
+// The sensor helper's Plane C file-access watch opens fanotify.
+// fanotify_init and fanotify_mark belong to @privileged, not to
+// @system-service or @network-io, so the unit must allow them by name or
+// the seccomp filter answers EPERM despite CAP_SYS_ADMIN and credential
+// file access goes unobserved.
+func TestSensorHelperSyscallFilterAllowsFanotify(t *testing.T) {
+	allow, deny := unitSyscallFilter(t, unitSensorHelper)
+	if !allow["@system-service"] {
+		t.Fatalf("sensor helper filter no longer starts from @system-service: %v", allow)
+	}
+	for _, call := range []string{"fanotify_init", "fanotify_mark"} {
+		if !allow[call] || deny[call] {
+			t.Fatalf("sensor helper SystemCallFilter does not allow %s (allow=%v deny=%v)", call, allow, deny)
+		}
+	}
+	if allow["@privileged"] {
+		t.Fatal("sensor helper allows all of @privileged; allow only the fanotify calls")
+	}
+}

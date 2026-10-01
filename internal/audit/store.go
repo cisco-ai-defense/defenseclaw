@@ -136,6 +136,15 @@ type Event struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
+	// SandboxID and SandboxName attribute an event to the OpenShell
+	// sandbox whose request produced it. They are filled from the
+	// correlation envelope, which takes them only from the authenticated
+	// sandbox binding, and are empty for host traffic. There is no
+	// dedicated SQLite column: generic (compatibility) records carry them
+	// in their v8 body, so every sink that receives the record sees them.
+	SandboxID   string `json:"sandbox_id,omitempty"`
+	SandboxName string `json:"sandbox_name,omitempty"`
+
 	// Structured carries sanitized machine-readable data for sink fanout
 	// AND is persisted verbatim in the SQLite audit_events.structured_json
 	// column (see migration 14). Downstream queries — the Alerts counter
@@ -2319,43 +2328,6 @@ func (s *Store) LogEvent(e Event) error {
 		return fmt.Errorf("audit: log event: %w", err)
 	}
 	return nil
-}
-
-// UpgradeReceiptEventRecorded reports whether receiptID already owns the
-// canonical upgrade compliance row. A row with the same ID but a different
-// identity is an integrity conflict, not an idempotent replay.
-func (s *Store) UpgradeReceiptEventRecorded(receiptID string) (bool, error) {
-	if s == nil {
-		return false, fmt.Errorf("audit: store is unavailable")
-	}
-	if parsed, err := uuid.Parse(receiptID); err != nil || parsed.String() != receiptID {
-		return false, fmt.Errorf("audit: invalid upgrade receipt ID")
-	}
-	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT action, bucket, signal, event_name
-		FROM audit_events WHERE id = ?`, receiptID)
-	if err != nil {
-		return false, fmt.Errorf("audit: query upgrade receipt: %w", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return false, rows.Err()
-	}
-	var action, bucket, signal, eventName string
-	if err := rows.Scan(&action, &bucket, &signal, &eventName); err != nil {
-		return false, fmt.Errorf("audit: read upgrade receipt: %w", err)
-	}
-	if rows.Next() {
-		return false, fmt.Errorf("audit: duplicate upgrade receipt identity")
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("audit: read upgrade receipt: %w", err)
-	}
-	if action != string(ActionUpgrade) || bucket != "compliance.activity" ||
-		signal != "logs" || eventName != "legacy.audit.upgrade" {
-		return false, fmt.Errorf("audit: upgrade receipt identity conflict")
-	}
-	return true, nil
 }
 
 // ActivityEventRow is the SQLite shape for migration #8 activity_events.

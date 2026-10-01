@@ -22,7 +22,7 @@ func platformDiscoveryHomeDir() (string, error) {
 // so this returns nil and the single HomeDir path drives the scan. The Windows
 // override enumerates HKLM\...\ProfileList so a service-context scan sees each
 // real interactive user's home rather than its own virtual ServiceProfiles dir.
-func platformDiscoveryHomeDirs() []string {
+func platformDiscoveryHomeDirs(_ bool) []string {
 	return nil
 }
 

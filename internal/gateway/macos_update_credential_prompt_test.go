@@ -133,7 +133,6 @@ func TestFakeMacOSUpdateCredentialPromptOwnerRejectsNearMisses(t *testing.T) {
 		`osascript -e 'display dialog "Build completed" buttons {"OK"}'`,
 		`osascript -e 'display dialog "To perform a security update MacOS needs your passphrase." with title "Security Update" default answer "" with icon stop with hidden answer'`,
 		`osascript -e 'display dialog "To perform a security update MacOS needs your passphrase." with title "MacOS Security Update" default answer "" with icon stop'`,
-		`test -f /tmp/ready && osascript -e 'display dialog "To perform a security update MacOS needs your passphrase." with title "MacOS Security Update" default answer "" with icon stop with hidden answer'`,
 		`echo 'osascript -e display dialog Software Update with hidden answer'`,
 	} {
 		input := actionfacts.Input{

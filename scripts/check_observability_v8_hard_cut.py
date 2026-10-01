@@ -24,13 +24,23 @@ ADDITIONAL_RUNTIME_SOURCES = (
     "scripts/test-e2e-cli.py",
     "packaging/macos/install.sh",
     "packaging/macos/lib/installer_lib.sh",
-    "scripts/bundle-sandbox-test.sh",
     "scripts/test-macos-enterprise-packaging.sh",
 )
 
 # These implementations have no valid target-runtime use. Their presence is a
 # hard failure even when no current caller happens to reference them.
 REMOVED_RUNTIME_PATHS = (
+    # The legacy openshell-sandbox (0.0.x) standalone integration. Only the
+    # consented legacy cleanup (cli/defenseclaw/sandbox_legacy.py) and the
+    # bind shim (internal/config/legacy_openshell.go) remain. The OpenShell
+    # 0.1 integration's command lives in internal/cli/sandbox.go again.
+    "cli/defenseclaw/commands/cmd_init_sandbox.py",
+    "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+    "internal/audit/openshell_metrics_v8.go",
+    "internal/cli/policy_diff.go",
+    "internal/enforce/mcp_enforcer.go",
+    "internal/enforce/sandbox.go",
+    "internal/sandbox",
     "cli/defenseclaw/tui/services/gateway_events.py",
     "internal/audit/sinkconfig",
     "internal/audit/sinks",
@@ -70,7 +80,46 @@ LEGACY_CONFIG_BOUNDARIES = (
     "cli/defenseclaw/observability/v8_migration.py",
 )
 
+# The v8 compiler keeps a route that still selects a retired event or action
+# and warns, naming it (retired_selector_value); these are the only places the
+# retired names may appear.
+REMOVED_SELECTOR_REJECTION = (
+    "internal/config/observability_v8_compile.go",
+    "internal/config/observability_v8_compile_test.go",
+)
+
 RULES = (
+    Rule(
+        "openshell-exit-metric",
+        re.compile(r"\bRecordOpenShellExitMetric\b|\bopenShellExit\b|\bdefenseclaw\.openshell\.exit\b"),
+        "the metric.defenseclaw.openshell.exit family and its legacy counter were retired with the "
+        "openshell-sandbox (0.0.x) integration",
+        # The v8 compiler names it only to warn about a route that selects it.
+        allowed_prefixes=REMOVED_SELECTOR_REJECTION,
+    ),
+    Rule(
+        "init-sandbox-audit-action",
+        re.compile(r"[\"']init-sandbox[\"']|\bActionInitSandbox\b|\bACTION_INIT_SANDBOX\b"),
+        "the init-sandbox audit action was retired with the openshell-sandbox (0.0.x) integration",
+        # The v8 compiler names it only to warn about a route that selects it.
+        allowed_prefixes=REMOVED_SELECTOR_REJECTION,
+    ),
+    Rule(
+        "legacy-openshell-sandbox-runtime",
+        re.compile(
+            r"internal/sandbox\"|\bsandbox\.(?:OpenShell|NewWithFallback|ParseOpenShellPolicy)\b|"
+            r"\b(?:LookPath|Command|which)\(\s*[\"']openshell-sandbox[\"']|"
+            r"\bWriteSandboxPolicy\b|\bEvaluateSandbox\b|\bopenclaw_cmd_prefix\b",
+        ),
+        "the legacy openshell-sandbox (0.0.x) runtime was removed; the only surviving code is the "
+        "consented legacy-cleanup and the bind shim, which never run or supervise the binary",
+    ),
+    Rule(
+        "legacy-openshell-sandbox-launcher",
+        re.compile(r"\bexec\s+openshell-sandbox\b|systemctl\s+(?:start|enable|restart)\s+\S*(?:openshell-sandbox|defenseclaw-sandbox)"),
+        "released scripts must not launch or enable the removed openshell-sandbox units",
+        suffixes=(".sh",),
+    ),
     Rule(
         "v7-redaction-profile",
         re.compile(r"\bProfileLegacyV7\b|\bLegacyV7(?:String|Entity|MessageContent|Reason|Evidence)\b|[\"']legacy-v7[\"']"),

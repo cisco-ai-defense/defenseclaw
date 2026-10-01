@@ -31,13 +31,34 @@ var embeddedPayload embed.FS
 const (
 	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
 	enterpriseFailureExitCode       = 1603
+	enterpriseInvalidArgsExitCode   = 1639 // ERROR_INVALID_COMMAND_LINE
 	defaultLifecycleTimeout         = 30 * time.Minute
 	maximumLifecycleTimeout         = 2 * time.Hour
 	maximumPayloadFileBytes         = int64(512 << 20)
 	maximumPayloadTotalBytes        = int64(1 << 30)
 	managedEnterpriseFlavor         = "managed-enterprise"
 	managedEnterpriseUnsignedFlavor = "managed-enterprise-unsigned"
+	// The standalone flavors carry the MDM-deployable profile: no CMID
+	// credential broker, PowerShell 7, vendor-neutral roots. An unsigned
+	// standalone payload is admitted by SHA-256 pins the Setup writes from
+	// its own embedded manifest (hash_pinned trust).
+	standaloneFlavor         = "standalone"
+	standaloneUnsignedFlavor = "standalone-unsigned"
+	// standalonePayloadTrustName is the hash-pinned trust anchor staged
+	// next to an unsigned standalone payload.
+	standalonePayloadTrustName = "payload-trust.json"
 )
+
+// enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
+var enterpriseSetupPayloadLoader = loadEmbeddedEnterprisePayload
+
+// enterpriseSetupInvalidArguments marks a command-line error without changing
+// its text. The standalone Setup reports it as 1639 so an MDM does not retry
+// a command line that can never succeed; the Secure Client Setup never
+// produces it and keeps its 0-or-1603 contract.
+type enterpriseSetupInvalidArguments struct{ error }
+
+func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -51,6 +72,29 @@ var requiredPayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
+}
+
+// standalonePayloadFiles is the standalone flavor's inventory: the Secure
+// Client set without the CMID credential broker.
+var standalonePayloadFiles = []string{
+	"DefenseClawEnterprise.psm1",
+	"defenseclaw-acp.exe",
+	"defenseclaw-gateway.exe",
+	"defenseclaw-hook.exe",
+	"defenseclaw-sensor-helper.exe",
+	"defenseclaw.exe",
+	"install-enterprise.ps1",
+}
+
+func isStandaloneFlavor(flavor string) bool {
+	return flavor == standaloneFlavor || flavor == standaloneUnsignedFlavor
+}
+
+func payloadFilesForFlavor(flavor string) []string {
+	if isStandaloneFlavor(flavor) {
+		return standalonePayloadFiles
+	}
+	return requiredPayloadFiles
 }
 
 type enterpriseSetupOptions struct {
@@ -93,6 +137,15 @@ type enterpriseSetupOptions struct {
 	Mode             string
 	Connector        string
 	LifecycleTimeout time.Duration
+	// AllowedSigners is a comma-separated list of SHA-256 Authenticode
+	// signer thumbprints the standalone lifecycle accepts (customer
+	// re-signing). Standalone Setup only.
+	AllowedSigners string
+
+	// Set from the embedded payload, never from the command line.
+	Standalone         bool
+	StandaloneUnsigned bool
+	ProductVersion     string
 }
 
 type enterprisePayloadManifest struct {
@@ -113,6 +166,13 @@ type enterprisePayloadManifestFile struct {
 type enterprisePayload struct {
 	Manifest enterprisePayloadManifest
 	Files    map[string]enterprisePayloadManifestFile
+	// Required is the flavor's exact file inventory.
+	Required []string
+}
+
+// Standalone reports whether the payload is the standalone flavor.
+func (payload enterprisePayload) Standalone() bool {
+	return isStandaloneFlavor(payload.Manifest.DistributionFlavor)
 }
 
 type enterpriseSetupFailure struct {
@@ -127,19 +187,47 @@ func main() {
 	os.Exit(runEnterpriseSetup(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// enterpriseSetupStandaloneFlavor reports whether this Setup embeds the
+// standalone payload. Replaceable in tests.
+var enterpriseSetupStandaloneFlavor = embeddedEnterpriseSetupStandalone
+
+// embeddedEnterpriseSetupStandalone reads only the embedded manifest's
+// distribution flavor, before any argument is parsed, so the Secure Client
+// Setup keeps its own action set, usage text and error messages. Anything
+// other than a readable standalone manifest is the Secure Client Setup;
+// executeEnterpriseSetup validates the whole payload before anything runs.
+func embeddedEnterpriseSetupStandalone() bool {
+	body, err := fs.ReadFile(embeddedPayload, "payload/manifest.json")
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		DistributionFlavor string `json:"distribution_flavor"`
+	}
+	if json.Unmarshal(body, &manifest) != nil {
+		return false
+	}
+	return isStandaloneFlavor(manifest.DistributionFlavor)
+}
+
 func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
-	opts, help, err := parseEnterpriseSetupOptions(arguments)
+	standalone := enterpriseSetupStandaloneFlavor()
+	opts, help, err := parseEnterpriseSetupOptionsForFlavor(arguments, standalone)
 	if help {
-		writeEnterpriseSetupUsage(stdout)
+		writeEnterpriseSetupUsageForFlavor(stdout, standalone)
 		return 0
 	}
 	if err != nil {
 		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
-		return enterpriseFailureExitCode
+		return enterpriseSetupArgumentFailureCode()
 	}
 	exitCode, err := executeEnterpriseSetup(context.Background(), opts, stdout, stderr)
 	if err != nil {
 		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
+		var invalid enterpriseSetupInvalidArguments
+		if errors.As(err, &invalid) {
+			return enterpriseInvalidArgsExitCode
+		}
 		return enterpriseFailureExitCode
 	}
 	if exitCode != 0 {
@@ -148,9 +236,55 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// enterpriseSetupArgumentFailureCode is the exit code for a command line that
+// does not parse: 1639 when this Setup embeds the standalone payload, the
+// historical 1603 for the Secure Client Setup (and when no payload loads).
+func enterpriseSetupArgumentFailureCode() int {
+	payload, err := enterpriseSetupPayloadLoader()
+	if err == nil && payload.Standalone() {
+		return enterpriseInvalidArgsExitCode
+	}
+	return enterpriseFailureExitCode
+}
+
+// parseEnterpriseSetupOptions parses the Secure Client Setup command line.
 func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bool, error) {
+	return parseEnterpriseSetupOptionsForFlavor(arguments, false)
+}
+
+// parseStandaloneEnterpriseSetupOptions parses the standalone Setup command
+// line, which adds the ensure action and --allowed-signers.
+func parseStandaloneEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bool, error) {
+	return parseEnterpriseSetupOptionsForFlavor(arguments, true)
+}
+
+// enterpriseSetupActions is the flavor's action set.
+func enterpriseSetupActions(standalone bool) []string {
+	actions := []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"}
+	if standalone {
+		actions = append(actions, "ensure")
+	}
+	return actions
+}
+
+// enterpriseSetupMutation reports whether action installs or changes the
+// deployment for this flavor.
+func enterpriseSetupMutation(action string, standalone bool) bool {
+	return action == "install" || action == "upgrade" || action == "repair" || (standalone && action == "ensure")
+}
+
+// enterpriseSetupMutationList names the flavor's mutation actions in the
+// Secure Client Setup's error wording.
+func enterpriseSetupMutationList(standalone bool) string {
+	if standalone {
+		return "install, upgrade, repair, or ensure"
+	}
+	return "install, upgrade, or repair"
+}
+
+func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (enterpriseSetupOptions, bool, error) {
 	opts := enterpriseSetupOptions{LifecycleTimeout: defaultLifecycleTimeout}
-	normalized, help, err := normalizeEnterpriseSetupArguments(arguments)
+	normalized, help, err := normalizeEnterpriseSetupArgumentsForFlavor(arguments, standalone)
 	if err != nil || help {
 		return opts, help, err
 	}
@@ -174,6 +308,9 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.BoolVar(&opts.AttestAgentApplicationControl, "attest-agent-application-control", false, "attest live WDAC or AppLocker enforcement")
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
 	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
+	if standalone {
+		flags.StringVar(&opts.AllowedSigners, "allowed-signers", "", "standalone: comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates")
+	}
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
 	if err := flags.Parse(normalized); err != nil {
@@ -183,12 +320,21 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 		return opts, false, fmt.Errorf("unexpected positional argument %q", flags.Arg(0))
 	}
 	opts.Action = strings.ToLower(strings.TrimSpace(opts.Action))
-	validActions := map[string]bool{
-		"install": true, "upgrade": true, "repair": true,
-		"reconcile": true, "status": true, "verify": true, "uninstall": true,
+	validActions := map[string]bool{}
+	for _, action := range enterpriseSetupActions(standalone) {
+		validActions[action] = true
 	}
 	if !validActions[opts.Action] {
+		if standalone {
+			return opts, false, errors.New("--action must be install, upgrade, repair, reconcile, status, verify, uninstall, or ensure")
+		}
 		return opts, false, errors.New("--action must be install, upgrade, repair, reconcile, status, verify, or uninstall")
+	}
+	for _, signer := range strings.Split(opts.AllowedSigners, ",") {
+		signer = strings.ToLower(strings.TrimSpace(signer))
+		if signer != "" && !sha256Pattern.MatchString(signer) {
+			return opts, false, fmt.Errorf("--allowed-signers entry %q is not a SHA-256 certificate thumbprint", signer)
+		}
 	}
 	modeSupplied := strings.TrimSpace(opts.Mode) != ""
 	connectorSupplied := strings.TrimSpace(opts.Connector) != ""
@@ -208,9 +354,8 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 			return opts, false, errors.New("--mode must be observe or action")
 		}
 		opts.Mode = mode
-		mutationAction := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
-		if !mutationAction {
-			return opts, false, errors.New("--mode / --connector are valid only with install, upgrade, or repair")
+		if !enterpriseSetupMutation(opts.Action, standalone) {
+			return opts, false, errors.New("--mode / --connector are valid only with " + enterpriseSetupMutationList(standalone))
 		}
 		// Keep this closed set aligned with the native Windows lifecycle. Each
 		// entry must have reconcile, trusted-runtime, rollback, and teardown
@@ -249,9 +394,8 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 		// CR spec-003:PRRT_kwDORuAK-s6alkr4.
 		return opts, false, errors.New("--deferred-config is valid only with install")
 	}
-	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
-	if opts.NoStart && !mutation {
-		return opts, false, errors.New("--no-start is valid only with install, upgrade, or repair")
+	if opts.NoStart && !enterpriseSetupMutation(opts.Action, standalone) {
+		return opts, false, errors.New("--no-start is valid only with " + enterpriseSetupMutationList(standalone))
 	}
 	if opts.Purge && opts.Action != "uninstall" {
 		return opts, false, errors.New("--purge is valid only with uninstall")
@@ -275,7 +419,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	return opts, false, nil
 }
 
-func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, error) {
+func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {
 	normalized := make([]string, 0, len(arguments))
 	valueNames := map[string]string{
 		"action": "action", "config": "config", "manifest": "manifest",
@@ -295,6 +439,15 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 		"/install": "install", "/upgrade": "upgrade", "/repair": "repair",
 		"/reconcile": "reconcile", "/status": "status", "/verify": "verify",
 		"/uninstall": "uninstall",
+	}
+	if standalone {
+		// Only the standalone Setup has the ensure action and signer pins.
+		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers"} {
+			valueNames[name] = canonical
+		}
+		for switchName, action := range map[string]string{"/ensure": "ensure"} {
+			actions[switchName] = action
+		}
 	}
 	for _, argument := range arguments {
 		trimmed := strings.TrimSpace(argument)
@@ -368,16 +521,23 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 	if manifest.Unsigned {
 		expectedFlavor = managedEnterpriseUnsignedFlavor
 	}
+	if isStandaloneFlavor(manifest.DistributionFlavor) {
+		expectedFlavor = standaloneFlavor
+		if manifest.Unsigned {
+			expectedFlavor = standaloneUnsignedFlavor
+		}
+	}
+	requiredFiles := payloadFilesForFlavor(expectedFlavor)
 	if manifest.SchemaVersion != 1 || strings.TrimSpace(manifest.Version) == "" ||
 		!sourceCommitPattern.MatchString(manifest.SourceCommit) ||
 		manifest.DistributionFlavor != expectedFlavor {
 		return enterprisePayload{}, errors.New("embedded enterprise manifest identity is invalid")
 	}
-	if len(manifest.Files) != len(requiredPayloadFiles) {
+	if len(manifest.Files) != len(requiredFiles) {
 		return enterprisePayload{}, errors.New("embedded enterprise manifest has an unexpected file inventory")
 	}
-	required := make(map[string]struct{}, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
+	required := make(map[string]struct{}, len(requiredFiles))
+	for _, name := range requiredFiles {
 		required[name] = struct{}{}
 	}
 	files := make(map[string]enterprisePayloadManifestFile, len(manifest.Files))
@@ -408,12 +568,37 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 		totalSize += entry.Size
 		files[entry.Name] = entry
 	}
-	for _, name := range requiredPayloadFiles {
+	for _, name := range requiredFiles {
 		if _, ok := files[name]; !ok {
 			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest is missing required file %s", name)
 		}
 	}
-	return enterprisePayload{Manifest: manifest, Files: files}, nil
+	return enterprisePayload{Manifest: manifest, Files: files, Required: requiredFiles}, nil
+}
+
+// splitStandaloneLifecycleJSON separates the lifecycle's JSON result from
+// diagnostics that share the combined child output (for example a library
+// warning printed at process start). The result is the last line that is a
+// complete JSON object; everything else is returned as diagnostics. Output
+// without such a line is returned unchanged as the document.
+func splitStandaloneLifecycleJSON(output []byte) (document, diagnostics []byte) {
+	lines := bytes.Split(output, []byte("\n"))
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := bytes.TrimSpace(lines[index])
+		if len(line) == 0 || line[0] != '{' || !json.Valid(line) {
+			continue
+		}
+		var rest bytes.Buffer
+		for other, text := range lines {
+			if other == index || len(bytes.TrimSpace(text)) == 0 {
+				continue
+			}
+			rest.Write(bytes.TrimRight(text, "\r"))
+			rest.WriteByte('\n')
+		}
+		return append(append([]byte{}, line...), '\n'), rest.Bytes()
+	}
+	return output, nil
 }
 
 func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
@@ -434,10 +619,18 @@ func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupO
 	fmt.Fprintf(stderr, "%s: %v\n", enterpriseSetupArtifactName, err)
 }
 
+// writeEnterpriseSetupUsage prints the Secure Client Setup usage.
 func writeEnterpriseSetupUsage(output io.Writer) {
-	actions := []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"}
+	writeEnterpriseSetupUsageForFlavor(output, false)
+}
+
+func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
+	actions := enterpriseSetupActions(standalone)
 	sort.Strings(actions)
 	fmt.Fprintf(output, "%s --action <%s> [options]\n", enterpriseSetupArtifactName, strings.Join(actions, "|"))
 	fmt.Fprintln(output, "Install requires --config <config.yaml> and --manifest <targets.yaml>.")
+	if standalone {
+		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
+	}
 	fmt.Fprintln(output, "Production paths and service names are fixed by the enterprise lifecycle.")
 }

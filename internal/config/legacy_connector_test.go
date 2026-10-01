@@ -109,10 +109,142 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 		}
 	})
 
+	t.Run("connector_hooks", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+retired+"\n  mode: observe\n"+
+			"connector_hooks:\n  "+retired+":\n    enabled: true\n    mode: action\n")
+		if _, ok := cfg.ConnectorHooks[retired]; ok {
+			t.Fatalf("connector_hooks kept the retired key: %v", cfg.ConnectorHooks)
+		}
+		if hook := cfg.ConnectorHookConfig(replacement); !hook.Enabled || hook.Mode != "action" {
+			t.Fatalf("connector_hooks.%s = %+v, want the retired block's settings", replacement, hook)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "connector_hooks") {
+			t.Fatalf("notices = %v, want one naming connector_hooks", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("connector_hooks keeps an explicit replacement", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+			"connector_hooks:\n  "+replacement+":\n    mode: observe\n  "+retired+":\n    mode: action\n")
+		if len(cfg.ConnectorHooks) != 1 || cfg.ConnectorHookConfig(replacement).Mode != "observe" {
+			t.Fatalf("connector_hooks = %+v, want only the explicit %s entry", cfg.ConnectorHooks, replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "connector_hooks."+retired) {
+			t.Fatalf("notices = %v, want one naming the dropped connector_hooks key", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("guardrail.judge.hook_connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+			"  judge:\n    enabled: true\n    hook_connectors: [codex, "+retired+", "+replacement+"]\n")
+		if got := strings.Join(cfg.Guardrail.Judge.HookConnectors, ","); got != "codex,"+replacement {
+			t.Fatalf("hook_connectors = %v, want codex and %s once", cfg.Guardrail.Judge.HookConnectors, replacement)
+		}
+		if !cfg.Guardrail.Judge.HookConnectorEnabled(replacement) {
+			t.Fatalf("the hook-lane judge is off for %s", replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "guardrail.judge.hook_connectors") {
+			t.Fatalf("notices = %v, want one naming guardrail.judge.hook_connectors", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("application_protection.include_connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+			"application_protection:\n  include_connectors: ["+retired+"]\n")
+		if got := strings.Join(cfg.ApplicationProtection.IncludeConnectors, ","); got != replacement {
+			t.Fatalf("include_connectors = %v, want [%s]", cfg.ApplicationProtection.IncludeConnectors, replacement)
+		}
+		if !cfg.ApplicationProtection.AllowsConnector(replacement) || cfg.ApplicationProtection.AllowsConnector("codex") {
+			t.Fatalf("include_connectors must now include only %s", replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "application_protection.include_connectors") {
+			t.Fatalf("notices = %v, want one naming application_protection.include_connectors", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("application_protection.exclude_connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+			"application_protection:\n  exclude_connectors: ["+retired+", "+retired+"]\n")
+		if got := strings.Join(cfg.ApplicationProtection.ExcludeConnectors, ","); got != replacement {
+			t.Fatalf("exclude_connectors = %v, want [%s]", cfg.ApplicationProtection.ExcludeConnectors, replacement)
+		}
+		if cfg.ApplicationProtection.AllowsConnector(replacement) {
+			t.Fatalf("exclude_connectors no longer excludes %s", replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "application_protection.exclude_connectors") {
+			t.Fatalf("notices = %v, want one naming application_protection.exclude_connectors", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("asset_policy rule connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+retired+"\n"+
+			"asset_policy:\n  enabled: true\n  mode: action\n  mcp:\n    default: allow\n"+
+			"    denied:\n      - name: marker-server\n        connector: "+retired+"\n"+
+			"    registry:\n      - name: approved-server\n        connector: "+retired+"\n"+
+			"  skill:\n    allowed:\n      - name: marker-skill\n        connector: codex\n")
+		if got := cfg.AssetPolicy.MCP.Denied[0].Connector; got != replacement {
+			t.Fatalf("denied rule connector = %q, want %q", got, replacement)
+		}
+		if got := cfg.AssetPolicy.MCP.Registry[0].Connector; got != replacement {
+			t.Fatalf("registry entry connector = %q, want %q", got, replacement)
+		}
+		if got := cfg.AssetPolicy.Skill.Allowed[0].Connector; got != "codex" {
+			t.Fatalf("another connector's rule changed to %q", got)
+		}
+		decision := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "mcp", Name: "marker-server", Connector: replacement})
+		if decision.Action != "block" {
+			t.Fatalf("a denied rule written for the retired ID no longer blocks %s: %+v", replacement, decision)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 ||
+			!strings.Contains(cfg.LegacyConnectorNotices[0], "asset_policy.mcp.registry, asset_policy.mcp.denied") ||
+			strings.Contains(cfg.LegacyConnectorNotices[0], "asset_policy.skill") {
+			t.Fatalf("notices = %v, want one naming the moved rule lists", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("observability route selector connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+			"observability:\n  destinations:\n    - name: console\n      kind: console\n      routes:\n"+
+			"        - name: codex-only\n          signals: [logs]\n          selector:\n            connectors: [codex]\n"+
+			"        - name: desktop\n          signals: [logs]\n          selector:\n            connectors: ["+retired+"]\n")
+		if len(cfg.LegacyConnectorNotices) != 1 ||
+			!strings.Contains(cfg.LegacyConnectorNotices[0], "observability.destinations[0].routes[1].selector.connectors") ||
+			strings.Contains(cfg.LegacyConnectorNotices[0], "routes[0]") {
+			t.Fatalf("notices = %v, want one naming the second route's selector", cfg.LegacyConnectorNotices)
+		}
+	})
+
 	t.Run("unaffected config has no notice", func(t *testing.T) {
 		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: cursor\n")
 		if cfg.Guardrail.Connector != "cursor" || len(cfg.LegacyConnectorNotices) != 0 {
 			t.Fatalf("connector=%q notices=%v", cfg.Guardrail.Connector, cfg.LegacyConnectorNotices)
 		}
 	})
+}
+
+// The v8 observability compiler reads the file itself: a route selector or
+// connector block written for the retired ID keeps applying to its
+// replacement, the way the config loader renames the other settings.
+func TestParseCompileObservabilityV8RenamesTheRetiredConnector(t *testing.T) {
+	retired, replacement := legacyconnector.RetiredDesktopID, legacyconnector.Replacement
+	source := "config_version: 8\nobservability:\n" +
+		"  connectors:\n    " + retired + ":\n      webhooks: []\n" +
+		"  destinations:\n    - name: console\n      kind: console\n      routes:\n" +
+		"        - name: desktop\n          signals: [logs]\n          selector:\n" +
+		"            buckets: [security.finding]\n            connectors: [codex, " + retired + ", " + replacement + "]\n" +
+		"          action: send\n          redaction_profile: none\n"
+	compiled, err := ParseCompileObservabilityV8("<test>", []byte(source), ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := compiled.Observability.Destinations[0].Routes[0].Selector
+	if got := strings.Join(selector.Connectors, ","); got != "codex,"+replacement {
+		t.Fatalf("route selector connectors = %q, want codex and %s once", got, replacement)
+	}
+	if _, ok := compiled.Observability.Connectors[retired]; ok {
+		t.Fatalf("retired observability.connectors key survived: %v", compiled.Observability.Connectors)
+	}
+	if _, ok := compiled.Observability.Connectors[replacement]; !ok {
+		t.Fatalf("observability.connectors lacks %s: %v", replacement, compiled.Observability.Connectors)
+	}
 }

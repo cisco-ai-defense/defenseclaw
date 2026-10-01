@@ -56,3 +56,10 @@ func syncFreshIdentityDirectory(path string) error {
 	}
 	return nil
 }
+
+// validateFreshIdentityManagedServiceDirectory has no managed exception
+// off Windows: the unix standalone gateway owns its data directory.
+func validateFreshIdentityManagedServiceDirectory(string) (bool, error) { return false, nil }
+
+// writeFreshIdentityManagedServiceFile has no managed exception off Windows.
+func writeFreshIdentityManagedServiceFile(string, []byte) (bool, error) { return false, nil }

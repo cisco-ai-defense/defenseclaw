@@ -1,0 +1,338 @@
+---
+title: Deploy with Jamf Pro
+description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile on Macs with Jamf Pro packages, policy scripts and an extension attribute.
+keywords:
+  - DefenseClaw Jamf Pro
+  - Jamf policy script
+  - Jamf extension attribute
+  - macOS pkg deployment
+  - Jamf smart group
+  - DefenseClaw MDM wrapper
+---
+
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+
+This recipe deploys the [standalone profile](/docs/enterprise/concepts) to
+Macs with Jamf Pro. Jamf Pro installs the DefenseClaw package from your
+distribution point, and two scripts from the MDM kit (the scripts in
+`packaging/mdm`) keep the deployment configured and healthy. Every
+recipe follows the same contract: see [Install with an MDM](/docs/enterprise/mdm)
+for exit codes, detection and how config and keys are delivered.
+
+## Prerequisites
+
+- Macs with Apple silicon on macOS 13 or later. The package refuses other
+  hardware and older releases.
+- No Cisco Secure Client DefenseClaw deployment on the Mac. The package
+  refuses to install beside it.
+- DefenseClaw ships no privacy (PPPC) profile. See
+  [macOS requirements](/docs/enterprise/macos#requirements) for when you need one.
+- A cloud distribution point, if you upload the package through the Jamf Pro
+  web interface ([Uploading a Package to Jamf Pro](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Uploading_a_Package_to_Jamf_Pro)).
+- Your administrator config. See [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  The default config protects no agent.
+- `cosign` on the workstation where you verify the release.
+
+## Get and verify the release
+
+On an administrator workstation, download the package and the signed
+checksum list, check the signature, then check the package's SHA-256:
+
+```bash
+VERSION=1.4.0   # the release you deploy
+BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
+PKG=defenseclaw-enterprise-$VERSION-darwin-arm64.pkg
+curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle" -O "$BASE/$PKG"
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+grep "  $PKG\$" checksums.txt | shasum -a 256 -c -
+```
+
+You also need three scripts from the MDM kit. They are in `packaging/mdm/macos`
+in the source tree and in the `defenseclaw-enterprise-<version>-darwin-arm64.tar.gz`
+release archive:
+
+| Script | Use in Jamf Pro |
+| --- | --- |
+| `defenseclaw-enterprise.sh` | Policy script that runs `ensure` |
+| `detect.sh` | Extension attribute |
+| `uninstall.sh` | Removal policy script |
+
+## How Jamf Pro runs scripts and packages
+
+| Behavior | Jamf Pro | Source |
+| --- | --- | --- |
+| Identity | Scripts run as root. | [Jamf 100 course, lesson 25](https://learn.jamf.com/r/en-US/jamf-100-course-current/Lesson_25) |
+| Arguments | Jamf Pro reserves the first three positional parameters for its own values. The values you enter in a policy start at `$4`, and the Jamf Pro API stores `parameter4` through `parameter11`. | [Scripts](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Scripts), [Create a script (API)](https://developer.jamf.com/jamf-pro/reference/post_v1-scripts) |
+| Order | A script's priority (Before or After) orders it against the policy's other payloads. Scripts in the same policy run in alphanumeric order of their names. | [Scripts](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Scripts), [Running Scripts Using a Policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Running_Scripts_Using_a_Policy) |
+| Output | Policy logs keep script output and are truncated after 25 KB. | [Running Scripts Using a Policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Running_Scripts_Using_a_Policy) |
+| Retry | With **Once per computer**, **Automatically re-run policy on failure** retries up to 10 times. Other frequencies run again on their schedule. | [Execution Frequency for Policies](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Execution_Frequency_for_Policies) |
+| Package integrity | Jamf Pro calculates a checksum when you upload a package. The security settings choose when computers validate it after download. | [Uploading a Package](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Uploading_a_Package_to_Jamf_Pro), [Security Settings](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Security_Settings) |
+| Extension attributes | A script extension attribute runs each time the computer submits inventory. Jamf Pro stores the text between `<result>` and `</result>`. | [Extension Attribute Input Types](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Extension_Attribute_Input_Types) |
+
+### Add one line to each kit script
+
+The kit scripts accept only their own flags. Any positional argument makes
+`defenseclaw-enterprise.sh` and `uninstall.sh` stop with exit code `2` and the
+error `mdm_invalid_arguments`, before they do anything. `detect.sh` exits `2`
+and prints nothing on standard output, so an extension attribute without the
+line below reports an empty value. Because Jamf Pro always passes positional values, add this
+line at the top of the settings block of every kit script you upload to Jamf
+Pro. It discards the values Jamf Pro passed, so the script uses only its
+settings block:
+
+```bash
+set -- # Jamf Pro passes positional values; this script takes its settings from this block
+```
+
+Do not pass the settings as Jamf Pro parameters. Parameters reach the script
+as command-line arguments, which other processes on the Mac can read.
+
+## Prepare the scripts
+
+Create each script in **Settings** > **Computer management** > **Scripts** >
+**New** ([Adding a Script to Jamf Pro](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Adding_a_Script_to_Jamf_Pro)).
+
+### DefenseClaw stage config
+
+This script holds your administrator config. It writes the config to a
+root-only staging folder, which the ensure script reads. On a Mac with no
+DefenseClaw config yet, it also writes the config to the layout path
+`/opt/cisco/defenseclaw/etc/config.yaml`, so the package applies it on the
+first install. It ignores the values Jamf Pro passes. Set its priority to
+**Before**.
+
+```bash
+#!/bin/sh
+# DefenseClaw: stage the administrator config (Jamf Pro, priority Before).
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+stage=/Library/Management/DefenseClaw
+layout=/opt/cisco/defenseclaw/etc
+umask 022
+mkdir -p "$stage"
+tmp=$(mktemp "$stage/.config.yaml.XXXXXX")
+cat >"$tmp" <<'DEFENSECLAW_CONFIG'
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+DEFENSECLAW_CONFIG
+chown root:wheel "$tmp"
+chmod 0600 "$tmp"
+mv -f "$tmp" "$stage/config.yaml"
+if [ ! -e "$layout/config.yaml" ]; then
+    mkdir -p "$layout"
+    tmp=$(mktemp "$layout/.config.yaml.XXXXXX")
+    cat "$stage/config.yaml" >"$tmp"
+    chown root:wheel "$tmp"
+    chmod 0640 "$tmp"
+    mv -f "$tmp" "$layout/config.yaml"
+fi
+echo "DefenseClaw config staged"
+```
+
+Replace the YAML between the markers with your config. Never put the Cisco AI
+Defense key in it: the standalone profile rejects an inline API key, and
+script bodies are not secret storage.
+
+### DefenseClaw ensure
+
+Upload `defenseclaw-enterprise.sh` and edit its settings block. Leave the
+source empty: the package is installed by the install policy, and the script
+re-applies the installed deployment with the staged config. Set its priority
+to **After**.
+
+```bash
+set -- # Jamf Pro passes positional values; this script takes its settings from this block
+DC_ACTION=ensure
+DC_CONFIG_FILE="/Library/Management/DefenseClaw/config.yaml"
+```
+
+The wrapper refuses a config file that is not owned by root or that another
+account can write, anywhere on its path (`mdm_untrusted_input`). The stage
+script creates the folder and the file with the right owner and mode.
+
+### DefenseClaw uninstall
+
+Upload `uninstall.sh` and add the same `set --` line to its settings block.
+Set `DC_PURGE=1` only if you also want to remove the config, credentials,
+state and logs.
+
+## Install
+
+Upload the package in **Settings** > **Computer management** > **Packages** >
+**New**. On the package's **Limitations** tab you can require Apple silicon
+and macOS 13 or later ([Package Settings](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Package_Settings)).
+
+Create a policy in **Computers** > **Policies** > **New**
+([Deploying a Package Using a Policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Deploying_a_Package_Using_a_Policy)):
+
+| Setting | Value |
+| --- | --- |
+| Name | `DefenseClaw install` |
+| Trigger | **Recurring Check-in** |
+| Execution frequency | **Once per computer**, with **Automatically re-run policy on failure** |
+| Scripts payload | `DefenseClaw stage config`, priority **Before** |
+| Packages payload | The DefenseClaw package, action **Install** |
+| Maintenance payload | **Update inventory** |
+| Scope | The Smart Group `DefenseClaw needs install` (see [Detect and report](#detect-and-report)) |
+
+The package's postinstall step runs
+`defenseclaw-gateway enterprise macos ensure --from-package`. If the lifecycle
+fails, it has already rolled back, and the postinstall step fails the package
+install, so the policy log shows the failure. The result is kept in
+`/opt/cisco/defenseclaw/lifecycle/last-package-result.json`.
+
+## Keep it applied
+
+Create a second policy that converges the Mac every day. It applies config
+changes and repairs drift, and does nothing when the Mac already matches:
+
+| Setting | Value |
+| --- | --- |
+| Name | `DefenseClaw ensure` |
+| Trigger | **Recurring Check-in** |
+| Execution frequency | **Once every day** |
+| Scripts payload | `DefenseClaw stage config`, priority **Before**; then `DefenseClaw ensure`, priority **After** |
+| Scope | The Smart Group `DefenseClaw installed` |
+
+The ensure script runs `enterprise macos ensure --reason mdm` with the staged
+config. It prints one lifecycle result document, which the policy log keeps,
+and appends it to `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log`. To run it
+at once on a test Mac, give the policy a custom trigger and run
+`sudo jamf policy -event <trigger> -verbose`
+([Getting More Information Using the jamf binary](https://learn.jamf.com/r/en-US/technical-articles/Getting_More_Information_Using_the_jamf_binary)).
+
+The deployment also watches its own files. When the config, credentials or
+policies at the layout path change, a launchd job runs `ensure`, and a daily
+job runs `verify`.
+
+## Deliver the AI Defense key
+
+The key is optional. Without it the local policy engine decides alone. Jamf
+Pro parameters reach the script as command-line arguments, which other
+processes can read, so do not put the key in a script, a parameter, a package
+or a configuration profile.
+
+Store it after the first install, on standard input, from your secrets
+tooling or an administrator session on the Mac:
+
+```bash
+read -rs KEY && printf '%s' "$KEY" | sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin --json; unset KEY
+```
+
+Then turn on AI Defense in the config and let the ensure policy apply it:
+
+```yaml
+enterprise:
+  profile: standalone
+  inspection:
+    ai_defense:
+      enabled: true
+      credential: ai-defense-api-key
+```
+
+See [Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
+and [AI Defense key](/docs/enterprise/ai-defense-key).
+
+## Detect and report
+
+Create a computer extension attribute in **Settings** > **Computer
+management** > **Extension attributes** > **New**, with **Data Type**
+**String** and **Input Type** **Script**
+([Manually Creating a Computer Extension Attribute](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Manually_Creating_a_Computer_Extension_Attribute)).
+Paste `detect.sh` with these settings:
+
+```bash
+set -- # Jamf Pro passes positional values; this script takes its settings from this block
+DC_MIN_VERSION="1.4.0"
+DC_REQUIRE_HEALTHY=1
+DC_FORMAT="jamf"
+```
+
+It asks the installed, root-owned gateway for its status and, with
+`DC_REQUIRE_HEALTHY=1`, runs `verify`. It always exits `0` and prints one of
+these values:
+
+| Value | Meaning |
+| --- | --- |
+| The installed version, such as `1.4.0` | Installed, at least `DC_MIN_VERSION`, and `verify` passes |
+| `not-installed` | No managed deployment, or its gateway is not root-owned |
+| `outdated` | Older than `DC_MIN_VERSION` |
+| `unhealthy` | `verify` reported problems |
+
+Build [Smart Groups](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Smart_Groups)
+on the attribute:
+
+| Smart Group | Criteria on the extension attribute |
+| --- | --- |
+| `DefenseClaw needs install` | `not-installed` or `outdated` |
+| `DefenseClaw installed` | a version, `outdated` or `unhealthy`, for example **matches regex** `^([0-9]\|outdated\|unhealthy)`. A blank value means the Mac has not reported the attribute yet, so do not treat it as installed. |
+| `DefenseClaw unhealthy` | `unhealthy` |
+
+The value changes only when the Mac submits inventory. For the full detection
+contract, see [Detection](/docs/enterprise/mdm#detection).
+
+## Upgrade, roll back and change the config
+
+| Task | What to do |
+| --- | --- |
+| Upgrade | Upload the new package. Set `DC_MIN_VERSION` in the extension attribute to the new version, so older Macs join `DefenseClaw needs install`. Create a new install policy with the new package, or replace the package and flush the policy's logs: a **Once per computer** policy does not run again on a computer that has a log entry. The package's `ensure --from-package` upgrades in place and keeps the config and state. |
+| Roll back | Follow [Roll back](/docs/enterprise/lifecycle#roll-back): run a script that creates the root-owned rollback marker (`touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`), then deploy the earlier package the same way. Without the marker the package refuses to downgrade. |
+| Change the config | Edit the YAML in `DefenseClaw stage config`. The ensure policy applies it at its next run. The lifecycle validates the new config before it replaces the running one, and rolls back if applying it fails. |
+
+See [Upgrades, rollback and config changes](/docs/enterprise/mdm#upgrades-rollback-and-config-changes).
+
+## Uninstall
+
+Jamf Pro's own package uninstall works only for packages indexed with Jamf
+Admin, which Jamf Pro 11.7 removed
+([Policy Payload Reference](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Policy_Payload_Reference)).
+Remove DefenseClaw with a policy that runs `DefenseClaw uninstall`. It runs
+`enterprise macos uninstall`, which stops the services and removes
+DefenseClaw's hooks and machine-policy entries, and the lifecycle forgets the
+package receipt. On a Mac without the deployment it prints a no-op result and
+exits `0`. Remove the Mac from the install and ensure policies first, and
+remove `/Library/Management/DefenseClaw` if you no longer need the staged
+config.
+
+## Logs
+
+| Where | What |
+| --- | --- |
+| Jamf Pro: **Computers** > **Policies** > the policy > **Logs** | Status and script output for each computer, truncated after 25 KB ([Viewing and Flushing Logs for a Policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Viewing_and_Flushing_Logs_for_a_Policy)) |
+| The Mac's `jamf.log` | The Jamf agent's own log ([Getting Additional Logging Information](https://learn.jamf.com/r/en-US/technical-articles/Getting_Additional_Logging_Information_on_Packages_and_Policies)) |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
+| `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
+
+See [Logs](/docs/enterprise/mdm#logs) and [Status and verify](/docs/enterprise/operations#status-and-verify).
+
+## Exit codes in Jamf Pro
+
+The kit scripts and the lifecycle use the Linux and macOS codes. Read the
+result document in the policy log for `errors[].code`.
+
+| Code | Meaning | What to do in Jamf Pro |
+| --- | --- | --- |
+| `0` | Success, or nothing to do | Nothing |
+| `1` | The action failed and rolled back, or the script refused an input | Read `errors[].code` in the policy log; see [MDM wrapper error codes](/docs/enterprise/troubleshooting#mdm-wrapper-error-codes) |
+| `2` | Invalid arguments or settings, such as a missing `set --` line | Fix the script settings; a retry gives the same result |
+| `75` | Another lifecycle run or the installer holds a lock | Let the next scheduled run retry |
+
+The extension attribute always exits `0`; its value carries the result. For
+the full table, see [Exit codes](/docs/enterprise/mdm#exit-codes).

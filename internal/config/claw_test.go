@@ -67,6 +67,43 @@ func TestActiveConnector_NilSafe(t *testing.T) {
 	}
 }
 
+// TestOpenClawConfigCandidates pins the openclaw.json paths the gateway
+// checks before it reports the claw.mode default as "OpenClaw is not
+// installed" (#958): claw.config_file and <claw.home_dir>/openclaw.json,
+// expanded and deduplicated, with the loader default when both are empty.
+func TestOpenClawConfigCandidates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	defaultPath := filepath.Join(home, ".openclaw", "openclaw.json")
+
+	tests := []struct {
+		name       string
+		configFile string
+		homeDir    string
+		want       []string
+	}{
+		{"loader_defaults_dedupe", "~/.openclaw/openclaw.json", "~/.openclaw", []string{defaultPath}},
+		{"both_empty_uses_default", "", "", []string{defaultPath}},
+		{"custom_home_dir_adds_its_json", "~/.openclaw/openclaw.json", "/srv/oc", []string{defaultPath, filepath.Clean("/srv/oc/openclaw.json")}},
+		{"home_dir_only", "", "/srv/oc", []string{filepath.Clean("/srv/oc/openclaw.json")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Claw: ClawConfig{ConfigFile: tt.configFile, HomeDir: tt.homeDir}}
+			got := cfg.OpenClawConfigCandidates()
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("OpenClawConfigCandidates() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	var nilCfg *Config
+	if got := nilCfg.OpenClawConfigCandidates(); len(got) != 1 || got[0] != defaultPath {
+		t.Errorf("nil cfg OpenClawConfigCandidates() = %q, want [%q]", got, defaultPath)
+	}
+}
+
 // TestSkillDirs_DispatchesViaConnector ensures the no-arg SkillDirs()
 // honors guardrail.connector. This is the contract sidecar runWatcher
 // and InstalledSkillCandidates rely on: callers that don't want to

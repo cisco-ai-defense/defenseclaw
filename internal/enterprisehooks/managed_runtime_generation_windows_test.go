@@ -243,6 +243,33 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if _, err := os.Lstat(first.BundlePath()); !os.IsNotExist(err) {
 		t.Fatalf("finalized prior bundle still exists: %v", err)
 	}
+	// A rollback restores the selector it captured even when that selector's
+	// bundle has since disappeared (a deleted account's profile): the entry
+	// stays unusable and resolution fails closed, and the restore does not
+	// leave the transaction pending.
+	thirdSelector, err := CaptureWindowsManagedRuntimeSelector("codex")
+	if err != nil || !thirdSelector.Existed {
+		t.Fatalf("capture outer complete selector: existed=%v err=%v", thirdSelector.Existed, err)
+	}
+	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+		WindowsManagedRuntimeSelectorFullRestoreOptions{
+			Snapshot:        oldSelector,
+			ExpectedCurrent: thirdSelector.CAS,
+		},
+	); err != nil {
+		t.Fatalf("restore selector whose bundle was removed: %v", err)
+	}
+	if _, err := ResolveWindowsManagedRuntimeGeneration(resolve); err == nil {
+		t.Fatal("selector with a removed bundle resolved instead of failing closed")
+	}
+	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+		WindowsManagedRuntimeSelectorFullRestoreOptions{
+			Snapshot:        thirdSelector,
+			ExpectedCurrent: oldSelector.CAS,
+		},
+	); err != nil {
+		t.Fatalf("restore outer complete selector: %v", err)
+	}
 
 	orphanDesired := thirdDesired
 	orphanDesired.GatewayAddr = "127.0.0.1:18973"
@@ -774,5 +801,56 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 				t.Fatal("authenticated connector contract drift matched immutable generation")
 			}
 		})
+	}
+}
+
+// A lifecycle that stopped the guardian between relaxing <data dir>\hooks for
+// a connector setup and hardening it again left the relaxed owner-private
+// DACL behind (2 ACEs, no Administrators). Every later retire of that user's
+// managed runtime generations then refused, as LocalSystem and as an elevated
+// administrator, and no lifecycle action could recover the host. The retire
+// restores the canonical DACL on exactly that shape.
+func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, windowsSetupRelaxedDirectorySDDL)
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+		t.Fatal("relaxed hooks directory validated as canonical")
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err != nil || removed != 0 {
+		t.Fatalf("collect with a relaxed hooks directory: removed=%d err=%v", removed, err)
+	}
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
+		t.Fatalf("hooks directory was not restored to the canonical DACL: %v", err)
+	}
+}
+
+func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, target *windows.SID, sddl string) {
+	t.Helper()
+	if err := os.Mkdir(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, hookDir, target)
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(hookDir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
 	}
 }

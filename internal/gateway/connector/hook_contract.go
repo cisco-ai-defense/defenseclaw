@@ -692,7 +692,7 @@ var builtinHookContracts = map[string][]HookContract{
 	"devin": {{
 		Connector:               "devin",
 		ContractID:              "devin-hooks-v1",
-		ExactAgentVersions:      []string{"3000.4.25"},
+		ExactAgentVersions:      []string{"3000.4.25", "3000.11.3"},
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"%APPDATA%/devin/config.json", "~/.config/devin/config.json", "<workspace>/.devin/hooks.v1.json"},
@@ -709,7 +709,7 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		ToolCallLifecycle:   devinToolCallLifecycle(),
 		Notes: []string{
-			"The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
+			"The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
 			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
 			"Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
 			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded.",
@@ -870,7 +870,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ResponseFieldName:       "hook_output",
 		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
 		// bridge plugin wires tool.execute.before (block) and
-		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.31 also exposes
+		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.33 also exposes
 		// permission.ask and chat/context mutation hooks; this focused bridge
 		// intentionally does not implement those surfaces.
 		Events: []string{
@@ -896,8 +896,8 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
-			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.31 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.31. The v1.18.31 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
+			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
 		},
 	}},
 	"amp": {{
@@ -998,6 +998,11 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
 		// through its protected connector launch boundary and does not persist
 		// the launch environment.
+		// Windows and macOS stay on the Devin build they were reviewed
+		// against; the extra pin covers Linux only.
+		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {
+			contract.ExactAgentVersions = []string{"3000.4.25"}
+		}
 		if contract.Connector == "openhands" && contract.ContractID == "openhands-hooks-v1" {
 			switch goos {
 			case "darwin":
@@ -1015,13 +1020,26 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 }
 
 func hookContractByID(connectorName, contractID string) (HookContract, bool) {
+	return hookContractByIDForOS(connectorName, contractID, runtime.GOOS)
+}
+
+func hookContractByIDForOS(connectorName, contractID, goos string) (HookContract, bool) {
 	contractID = strings.TrimSpace(contractID)
 	if contractID == "" {
 		return HookContract{}, false
 	}
-	for _, contract := range KnownHookContracts(connectorName) {
+	for _, contract := range hookContractsForOS(connectorName, goos) {
 		if contract.ContractID == contractID {
 			return contract, true
+		}
+	}
+	// A sandbox binding pins the sandbox-only contract its image was built
+	// for; every OpenShell sandbox runs Linux.
+	if goos == "linux" {
+		for _, contract := range sandboxOnlyHookContracts(connectorName) {
+			if contract.ContractID == contractID {
+				return contract, true
+			}
 		}
 	}
 	return HookContract{}, false
@@ -1053,7 +1071,12 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	contracts := hookContractsForOS(name, goos)
+	return resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+}
+
+// resolveHookContractAgainst matches rawVersion against contracts, the
+// registered contracts of connector name.
+func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,
@@ -1174,9 +1197,10 @@ func resolveHookContractForOptions(
 	connectorName string,
 	opts SetupOpts,
 ) HookContractResolution {
-	resolution := ResolveHookContract(connectorName, opts.AgentVersion)
+	goos := opts.profileGOOS()
+	resolution := resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
 	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
-		pinned, ok := hookContractByID(connectorName, pinnedID)
+		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)
 		switch {
 		case !ok:
 			resolution.Status = HookCompatibilityUnknown
@@ -1191,6 +1215,15 @@ func resolveHookContractForOptions(
 		}
 	}
 	return resolution
+}
+
+// profileGOOS is the operating system a profile is resolved for: opts.GOOS
+// when the agent runs elsewhere (a sandbox), otherwise this host.
+func (opts SetupOpts) profileGOOS() string {
+	if goos := strings.ToLower(strings.TrimSpace(opts.GOOS)); goos != "" {
+		return goos
+	}
+	return runtime.GOOS
 }
 
 func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {

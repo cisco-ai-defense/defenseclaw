@@ -6,7 +6,8 @@ set -euo pipefail
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
-
+{{if .ForeignHookGuardSH}}DEFENSECLAW_GUARD_AGENT_HOME="$HOME"
+{{end}}
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
@@ -52,14 +53,32 @@ fi
 # token-resolution logic depends on the operator's original PATH or
 # HOME.
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # FAIL_MODE set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. Response-layer and transport-layer
 # failures respect FAIL_MODE; DEFENSECLAW_STRICT_AVAILABILITY=1 remains
 # a force-closed override.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status, so no failed, refused or unparseable reply may turn into an allow.
+# Hermes ignores a hook's exit status and treats a timeout or a spawn error
+# as "no opinion", so the only fail-closed signal it honours is a block
+# directive on stdout: every failure below prints one before it exits.
+FAIL_MODE="closed"
+readonly FAIL_MODE
+
+hermes_sandbox_block() {
+  defenseclaw_log_hook_failure hermes hermes-hook "$1" "$2" closed
+  echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
+  printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
+  exit 2
+}{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the
@@ -69,7 +88,27 @@ DEFENSECLAW_HOOK_CONNECTOR="hermes"
 DEFENSECLAW_HOOK_NAME="hermes-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+{{if .Sandbox}}# The binding token is the only credential a sandbox hook may present.
+case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+  '') hermes_sandbox_block "missing sandbox binding token (DEFENSECLAW_SANDBOX_TOKEN unset)" transport ;;
+  *$'\n'*|*$'\r'*) hermes_sandbox_block "malformed sandbox binding token" transport ;;
+esac
+
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || hermes_sandbox_block "hook payload too large" response
+API_ADDR="{{.APIAddr}}"
+
+# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
+
+fail_unreachable() {
+  hermes_sandbox_block "$1" transport
+}
+
+fail_response() {
+  hermes_sandbox_block "$(defenseclaw_response_failure_reason "$1")" response
+}
+{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool"
 fi
 
@@ -115,8 +154,8 @@ fail_response() {
   printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
   exit 0
 }
-
-AUTH_HEADER_ARGS=()
+{{end}}
+{{.HookSocketTransportSH}}{{.ForeignHookGuardSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -139,17 +178,27 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/hermes/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/hermes/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: hermes-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/hermes/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: hermes-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
+  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -165,7 +214,26 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
+# reply the workload may have shaped, never an allow. A block without a
+# rendered directive still has to reach Hermes as one on stdout.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|alert|confirm|continue) ;;
+  block)
+    if [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; then
+      REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+      if [ -z "$REASON" ]; then
+        REASON="Blocked by DefenseClaw Hermes policy."
+      fi
+      OUTPUT="$(printf '{"action":"block","message":"%s"}' "$(defenseclaw_json_escape "$REASON")")"
+    fi
+    ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 exit 0

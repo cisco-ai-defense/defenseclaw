@@ -120,6 +120,9 @@ func TestPOSIXSystemLogBoundedFallbackProfilePosture(t *testing.T) {
 		`/usr/bin/truncate -s 0 /var/log/auth.log/current.log 2>/dev/null || true`,
 		"chattr -i /var/log/audit/audit.log.1 2>/dev/null;\ntruncate -s 0 /var/log/audit/audit.log.1",
 	}
+	// The first command's list is judged as the sequence of its commands, on
+	// which the system-log owner itself matches and alerts.
+	alerts := map[string]bool{commands[0]: true}
 	profiles := []struct {
 		name     string
 		action   string
@@ -171,10 +174,14 @@ func TestPOSIXSystemLogBoundedFallbackProfilePosture(t *testing.T) {
 						"command": command,
 					},
 				})
-				if response.Action != profile.action || response.RawAction != profile.action ||
+				wantAction := profile.action
+				if alerts[command] {
+					wantAction = guardrailActionAlert
+				}
+				if response.Action != wantAction || response.RawAction != wantAction ||
 					response.Severity != profile.severity ||
 					!findingStringHasRuleID(response.Findings, "tamper.posix_system_log_destruction") {
-					t.Fatalf("command=%q response=%+v want %s/%s", command, response, profile.action, profile.severity)
+					t.Fatalf("command=%q response=%+v want %s/%s", command, response, wantAction, profile.severity)
 				}
 			}
 		})

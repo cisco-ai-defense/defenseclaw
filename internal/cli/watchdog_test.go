@@ -157,6 +157,9 @@ func TestWatchdogHealthRequirementsFromConfig(t *testing.T) {
 
 	t.Run("fleet topology", func(t *testing.T) {
 		cfg := config.DefaultConfig()
+		// An agent discovery cache on the test host that found no OpenClaw
+		// would turn the loopback fleet dial off, so use an empty data dir.
+		cfg.DataDir = t.TempDir()
 		cfg.Guardrail.Connector = "openclaw"
 		cfg.Guardrail.Connectors = nil
 		cfg.Gateway.FleetMode = "auto"

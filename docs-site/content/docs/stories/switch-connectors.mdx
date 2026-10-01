@@ -102,5 +102,5 @@ requires `--force`.
 ## Caveats
 
 <Callout>
-The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Use [`defenseclaw upgrade`](/docs/get-started/upgrade), which applies release-required migrations before reporting success. Run `defenseclaw migrations status` afterward to inspect the durable cursor; pending entries retry on the next upgrade, not on unrelated CLI commands.
+The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Use [`defenseclaw upgrade`](/docs/get-started/upgrade), which runs `defenseclaw migrate` before restarting the gateway; `defenseclaw migrate --check` reports anything still pending.
 </Callout>

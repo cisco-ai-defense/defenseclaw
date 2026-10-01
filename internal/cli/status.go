@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +51,10 @@ The sidecar must be running for this command to work.`,
 	// Status only needs the strict runtime config to locate the health API.
 	// Do not inherit root's audit-store lifecycle: a second short-lived Store
 	// can unlink the running daemon's WAL/SHM and strand later audit writes.
-	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+	// On a standalone managed host an administrator's status reads the
+	// managed deployment without extra environment variables.
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		return loadGatewayCommandConfigOnly()
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
@@ -107,13 +111,7 @@ func gatewayBindHost(c *config.Config) string {
 	if c == nil {
 		c = config.DefaultConfig()
 	}
-	bind := "127.0.0.1"
-	if c.Gateway.APIBind != "" {
-		bind = c.Gateway.APIBind
-	} else if c.OpenShell.IsStandalone() && c.Guardrail.Host != "" && c.Guardrail.Host != "localhost" {
-		bind = c.Guardrail.Host
-	}
-	return bind
+	return config.APIBindHost(c)
 }
 
 func sidecarHealthURL(c *config.Config) string {
@@ -189,7 +187,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 			fmt.Println()
 			Warn("Sidecar Status: NOT RUNNING")
 			printGatewayKV("Endpoint", addr)
-			Subhead("Start the sidecar with: defenseclaw-gateway start")
+			Subhead(sidecarNotRunningHint(cfg))
 			return fmt.Errorf("sidecar unreachable")
 		}
 		return fmt.Errorf("sidecar status: %w", err)
@@ -224,6 +222,17 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// sidecarNotRunningHint names how to bring the gateway back. The per-user
+// gateway is started with `start`; a unix standalone deployment's gateway
+// is a system service that `start` refuses to touch.
+func sidecarNotRunningHint(c *config.Config) string {
+	if c != nil && c.StandaloneEnterprise() && runtime.GOOS != "windows" {
+		return "The managed gateway runs as a system service; an administrator can restart it with: " +
+			managedHostServiceRestartCommand()
+	}
+	return "Start the sidecar with: defenseclaw-gateway start"
 }
 
 func isLocalStatusTarget(host string) bool {
@@ -472,10 +481,14 @@ func friendlyConnectorName(name string) string {
 		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
+	case "opencode":
+		return "OpenCode"
 	case "amp":
 		return "Amp"
 	case "omnigent":
 		return "OmniGent"
+	case "kiro":
+		return "Kiro"
 	default:
 		s := strings.TrimSpace(name)
 		if s == "" {
@@ -501,6 +514,15 @@ type connectorModeSummary struct {
 	ProxyIntercept     bool     `json:"proxy_intercept"`
 	GuardrailMode      string   `json:"guardrail_mode"`
 	HookEnforcement    bool     `json:"hook_enforcement"`
+	// Enabled is the connector's guardrail.connectors.<name>.enabled
+	// switch; nil from sidecars that predate the field means enabled.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// disabled reports a connector the config turned off: it is listed but
+// nothing enforces it.
+func (m *connectorModeSummary) disabled() bool {
+	return m != nil && m.Enabled != nil && !*m.Enabled
 }
 
 // fetchConnectorModes returns one mode summary per active connector. It
@@ -577,6 +599,13 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
 	}
 	fmt.Printf("    %s%s\n", modeLabel, connectorName)
+	if m.disabled() {
+		// A configured but disabled connector has no hooks or proxy in
+		// its data path; its policy fields would read as enforced.
+		statusLine := Style(fmt.Sprintf("%-18s", "Status:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", statusLine, Dim("disabled, not enforced"))
+		return
+	}
 	dataPath := m.Mode
 	if m.Mode == "observability" {
 		dataPath = "direct-to-upstream"

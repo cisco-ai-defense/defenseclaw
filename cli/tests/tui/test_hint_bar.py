@@ -23,11 +23,11 @@ from defenseclaw.tui.widgets.hint_bar import HintBar, HintEngine
         ("skills", "R registries"),
         ("mcps", "n add server"),
         ("plugins", "plugin install"),
-        ("inventory", "h/l switch sub-tabs"),
+        ("inventory", "h/l sub-tab"),
         ("tools", "tool block"),
         ("ai", "vendor/product/component"),
         ("registries", "S sync all"),
-        ("setup", "choose wizard"),
+        ("setup", "Enter open"),
         ("first-run", "Ctrl+R apply"),
     ),
 )
@@ -127,7 +127,9 @@ def test_setup_missing_credentials_hint_uses_status_detail() -> None:
     assert "press f to fill missing" in hint
 
 
-def test_first_run_missing_credentials_hint_uses_status_detail() -> None:
+def test_first_run_hint_lists_first_run_keys_even_when_credentials_are_missing() -> None:
+    # First-run has no Credentials task to open, so the missing-keys nudge
+    # (which points at f / r on the Setup task list) would be a dead end.
     status = StatusModel(
         gateway=ServiceStatus(
             "Gateway",
@@ -138,8 +140,8 @@ def test_first_run_missing_credentials_hint_uses_status_detail() -> None:
 
     hint = HintEngine().hint_for(HintState(active_panel="first-run"), status)
 
-    assert "Required credentials are missing" in hint
-    assert "r refresh" in hint
+    assert "Required credentials are missing" not in hint
+    assert "Ctrl+R apply" in hint
 
 
 def test_hint_bar_skips_static_update_when_rendered_text_is_unchanged(monkeypatch) -> None:

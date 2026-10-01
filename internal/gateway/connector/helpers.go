@@ -45,6 +45,14 @@ var userHomeOverride string
 // userHomeDir returns the current user's home directory in a cross-platform
 // way. It prefers os.UserHomeDir() (which uses USERPROFILE on Windows,
 // HOME on Unix) and falls back to os.Getenv("HOME") for legacy compatibility.
+// activeUserHomeOverride returns the home installed by WithUserHomeDir, or
+// "" when connector paths resolve for the process user.
+func activeUserHomeOverride() string {
+	userHomeOverrideMu.RLock()
+	defer userHomeOverrideMu.RUnlock()
+	return strings.TrimSpace(userHomeOverride)
+}
+
 func userHomeDir() string {
 	userHomeOverrideMu.RLock()
 	override := strings.TrimSpace(userHomeOverride)
@@ -211,6 +219,15 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// before its bash boundary, leaving bash to parse PowerShell source.
 	if connector == "devin" {
 		return windowsDevinBashHookCommand(defenseclawHookBinary())
+	}
+	// Kiro honors only exit 2 as a block. Release launchers use the GUI
+	// subsystem, which PowerShell's call operator does not await (the hook's
+	// status is lost and Kiro proceeds), and cmd.exe rejects the call operator
+	// outright. Use Kiro's encoded system PowerShell command, which awaits the
+	// launcher and returns its exit status to cmd.exe and to any launcher that
+	// runs the command line directly (windowsKiroHookCommandForBinary).
+	if connector == "kiro" {
+		return windowsKiroHookCommandForBinary(defenseclawHookBinary(), "")
 	}
 	// Claude Code evaluates hook command strings with PowerShell on Windows.
 	// A quoted executable path alone is only a string expression there; the
@@ -629,7 +646,12 @@ func windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBina
 	return windowsNativePowerShellHookCommandForBoundEvent("codex", event, contractID, hookBinary)
 }
 
-func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractID, hookBinary string) string {
+// windowsNativePowerShellHookCommandForBoundEvent renders the encoded system
+// PowerShell bridge for one hook registration. extra are further hook
+// arguments (flag, value pairs such as Kiro's --hook-surface v3), appended
+// after the event and contract; without them the bytes are the same as
+// before extra existed.
+func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractID, hookBinary string, extra ...string) string {
 	arguments := []string{
 		powershellQuoteLiteral("hook"),
 		powershellQuoteLiteral("--connector"),
@@ -646,6 +668,9 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 			powershellQuoteLiteral("--hook-contract"),
 			powershellQuoteLiteral(contractID),
 		)
+	}
+	for _, argument := range extra {
+		arguments = append(arguments, powershellQuoteLiteral(argument))
 	}
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",

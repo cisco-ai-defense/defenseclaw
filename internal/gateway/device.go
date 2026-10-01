@@ -337,6 +337,9 @@ func validateFreshIdentityDirectory(path string) error {
 	if err := validateFreshIdentityDirectoryPlatform(path, info); err != nil {
 		return err
 	}
+	if handled, err := validateFreshIdentityManagedServiceDirectory(path); handled || err != nil {
+		return err
+	}
 	if err := safefile.ValidatePrivateDirectory(path); err != nil {
 		return fmt.Errorf("gateway: validate device identity directory %s: %w", path, err)
 	}
@@ -344,6 +347,9 @@ func validateFreshIdentityDirectory(path string) error {
 }
 
 func writeNewPrivateFile(path string, data []byte) error {
+	if handled, err := writeFreshIdentityManagedServiceFile(path, data); handled || err != nil {
+		return err
+	}
 	file, err := safefile.CreateExclusive(path)
 	if err != nil {
 		return err

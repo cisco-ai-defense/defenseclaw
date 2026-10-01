@@ -85,8 +85,14 @@ class RequirementPredicateTests(unittest.TestCase):
     """Each predicate should correctly respond to whether its feature is on."""
 
     def test_openclaw_token_required_for_explicit_openclaw(self):
-        cfg = _make_cfg("/tmp/dc-test")
-        self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.REQUIRED)
+        # claw.mode's openclaw default with OpenClaw set up (openclaw.json).
+        # Without it the token is not used; see test_openclaw_presence (#958).
+        with tempfile.TemporaryDirectory() as home:
+            config_file = os.path.join(home, "openclaw.json")
+            with open(config_file, "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            cfg = _make_cfg("/tmp/dc-test", claw=ClawConfig(mode="openclaw", home_dir=home, config_file=config_file))
+            self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.REQUIRED)
 
     def test_openclaw_token_not_used_for_codex_connector(self):
         cfg = _make_cfg("/tmp/dc-test", claw=ClawConfig(mode="codex"))

@@ -229,8 +229,8 @@
       "type": "stat",
       "title": "Findings (1h)",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -240,18 +240,24 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[1h])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"finding.observed\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" [1h])) or vector(0)",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
-      ]
+      ],
+      "description": "Exact count of finding.observed records in the last hour, from Loki. Prometheus counters miss a rule's first finding, so the tiles count log records."
     },
     {
       "type": "stat",
       "title": "Distinct rules firing (1h)",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 4,
@@ -261,18 +267,24 @@
       },
       "targets": [
         {
-          "expr": "count(group by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\", connector=~\"$connector\"}[1h]) > 0)) or vector(0)",
+          "expr": "count(sum by (body_defenseclaw_finding_rule_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"finding.observed\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_security_severity=~\"$severity\" [1h]))) or vector(0)",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
-      ]
+      ],
+      "description": "Exact count of finding.observed records in the last hour, from Loki. Prometheus counters miss a rule's first finding, so the tiles count log records."
     },
     {
       "type": "stat",
       "title": "Critical findings (1h)",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 8,
@@ -282,9 +294,14 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"critical|CRITICAL\", connector=~\"$connector\"}[1h])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"finding.observed\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_security_severity=\"CRITICAL\" [1h])) or vector(0)",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
       ],
       "fieldConfig": {
@@ -306,14 +323,15 @@
       },
       "options": {
         "colorMode": "background"
-      }
+      },
+      "description": "Exact count of finding.observed records in the last hour, from Loki. Prometheus counters miss a rule's first finding, so the tiles count log records."
     },
     {
       "type": "stat",
       "title": "High findings (1h)",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 12,
@@ -323,9 +341,14 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"high|critical|HIGH|CRITICAL\", connector=~\"$connector\"}[1h])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"finding.observed\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_security_severity=~\"HIGH|CRITICAL\" [1h])) or vector(0)",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
       ],
       "fieldConfig": {
@@ -347,14 +370,15 @@
       },
       "options": {
         "colorMode": "background"
-      }
+      },
+      "description": "Exact count of finding.observed records in the last hour, from Loki. Prometheus counters miss a rule's first finding, so the tiles count log records."
     },
     {
       "type": "stat",
       "title": "Top rule (1h)",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 16,
@@ -364,27 +388,36 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\", connector=~\"$connector\"}[1h])))",
+          "expr": "topk(1, sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"finding.observed\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_security_severity=~\"$severity\" | label_format rule_id=\"{{.body_defenseclaw_finding_rule_id}}\" [1h])))",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "legendFormat": "{{rule_id}}"
         }
       ],
       "options": {
         "reduceOptions": {
+          "values": false,
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "/^rule_id$/"
         },
         "colorMode": "value",
         "graphMode": "none",
-        "textMode": "name"
+        "textMode": "value"
       },
       "fieldConfig": {
         "defaults": {
           "noValue": "No findings in the last hour"
         },
         "overrides": []
-      }
+      },
+      "description": "Rule with the most finding.observed records in the last hour, from Loki."
     },
     {
       "type": "stat",
@@ -402,7 +435,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (finding_target) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"finding[.](observed|correlated)\" | label_format finding_target=\"{{.body_defenseclaw_finding_target_ref}}\" | finding_target!=\"\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\" | connector=~\"$connector\" [1h])))",
+          "expr": "topk(1, sum by (finding_target) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"finding[.](observed|correlated)\" | label_format finding_target=\"{{.body_defenseclaw_finding_target_ref}}\" | finding_target!=\"\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" [1h])))",
           "legendFormat": "{{finding_target}}",
           "refId": "A",
           "instant": true
@@ -410,12 +443,14 @@
       ],
       "options": {
         "reduceOptions": {
+          "values": false,
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "/^finding_target$/"
         },
         "colorMode": "value",
-        "textMode": "name"
+        "textMode": "value"
       },
       "fieldConfig": {
         "defaults": {
@@ -583,12 +618,12 @@
       }
     },
     {
-      "type": "heatmap",
-      "title": "Heatmap — rule_id (rows) × time (cols)",
-      "description": "Density grid of findings per (rule_id, time-bucket). Clusters of dark cells = a rule firing in tight bursts.",
+      "type": "status-history",
+      "title": "Rule activity — rule_id (rows) × time (cols)",
+      "description": "Findings per rule and time bucket, counted from finding.observed records in Loki. Dense rows are a rule firing in tight bursts.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 12,
@@ -598,18 +633,33 @@
       },
       "targets": [
         {
-          "expr": "sum by (rule_id) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[$__rate_interval]))",
-          "format": "time_series",
+          "expr": "sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"finding.observed\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | label_format rule_id=\"{{.body_defenseclaw_finding_rule_id}}\" [$__auto]))",
           "legendFormat": "{{rule_id}}",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
       ],
       "options": {
-        "calculate": false
+        "showValue": "never",
+        "rowHeight": 0.9,
+        "colWidth": 0.9,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "noValue": "No findings in the selected range"
+          "noValue": "No findings in the selected range",
+          "color": {
+            "mode": "continuous-YlRd"
+          }
         },
         "overrides": []
       }
@@ -770,7 +820,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (finding_target) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"finding[.](observed|correlated)\" | label_format finding_target=\"{{.body_defenseclaw_finding_target_ref}}\" | finding_target!=\"\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\" | connector=~\"$connector\" [1h])))",
+          "expr": "topk(15, sum by (finding_target) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"finding[.](observed|correlated)\" | label_format finding_target=\"{{.body_defenseclaw_finding_target_ref}}\" | finding_target!=\"\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" [1h])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -789,6 +839,7 @@
             },
             "renameByName": {
               "Value": "findings/1h",
+              "Value #A": "findings/1h",
               "finding_target": "target"
             }
           }
@@ -872,7 +923,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"finding[.](observed|correlated)\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | label_format connector=\"{{ if .connector }}{{ .connector }}{{ else }}unknown{{ end }}\" | connector=~\"$connector\" | event_name=~\"finding[.](observed|correlated)\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

@@ -76,9 +76,8 @@ select. `make test`, `make check`, and `make py-lint` bootstrap that environment
 when needed. `make all` intentionally rebuilds and activates the current
 checkout for local development; the lower-level
 `make install`, `make dev-install`, and `scripts/install-dev.sh` targets enforce
-source-ownership rules and are not an upgrade path. Release-managed
-installations use the release-owned `scripts/upgrade.sh` or
-`scripts/upgrade.ps1` resolver described on the
+source-ownership rules and are not an upgrade path. Release installs upgrade
+with `defenseclaw upgrade`, which runs the latest release's installer; see the
 [upgrade page](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/).
 
 The principal source areas are:

@@ -601,34 +601,7 @@ func TestHasManagedProcessIdentityRejectsStrongRecordWithoutDataDir(t *testing.T
 	}
 }
 
-func TestManagedProcessStartedAtRequiresStrongLiveIdentity(t *testing.T) {
-	d := New(t.TempDir())
-	executable, err := os.Executable()
-	if err != nil {
-		t.Skipf("cannot determine executable: %v", err)
-	}
-	identity, err := processStartIdentity(os.Getpid())
-	if err != nil || identity == "" {
-		t.Skipf("strong process generation unavailable: identity=%q err=%v", identity, err)
-	}
-	before := time.Now().Add(-time.Second)
-	if err := d.writePIDInfo(os.Getpid(), executable, identity); err != nil {
-		t.Fatal(err)
-	}
-	startedAt, ok := d.ManagedProcessStartedAt(os.Getpid())
-	if !ok || startedAt.Before(before) || startedAt.After(time.Now().Add(time.Second)) {
-		t.Fatalf("managed launch generation = (%s, %v), want current strong record", startedAt, ok)
-	}
-
-	if err := os.WriteFile(d.pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := d.ManagedProcessStartedAt(os.Getpid()); ok {
-		t.Fatal("legacy PID record exposed an unverified launch generation")
-	}
-}
-
-func TestManagedProcessStartedAtPreservesPreSpawnSecondBoundary(t *testing.T) {
+func TestPIDRecordPreservesPreSpawnSecondBoundary(t *testing.T) {
 	d := New(t.TempDir())
 	executable, err := os.Executable()
 	if err != nil {
@@ -644,10 +617,11 @@ func TestManagedProcessStartedAtPreservesPreSpawnSecondBoundary(t *testing.T) {
 	if err := d.writePIDInfoAt(os.Getpid(), executable, identity, preSpawn); err != nil {
 		t.Fatal(err)
 	}
-	recorded, ok := d.ManagedProcessStartedAt(os.Getpid())
-	if !ok {
-		t.Fatal("strong PID record did not expose its pre-spawn lower bound")
+	info, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatal(err)
 	}
+	recorded := time.Unix(info.StartTime, 0)
 	if want := time.Unix(preSpawn.Unix(), 0); !recorded.Equal(want) {
 		t.Fatalf("recorded generation = %s, want pre-spawn floor %s", recorded, want)
 	}

@@ -717,29 +717,6 @@ enum TUIWizards {
         ]
     )
 
-    private static let sandbox = WizardDefinition(
-        id: "sandbox", title: "Sandbox", icon: "cube.transparent",
-        blurb: "Initialize OpenShell sandbox networking and policy controls (Linux hosts only).",
-        baseArgs: ["sandbox", "setup"], appendNonInteractive: true,
-        validation: { _ in
-            // cmd_init_sandbox exits on non-Linux, and --disable needs sudo
-            // this GUI can't provide — surface that before Run.
-            "Sandbox setup requires a Linux host; run `defenseclaw sandbox setup` there instead."
-        },
-        fields: [
-            WizardField(key: "sandbox-ip", label: "Sandbox IP", kind: .text(placeholder: "10.200.0.2"), defaultValue: "10.200.0.2"),
-            WizardField(key: "host-ip", label: "Host IP", kind: .text(placeholder: "10.200.0.1"), defaultValue: "10.200.0.1"),
-            WizardField(key: "sandbox-home", label: "Sandbox home", kind: .text(placeholder: "/home/sandbox"), defaultValue: "/home/sandbox"),
-            WizardField(key: "openclaw-port", label: "OpenClaw port", kind: .text(placeholder: "18789"), defaultValue: "18789"),
-            WizardField(key: "policy", label: "Policy", kind: .choice(options: ["default", "strict", "permissive"]), defaultValue: "permissive"),
-            WizardField(key: "dns", label: "DNS servers", kind: .text(placeholder: "8.8.8.8,1.1.1.1"), defaultValue: "8.8.8.8,1.1.1.1"),
-            WizardField(key: "no-auto-pair", label: "Disable automatic pairing", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "no-host-networking", label: "Disable host networking", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "no-guardrail", label: "Disable guardrail", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "disable", label: "Disable sandbox", kind: .flagOnly, defaultValue: "no"),
-        ]
-    )
-
     private static let registries = WizardDefinition(
         id: "registries", title: "Registries", icon: "books.vertical",
         blurb: "Add an external skill or MCP catalog and optionally sync and scan it.",
@@ -798,6 +775,77 @@ enum TUIWizards {
             WizardField(key: "scan", label: "Scan immediately", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
         ]
     )
+
+    /// OpenShell sandbox setup (TUI Setup slot 13). The argv mirrors the TUI's
+    /// `_build_sandbox_args` on macOS byte for byte. The OpenShell install
+    /// runs in a terminal (on a Mac it installs NVIDIA's Homebrew formula,
+    /// and e2fsprogs under the same consent); the app never passes
+    /// --install-openshell. Like the TUI on macOS it has no telemetry
+    /// question (the Homebrew gateway does not read gateway.env, so setup
+    /// cannot turn OpenShell's telemetry off) and no mounts question: setup
+    /// runs macOS sandboxes in OpenShell MicroVMs, which mount no host folders.
+    private static let sandbox = WizardDefinition(
+        id: "sandbox", title: "Sandbox", icon: "cube.transparent",
+        blurb: "Run Claude Code and Codex in NVIDIA OpenShell sandboxes that see only your project folder. "
+            + "On a Mac they run in OpenShell MicroVMs (its vm driver: Apple silicon only, experimental "
+            + "upstream), because Docker Desktop's Linux kernel has no Landlock: setup sets "
+            + "compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway once. "
+            + "A MicroVM mounts no host folders, so every run works on a copy and "
+            + "`defenseclaw sandbox pull` brings the changes back. The first run of each image prepares "
+            + "its MicroVM disk (about a minute and 5 GB). "
+            + "If OpenShell or e2fsprogs is missing, run `defenseclaw sandbox setup --install-openshell` "
+            + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula and e2fsprogs).",
+        baseArgs: ["sandbox", "setup"],
+        commandBuilder: sandboxCommands,
+        validation: sandboxValidation,
+        liveDefaults: sandboxLiveDefaults,
+        fields: [
+            WizardField(key: "action", label: "Action", kind: .choice(options: ["setup", "doctor"]),
+                        defaultValue: "setup",
+                        help: "setup: the one-time sandbox setup. doctor: only check this machine."),
+            WizardField(key: "harness-claudecode", label: "Claude Code", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Run `claude` in a sandbox (--harness claudecode)."),
+            WizardField(key: "harness-codex", label: "Codex", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Run `codex` in a sandbox (--harness codex)."),
+            WizardField(key: "wrappers", label: "Shell wrappers", kind: .bool, defaultValue: "no",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Make `claude` and `codex` run sandboxed when you type them "
+                            + "(undo: defenseclaw sandbox disable <harness>)."),
+            WizardField(key: "build-images", label: "Build images now", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "The first build is about 3 GB. Off: the first run builds them."),
+        ]
+    )
+
+    static func sandboxCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+        func on(_ key: String, _ fallback: String) -> Bool { value(v, key, fallback) == "yes" }
+        if value(v, "action", "setup") == "doctor" { return [["sandbox", "doctor"]] }
+        var args = ["sandbox", "setup", "--non-interactive"]
+        for harness in ["claudecode", "codex"] where on("harness-\(harness)", "yes") {
+            args += ["--harness", harness]
+        }
+        args.append(on("wrappers", "no") ? "--wrappers" : "--no-wrappers")
+        if !on("build-images", "yes") { args.append("--skip-images") }
+        return [args]
+    }
+
+    static func sandboxValidation(_ values: [String: String]) -> String? {
+        guard value(values, "action", "setup") == "setup" else { return nil }
+        let any = ["claudecode", "codex"].contains { value(values, "harness-\($0)", "yes") == "yes" }
+        return any ? nil : "Choose at least one harness (Claude Code or Codex)."
+    }
+
+    static func sandboxLiveDefaults(_ raw: YAMLNode) -> [String: String] {
+        guard case .sequence(let items)? = raw["openshell.harnesses"] else { return [:] }
+        let harnesses = items.compactMap(\.string)
+        guard !harnesses.isEmpty else { return [:] }
+        return [
+            "harness-claudecode": harnesses.contains("claudecode") ? "yes" : "no",
+            "harness-codex": harnesses.contains("codex") ? "yes" : "no",
+        ]
+    }
 
     private static let splunkDashboards = WizardDefinition(
         id: "splunk-dashboards", title: "Splunk Dashboards", icon: "rectangle.3.group.bubble.left",

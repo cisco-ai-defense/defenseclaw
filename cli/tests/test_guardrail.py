@@ -1924,7 +1924,7 @@ class TestRestartDefenseGateway(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
         return_value=True,
     )
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
     def test_starts_when_not_running(self, mock_run, mock_ready):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
@@ -1958,7 +1958,7 @@ class TestRestartDefenseGateway(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
         return_value=True,
     )
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
     def test_restarts_when_running(self, mock_run, mock_ready, _mock_identity):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
@@ -1989,7 +1989,7 @@ class TestRestartDefenseGateway(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
         return_value=False,
     )
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
     def test_fails_when_spawned_gateway_api_never_becomes_ready(self, mock_run, mock_ready):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
@@ -2009,7 +2009,7 @@ class TestRestartDefenseGateway(unittest.TestCase):
         return_value=False,
     )
     @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
     def test_refuses_live_unverified_pid(self, mock_run, _mock_alive, _mock_identity):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
@@ -2021,7 +2021,7 @@ class TestRestartDefenseGateway(unittest.TestCase):
             self.assertFalse(_restart_defense_gateway(tmpdir))
             mock_run.assert_not_called()
 
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable", side_effect=FileNotFoundError)
     def test_binary_not_found(self, mock_run):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
@@ -3489,7 +3489,7 @@ class TestDisableGuardrailFlow(unittest.TestCase):
 
 
 class TestRestartDefenseGatewayEdgeCases(unittest.TestCase):
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
     def test_nonzero_exit_shows_stderr(self, mock_run):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
@@ -3507,7 +3507,7 @@ class TestRestartDefenseGatewayEdgeCases(unittest.TestCase):
         mock_run.assert_called_once()
 
     @patch(
-        "defenseclaw.commands.cmd_setup.subprocess.run",
+        "defenseclaw.commands.cmd_setup.run_pinned_executable",
         side_effect=subprocess.TimeoutExpired(cmd="defenseclaw-gateway", timeout=30),
     )
     def test_timeout(self, _mock_run):

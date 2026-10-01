@@ -1,0 +1,18 @@
+# Applies administrator changes to the managed configuration, secrets or
+# policies. Configuration-management tools (Ansible, Puppet, Chef, Salt,
+# Intune scripts) only need to manage these files.
+
+[Unit]
+Description=Apply DefenseClaw managed configuration changes
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+
+[Path]
+PathChanged=/etc/defenseclaw/config.yaml
+PathChanged=/etc/defenseclaw/secrets
+PathChanged=/etc/defenseclaw/policies
+Unit=defenseclaw-enterprise-apply.service
+TriggerLimitIntervalSec=60s
+TriggerLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

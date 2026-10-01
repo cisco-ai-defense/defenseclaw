@@ -115,7 +115,7 @@ func watcherTestBuildContext() audit.RuntimeV8BuildContext {
 func TestWatcherAdmissionTraceUsesGeneratedFamilyAndJoinsScanEvaluation(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	cfg.Guardrail.Connector = "codex"
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	capture := &watcherAdmissionTraceCapture{}
 	w.BindObservabilityV8(capture)
 	traceID, _ := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
@@ -165,7 +165,7 @@ func TestWatcherMetricsNeverReachLegacyProvider(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	runtime := &watcherTestRuntime{}
 	logger.SetRuntimeV8Emitter(runtime)
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	ctx := context.Background()
 	w.recordWatcherEvent(ctx, "create", "skill", "")
 	w.recordWatcherError(ctx)
@@ -189,7 +189,7 @@ func TestEmitRescanResultUsesGeneratedV8AndPreservesForensics(t *testing.T) {
 	runtime := &watcherTestRuntime{}
 	logger.SetRuntimeV8Emitter(runtime)
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatal(err)
