@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 
 import click
@@ -96,3 +97,34 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         ux.ok(f"{len(result.applied)} migration step(s) pending.")
     else:
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
+    if not check and not as_json:
+        _report_hook_fail_mode_changes(data_dir or _default_data_dir())
+
+
+def _report_hook_fail_mode_changes(data_dir: str) -> None:
+    """Name each connector whose hooks change from fail-closed to fail-open.
+
+    0.8.x sealed the global fail mode into the hooks of observe-mode
+    connectors. This release applies the documented rule that observe-mode
+    hooks fail open, so say so before the gateway rewrites the hooks.
+    """
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as stream:
+            lock = json.load(stream)
+        from defenseclaw.config import load
+
+        guardrail = load(data_dir=data_dir).guardrail
+    except Exception:  # noqa: BLE001 - a notice must never fail the migration
+        return
+    connectors = lock.get("connectors") if isinstance(lock, dict) else None
+    if not isinstance(connectors, dict):
+        return
+    for name, entry in sorted(connectors.items()):
+        sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
+        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
+            continue
+        ux.warn(
+            f"{name} hooks now fail open: in observe mode they let a call through when "
+            "inspection is unavailable, where the previous release blocked it."
+        )
+        ux.subhead(f"To block such calls, enforce policy: defenseclaw setup {name} --mode action", indent="    ")

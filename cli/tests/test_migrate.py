@@ -278,6 +278,20 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
     assert recorded == ["0.8.5"]
 
 
+def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
+    # 0.8.x sealed the global fail mode into observe-mode hooks.
+    _write_config(data_dir, "config_version: 8\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
+    lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "claudecode hooks now fail open" in result.output
+    assert "defenseclaw setup claudecode --mode action" in result.output
+    assert "codex" not in result.output
+
+
 def test_a_pre_v8_config_always_gets_the_v8_conversion(data_dir: Path, recorded: list[str]) -> None:
     # A cursor that claims 0.8.5 ran, beside a v7 config, must not skip the conversion.
     _write_config(data_dir, "config_version: 7\n")
