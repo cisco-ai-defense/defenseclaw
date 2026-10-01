@@ -82,6 +82,8 @@ def test_parse_accepts_the_permanent_flag_set() -> None:
     assert upgrade_shim._parse("upgrade", ["--version=1.0.0"]) == {"version": "1.0.0", "yes": False}
     assert upgrade_shim._parse("rollback", ["--yes"]) == {"version": None, "yes": True}
     assert upgrade_shim._parse("upgrade", ["--help"]) is None
+    # The console entry sends upgrade straight here, so the hidden 0.8.x flag must be accepted too.
+    assert upgrade_shim._parse("upgrade", ["--recover-corrupt-audit", "--yes"]) == {"version": None, "yes": True}
 
 
 @pytest.mark.parametrize("args", [["--version", "1.2"], ["--bogus"], ["--version"]])

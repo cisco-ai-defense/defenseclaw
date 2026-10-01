@@ -50,6 +50,11 @@ LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _TIMEOUT = 30
 
+RECOVER_CORRUPT_AUDIT_NOTE = (
+    "  --recover-corrupt-audit is no longer needed: the gateway moves a corrupt audit store "
+    "aside and starts a new one by itself (see defenseclaw doctor)."
+)
+
 USAGE = """Usage: defenseclaw upgrade [--version X.Y.Z] [--yes]
        defenseclaw rollback [--yes]
 
@@ -163,6 +168,9 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             options["version"] = args[index]
         elif command == "upgrade" and arg.startswith("--version="):
             options["version"] = arg.split("=", 1)[1]
+        elif command == "upgrade" and arg == "--recover-corrupt-audit":
+            # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
+            print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)
         else:
             raise ShimError(f"unknown option {arg!r} for 'defenseclaw {command}' (see --help)")
         index += 1
