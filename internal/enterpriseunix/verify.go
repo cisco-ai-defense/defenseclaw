@@ -471,7 +471,18 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if r.Inspection.AIDefense == "" {
 		r.Inspection.AIDefense = "unknown"
 	}
+	if strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
+		// Not an error: the local policy engine keeps deciding. But the
+		// cloud inspection the administrator enabled is not running.
+		r.AddWarning(codeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
+			r.Inspection.AIDefense+"; the local policy engine keeps deciding. Check the "+
+			"enterprise.inspection.ai_defense credential and network access")
+	}
 }
+
+// codeAIDefenseUnavailable warns that enabled AI Defense inspection is
+// failing (for example a rejected key).
+const codeAIDefenseUnavailable = "ai_defense_unavailable"
 
 // readInspection copies the gateway's inspection posture from /health when
 // the gateway publishes it.

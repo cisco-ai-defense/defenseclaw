@@ -287,6 +287,20 @@ func TestEarlierGatewayIsProbedOnTheAPIPort(t *testing.T) {
 	}
 }
 
+// Enabled AI Defense that fails (a rejected key) leaves the local engine
+// deciding, so status stays ok, but it must say so.
+func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"}}`), nil
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
+		t.Fatalf("an unavailable AI Defense must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
+	}
+}
+
 // The production probe speaks HTTP over the hook socket, with the API
 // address as Host, and returns the gateway's document.
 func TestHookSocketProbesReadTheGateway(t *testing.T) {
