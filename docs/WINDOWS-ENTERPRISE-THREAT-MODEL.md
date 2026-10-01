@@ -372,7 +372,15 @@ authority.
    the enumerator preserves the protected `enabled`, `deferred`, and
    `agent_version` state. A new row is enabled automatically only when the
    profile has a discoverable supported CLI/version; otherwise it is omitted
-   and the reason is logged.
+   and the reason is logged. Because the walk also finds signed-out and
+   disconnected users, an automatically enabled new row is written with
+   `deferred: true` (the same posture the `-Mode`/`-Connector` renderer uses
+   for sessionless profiles). Guardian reports such a row pending while no
+   exact active session exists only when the deferred pending proof passes,
+   which requires the installer-created canonical `<home>\.defenseclaw`
+   root. A row discovered after install whose user has not signed in since
+   has no such root and stays a reported failure until that user signs in;
+   see Guardian reconcile item 10 for why it no longer blocks other SIDs.
 3. Before publication, the enumerator authenticates the committed manifest's
    ancestry, exact administrator-file descriptor, regular-file/link identity,
    and schema. It stages the new manifest under the same contract and replaces
@@ -421,6 +429,19 @@ authority.
 9. It publishes service-writable diagnostic state and a separately protected
    authorization ledger. Removed or disabled targets are revoked from the
    ledger.
+10. Deferred machine policy is staged and the exact protected enrollment set
+    is published only when every failed target is one that cannot be
+    protected until its user signs in: never recorded in the protected
+    ledger, no managed runtime selected for its exact SID and connector, and
+    the typed "no active WTS session for this SID" absence (never an ordinary
+    WTS, token, or profile error). Such targets remain reported failures and
+    keep Guardian not ready, but they are left out of that publication, which
+    is then exactly the publication for a manifest without them: nothing is
+    staged or enrolled for them and nothing they hold is revoked. If leaving
+    them out would empty a connector's exact set, the exact publication is
+    skipped for that cycle instead, because an empty set tears down that
+    connector's machine-wide hook policy. Any other failure still withholds
+    staging and publication for every target.
 
 ### Hook request
 

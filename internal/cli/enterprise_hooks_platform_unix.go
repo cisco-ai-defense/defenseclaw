@@ -41,6 +41,13 @@ func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool,
 	return true, nil
 }
 
+// enterpriseHookTargetAwaitingFirstSignIn is Windows-only: other platforms
+// have no per-SID session gate, so every failed target keeps withholding the
+// enrollment publication exactly as before.
+func enterpriseHookTargetAwaitingFirstSignIn(enterprisehooks.ManifestTarget) bool {
+	return false
+}
+
 func stageEnterpriseHookDeferredManagedPolicies(
 	enterprisehooks.Manifest,
 	[]enterprisehooks.ManifestTarget,
