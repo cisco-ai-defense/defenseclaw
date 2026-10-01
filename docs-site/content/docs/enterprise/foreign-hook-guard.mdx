@@ -315,6 +315,10 @@ Before it changes a user's file, the guardian copies the original to:
 | Linux and macOS | `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` |
 | Windows | `%USERPROFILE%\.defenseclaw\foreign-hooks-backup\<connector>\<timestamp>\` |
 
+An uninstall without purge keeps these backups. A purge deletes the whole
+DefenseClaw folder, these backups included, so copy any you want to keep
+first.
+
 `<timestamp>` is UTC, for example `20260926T141500Z`. Each backed-up file
 is named `<12 hex characters>-<original file name>`. Removed plugin files
 and folders are moved into the same directory under the same naming. To bring a hook back,

@@ -18,17 +18,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// PurgeWindowsUserState removes one enrolled account's DefenseClaw per-user
-// state (%USERPROFILE%\.defenseclaw) for the standalone Windows uninstall
-// with purge, after the uninstall committed and removed the registrations it
-// could. It runs as LocalSystem, whether or not the account is signed in:
-// some of the folder's subfolders grant only the account and SYSTEM, not
-// Administrators. It keeps what the Unix purge keeps (the account's own
-// hooks the foreign-hook policy moved aside, and each DefenseClaw hook script
-// as the disabled stub, for an agent that still calls the hook path it
-// loaded; see connector.PurgeUserStateInRoot) and removes the rest, including
-// the per-user hook tokens. What it keeps goes back to a DACL the account can
-// manage. A missing folder is not an error.
+// PurgeWindowsUserState removes one enrolled account's whole DefenseClaw
+// per-user folder (%USERPROFILE%\.defenseclaw) for the standalone Windows
+// uninstall with purge, after the uninstall committed and removed the
+// registrations it could. It runs as LocalSystem, whether or not the account
+// is signed in: some of the folder's subfolders grant only the account and
+// SYSTEM, not Administrators. Like the Unix purge it removes everything,
+// DefenseClaw's hook scripts, the per-user hook tokens and the account's own
+// hooks the foreign-hook policy moved aside included (see
+// connector.PurgeUserStateInRoot). Anything a failure leaves goes back to a
+// DACL the account can manage. A missing folder is not an error.
 func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err

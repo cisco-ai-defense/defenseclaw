@@ -93,32 +93,18 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	})
 }
 
-// UserInstallKeptError is PurgeUserState's answer for an account whose
-// ~/.defenseclaw holds its own per-user DefenseClaw install: the purge left
-// the folder alone (the enterprise hook registrations were already removed),
-// because it removes only what the enterprise deployment created.
-type UserInstallKeptError struct {
-	// Found names the entries of the account's own install.
-	Found []string
-}
-
-func (e *UserInstallKeptError) Error() string {
-	return "kept ~/.defenseclaw, which holds the account's own DefenseClaw install (" + strings.Join(e.Found, ", ") + ")"
-}
-
 // PurgeUserState removes one account's DefenseClaw per-user state for the
 // standalone Unix uninstall --purge, in the per-user worker with the
 // account's credentials, after RemoveUserHooks ran for its manifest
 // targets. A connector that still keeps DefenseClaw's backups (one set up by
 // an earlier route, or disabled before the uninstall) is torn down first, so
 // the files DefenseClaw changed get their content back before the backups
-// go; if any teardown fails, the state stays for a rerun. Then the state
-// goes except the account's own hooks the foreign-hook policy moved aside
-// and the hook scripts, which become disabled stubs (see
-// connector.PurgeUserState). A home that no longer exists is not an error.
-// A ~/.defenseclaw that holds the account's own per-user install stays
-// whole, with a *UserInstallKeptError: its backups and data are that
-// install's, not the enterprise deployment's.
+// go; if any teardown fails, the state stays for a rerun. Then all of
+// ~/.defenseclaw goes, including the hook scripts and the account's own
+// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
+// and so do the binaries and launcher links the per-user install put in
+// ~/.local/bin (see RemoveUserBinaries). The caller stops the account's
+// per-user gateway first. A home that no longer exists is not an error.
 func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
 		return err
@@ -154,7 +140,11 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not a .defenseclaw folder", dataDir)
 	}
 	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
-		return nil
+		// A rerun after the state went still removes the binaries.
+		return withOwnerCredentials(uid, gid, func() error {
+			_, err := RemoveUserBinaries(home, dataDir, uid)
+			return err
+		})
 	}
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
 		return err
@@ -165,10 +155,6 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	}
 	return connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
-			if found := connector.PersonalInstallEntries(dataDir); len(found) > 0 {
-				removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
-				return &UserInstallKeptError{Found: found}
-			}
 			names, err := connector.BackedUpConnectors(dataDir)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: list connector backups: %w", err)
@@ -191,7 +177,8 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 				return fmt.Errorf("enterprise hooks: remove the per-user state: %w", err)
 			}
 			removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
-			return nil
+			_, err = RemoveUserBinaries(home, dataDir, uid)
+			return err
 		})
 	})
 }

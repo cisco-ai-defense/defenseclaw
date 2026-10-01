@@ -107,6 +107,7 @@ type windowsManagedHooksTeardownReport struct {
 	UserRegistrationsPending     []string                            `json:"user_registrations_pending,omitempty"`
 	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
 	UserStateRemaining           []string                            `json:"user_state_remaining,omitempty"`
+	UserStatePurged              []string                            `json:"user_state_purged,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -133,7 +134,7 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
-	report.UserStateRemaining = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
+	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
@@ -148,8 +149,12 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 // environment value and only names the per-user folders.
 const windowsManagedHooksPurgeUserStateEnv = "DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE"
 
-// windowsManagedHooksStandaloneUserStatePurger is replaceable in tests.
-var windowsManagedHooksStandaloneUserStatePurger = enterprisehooks.PurgeWindowsUserState
+// windowsManagedHooksStandaloneUserStatePurger and
+// windowsManagedHooksStandaloneUserBinariesPurger are replaceable in tests.
+var (
+	windowsManagedHooksStandaloneUserStatePurger    = enterprisehooks.PurgeWindowsUserState
+	windowsManagedHooksStandaloneUserBinariesPurger = enterprisehooks.PurgeWindowsUserBinaries
+)
 
 // windowsManagedHooksAccountsKeepingRegistrations reports whether an
 // account's registrations may have stayed after cleanup: it is named in a
@@ -173,22 +178,26 @@ func windowsManagedHooksAccountsKeepingRegistrations(cleanup enterpriseHookUserC
 
 // windowsManagedHooksStandaloneUserState handles the DefenseClaw per-user
 // folder of each enrolled account once the uninstall has removed the
-// registrations it could. With purge it removes each folder as LocalSystem,
-// signed-out accounts included, and lists each one it could not remove
-// ("user (SID): path: reason"). An account that keeps registrations
-// (keepsRegistrations) keeps its folder. Without purge it lists each folder
-// that exists ("user (SID): path").
+// registrations it could. With purge it removes, as LocalSystem and
+// signed-out accounts included, each folder (all of it, hook scripts and
+// foreign-hooks-backup included) and then the account's per-user binaries in
+// %USERPROFILE%\.local\bin with that folder's user Path entry. It returns
+// each account it could not purge ("user (SID): path: reason") and each one
+// it purged ("user (SID): path"), so the result names every account whose
+// data went. An account that keeps registrations (keepsRegistrations) keeps
+// its folder. Without purge it lists each folder that exists ("user (SID):
+// path") and purges nothing.
 func windowsManagedHooksStandaloneUserState(
 	manifest enterprisehooks.Manifest,
 	purge bool,
 	keepsRegistrations func(sid string) bool,
-) []string {
+) ([]string, []string) {
 	var identityErr error
 	if purge {
 		identityErr = enterpriseHookWindowsUserCleanupIdentity()
 	}
 	seen := map[string]bool{}
-	var remaining []string
+	var remaining, purged []string
 	for _, target := range manifest.Targets {
 		home, sid := strings.TrimSpace(target.UserHome), strings.TrimSpace(target.SID)
 		dataDir := strings.TrimSpace(target.DataDir)
@@ -217,6 +226,12 @@ func windowsManagedHooksStandaloneUserState(
 			// profile, which is off the computer while the account is signed
 			// out and brings the folder back at its next sign-in.
 			if _, err := os.Lstat(home); home == "" || !errors.Is(err, os.ErrNotExist) || enterpriseHookWindowsUserProfileRemoved(sid) {
+				if home != "" && !errors.Is(err, os.ErrNotExist) && identityErr == nil && !keepsRegistrations(sid) {
+					// The folder is gone; the binaries may still be there.
+					if _, err := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); err != nil {
+						remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+					}
+				}
 				continue
 			}
 			reason = "the account's profile folder is not on this computer while it is signed out"
@@ -227,6 +242,10 @@ func windowsManagedHooksStandaloneUserState(
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
 			if err == nil {
+				_, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
+			}
+			if err == nil {
+				purged = append(purged, label)
 				continue
 			}
 			reason = boundedEnterpriseHookUserCleanupText(err.Error())
@@ -234,7 +253,8 @@ func windowsManagedHooksStandaloneUserState(
 		remaining = append(remaining, label+": "+reason)
 	}
 	sort.Strings(remaining)
-	return remaining
+	sort.Strings(purged)
+	return remaining, purged
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {

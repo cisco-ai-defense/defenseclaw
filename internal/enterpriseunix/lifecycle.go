@@ -1790,7 +1790,6 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Failed      []string `json:"failed"`
 		StateFailed []string `json:"state_failed"`
 		Purged      []string `json:"purged"`
-		Kept        []string `json:"kept"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
@@ -1819,17 +1818,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
-		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user state of user %s was not removed: %s", user, reason))
+		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user data and binaries of user %s were not removed: %s; fix the cause and rerun %s", user, reason, rerun))
 	}
-	// An account's own per-user install is not the deployment's to delete.
-	for _, entry := range report.Kept {
-		user, _, _ := strings.Cut(entry, ": ")
-		r.Changes = append(r.Changes, fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw), which holds that account's own DefenseClaw install; only the enterprise hook registrations were removed from it", user))
-	}
-	// A purge deletes the per-user data the enterprise install wrote; say
-	// so, instead of a bare "done".
+	// A purge deletes data an account created before the install; name each
+	// account, instead of a bare "done".
 	for _, user := range report.Purged {
-		r.Changes = append(r.Changes, fmt.Sprintf("removed the DefenseClaw per-user data of user %s (~/.defenseclaw) except ~/.defenseclaw/hooks, where DefenseClaw's hook scripts stay as disabled stubs that exit 0 for agents still running with the old path (delete them once those agents have restarted); the account's own hooks moved aside by the foreign-hook policy stay in its foreign-hooks-backup folder", user))
+		r.Changes = append(r.Changes, fmt.Sprintf("removed all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder) and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user))
 	}
 	return left
 }

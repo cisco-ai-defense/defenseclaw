@@ -20439,19 +20439,22 @@ function Add-DefenseClawUserRegistrationCleanupResult {
                 -Force
     }
     # The standalone finalize names each enrolled account's per-user folder
-    # that stays: with purge, each one it could not remove and why. Only a
-    # purge reports it.
-    $remaining = $null
-    if ($null -ne $report) {
-        $remaining = $report.PSObject.Properties['user_state_remaining']
-    }
-    if ($null -ne $remaining -and $null -ne $remaining.Value) {
+    # that stays (with purge, each one it could not remove and why) and,
+    # with purge, each account whose per-user data and binaries it removed.
+    foreach ($name in @('user_state_remaining', 'user_state_purged')) {
+        $state = $null
+        if ($null -ne $report) {
+            $state = $report.PSObject.Properties[$name]
+        }
+        if ($null -eq $state -or $null -eq $state.Value) {
+            continue
+        }
         $Result |
             Microsoft.PowerShell.Utility\Add-Member `
                 -MemberType NoteProperty `
-                -Name user_state_remaining `
+                -Name $name `
                 -Value ([string[]]@(
-                    @($remaining.Value) |
+                    @($state.Value) |
                         Microsoft.PowerShell.Utility\Select-Object -First 4096 |
                         Microsoft.PowerShell.Core\ForEach-Object {
                             ConvertTo-DefenseClawBoundedDiagnostic `

@@ -343,7 +343,7 @@ def main() -> int:
         # revalidated again below before any deletion occurs.
         time.sleep(_LAUNCHER_UNWIND_GRACE_SECONDS)
 
-        _, data_dir, targets = _validate_plan(plan)
+        install_root, data_dir, targets = _validate_plan(plan)
         for target in targets:
 
             def remove_target(target=target):
@@ -351,6 +351,12 @@ def main() -> int:
                 os.unlink(target)
 
             _retry(remove_target, f"remove {target}")
+        if bool(plan.get("remove_empty_install_root")) and targets:
+            # rmdir removes only an empty folder: one other tools use stays.
+            try:
+                os.rmdir(install_root)
+            except OSError:
+                pass
         if bool(plan.get("remove_data_dir")) and os.path.lexists(data_dir):
 
             def remove_data() -> None:

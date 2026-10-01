@@ -17,30 +17,6 @@ import (
 	"sort"
 )
 
-// foreignHooksBackupDir holds an account's own hooks that the enterprise
-// foreign-hook policy moved aside; only the account may put them back.
-const foreignHooksBackupDir = "foreign-hooks-backup"
-
-// personalInstallEntries are what an account's own per-user DefenseClaw
-// install keeps in ~/.defenseclaw (its config, the CLI's virtualenv, the
-// per-user gateway's audit database). The managed enterprise hook install
-// writes none of them there, so any of them records that the folder holds
-// the account's own install, which an enterprise purge must not delete.
-var personalInstallEntries = []string{"config.yaml", ".venv", "audit.db"}
-
-// PersonalInstallEntries lists the entries of dataDir that belong to the
-// account's own per-user DefenseClaw install (see personalInstallEntries);
-// none for a folder only the managed enterprise install wrote.
-func PersonalInstallEntries(dataDir string) []string {
-	var found []string
-	for _, name := range personalInstallEntries {
-		if _, err := os.Lstat(filepath.Join(dataDir, name)); err == nil {
-			found = append(found, name)
-		}
-	}
-	return found
-}
-
 // BackedUpConnectors lists the connectors that still keep DefenseClaw's
 // backups of files they changed (<dataDir>/connector_backups/<name>): each
 // one's teardown can still put those files back.
@@ -62,14 +38,15 @@ func BackedUpConnectors(dataDir string) ([]string, error) {
 	return names, nil
 }
 
-// PurgeUserState removes an account's DefenseClaw state in dataDir, for an
-// enterprise uninstall --purge. Two things stay: the account's own hooks the
-// foreign-hook policy moved aside (foreign-hooks-backup), and DefenseClaw's
-// hook scripts, each replaced by the disabled stub that exits 0, because an
-// agent that is still running may call the hook path it loaded. Everything
-// else goes, including the per-user hook credentials. Run it as the account,
-// after every connector's teardown: the backups a teardown restores from are
-// part of this state.
+// PurgeUserState removes an account's whole DefenseClaw data directory
+// (dataDir, normally ~/.defenseclaw), for an enterprise uninstall --purge:
+// everything goes, including DefenseClaw's hook scripts, the per-user hook
+// credentials, and the account's own hooks the foreign-hook policy moved
+// aside (foreign-hooks-backup). Run it as the account, after every
+// connector's teardown has removed the hook registrations: the backups a
+// teardown restores from are part of this state. An agent still running
+// with a hook it loaded before the teardown gets a missing script, which
+// it treats as a failed, non-blocking hook until it restarts.
 func PurgeUserState(dataDir string) error {
 	entries, err := os.ReadDir(dataDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -80,47 +57,12 @@ func PurgeUserState(dataDir string) error {
 	}
 	var errs []error
 	for _, entry := range entries {
-		path := filepath.Join(dataDir, entry.Name())
-		switch {
-		case entry.Name() == foreignHooksBackupDir:
-			continue
-		case entry.Name() == "hooks" && entry.IsDir():
-			if err := purgeHookScripts(dataDir); err != nil {
-				errs = append(errs, err)
-			}
-			continue
-		}
-		if err := os.RemoveAll(path); err != nil {
+		if err := os.RemoveAll(filepath.Join(dataDir, entry.Name())); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	// Gone only when nothing stayed.
-	_ = os.Remove(dataDir)
-	return errors.Join(errs...)
-}
-
-// purgeHookScripts turns every DefenseClaw hook script in <dataDir>/hooks
-// into the disabled stub and removes everything else there (credentials,
-// hook config, temporary files).
-func purgeHookScripts(dataDir string) error {
-	dir := filepath.Join(dataDir, "hooks")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
+	if err := os.Remove(dataDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
 	}
-	var errs []error
-	for _, entry := range entries {
-		path := filepath.Join(dir, entry.Name())
-		if entry.Type().IsRegular() && scriptHasMarker(path) {
-			if err := writeDisabledHookTombstone(SetupOpts{DataDir: dataDir}, entry.Name(), "DefenseClaw"); err != nil {
-				errs = append(errs, err)
-			}
-			continue
-		}
-		if err := os.RemoveAll(path); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	_ = os.Remove(dir)
 	return errors.Join(errs...)
 }

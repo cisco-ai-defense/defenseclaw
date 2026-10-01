@@ -199,16 +199,13 @@ type enterpriseHookWorkerCleanupReport struct {
 }
 
 type enterpriseHookWorkerTargetResult struct {
-	Index    int  `json:"index"`
-	OK       bool `json:"ok"`
-	Repaired bool `json:"repaired,omitempty"`
-	Removed  bool `json:"removed,omitempty"`
-	Pending  bool `json:"pending,omitempty"`
-	// Kept is why a purge left the account's ~/.defenseclaw alone: it
-	// holds the account's own per-user install.
-	Kept   string                         `json:"kept,omitempty"`
-	Error  string                         `json:"error,omitempty"`
-	Result *enterprisehooks.InstallResult `json:"result,omitempty"`
+	Index    int                            `json:"index"`
+	OK       bool                           `json:"ok"`
+	Repaired bool                           `json:"repaired,omitempty"`
+	Removed  bool                           `json:"removed,omitempty"`
+	Pending  bool                           `json:"pending,omitempty"`
+	Error    string                         `json:"error,omitempty"`
+	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -437,6 +434,9 @@ var (
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
 	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
+	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
+	// and watchdog before the purge removes the state they run from.
+	enterpriseHookWorkerStopPerUser = stopPerUserGatewayForPurge
 )
 
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
@@ -481,14 +481,13 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		case enterpriseHookWorkerModePurge:
 			if removalFailed {
-				err = errors.New("not removed, because a DefenseClaw hook registration of this account was not removed")
+				err = errors.New("a DefenseClaw hook registration of this account was not removed")
+				break
+			}
+			if err = enterpriseHookWorkerStopPerUser(opts); err != nil {
 				break
 			}
 			err = enterpriseHookWorkerPurger(ctx, opts)
-			var kept *enterprisehooks.UserInstallKeptError
-			if errors.As(err, &kept) {
-				outcome.Kept, err = kept.Error(), nil
-			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}

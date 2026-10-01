@@ -14,7 +14,6 @@ package enterprisehooks
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,51 +102,5 @@ func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(notes); err != nil {
 		t.Fatalf("the purge removed the user's own file: %v", err)
-	}
-}
-
-// RHEL-U2-12: uninstall --purge deleted the ~/.defenseclaw of an account
-// that ran its own per-user DefenseClaw install (config, .venv, audit data).
-// The purge removes only what the enterprise deployment wrote: a folder
-// with the account's own install stays whole, one the managed install wrote
-// alone still goes.
-func TestPurgeUserStateKeepsTheAccountsOwnInstall(t *testing.T) {
-	skipIfRoot(t)
-	write := func(dataDir string, files ...string) {
-		t.Helper()
-		for _, name := range files {
-			path := filepath.Join(dataDir, filepath.FromSlash(name))
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	own := newTestHome(t)
-	ownData := filepath.Join(own, ".defenseclaw")
-	ownFiles := []string{"config.yaml", ".venv/bin/python", "audit.db", "connector_backups/codex/config.toml", "hooks/.hook-codex.token"}
-	write(ownData, ownFiles...)
-	opts := InstallOptions{UserHome: own, OwnerUID: os.Getuid(), OwnerGID: os.Getgid()}
-	err := PurgeUserState(context.Background(), opts)
-	var kept *UserInstallKeptError
-	if !errors.As(err, &kept) || strings.Join(kept.Found, ",") != "config.yaml,.venv,audit.db" {
-		t.Fatalf("PurgeUserState of an account's own install = %v, want a UserInstallKeptError", err)
-	}
-	for _, name := range ownFiles {
-		if _, err := os.Stat(filepath.Join(ownData, filepath.FromSlash(name))); err != nil {
-			t.Fatalf("the purge removed the account's own %s: %v", name, err)
-		}
-	}
-
-	managedOnly := newTestHome(t)
-	write(filepath.Join(managedOnly, ".defenseclaw"), "hook_contract_lock.json", "hooks/.hook-codex.token")
-	opts.UserHome = managedOnly
-	if err := PurgeUserState(context.Background(), opts); err != nil {
-		t.Fatalf("PurgeUserState of a managed-only folder: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(managedOnly, ".defenseclaw")); !os.IsNotExist(err) {
-		t.Fatalf("the managed-only state stayed: %v", err)
 	}
 }

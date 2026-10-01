@@ -109,7 +109,7 @@ from defenseclaw.tui.services.setup_state import (
 
 SetupMode = Literal["wizards", "config"]
 WizardFieldKind = Literal["bool", "string", "choice", "int", "password", "section", "preset", "whtype", "regid"]
-UninstallOption = Literal["dry-run", "keep-data", "wipe-data"]
+UninstallOption = Literal["dry-run", "keep-data", "wipe-data", "wipe-all"]
 
 # These re-exports keep existing callers (panels, tests) importing from
 # ``defenseclaw.tui.panels.setup`` working unchanged while routing the
@@ -542,6 +542,9 @@ UNINSTALL_CHOICES: tuple[UninstallChoice, ...] = (
     UninstallChoice("dry-run", "p", "Preview plan", "Runs uninstall --dry-run and changes nothing."),
     UninstallChoice("keep-data", "u", "Uninstall, keep data", "Reverts hooks/plugin integration and keeps data.", True),
     UninstallChoice("wipe-data", "a", "Uninstall and wipe data", "Also deletes audit DB, config, and secrets.", True),
+    UninstallChoice(
+        "wipe-all", "e", "Uninstall everything", "Also deletes the data and the defenseclaw binaries.", True
+    ),
 )
 
 
@@ -5516,6 +5519,8 @@ def uninstall_args_for_option(option: UninstallOption) -> tuple[tuple[str, ...],
         return ("uninstall", "--yes"), "uninstall --yes"
     if option == "wipe-data":
         return ("uninstall", "--all", "--yes"), "uninstall --all --yes"
+    if option == "wipe-all":
+        return ("uninstall", "--all", "--binaries", "--yes"), "uninstall --all --binaries --yes"
     return ("uninstall", "--dry-run"), "uninstall dry-run"
 
 

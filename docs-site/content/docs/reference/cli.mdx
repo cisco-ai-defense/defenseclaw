@@ -473,8 +473,9 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw setup guardrail --disable` | Roll back guardrail. Connector files restored from backup. |
-| `defenseclaw uninstall` | Reversible by default — runs connector teardown, stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) intact. |
-| `defenseclaw uninstall --all` | Same as above, plus deletes `~/.defenseclaw/`. Add `--binaries` to also remove the `defenseclaw` and `defenseclaw-gateway` binaries from `~/.local/bin`. |
+| `defenseclaw uninstall` | Reversible by default — runs connector teardown (removes the hooks and registrations), stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) and the binaries intact. |
+| `defenseclaw uninstall --all` | Same as above, plus deletes all of `~/.defenseclaw/` (hook scripts and `foreign-hooks-backup` included) and the local observability stack's containers and data volumes. The launcher links into `~/.defenseclaw/` go with it; the binaries stay. |
+| `defenseclaw uninstall --all --binaries` | Removes everything: all of the above, plus `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links, the `uv` the installer added (when unchanged) and its bookkeeping from `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows, where the emptied folder and its user `Path` entry go too). On a native Windows Setup install, Setup runs first and the script-install leftovers go after it. On macOS, `DefenseClawMac.app` stays; the plan says how to remove it. Run `--dry-run` first to see the plan. |
 | `defenseclaw uninstall --skip-sandbox-teardown` | Uninstall without the OpenShell sandbox teardown it runs first (when Docker or OpenShell are gone or broken); `defenseclaw sandbox teardown` removes the sandboxes later. `reset` takes it too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
 
@@ -532,7 +533,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `rotate-credentials` | Replace the key every user's per-user credentials derive from. Every user moves to the new key before it takes effect. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
 | `status` | Report the deployment state. Read-only |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
-| `uninstall` | Stop and remove the deployment. `--purge` also removes config and state |
+| `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw`. `--purge` removes everything, every enrolled account's data and binaries included |
 
 | Flag | Actions | Meaning |
 | --- | --- | --- |
@@ -545,7 +546,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
 | `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove config, credentials, state, and logs |
+| `--purge` | uninstall | Also remove config, credentials, state, and logs, and each enrolled account's `~/.defenseclaw` and per-user binaries and launcher links in `~/.local/bin`, after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun |
 | `--remove-service-account` | uninstall | With `--purge`, also delete the gateway service account |
 | `--json` | all | Print the lifecycle result as JSON |
 
@@ -570,7 +571,7 @@ its transaction on PowerShell 7, which must be installed.
 | `ensure` | Standalone only | Install, upgrade, or repair as needed. Refuses to downgrade (`downgrade_refused`) |
 | `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
 | `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
-| `uninstall` | Secure Client, standalone | Remove the services. Keeps state unless `--purge` |
+| `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Keeps state and each account's `%USERPROFILE%\.defenseclaw` unless `--purge` |
 
 | Flag | Meaning |
 | --- | --- |
@@ -584,7 +585,7 @@ its transaction on PowerShell 7, which must be installed.
 | `--broker-binary` | Secure Client only: the source credential broker |
 | `--installer <file>` | An explicit `install-enterprise.ps1` |
 | `--no-start` | Install, upgrade, repair, ensure: stage the services disabled and stopped |
-| `--purge` | Uninstall: also remove managed state |
+| `--purge` | Uninstall: also remove managed state and (standalone) each enrolled account's `%USERPROFILE%\.defenseclaw` and DefenseClaw files in `%USERPROFILE%\.local\bin`, with that folder's user `Path` entry once it is empty. The result names each account. A signed-out account keeps its `Path` entry, and the result says so |
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
 
