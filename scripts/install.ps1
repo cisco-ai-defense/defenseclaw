@@ -911,7 +911,9 @@ function Save-RolledBackData {
     $kept = Join-Path $DataDir ("backups\rolled-back-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
-    Write-Info "Kept the data from before the last rollback in $kept"
+    $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Info ("Kept the data from before the last rollback in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
+    Write-Info "It is not used again; once you no longer need its audit history, remove it with: Remove-Item -Recurse -Force '$kept'"
 }
 
 function Save-Live([string]$Slot) {

@@ -971,8 +971,9 @@ keep_rolled_back_data() {
     [[ -f "${PREVIOUS}/ROLLED_BACK" && -d "${PREVIOUS}/data" ]] || return 0
     local kept
     kept="${DEFENSECLAW_HOME}/backups/rolled-back-$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" \
-        && info "Kept the data from before the last rollback in ${kept}"
+    mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" || return 1
+    info "Kept the data from before the last rollback in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
+    info "It is not used again; once you no longer need its audit history, remove it with: rm -rf '${kept}'"
 }
 
 # stash_live SLOT: move the live install (binaries copied, everything else
