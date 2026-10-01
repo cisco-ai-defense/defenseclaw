@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Materialize canonical observability-v8 records from SQLite as JSONL."""
+"""Materialize canonical observability-v8 records from SQLite as JSONL.
+
+One-shot mode (``--audit-db``/``--out``) writes a single snapshot. Serve mode
+(``--serve``) keeps one interpreter alive and answers one JSON request per
+standard-input line, so a harness that polls the audit history many times per
+run pays interpreter start-up once instead of once per poll.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +14,11 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import TextIO
 
 _MAX_RECORD_BYTES = 4 * 1024 * 1024 + 4 * 1024
 _MAX_PROJECTION_BYTES = 64 * 1024 * 1024
@@ -199,11 +207,9 @@ def _replace_jsonl(output: Path, records: list[str]) -> None:
                 stream.write(record)
                 stream.write("\n")
             # The snapshot is a private, transient file that the harness
-            # reads and deletes immediately; it has no durability need.
-            # Forcing it to the device (fsync) can stall in an
-            # uncancellable kernel flush on a saturated runner disk,
-            # leaving an unkillable process that outlives the bounded
-            # caller. os.replace below still makes publication atomic.
+            # reads and deletes immediately, so it has no durability need
+            # and is not forced to the device. os.replace below still makes
+            # publication atomic.
             stream.flush()
         os.replace(temporary, output)
     finally:
@@ -213,17 +219,70 @@ def _replace_jsonl(output: Path, records: list[str]) -> None:
             pass
 
 
+def project(audit_db: Path, output: Path) -> None:
+    if audit_db.resolve() == output.resolve():
+        raise ValueError("canonical projection output must differ from the audit database")
+    _replace_jsonl(output, _read_projected_records(audit_db))
+
+
+SERVE_PROTOCOL = 1
+
+
+def _write_response(responses: TextIO, response: dict[str, object]) -> None:
+    responses.write(json.dumps(response, separators=(",", ":")))
+    responses.write("\n")
+    responses.flush()
+
+
+def _serve_request(line: str) -> dict[str, object]:
+    try:
+        request = json.loads(line)
+        if not isinstance(request, dict) or set(request) != {"audit_db", "out"}:
+            raise ValueError("projection request must name exactly audit_db and out")
+        audit_db = request["audit_db"]
+        output = request["out"]
+        if not isinstance(audit_db, str) or not audit_db or not isinstance(output, str) or not output:
+            raise ValueError("projection request paths must be non-empty text")
+        project(Path(audit_db), Path(output))
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        return {"ok": False, "error": f"canonical audit projection failed: {exc}"}
+    return {"ok": True}
+
+
+def serve(requests: TextIO, responses: TextIO) -> int:
+    """Answer one projection request per line until end of input.
+
+    Each request is ``{"audit_db": ..., "out": ...}``. The response is
+    ``{"ok": true}`` once the snapshot is atomically published, or
+    ``{"ok": false, "error": ...}`` when the projection is rejected; a
+    rejected projection leaves the server ready for the next request. End of
+    input (the harness closing its pipe or exiting) is the only shutdown
+    request.
+    """
+    _write_response(responses, {"ready": True, "protocol": SERVE_PROTOCOL})
+    while True:
+        line = requests.readline()
+        if not line:
+            return 0
+        _write_response(responses, _serve_request(line))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audit-db", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--audit-db", type=Path)
+    parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
-    if args.audit_db.resolve() == args.out.resolve():
-        raise ValueError("canonical projection output must differ from the audit database")
-
-    records = _read_projected_records(args.audit_db)
-    _replace_jsonl(args.out, records)
+    if args.serve:
+        if args.audit_db is not None or args.out is not None:
+            parser.error("--serve takes the audit database and output from each request")
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+        return serve(sys.stdin, sys.stdout)
+    if args.audit_db is None or args.out is None:
+        parser.error("--audit-db and --out are required without --serve")
+    project(args.audit_db, args.out)
     return 0
 
 
@@ -231,5 +290,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, ValueError, sqlite3.Error) as exc:
-        print(f"canonical audit projection failed: {exc}", file=os.sys.stderr)
+        print(f"canonical audit projection failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

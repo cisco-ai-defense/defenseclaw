@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -196,3 +199,70 @@ def test_corrupt_projection_fails_closed(
 
     with pytest.raises(ValueError):
         PROJECTOR._read_projected_records(database)
+
+
+def _request(database: Path, output: Path) -> str:
+    return json.dumps({"audit_db": str(database), "out": str(output)}) + "\n"
+
+
+def test_serve_answers_every_request_and_survives_rejections(tmp_path: Path) -> None:
+    database = tmp_path / "audit.db"
+    expected = _database(database)
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    requests = io.StringIO(
+        _request(database, first)
+        + _request(tmp_path / "missing.db", second)
+        + "not json\n"
+        + json.dumps({"audit_db": str(database)}) + "\n"
+        + _request(database, database)
+        + _request(database, second)
+    )
+    responses = io.StringIO()
+
+    assert PROJECTOR.serve(requests, responses) == 0
+
+    answers = [json.loads(line) for line in responses.getvalue().splitlines()]
+    assert answers[0] == {"ready": True, "protocol": 1}
+    assert answers[1] == {"ok": True}
+    assert [answer["ok"] for answer in answers[2:6]] == [False] * 4
+    assert "missing" in answers[2]["error"]
+    assert "must differ from the audit database" in answers[5]["error"]
+    assert answers[6] == {"ok": True}
+    assert len(answers) == 7
+    assert first.read_text(encoding="utf-8") == expected + "\n"
+    assert second.read_text(encoding="utf-8") == expected + "\n"
+    assert not second.with_name("missing.db").exists()
+
+
+def test_serve_process_exits_cleanly_at_end_of_input(tmp_path: Path) -> None:
+    database = tmp_path / "audit.db"
+    expected = _database(database)
+    output = tmp_path / "projection.jsonl"
+    script = Path(PROJECTOR.__file__)
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--serve"],
+        input=_request(database, output),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ['{"ready":true,"protocol":1}', '{"ok":true}']
+    assert output.read_text(encoding="utf-8") == expected + "\n"
+
+
+def test_serve_rejects_one_shot_paths(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(Path(PROJECTOR.__file__)), "--serve", "--audit-db", str(tmp_path / "a")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "--serve takes the audit database and output from each request" in completed.stderr
