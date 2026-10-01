@@ -579,7 +579,7 @@ func validateWindowsCursorManagedPublicArtifacts(
 	if err != nil {
 		return artifacts, err
 	}
-	if err := connector.VerifyWindowsCursorEnterpriseHooks(artifacts.hooks.data, artifacts.adapter.path, "closed"); err != nil {
+	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(artifacts.hooks.data, artifacts.adapter.path, "closed"); err != nil {
 		return artifacts, fmt.Errorf("enterprise hooks: verify Cursor enterprise hooks: %w", err)
 	}
 	artifacts.active = true
@@ -910,7 +910,7 @@ func installWindowsCursorManagedPolicy(
 					} else if current.active {
 						// Preserve an administrator's unrelated concurrent update only
 						// when the prior active policy remains fully callable.
-						if err := connector.VerifyWindowsCursorEnterpriseHooks(
+						if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(
 							nowHooks.data,
 							before.adapter.path,
 							"closed",
@@ -998,6 +998,9 @@ func installWindowsCursorManagedPolicy(
 				err = errors.New("Cursor enterprise policy did not become active")
 			}
 			return failMutation(err)
+		}
+		if err := connector.VerifyWindowsCursorEnterpriseHooks(installed.hooks.data, installed.adapter.path, "closed"); err != nil {
+			return failMutation(fmt.Errorf("enterprise hooks: installed Cursor hook command is not current: %w", err))
 		}
 		rollback = func() error {
 			return withWindowsCursorManagedTransaction(func() error {
@@ -1538,7 +1541,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		return err
 	}
 	adapterPath := paths.Adapter
-	if err := connector.VerifyWindowsCursorEnterpriseHooks(snapshot.Hooks, adapterPath, "closed"); err != nil {
+	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(snapshot.Hooks, adapterPath, "closed"); err != nil {
 		return fmt.Errorf("enterprise hooks: Cursor snapshot hook contract is invalid: %w", err)
 	}
 	var receipt windowsCursorManagedPolicyReceipt

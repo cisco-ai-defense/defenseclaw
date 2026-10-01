@@ -153,6 +153,8 @@ func TestWindowsCursorEnterpriseHookCommandIsShellNeutral(t *testing.T) {
 		wantScript := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
 			"[Text.UTF8Encoding]::new($false,$true),$false);" +
 			"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
+			"if($payload.StartsWith([string][char]0xFEFF)){$payload=$payload.Substring(1)};" +
+			"if($payload.TrimStart().StartsWith([string][char]0x22)){$payload=([string][char]0x7B)+$payload};" +
 			"$payload | & " + powershellQuoteLiteral(adapterPath)
 		if decoded := decodePowerShellEncodedCommandForTest(t, command); decoded != wantScript {
 			t.Fatalf("decoded Cursor enterprise command = %q, want %q", decoded, wantScript)
@@ -171,9 +173,15 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 	root := t.TempDir()
 	adapterPath := filepath.Join(root, "cursor-hook.ps1")
 	adapter := strings.Join([]string{
+		`[CmdletBinding()]`,
+		`param([Parameter(ValueFromPipeline = $true)][AllowNull()][object]$InputObject)`,
+		`begin { $parts = [System.Collections.Generic.List[string]]::new() }`,
+		`process { if ($null -ne $InputObject) { [void]$parts.Add([string]$InputObject) } }`,
+		`end {`,
 		`$ErrorActionPreference = 'Stop'`,
-		`$payload = (@($input | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)`,
+		`$payload = $parts -join [Environment]::NewLine`,
 		`[IO.File]::WriteAllText($env:DC_CURSOR_UTF8_OUTPUT, $payload, [Text.UTF8Encoding]::new($false))`,
+		`}`,
 	}, "\r\n")
 	if err := os.WriteFile(adapterPath, []byte(adapter), 0o600); err != nil {
 		t.Fatalf("write Cursor UTF-8 probe adapter: %v", err)
@@ -183,8 +191,17 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := `{"path":"C:\\用户\\résumé.txt","prompt":"東京 – café 🚀"}`
+	testCases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "PlainUTF8", input: payload, want: payload},
+		{name: "LeadingBOM", input: "\uFEFF" + payload, want: payload},
+		{name: "EmbeddedBOM", input: `{"prompt":"left` + "\uFEFF" + `right"}`, want: `{"prompt":"left` + "\uFEFF" + `right"}`},
+	}
 
-	run := func(t *testing.T, commandForHost func(context.Context) *exec.Cmd) {
+	run := func(t *testing.T, commandForHost func(context.Context) *exec.Cmd, input, want string) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -194,7 +211,7 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 			"DC_CURSOR_UTF8_OUTPUT="+outputPath,
 			"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
 		)
-		cmd.Stdin = strings.NewReader(payload)
+		cmd.Stdin = strings.NewReader(input)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("run Cursor enterprise command: %v\ncommand: %s\noutput: %s", err, command, output)
 		}
@@ -205,32 +222,40 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read Cursor UTF-8 probe output: %v", err)
 		}
-		if string(got) != payload {
-			t.Fatalf("Cursor enterprise payload = %q, want %q", got, payload)
+		if string(got) != want {
+			t.Fatalf("Cursor enterprise payload = %q, want %q", got, want)
 		}
 	}
 
 	t.Run("PowerShell", func(t *testing.T) {
-		run(t, func(ctx context.Context) *exec.Cmd {
-			return exec.CommandContext(
-				ctx,
-				"powershell.exe",
-				"-NoLogo",
-				"-NoProfile",
-				"-NonInteractive",
-				"-Command",
-				command,
-			)
-		})
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				run(t, func(ctx context.Context) *exec.Cmd {
+					return exec.CommandContext(
+						ctx,
+						"powershell.exe",
+						"-NoLogo",
+						"-NoProfile",
+						"-NonInteractive",
+						"-Command",
+						command,
+					)
+				}, tc.input, tc.want)
+			})
+		}
 	})
 	t.Run("GitBash", func(t *testing.T) {
 		bash, err := exec.LookPath("bash")
 		if err != nil {
 			t.Skip("Git Bash is not installed")
 		}
-		run(t, func(ctx context.Context) *exec.Cmd {
-			return exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-lc", command)
-		})
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				run(t, func(ctx context.Context) *exec.Cmd {
+					return exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-lc", command)
+				}, tc.input, tc.want)
+			})
+		}
 	})
 }
 
