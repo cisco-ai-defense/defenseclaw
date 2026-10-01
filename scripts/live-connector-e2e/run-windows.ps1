@@ -5316,23 +5316,40 @@ function Get-CodexWindowsHookCommand([string]$Config) {
     return [pscustomobject]@{ Command = $command; Encoded = $encoded.Groups[1].Value; Script = $script }
 }
 
+# Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
+# started with Process.Start, which keeps the handle CreateProcess returned so
+# a launcher that exits at once still returns its status, and with the call
+# operator piped to Out-Host in Constrained Language mode. It returns the
+# launcher, its arguments and the call-operator invocation, or $null when the
+# script is not exactly that bridge with the same launcher and arguments in
+# both branches.
+function Get-AwaitedHookBridge([string]$Script) {
+    $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
+        'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
+        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
+        '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
+        '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
+        '\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); ' +
+        '\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode$'
+    $match = [regex]::Match($Script, $pattern)
+    if (-not $match.Success) { return $null }
+    $arguments = @($match.Groups['arguments'].Value.Split(' '))
+    if ((@($arguments | ForEach-Object { " '" + $_ + "'" }) -join '') -cne $match.Groups['quoted'].Value) {
+        return $null
+    }
+    $fileLiteral = $match.Groups['file'].Value
+    return [pscustomobject]@{
+        File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
+        Arguments = $arguments
+        Invocation = $match.Groups['invocation'].Value
+    }
+}
+
 function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [string]$Context) {
-    $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*'')\s+-ArgumentList\s+@\((?<arguments>''(?:''''|[^''])*''(?:,''(?:''''|[^''])*'')*)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
-    $startProcess = [regex]::Match($CodexCommand.Script, $startProcessPattern)
-    $argumentLiterals = if ($startProcess.Success) {
-        @([regex]::Matches($startProcess.Groups['arguments'].Value, "'(?:''|[^'])*'"))
-    } else {
-        @()
-    }
-    $arguments = @($argumentLiterals | ForEach-Object {
-        $_.Value.Substring(1, $_.Value.Length - 2).Replace("''", "'")
-    })
-    $file = if ($startProcess.Success) {
-        $literal = $startProcess.Groups['file'].Value
-        $literal.Substring(1, $literal.Length - 2).Replace("''", "'")
-    } else {
-        ''
-    }
+    $bridge = Get-AwaitedHookBridge $CodexCommand.Script
+    $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
+    $file = if ($null -ne $bridge) { $bridge.File } else { '' }
     $contractEvents = @{
         'codex-hooks-v1' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop')
         'codex-hooks-v2' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop')
@@ -5341,17 +5358,14 @@ function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [strin
     }
     $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
     $contract = if ($arguments.Count -eq 7) { $arguments[6] } else { '' }
-    if (-not $startProcess.Success -or
-        ($argumentLiterals.Value -join ',') -cne $startProcess.Groups['arguments'].Value -or
+    if ($null -eq $bridge -or
         [IO.Path]::GetFileName($file) -cne 'defenseclaw-hook.exe' -or
         $arguments.Count -ne 7 -or
         ($arguments -join "`0") -cne (@(
             'hook', '--connector', 'codex', '--event', $boundEvent, '--hook-contract', $contract
         ) -join "`0") -or
         -not $contractEvents.ContainsKey($contract) -or
-        $boundEvent -cnotin @($contractEvents[$contract]) -or
-        $CodexCommand.Script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-        $CodexCommand.Script -match '(?i)\$LASTEXITCODE') {
+        $boundEvent -cnotin @($contractEvents[$contract])) {
         throw "$Context does not use the exact synchronous native hook command"
     }
 }
@@ -5523,13 +5537,10 @@ function Assert-AntigravityWindowsHookCommands([string]$Config) {
         if (-not $encoded.Success) { throw "Antigravity $event command is not an EncodedCommand" }
         try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
         catch { throw "Antigravity $event encoded command is invalid" }
-        $eventPattern = [regex]::Escape("'hook','--connector','antigravity','--event','$event'")
-        if ($script -notmatch '(?i)Microsoft\.PowerShell\.Management\\Start-Process' -or
-            $script -notmatch '(?i)defenseclaw-hook\.exe' -or
-            $script -notmatch $eventPattern -or
-            $script -notmatch '(?i)-NoNewWindow\s+-Wait\s+-PassThru' -or
-            $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-            $script -match '(?i)\$LASTEXITCODE') {
+        $bridge = Get-AwaitedHookBridge $script
+        if ($null -eq $bridge -or
+            [IO.Path]::GetFileName($bridge.File) -cne 'defenseclaw-hook.exe' -or
+            (@($bridge.Arguments) -join "`0") -cne (@('hook', '--connector', 'antigravity', '--event', $event) -join "`0")) {
             throw "Antigravity $event does not use the exact synchronous event-bound native command"
         }
     }

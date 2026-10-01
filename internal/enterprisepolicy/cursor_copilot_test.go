@@ -127,7 +127,8 @@ func TestCopilotWindowsRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"powershell"`) || !strings.Contains(string(data), `-Wait -PassThru`) || strings.Contains(string(data), `"bash"`) {
+	if !strings.Contains(string(data), `"powershell"`) || !strings.Contains(string(data), `$hookProcess=[System.Diagnostics.Process]::Start($hookStart)`) ||
+		strings.Contains(string(data), `Start-Process`) || strings.Contains(string(data), `"bash"`) {
 		t.Fatalf("windows copilot drop-in: %s", data)
 	}
 	if path, _ := copilotDropInPath(opts); path != `C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json` {

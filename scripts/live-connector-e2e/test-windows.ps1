@@ -4760,11 +4760,10 @@ connection.close()
     ).Value
     Assert-True ($doctorContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
         $doctorSetupContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
-        $synchronousCodexHookContract -match 'Start-Process' -and
-        $synchronousCodexHookContract -match '-NoNewWindow\\s\+\-Wait\\s\+\-PassThru' -and
-        $synchronousCodexHookContract -match '\$hookProcess\\\.ExitCode' -and
-        $synchronousCodexHookContract -match '\$LASTEXITCODE') `
-        'Codex Doctor contracts require the synchronous native launcher and reject stale LASTEXITCODE handling'
+        $synchronousCodexHookContract.Contains('Get-AwaitedHookBridge $CodexCommand.Script') -and
+        $harnessText.Contains('function Get-AwaitedHookBridge') -and
+        $harnessText.Contains('\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)')) `
+        'Codex Doctor contracts require the awaited native launcher bridge'
     $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
     $doctorAmpSelfHeal = $doctorContract.IndexOf('Assert-AmpPluginSelfHeal $configPath $originalConfig', [StringComparison]::Ordinal)
     $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)

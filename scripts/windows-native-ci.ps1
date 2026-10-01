@@ -4614,6 +4614,36 @@ function Assert-NoGatewayAutoStart {
     }
 }
 
+# Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
+# started with Process.Start, which keeps the handle CreateProcess returned so
+# a launcher that exits at once still returns its status, and with the call
+# operator piped to Out-Host in Constrained Language mode. It returns the
+# launcher, its arguments and the call-operator invocation, or $null when the
+# script is not exactly that bridge with the same launcher and arguments in
+# both branches.
+function Get-AwaitedHookBridge([string]$Script) {
+    $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
+        'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
+        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
+        '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
+        '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
+        '\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); ' +
+        '\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode$'
+    $match = [regex]::Match($Script, $pattern)
+    if (-not $match.Success) { return $null }
+    $arguments = @($match.Groups['arguments'].Value.Split(' '))
+    if ((@($arguments | ForEach-Object { " '" + $_ + "'" }) -join '') -cne $match.Groups['quoted'].Value) {
+        return $null
+    }
+    $fileLiteral = $match.Groups['file'].Value
+    return [pscustomobject]@{
+        File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
+        Arguments = $arguments
+        Invocation = $match.Groups['invocation'].Value
+    }
+}
+
 function Assert-WizardHookRegistration(
     [object]$Specification,
     [string]$DataRoot,
@@ -4657,7 +4687,6 @@ function Assert-WizardHookRegistration(
         }
         $registeredEvents = [Collections.Generic.List[string]]::new()
         $registeredContract = ''
-        $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*'')\s+-ArgumentList\s+@\((?<arguments>''(?:''''|[^''])*''(?:\s*,\s*''(?:''''|[^''])*'')*)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
         foreach ($tomlString in $tomlStrings) {
             $literal = $tomlString.Groups['literal'].Value
             if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
@@ -4670,21 +4699,9 @@ function Assert-WizardHookRegistration(
             if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
             try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
             catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-            $startProcess = [regex]::Match($script, $startProcessPattern)
-            $argumentLiterals = if ($startProcess.Success) {
-                @([regex]::Matches($startProcess.Groups['arguments'].Value, "'(?:''|[^'])*'"))
-            } else {
-                @()
-            }
-            $arguments = @($argumentLiterals | ForEach-Object {
-                $_.Value.Substring(1, $_.Value.Length - 2).Replace("''", "'")
-            })
-            $file = if ($startProcess.Success) {
-                $fileLiteral = $startProcess.Groups['file'].Value
-                $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
-            } else {
-                ''
-            }
+            $bridge = Get-AwaitedHookBridge $script
+            $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
+            $file = if ($null -ne $bridge) { $bridge.File } else { '' }
             $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
             $boundContract = if ($arguments.Count -eq 7) { $arguments[6] } else { '' }
             if (-not $codexEventsByContract.ContainsKey($boundContract)) {
@@ -4696,17 +4713,14 @@ function Assert-WizardHookRegistration(
                 throw "wizard-selected Codex registration mixes hook contracts: $registeredContract, $boundContract"
             }
             $expectedEvents = @($codexEventsByContract[$boundContract])
-            if (-not $startProcess.Success -or
+            if ($null -eq $bridge -or
                 [IO.Path]::GetFileName($file) -cne 'defenseclaw-hook.exe' -or
                 $arguments.Count -ne 7 -or
                 ($arguments -join "`0") -cne (@(
                     'hook', '--connector', 'codex', '--event', $boundEvent,
                     '--hook-contract', $boundContract
                 ) -join "`0") -or
-                $boundEvent -cnotin $expectedEvents -or
-                $script -notmatch '(?i)^\$ErrorActionPreference=''Stop'';\s+\$env:NoDefaultCurrentDirectoryInExePath=''1'';' -or
-                $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-                $script -match '(?i)\$LASTEXITCODE') {
+                $boundEvent -cnotin $expectedEvents) {
                 throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
             }
             $registeredEvents.Add($boundEvent)
@@ -4762,9 +4776,9 @@ function Assert-WizardHookRegistration(
             } catch {
                 throw "wizard-selected Antigravity $event command is not valid UTF-16LE Base64"
             }
-            $eventArgs = "'hook','--connector','antigravity','--event','" + $event + "'"
-            if ($script -notmatch '(?i)Start-Process' -or
-                $script.IndexOf($eventArgs, [StringComparison]::Ordinal) -lt 0) {
+            $bridge = Get-AwaitedHookBridge $script
+            if ($null -eq $bridge -or
+                (@($bridge.Arguments) -join "`0") -cne (@('hook', '--connector', 'antigravity', '--event', $event) -join "`0")) {
                 throw "wizard-selected Antigravity $event command is not event-bound to the native hook launcher"
             }
         }
@@ -5029,22 +5043,14 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
     catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
 
-    $startPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\((?<arguments>''hook'',''--connector'',''codex''(?:,''--event'',''(?:''''|[^''])*'')?(?:,''--hook-contract'',''(?:''''|[^''])*'')?)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
-    $start = [regex]::Match($script, $startPattern)
-    if (-not $start.Success) {
+    $bridge = Get-AwaitedHookBridge $script
+    if ($null -eq $bridge -or
+        [IO.Path]::GetFileName($bridge.File) -cne 'defenseclaw-hook.exe' -or
+        (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
-    $argumentLiterals = @([regex]::Matches(
-        $start.Groups['arguments'].Value,
-        "'(?:''|[^'])*'"
-    ))
-    if (($argumentLiterals.Value -join ',') -cne $start.Groups['arguments'].Value) {
-        throw 'cannot stage legacy Codex hook: launcher arguments are not exact PowerShell literals'
-    }
-    $legacyScript = $script.Replace(
-        $start.Value,
-        ('& ' + $start.Groups['file'].Value + ' ' + ($argumentLiterals.Value -join ' '))
-    ).Replace('exit $hookProcess.ExitCode', 'exit $LASTEXITCODE')
+    $legacyScript = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
+        $bridge.Invocation + '; exit $LASTEXITCODE'
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
