@@ -127,6 +127,14 @@ func WindowsCodexStandaloneManagedHookCommand(hookBinary, event, hookContract st
 	return windowsCodexBoundManagedHookCommand(hookBinary, event, hookContract)
 }
 
+// WindowsAwaitedHookStatements returns the PowerShell statements that start
+// the GUI-subsystem hook launcher, wait for it and exit with its status,
+// keeping the process handle from the start so a launcher that exits at once
+// still returns its status (see windowsAwaitedHookStatements).
+func WindowsAwaitedHookStatements(hookBinary string, arguments []string) []string {
+	return windowsAwaitedHookStatements(hookBinary, arguments)
+}
+
 // PowerShellQuoteLiteral returns one inert single-quoted PowerShell literal.
 func PowerShellQuoteLiteral(value string) string {
 	return powershellQuoteLiteral(value)

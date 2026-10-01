@@ -1468,6 +1468,36 @@ func TestPackagedMigrationPreflightUsesStagedTargetRuntime(t *testing.T) {
 	}
 }
 
+func TestManagedBytecodeWarmupCompilesCLIImportClosureWithoutRunningCLI(t *testing.T) {
+	if args := managedBytecodeWarmupArgs(); !slices.Contains(args, "-I") ||
+		slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "-O") || arg == "-B" }) {
+		t.Fatalf("warm-up args = %v, want the launcher's isolated, unoptimized bytecode flags", args)
+	}
+	fixture := newPackagedScriptFixture(t, "1.0.0")
+	marker := filepath.Join(fixture.root, "cli-ran")
+	fixture.writeModule(t, "commands.py", "VALUE = 1\n")
+	fixture.writeModule(t, "main.py", fmt.Sprintf(
+		"from defenseclaw import commands\nif __name__ == \"__main__\":\n    open(%q, \"w\").close()\n", marker,
+	))
+	if output, err := fixture.run(managedBytecodeWarmupScript); err != nil {
+		t.Fatalf("bytecode warm-up failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	for _, module := range []string{"__init__", "main", "commands"} {
+		matches, err := filepath.Glob(filepath.Join(fixture.root, "defenseclaw", "__pycache__", module+".*.pyc"))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("bytecode for %s = %v (%v), want one cached module", module, matches, err)
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bytecode warm-up ran the CLI entry point: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := warmManagedPythonBytecode(cancelled, t.TempDir()); !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("warm-up after setup cancellation = %v, want errSetupCancelled", err)
+	}
+}
+
 func TestPackagedTargetRuntimeEnvRejectsAmbientRuntimeAndConfigAuthority(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "staged-target")
 	dataRoot := filepath.Join(t.TempDir(), "live-data")

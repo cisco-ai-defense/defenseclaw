@@ -16,8 +16,24 @@ services:
     volumes:
       - /opt/splunk/etc
       - /opt/splunk/var
-      - ../splunk/default.yml:/tmp/defaults/default.yml:ro
-      - ../splunk:/opt/splunk-claw-bridge/splunk:ro
+      # Long syntax with create_host_path: false. With the short form, the
+      # Docker daemon creates a missing source path as a root-owned
+      # directory. On a persistent self-hosted runner that leaves root-owned
+      # directories in the checkout that actions/checkout cannot delete, so
+      # every later job fails before it reaches the repo. Fail this start
+      # instead.
+      - type: bind
+        source: ../splunk/default.yml
+        target: /tmp/defaults/default.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../splunk
+        target: /opt/splunk-claw-bridge/splunk
+        read_only: true
+        bind:
+          create_host_path: false
 
   splunk-s3-exporter:
     profiles:
