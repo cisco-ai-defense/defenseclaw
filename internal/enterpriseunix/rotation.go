@@ -645,6 +645,9 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	case !present:
 		return refuse("there is no per-user credential key to rotate yet; the hook guardian creates it when it enrolls the first user")
 	}
+	if intent, err := env.loadRotationIntent(); err != nil || intent != nil {
+		return refuse("an earlier credential rotation is still rolling back; rotate again once `enterprise %s status` no longer reports it", platformName(env.GOOS))
+	}
 	if exists(env.stagedUserKeyPath()) || exists(env.retiringUserKeyPath()) {
 		// No rotation owns it (recoverInterruptedRotation settled any
 		// recorded one), so nothing authorized it: remove it.
@@ -799,26 +802,19 @@ func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Dep
 			return fmt.Errorf("the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
 		}
 	}
-	var problems []string
 	idA := connector.UserScopedTokenKeyFingerprint(keyA)
-	restored := false
-	lastID := env.attestationID()
-	for attempt := 0; attempt < rotationAttempts && !restored; attempt++ {
-		attestation, err := l.freshAttestation(ctx, lastID)
-		if err != nil {
-			problems = append(problems, err.Error())
-			break
-		}
-		lastID = attestation.ID
-		done, fatal := onKey(attestation, idA, manifestSHA256, selected)
-		if fatal != "" {
-			problems = append(problems, fatal)
-			break
-		}
-		restored = done
+	restored, problems := l.moveUsersBack(ctx, idA, manifestSHA256, selected)
+	if !restored && env.retiringKeyHonored() {
+		// Removing the new key now would refuse every user still on it.
+		// The gateway keeps accepting it only until
+		// connector.RotationKeyMaxAge after the rotation staged it, and the
+		// rotation record stays, so the next lifecycle run finishes the
+		// rollback once the guardian has moved them back.
+		problems = append(problems, "not every user is back on the previous key yet; "+rollbackPendingNote)
+		return errors.New("rollback: " + strings.Join(problems, "; "))
 	}
-	// Every user is back on A, or the attempts ran out: the new key goes
-	// either way, so the rollback never leaves both keys accepted.
+	// Every user is back on A, or the gateway no longer honors the new key
+	// anyway: it goes, so the rollback never leaves both keys accepted.
 	if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
 		return fmt.Errorf("rollback: the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
 	}
@@ -829,12 +825,56 @@ func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Dep
 		problems = append(problems, "the rotation record could not be removed: "+err.Error())
 	}
 	if !restored {
-		problems = append(problems, "not every user is back on the previous key yet; the hook guardian re-renders them on its next reconcile")
+		problems = append(problems, "not every user is back on the previous key; the hook guardian re-renders them on its next reconcile")
 	}
 	if len(problems) > 0 {
 		return errors.New("rollback: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// rollbackPendingNote explains a rollback that keeps the retiring key.
+var rollbackPendingNote = fmt.Sprintf("the new key stays accepted for at most %d minutes after the rotation began while the hook guardian moves them back, and the next lifecycle run finishes the rollback", int(connector.RotationKeyMaxAge/time.Minute))
+
+// moveUsersBack reconciles, at most rotationAttempts times, until every
+// target of want is current and verified on keyID. A nil want takes the
+// credential-bearing targets of each attestation, and then also requires
+// that no failed target still holds a credential (targetsNotMoved).
+func (l *lifecycle) moveUsersBack(ctx context.Context, keyID, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (bool, []string) {
+	lastID := l.env.attestationID()
+	for attempt := 0; attempt < rotationAttempts; attempt++ {
+		attestation, err := l.freshAttestation(ctx, lastID)
+		if err != nil {
+			return false, []string{err.Error()}
+		}
+		lastID = attestation.ID
+		manifest, targets := manifestSHA256, want
+		if want == nil {
+			manifest, targets = attestation.ManifestSHA256, credentialTargets(attestation)
+			if held, _, err := l.targetsNotMoved(ctx, attestation); err != nil || len(held) > 0 {
+				continue
+			}
+		}
+		done, fatal := onKey(attestation, keyID, manifest, targets)
+		if fatal != "" {
+			return false, []string{fatal}
+		}
+		if done {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// retiringKeyHonored reports whether the gateway still accepts the retiring
+// key: it exists and is younger than connector.RotationKeyMaxAge.
+func (e *Env) retiringKeyHonored() bool {
+	info, err := os.Lstat(e.retiringUserKeyPath())
+	if err != nil {
+		return false
+	}
+	age := time.Since(info.ModTime())
+	return age <= connector.RotationKeyMaxAge && age >= -connector.RotationKeyMaxAge
 }
 
 // recoverInterruptedRotation settles a rotation an earlier run did not
@@ -859,10 +899,20 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 		return
 	}
 	// Users the interrupted run had already moved go back to the committed
-	// key on this reconcile, while the gateway still accepts the retired
-	// key; it goes once they are back.
+	// key while the gateway still accepts the retired key; it goes once a
+	// fresh attestation shows every user back, or once the gateway no
+	// longer honors it.
 	if err := env.withReconcileLock(ctx, env.retireStagedKey); err == nil {
-		_ = l.triggerGuardianReconcile(ctx)
+		if committedID == "" || !env.retiringKeyHonored() {
+			_ = l.triggerGuardianReconcile(ctx)
+		} else if restored, problems := l.moveUsersBack(ctx, committedID, "", nil); !restored {
+			note := "an interrupted credential rotation is still rolling back: not every user is back on key " + shortKeyID(committedID) + " yet"
+			if len(problems) > 0 {
+				note += " (" + strings.Join(problems, "; ") + ")"
+			}
+			r.AddWarning(codeRotationRecovered, note+"; "+rollbackPendingNote)
+			return
+		}
 	}
 	if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
 		r.AddWarning(codeRotationRecovered, fmt.Sprintf("an interrupted credential rotation could not be rolled back yet: %v", err))

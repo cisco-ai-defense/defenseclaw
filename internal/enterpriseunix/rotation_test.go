@@ -55,6 +55,9 @@ type rotationHost struct {
 	keyA       string
 	rendered   map[string]string // user -> key fingerprint of their hooks
 	failStaged bool              // bob fails whenever a key is staged
+	// holdBack keeps a user on the key their hooks carry while no key is
+	// staged (a guardian that cannot move them back yet).
+	holdBack bool
 	// failed are targets every reconcile reports failed, beside the users.
 	failed     []enterprisehooks.CredentialAttestationTarget
 	reconciles int
@@ -171,6 +174,8 @@ func (h *rotationHost) reconcile() {
 			target.State, target.UID = enterprisehooks.CredentialTargetFailed, -1
 		case h.rendered[user] == keyID:
 			target.Credentials, target.Verified = true, true
+		case h.holdBack && !exists(h.env.stagedUserKeyPath()):
+			target.Credentials = true
 		default:
 			h.rendered[user] = keyID
 			target.Credentials = true
@@ -267,6 +272,25 @@ func TestRotateCredentialsMovesEveryUserBeforeTheKeyCommits(t *testing.T) {
 	// until the guardian had moved her back.
 	if slices.Contains(h.events, "refused alice") {
 		t.Fatalf("the rollback refused a user who had moved: %v", h.events)
+	}
+
+	// A rollback that cannot move alice back keeps accepting the new key
+	// and keeps the rotation record; the next run finishes the rollback
+	// once the guardian has moved her.
+	h = newRotationHost(t)
+	h.failStaged, h.holdBack = true, true
+	requireError(t, h.run(Options{Action: ActionRotateCredentials}), codeRollbackFailed)
+	if len(h.liveKeyIDs()) != 2 || !exists(h.env.rotationIntentPath()) {
+		t.Fatalf("an unfinished rollback stopped accepting the new key: keys=%v", h.liveKeyIDs())
+	}
+	if result := h.run(Options{Action: ActionReconcile}); !hasWarning(result, codeRotationRecovered) || len(h.liveKeyIDs()) != 2 {
+		t.Fatalf("recovery retired the new key before alice was back: %+v keys=%v", result.Warnings, h.liveKeyIDs())
+	}
+	h.holdBack = false
+	requireOK(t, h.run(Options{Action: ActionReconcile}))
+	h.requireNoRotationLeft()
+	if h.committedKey() != h.keyA || h.rendered["alice"] != idA || slices.Contains(h.events, "refused alice") {
+		t.Fatalf("the rollback did not finish on key A: users=%v events=%v", h.rendered, h.events)
 	}
 }
 
