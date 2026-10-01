@@ -460,12 +460,15 @@ transaction is recovered. The failed result names the command to run next.
 
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,
-a file whose owner or permissions changed, or a hard link. It does not stay
-pending for that either. It renames the folder the transaction created to
+a file other than a DefenseClaw hook file whose owner or permissions changed,
+or a hard link. A DefenseClaw hook file whose permissions changed is removed.
+The rollback does not stay pending for the rest either, and the same holds
+when the account changed the owner or permissions of the folder itself or
+replaced it: it renames the folder to
 `%USERPROFILE%\.defenseclaw.rollback-<random>`, with that content inside, and
-finishes. The folder keeps the account as its owner; review it and delete it.
-A file another program holds open still makes the rollback wait, because a
-retry can remove it once the program closes it.
+finishes. Review that folder and delete it. A file or folder another program
+holds open still makes the rollback wait, because a retry can finish once the
+program closes it.
 
 The rollback of a failed first install also puts back each account's agent
 configuration and removes the machine policy the install published. It acts
