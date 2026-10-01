@@ -157,8 +157,13 @@ config with no connectors protects nothing. See
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
 Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
-the rule packs built into it. A rule-pack directory you name must exist and
-be writable only by administrators. Setup checks the config with the
+the rule packs built into it. A rule-pack directory you name must exist, be
+writable only by administrators, and be readable by the gateway service
+account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
+`Users` read and execute entry in place). Setup's checks run as SYSTEM, so
+they pass for a folder that only SYSTEM and Administrators can read. The
+gateway then cannot start, and Setup reports only that the service failed to
+start and rolls back. Setup checks the config with the
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
