@@ -2415,7 +2415,48 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 			verdict.Action == "block" && mode == "action")
 		if verdict.Action == "block" && mode == "action" {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
-			writeOpenAIError(w, http.StatusForbidden, msg)
+			// Return block as a Responses API SSE stream so Codex displays it
+			bID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
+			mID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			bf, _ := w.(http.Flusher)
+			blockSSE := func(d []byte) {
+				fmt.Fprintf(w, "data: %s\n\n", d)
+				if bf != nil { bf.Flush() }
+			}
+			d1, _ := json.Marshal(map[string]interface{}{
+				"type": "response.created",
+				"response": map[string]interface{}{"id": bID, "object": "response", "status": "in_progress", "model": decision.Model, "output": []interface{}{}},
+			})
+			blockSSE(d1)
+			d2, _ := json.Marshal(map[string]interface{}{
+				"type": "response.output_item.added", "output_index": 0,
+				"item": map[string]interface{}{"type": "message", "id": mID, "status": "in_progress", "role": "assistant", "content": []interface{}{}},
+			})
+			blockSSE(d2)
+			d3, _ := json.Marshal(map[string]interface{}{
+				"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+				"part": map[string]interface{}{"type": "output_text", "text": ""},
+			})
+			blockSSE(d3)
+			d4, _ := json.Marshal(map[string]interface{}{
+				"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": msg,
+			})
+			blockSSE(d4)
+			d5, _ := json.Marshal(map[string]interface{}{
+				"type": "response.completed",
+				"response": map[string]interface{}{
+					"id": bID, "object": "response", "status": "completed", "model": decision.Model,
+					"output": []interface{}{map[string]interface{}{
+						"type": "message", "id": mID, "status": "completed", "role": "assistant",
+						"content": []interface{}{map[string]interface{}{"type": "output_text", "text": msg}},
+					}},
+					"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+				},
+			})
+			blockSSE(d5)
 			return
 		}
 	}
