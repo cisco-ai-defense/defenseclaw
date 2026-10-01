@@ -234,9 +234,11 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	// PowerShell 5.1 startup is host-dependent and deliberately outside the
 	// adapter's budget (it restarts the deadline once the launcher exists), so
 	// the timeout plus the kill/drain reserve must fit the contract from there.
-	if elapsed := finishedAt.Sub(launchedAt); elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
+	elapsed := finishedAt.Sub(launchedAt)
+	if elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
 		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
 	}
+	t.Logf("adapter finished %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
 	if code != 0 {
 		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
 	}
@@ -355,9 +357,11 @@ func TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed(t *tes
 	// As for Copilot, the timeout plus the cleanup reserve must fit Cursor's
 	// contract from the moment the launcher exists; PowerShell startup is
 	// host-dependent and outside the adapter's budget.
-	if elapsed := finishedAt.Sub(launchedAt); elapsed > time.Duration(cursorWindowsHookContractTimeoutMS)*time.Millisecond {
+	elapsed := finishedAt.Sub(launchedAt)
+	if elapsed > time.Duration(cursorWindowsHookContractTimeoutMS)*time.Millisecond {
 		t.Fatalf("adapter exceeded the Cursor command-hook deadline: %s after the launcher started", elapsed)
 	}
+	t.Logf("adapter finished %s after the launcher started", elapsed)
 	if code != 2 {
 		t.Fatalf("exit code = %d, want fail-closed 2; stderr=%q", code, stderr)
 	}
