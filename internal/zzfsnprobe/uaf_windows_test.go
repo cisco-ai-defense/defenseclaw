@@ -45,27 +45,25 @@ func TestRemoveChurnUnderGC(t *testing.T) {
 	}()
 	deadline := time.Now().Add(d)
 	iters := 0
-	for time.Now().Before(deadline) {
-		w, err := fsnotify.NewWatcher()
-		if err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for {
-				select {
-				case _, ok := <-w.Events:
-					if !ok {
-						return
-					}
-				case _, ok := <-w.Errors:
-					if !ok {
-						return
-					}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			select {
+			case _, ok := <-w.Events:
+				if !ok {
+					return
+				}
+			case _, ok := <-w.Errors:
+				if !ok {
+					return
 				}
 			}
-		}()
+		}
+	}()
+	for time.Now().Before(deadline) {
 		for _, dir := range dirs {
 			if err := w.Add(dir); err != nil {
 				t.Fatal(err)
@@ -73,12 +71,10 @@ func TestRemoveChurnUnderGC(t *testing.T) {
 		}
 		for i, dir := range dirs {
 			_ = os.WriteFile(filepath.Join(dir, "f"), []byte(strconv.Itoa(iters+i)), 0o600)
-			if mode != "close" {
+			if mode == "remove" {
 				_ = w.Remove(dir)
 			}
 		}
-		_ = w.Close()
-		<-done
 		iters++
 	}
 	stop.Store(true)

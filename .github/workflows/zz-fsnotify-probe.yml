@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [remove, close]
+        mode: [remove, readd]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -22,5 +22,5 @@ jobs:
         shell: pwsh
         env:
           PROBE_MODE: ${{ matrix.mode }}
-          PROBE_DURATION: 6m
+          PROBE_DURATION: 12m
         run: go test -count=1 -timeout 15m -v ./internal/zzfsnprobe/
