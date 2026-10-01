@@ -1081,6 +1081,15 @@ def setup_llm(
         _clear_legacy_llm_fields(cfg)
     else:
         _configure_llm(cfg, cfg.data_dir, target_path=target_path)
+        missing_key_env = _interactive_llm_missing_key_env(cfg, target_path)
+        if missing_key_env:
+            ux.warn(
+                f"{missing_key_env} has no value, so the LLM judge and LLM scanners cannot use "
+                f"{cfg.resolve_llm(target_path).model} and doctor reports the key as missing."
+            )
+            if not click.confirm("  Save this LLM configuration without a key?", default=False):
+                click.echo("  LLM configuration not saved. Run 'defenseclaw setup llm' when you have a key.")
+                return
     cfg.save()
 
     click.echo()
@@ -1276,6 +1285,24 @@ def _role_to_target_path(role: str) -> str:
     :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
     """
     return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
+
+
+
+def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
+    """Name the key variable an interactively configured LLM still lacks, or "".
+
+    Only the key prompt sets ``api_key_env``; local providers and the
+    Bedrock, Vertex and Azure credential modes clear it and need no key here.
+    """
+    resolved = cfg.resolve_llm(target_path)
+    env_name = resolved.api_key_env
+    if not env_name or not resolved.model or resolved.is_local_provider():
+        return ""
+    if os.environ.get(env_name, "").strip():
+        return ""
+    if _load_dotenv(os.path.join(cfg.data_dir, ".env")).get(env_name, "").strip():
+        return ""
+    return env_name
 
 
 def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:

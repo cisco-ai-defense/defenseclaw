@@ -117,6 +117,27 @@ def test_dependencies_install_from_the_hashed_lock_only() -> None:
     assert re.search(r"uv pip install [^\n]*--no-deps \"\$\{STAGING\}/\$\{WHEEL\}\"", text)
 
 
+def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
+    # An upgrade starts without fresh discovery; the gateway records agent
+    # versions in the hook contract lock from it, and doctor checks them.
+    posix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    posix_refresh = posix.index("agent discover --refresh --no-emit-otel")
+    windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
+    assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
+    assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+
+
+def test_windows_process_listing_survives_a_wmi_refusal() -> None:
+    # WMI refuses a standard user signed in over SSH; an upgrade must still
+    # find this account's own processes.
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = windows[windows.index("function Get-ProcessesUnder") :]
+    body = body[: body.index("\n}\n")]
+    assert "try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {" in body
+    assert "Get-Process" in body
+
+
 def test_installer_never_uses_retired_asset_names() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 

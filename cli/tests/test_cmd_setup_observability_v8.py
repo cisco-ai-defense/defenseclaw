@@ -171,6 +171,18 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     assert result.exit_code == 0, result.output
     source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
     assert source["observability"]["destinations"][0]["network_safety"] == {"allow_private_networks": True}
+    assert "add --plaintext" in result.output
+
+    # MAC-U2-10: a local collector without TLS needs tls.insecure, which add could not write.
+    result = CliRunner().invoke(
+        observability,
+        [*args, "--allow-private-networks", "--plaintext"],
+        obj=_setup_app(tmp_path),
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
 
 
 def test_setup_v8_explicit_token_takes_precedence_over_environment(

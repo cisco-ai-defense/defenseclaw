@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 
 import click
@@ -77,20 +78,44 @@ def _trunc_path(s: str, width: int) -> str:
     return "…" + s[-(width - 1):]
 
 
+_DETAIL_KEY = re.compile(r"[A-Za-z_][\w.]*")
+
+
+def _detail_tokens(raw: str) -> list[str]:
+    """Split details on whitespace, keeping a "<redacted len=N sha=H>" placeholder whole."""
+    tokens: list[str] = []
+    for tok in raw.split():
+        if tokens and tokens[-1].count("<") > tokens[-1].count(">"):
+            tokens[-1] += " " + tok
+        else:
+            tokens.append(tok)
+    return tokens
+
+
 def _humanize_details(raw: str) -> str:
     if not raw:
         return ""
-    tokens = raw.split()
+    tokens = _detail_tokens(raw)
     if not any("=" in t for t in tokens):
         return raw
     kv: dict[str, str] = {}
     plain: list[str] = []
+    last = ""
     for tok in tokens:
-        if "=" in tok:
-            k, v = tok.split("=", 1)
+        k, sep, v = tok.partition("=")
+        if sep and _DETAIL_KEY.fullmatch(k):
             kv[k] = v
+            last = k
+        elif last:
+            # A value with spaces runs on to the next key
+            # ("reason=matched: RULE-ID:title", "agent_version_raw=2.1 (Agent)").
+            kv[last] += " " + tok
         else:
             plain.append(tok)
+    # would_block is the observe-mode "would have blocked"; false says nothing
+    # and reads as a contradiction next to action=block.
+    if kv.get("would_block") == "false":
+        kv.pop("would_block")
     parts: list[str] = []
     if "host" in kv and "port" in kv:
         parts.append(f"{kv.pop('host')}:{kv.pop('port')}")

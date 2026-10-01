@@ -562,8 +562,10 @@ make_venv() {
         || uv venv "${venv}" --quiet --python '>=3.11,<3.14' \
         || return 1
     # The requirements file is the complete hashed lock, so nothing resolves.
-    uv pip install --quiet --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
-        && uv pip install --quiet --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+    # --compile-bytecode: uv skips compiling by default, which moves that cost
+    # to the first start of the CLI and the scanners.
+    uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
+        && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
 }
 make_venv "${STAGING}/venv" || die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
 "${STAGING}/venv/bin/defenseclaw" --version 2>/dev/null | grep -qF "${VERSION}" \
@@ -879,6 +881,12 @@ swap_in() {
         local args=(migrate --yes)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        # The previous version's agent discovery is absent or stale. Refresh
+        # it (bounded --version probes, no telemetry) before the gateway
+        # starts, so the gateway records each agent's version in the hook
+        # contract lock and doctor can check compatibility. Best effort.
+        info "Refreshing agent discovery"
+        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
     fi
 }
 
@@ -1012,8 +1020,9 @@ finish_swap() {
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
     # Pre-1.0 installers kept retired binaries in the temp folder they ran
     # with. On macOS that is often /tmp although TMPDIR now names a per-user
-    # folder, so look in both.
-    find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
+    # folder, so look in both. -H follows a symlinked start path such as
+    # macOS /tmp -> private/tmp; BSD find otherwise lists nothing under it.
+    find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
 }

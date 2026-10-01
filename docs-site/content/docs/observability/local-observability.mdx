@@ -163,7 +163,8 @@ webhooks are left untouched.
 
 To send to a collector of your own on this computer or a private network, add
 `--allow-private-networks` to `defenseclaw setup observability add otlp`. It
-writes the same `network_safety` setting.
+writes the same `network_safety` setting. If that collector has no TLS, also
+add `--plaintext`, which writes `tls.insecure: true` like the bundle does.
 
 ## Bundled Grafana dashboards
 
