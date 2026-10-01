@@ -7,20 +7,23 @@ package daemon
 
 import (
 	"bufio"
+	"encoding/binary"
+	"encoding/hex"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-func findPortHolder(port int) (PortHolder, error) {
-	return findProcPortHolder("/proc", port)
+func findPortHolder(host string, port int) (PortHolder, error) {
+	return findProcPortHolder("/proc", host, port)
 }
 
 // findProcPortHolder reads the kernel's TCP tables for a LISTEN socket on
-// port, then finds the process that owns that socket among the processes
-// whose descriptors this account may read.
-func findProcPortHolder(procRoot string, port int) (PortHolder, error) {
+// port that serves host, then finds the process that owns that socket among
+// the processes whose descriptors this account may read.
+func findProcPortHolder(procRoot, host string, port int) (PortHolder, error) {
 	holder := PortHolder{UID: -1}
 	inodes := map[string]struct{}{}
 	for _, table := range []string{"tcp", "tcp6"} {
@@ -35,11 +38,14 @@ func findProcPortHolder(procRoot string, port int) (PortHolder, error) {
 			if len(fields) < 10 || fields[3] != "0A" {
 				continue
 			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
+			addrHex, portHex, ok := strings.Cut(fields[1], ":")
 			if !ok {
 				continue
 			}
 			if value, err := strconv.ParseUint(portHex, 16, 16); err != nil || int(value) != port {
+				continue
+			}
+			if !listenerServesHost(host, procAddrIP(addrHex)) {
 				continue
 			}
 			if uid, err := strconv.Atoi(fields[7]); err == nil && holder.UID < 0 {
@@ -81,4 +87,17 @@ func findProcPortHolder(procRoot string, port int) (PortHolder, error) {
 		}
 	}
 	return holder, nil
+}
+
+// procAddrIP decodes a /proc/net/tcp{,6} address: 32-bit words in host byte
+// order. It returns nil for a malformed address.
+func procAddrIP(addrHex string) net.IP {
+	raw, err := hex.DecodeString(addrHex)
+	if err != nil || (len(raw) != net.IPv4len && len(raw) != net.IPv6len) {
+		return nil
+	}
+	for i := 0; i < len(raw); i += 4 {
+		binary.BigEndian.PutUint32(raw[i:], binary.NativeEndian.Uint32(raw[i:]))
+	}
+	return net.IP(raw)
 }

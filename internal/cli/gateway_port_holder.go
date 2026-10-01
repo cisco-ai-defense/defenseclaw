@@ -38,8 +38,9 @@ func foreignGatewayListener(cfg *config.Config) string {
 		return ""
 	}
 	port := cfg.Gateway.APIPort
-	addr := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(port))
-	holder, holderErr := gatewayPortHolder(port)
+	host := gatewayClientHost(cfg)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
 	// holder is confirmed with a connection attempt.
 	if holderErr != nil && !gatewayPortAnswers(addr) {

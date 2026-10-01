@@ -5,8 +5,8 @@
 
 package daemon
 
-func findPortHolder(port int) (PortHolder, error) {
-	if pid, err := listenerOwnerPID("", port); err == nil {
+func findPortHolder(host string, port int) (PortHolder, error) {
+	if pid, err := listenerOwnerPID(host, port); err == nil {
 		return PortHolder{PID: pid, UID: -1}, nil
 	} else {
 		return PortHolder{UID: -1}, err

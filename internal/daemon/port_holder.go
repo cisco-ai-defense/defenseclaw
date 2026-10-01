@@ -5,8 +5,10 @@ package daemon
 
 import (
 	"fmt"
+	"net"
 	"os/user"
 	"strconv"
+	"strings"
 )
 
 // PortHolder is a best-effort description of the process listening on a
@@ -18,14 +20,30 @@ type PortHolder struct {
 	Command string
 }
 
-// FindPortHolder describes the process that listens on the local TCP port.
-// It returns ErrNoListener when no listener was found and
-// ErrListenerInspectionUnavailable when the platform cannot tell.
-func FindPortHolder(port int) (PortHolder, error) {
+// FindPortHolder describes the process that listens on the local TCP port
+// and serves connections to host: a listener bound to that address, or to
+// the wildcard address. An empty or non-IP host other than localhost
+// matches every address. It returns ErrNoListener when no listener was
+// found and ErrListenerInspectionUnavailable when the platform cannot tell.
+func FindPortHolder(host string, port int) (PortHolder, error) {
 	if port < 1 || port > 65535 {
 		return PortHolder{PID: 0, UID: -1}, fmt.Errorf("%w: invalid port %d", ErrListenerInspectionUnavailable, port)
 	}
-	return findPortHolder(port)
+	return findPortHolder(host, port)
+}
+
+// listenerServesHost reports whether a listener bound to bound (nil when
+// unknown) serves connections to host.
+func listenerServesHost(host string, bound net.IP) bool {
+	if bound == nil || bound.IsUnspecified() {
+		return true
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return bound.IsLoopback()
+	}
+	wanted := net.ParseIP(host)
+	return wanted == nil || wanted.IsUnspecified() || wanted.Equal(bound)
 }
 
 // String names the holder for an operator: "PID 123 (defenseclaw-gateway)",
