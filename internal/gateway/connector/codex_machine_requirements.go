@@ -605,13 +605,13 @@ func mergeWindowsCodexRequirementsModel(
 		}
 		found := false
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
+			groups = append(groups, windowsCodexMachineLayout(opts).expectedGroup(expected))
 			plan.missingGroups = append(plan.missingGroups, expected)
 		}
 		hooks[expected.eventType] = groups

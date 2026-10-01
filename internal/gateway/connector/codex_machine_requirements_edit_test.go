@@ -303,7 +303,7 @@ timeout = 9
 	sessionStart := cfg["hooks"].(map[string]interface{})["SessionStart"].([]interface{})
 	if len(sessionStart) != 2 ||
 		sessionStart[0].(map[string]interface{})["matcher"] != "startup" ||
-		!windowsCodexMachineGroupMatches(sessionStart[1], codexHookGroups[0], opts.HookBinary) {
+		!windowsCodexMachineGroupMatches(sessionStart[1], codexHookGroups[0], opts) {
 		t.Fatalf("SessionStart groups = %#v, want administrator group then DefenseClaw group", sessionStart)
 	}
 
