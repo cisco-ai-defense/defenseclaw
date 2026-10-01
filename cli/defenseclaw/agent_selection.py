@@ -162,6 +162,12 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         protected_darwin_openhands = connector == "openhands" and sys.platform == "darwin"
         identity = _stable_selection_identity(candidate) if protected_darwin_openhands else None
         if protected_darwin_openhands and identity is None:
+            # A uv-tool install puts a symlink on PATH (~/.local/bin/openhands
+            # -> ~/.local/share/uv/tools/openhands/bin/openhands). Name the
+            # real file so the refusal gives the trusted-paths command for it.
+            target = os.path.realpath(os.path.abspath(candidate))
+            if not untrusted_found and os.path.isfile(target):
+                untrusted_found = target
             continue
         if protected_windows_opencode:
             trusted = _is_windows_opencode_setup_binary(candidate)
