@@ -3571,7 +3571,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._strip_clear()
             self._set_status("Cleared command status.")
             return
-        self._set_status("q is local close/no-op. Press Ctrl+C to quit.")
+        # Nothing to close. The status line is not drawn on every tab, so a
+        # toast says how to quit wherever the operator is.
+        self._set_status("Nothing to close. Press Ctrl+C to quit.")
+        self.notify("Nothing to close. Press Ctrl+C to quit DefenseClaw.", timeout=4)
 
     def action_cancel_or_quit(self) -> None:
         if self.command_running or self.executor.is_running:

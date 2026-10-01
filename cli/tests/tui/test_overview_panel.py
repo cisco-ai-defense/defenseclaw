@@ -153,9 +153,20 @@ def test_overview_standalone_hint_and_notices() -> None:
             )
         )
     )
-    assert model.gateway_standalone_hint() == "set gateway.host and restart"
+    # A hook-only (codex) roster never uses the OpenClaw fleet uplink, so the
+    # Gateway row shows the sidecar and the OpenClaw advice stays hidden.
+    assert model.gateway_standalone_hint() == ""
+    assert model.subsystem_state("gateway") == "running"
+    assert "OpenClaw" not in model.service_detail("gateway")
     notices = model.build_notices()
     assert not any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert not any("set gateway.host" in notice.message for notice in notices)
+
+    openclaw = OverviewPanelModel(OverviewConfig(data_dir="/tmp/dc", claw_mode="openclaw"), version="test")
+    openclaw.set_health(model.health)
+    assert openclaw.gateway_standalone_hint() == "set gateway.host and restart"
+    assert openclaw.subsystem_state("gateway") == "disabled"
+    notices = openclaw.build_notices()
     assert any(notice.level == "info" and "set gateway.host" in notice.message for notice in notices)
 
     model.set_health(HealthSnapshot(gateway=SubsystemHealth(state="reconnecting")))
