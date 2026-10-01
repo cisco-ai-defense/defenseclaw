@@ -109,6 +109,56 @@ func resumeCapturedProcess(pid uint32) error {
 	}
 }
 
+var procIsProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+type capturedJobProcessIDList struct {
+	assigned uint32
+	listed   uint32
+	ids      [256]uintptr
+}
+
+// waitCapturedJobExited blocks until the processes TerminateJobObject is
+// ending have exited. TerminateJobObject only starts termination; a process
+// releases its handles before its process object is signalled, so after this
+// returns no terminated descendant still holds the captured output pipes and
+// cmd.Wait reaches EOF without racing WaitDelay.
+func waitCapturedJobExited(job windows.Handle) error {
+	var list capturedJobProcessIDList
+	err := windows.QueryInformationJobObject(
+		job,
+		windows.JobObjectBasicProcessIdList,
+		uintptr(unsafe.Pointer(&list)),
+		uint32(unsafe.Sizeof(list)),
+		nil,
+	)
+	if err != nil && !errors.Is(err, windows.ERROR_MORE_DATA) {
+		return fmt.Errorf("list captured process tree: %w", err)
+	}
+	for _, id := range list.ids[:min(int(list.listed), len(list.ids))] {
+		process, openErr := windows.OpenProcess(
+			windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+			false,
+			uint32(id),
+		)
+		if openErr != nil {
+			continue // already gone
+		}
+		// A listed ID can be reused once its process exits; wait only on a
+		// process that is still a member of this job.
+		var member int32
+		ok, _, _ := procIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&member)))
+		var waitErr error
+		if ok != 0 && member != 0 {
+			_, waitErr = windows.WaitForSingleObject(process, windows.INFINITE)
+		}
+		windows.CloseHandle(process)
+		if waitErr != nil {
+			return fmt.Errorf("wait for captured process tree exit: %w", waitErr)
+		}
+	}
+	return nil
+}
+
 func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, error) {
 	if cmd.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
@@ -193,6 +243,9 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	// Reap descendants that did not exit with the direct command. A managed
 	// daemon can survive only by explicitly breaking away from the permitted job.
 	jobErr := windows.TerminateJobObject(job, 1)
+	if jobErr == nil {
+		jobErr = waitCapturedJobExited(job)
+	}
 	waitErr := cmd.Wait()
 	if directWaitErr != nil {
 		directWaitErr = fmt.Errorf("wait for captured process exit: %w", directWaitErr)
