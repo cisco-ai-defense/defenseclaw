@@ -255,21 +255,27 @@ type codexMachineRequirementsLayout struct {
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
 // managed group. It names the group's event and the hook contract, which
-// the hook requires, and starts the GUI-subsystem launcher through
-// Start-Process -Wait: the PowerShell call operator does not wait for a
-// GUI-subsystem process, so its exit code (2 blocks) and stdout never
-// reached Codex and every decision was lost.
+// the hook requires, and waits for the GUI-subsystem launcher. A standalone
+// call operator does not wait for a GUI-subsystem process, while Start-Process
+// -Wait -PassThru can fail when a hook exits before it returns its process
+// object. Process.Start returns the handle before the hook can finish; a
+// pipeline to Out-Host provides the constrained-language fallback.
 func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
 	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
 	quoted := make([]string, 0, len(arguments))
 	for _, argument := range arguments {
 		quoted = append(quoted, powershellQuoteLiteral(argument))
 	}
+	argumentLine := strings.Join(arguments, " ")
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
-			" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," + powershellQuoteLiteral(argumentLine) + ")",
+		"$hookStart.UseShellExecute=$false",
+		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		"$hookProcess.WaitForExit()",
 		"exit $hookProcess.ExitCode",
 	}, "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)

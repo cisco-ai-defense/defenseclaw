@@ -74,6 +74,28 @@ func TestWindowsCodexManagedHookCommandReturnsTheHookDecision(t *testing.T) {
 	}
 }
 
+func TestWindowsCodexManagedHookCommandPropagatesHookError(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(windowsCodexManagedHookCommand(executable, "PreToolUse"))
+	cmd := exec.Command(fields[0], fields[1:]...)
+	cmd.Env = append(os.Environ(), codexMachineHookHelperMode+"=block")
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"WrongEvent"}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 11 {
+		t.Fatalf("managed command = %v, want the hook's exit 11\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "wrong stdin") {
+		t.Fatalf("managed command did not forward hook stderr: %s", stderr.String())
+	}
+}
+
 func TestResolveWindowsCodexManagedRuntimeRegistryCleanAbsenceIsNoop(t *testing.T) {
 	programData := t.TempDir()
 	originalProgramData := windowsCodexMachineProgramData

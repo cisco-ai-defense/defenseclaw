@@ -268,11 +268,14 @@ func TestWindowsCodexManagedHookCommandBindsEventAndContract(t *testing.T) {
 			t.Fatalf("%s command %q does not use the fixed system PowerShell", group.eventType, command)
 		}
 		want := "$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; " +
-			"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " +
+			"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
 			powershellQuoteLiteral(opts.HookBinary) +
-			" -ArgumentList @('hook','--connector','codex','--enterprise-managed','--event','" +
-			group.eventType + "','--hook-contract','" + contractID +
-			"') -NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode"
+			" 'hook' '--connector' 'codex' '--enterprise-managed' '--event' '" + group.eventType +
+			"' '--hook-contract' '" + contractID + "' | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }; " +
+			"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(opts.HookBinary) +
+			",'hook --connector codex --enterprise-managed --event " + group.eventType +
+			" --hook-contract " + contractID + "'); $hookStart.UseShellExecute=$false; " +
+			"$hookProcess=[System.Diagnostics.Process]::Start($hookStart); $hookProcess.WaitForExit(); exit $hookProcess.ExitCode"
 		if got := decodePowerShellEncodedCommandForTest(t, command); got != want {
 			t.Fatalf("%s script\n got: %s\nwant: %s", group.eventType, got, want)
 		}
