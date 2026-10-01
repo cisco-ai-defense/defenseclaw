@@ -315,7 +315,7 @@ func TestClaudeOSAdminPolicyHoldsTheCarriedHooksToTheRenderedTimeouts(t *testing
 // handler on an event outside the target's contract made the guardian audit
 // report the hooks missing forever while Setup kept succeeding.
 func TestClaudeOSAdminPolicyRefusesDefenseClawHooksOutsideTheTargetContract(t *testing.T) {
-	target := claudeOSAdminTestOpts(t, "2.1.152")
+	target := claudeOSAdminTestOpts(t, "2.1.154")
 	for name, extra := range map[string]map[string]interface{}{
 		"carried": nil,
 		"merged":  {"managedSourcesBehavior": "merge"},
@@ -325,8 +325,8 @@ func TestClaudeOSAdminPolicyRefusesDefenseClawHooksOutsideTheTargetContract(t *t
 			if err := json.Unmarshal([]byte(claudeOSAdminSettings(t, target, extra)), &policy); err != nil {
 				t.Fatal(err)
 			}
-			// 0.8.6 has only the v1 contract. Inject a DefenseClaw handler
-			// on a later event to prove the HKLM gate rejects it.
+			// The v1 contract lacks DirectoryAdded. Inject a DefenseClaw
+			// handler on that later event to prove the HKLM gate rejects it.
 			hooks := policy["hooks"].(map[string]interface{})
 			hooks["DirectoryAdded"] = hooks["PreToolUse"]
 			body, err := json.Marshal(policy)
@@ -337,7 +337,7 @@ func TestClaudeOSAdminPolicyRefusesDefenseClawHooksOutsideTheTargetContract(t *t
 			if err == nil {
 				t.Fatal("a policy with a DefenseClaw hook outside the target contract was admitted")
 			}
-			for _, want := range []string{"DirectoryAdded", ClaudeCodeManagedPolicyExportCommand + " --agent-version 2.1.152"} {
+			for _, want := range []string{"DirectoryAdded", ClaudeCodeManagedPolicyExportCommand + " --agent-version 2.1.154"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("refusal %q does not mention %q", err, want)
 				}
