@@ -946,7 +946,7 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 		return false, 0, fmt.Errorf("inspect configured gateway listener: %w", err)
 	}
 	if !running || managedPID != ownerPID {
-		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d", cfg.Gateway.APIPort, ownerPID)
+		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d (often another account's gateway); choose a free port with: defenseclaw setup gateway --api-port <free port> --non-interactive", cfg.Gateway.APIPort, ownerPID)
 	}
 	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
