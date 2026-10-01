@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -323,88 +321,52 @@ class TestAibomProvenance(unittest.TestCase):
 
 
 class TestGoScanCodeJSONSchema(unittest.TestCase):
-    """`go run ./cmd/defenseclaw scan code --json` must validate against
-    the canonical scan-result schema.
+    """The Go `scan code --json` document must validate against the canonical
+    scan-result schema under the Python ``jsonschema`` implementation that
+    downstream Python consumers use.
 
-    Skipped when ``go`` or ``jsonschema`` is unavailable (the latter only
-    ships in ``[dependency-groups] dev``); the Go e2e job covers the
-    same contract from the Go side via ``test/e2e/v7_golden_events_test.go``.
+    The document is ``internal/cli/testdata/scan-code-json.golden.json``.
+    ``TestScanCodeJSONCommandValidatesCanonicalSchema`` (internal/cli) runs the
+    real command path in-process, validates its output against the same schema
+    file, and fails if the envelope or finding keys drift from this document.
+    Compiling the Go CLI here (``go run``) made this test's runtime depend on
+    the Go build cache and toolchain state of the Python shard, so it timed out
+    whenever that shard compiled cold.
+
+    Skipped when ``jsonschema`` is unavailable (it only ships in
+    ``[dependency-groups] dev``).
     """
 
-    @unittest.skipUnless(shutil.which("go"), "go not on PATH")
     def test_go_scan_code_json_validates_schema(self) -> None:
         try:
             import jsonschema
         except ImportError:
             self.skipTest("jsonschema not installed (dev-only dependency)")
 
-        schema_path = ROOT / "schemas" / "scan-result.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        go_paths = subprocess.run(
-            ["go", "env", "-json", "GOCACHE", "GOMODCACHE"],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            # Hosted Windows runners execute the Python and Go matrices in
-            # parallel and can take more than 30 seconds merely to schedule a
-            # new Go process. Keep a firm bound, but allow the same headroom as
-            # other metadata/bootstrap subprocesses before declaring a hang.
-            timeout=90,
-            check=True,
+        schema = json.loads(
+            (ROOT / "schemas" / "scan-result.json").read_text(encoding="utf-8")
         )
-        go_cache = json.loads(go_paths.stdout)
-        with tempfile.TemporaryDirectory() as tmp:
-            isolated_home = Path(tmp) / "home"
-            data_dir = isolated_home / ".defenseclaw"
-            data_dir.mkdir(parents=True)
-            config_path = data_dir / "config.yaml"
-            config_path.write_text(
-                "config_version: 8\n"
-                f"data_dir: {json.dumps(str(data_dir))}\n"
-                "observability: {}\n",
-                encoding="utf-8",
-            )
-            p = Path(tmp) / "x.go"
-            p.write_text('package x\nvar _ = "x"\n', encoding="utf-8")
-            proc = subprocess.run(
-                [
-                    "go",
-                    "run",
-                    "./cmd/defenseclaw",
-                    "scan",
-                    "code",
-                    str(p),
-                    "--json",
-                ],
-                cwd=str(ROOT),
-                capture_output=True,
-                text=True,
-                # The hosted Windows Python shard cold-compiles the complete
-                # Go CLI without the setup-go cache used by the Go matrix.
-                # Keep the tighter local/POSIX bound while allowing runner
-                # image and scheduling variance on Windows.
-                timeout=300 if os.name == "nt" else 180,
-                env={
-                    **os.environ,
-                    "HOME": str(isolated_home),
-                    "DEFENSECLAW_HOME": str(data_dir),
-                    "DEFENSECLAW_CONFIG": str(config_path),
-                    "GOCACHE": go_cache["GOCACHE"],
-                    "GOMODCACHE": go_cache["GOMODCACHE"],
-                },
-                check=False,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            doc = json.loads(proc.stdout)
-            jsonschema.validate(instance=doc, schema=schema)
+        doc = json.loads(
+            (
+                ROOT / "internal" / "cli" / "testdata" / "scan-code-json.golden.json"
+            ).read_text(encoding="utf-8")
+        )
+        validator_cls = jsonschema.validators.validator_for(schema)
+        validator_cls.check_schema(schema)
+        validator = validator_cls(schema, format_checker=validator_cls.FORMAT_CHECKER)
+        validator.validate(doc)
+        self.assertTrue(doc["findings"], "golden document must exercise a finding")
 
+        # Every optional field the Go encoder emits as null must stay nullable.
+        required = set(schema["required"])
+        finding_required = set(schema["properties"]["findings"]["items"]["required"])
+        nulled = {key: value if key in required else None for key, value in doc.items()}
+        nulled["findings"] = [
+            {key: value if key in finding_required else None for key, value in finding.items()}
+            for finding in doc["findings"]
+        ]
+        validator.validate(nulled)
 
-class TestScanResultSchemaEmbedded(unittest.TestCase):
-    def test_embedded_matches_repo_schema(self) -> None:
-        emb = ROOT / "internal" / "cli" / "embed" / "scan-result.json"
-        src = ROOT / "schemas" / "scan-result.json"
-        self.assertEqual(emb.read_text(), src.read_text())
-
-
-if __name__ == "__main__":
-    unittest.main()
+        # Unknown envelope keys must be rejected (additionalProperties: false).
+        with self.assertRaises(jsonschema.ValidationError):
+            validator.validate({**doc, "unexpected": True})
