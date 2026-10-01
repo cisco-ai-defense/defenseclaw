@@ -2927,27 +2927,30 @@ $ErrorActionPreference = 'Stop'
 $utf8 = [Text.UTF8Encoding]::new($false)
 $pidPath = Join-Path $DataRoot 'gateway.pid'
 $jsonlPath = Join-Path $DataRoot 'gateway.jsonl'
-# Initialize the NetTCPIP command and its CIM provider before publishing sampler
-# readiness so their fresh-process cost precedes the started record. A
-# newly started listener can briefly be absent from a cold CIM provider, so
-# retry that exact query within a small bound instead of terminating the sampler.
-$prewarmDeadline = [DateTime]::UtcNow.AddSeconds(20)
-do {
+$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
+try {
+    # The schema header is the started record, written before any CIM work.
+    $header = $utf8.GetBytes("schema=1`n")
+    $stream.Write($header, 0, $header.Length)
+    $stream.Flush($true)
+    # Initialize the NetTCPIP command and its CIM provider once, with no wall
+    # clock. A cold provider can briefly miss a live listener; that is reported
+    # as a non-terminal listener_prewarm stage, and the sampling loop below
+    # retries the exact listener query.
     $prewarmListeners = @()
     try {
         $prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort $ApiPort -ErrorAction Stop)
     } catch { }
-    if ($prewarmListeners.Count -gt 0) { break }
-    if ([DateTime]::UtcNow -ge $prewarmDeadline) {
-        throw 'Setup health sampler listener prewarm timed out'
+    if ($prewarmListeners.Count -eq 0) {
+        $bytes = $utf8.GetBytes(([ordered]@{
+            observed_at = [DateTime]::UtcNow.ToString('o')
+            kind = 'sample_error'
+            stage = 'listener_prewarm'
+            category = 'unavailable_or_mismatch'
+        } | ConvertTo-Json -Compress) + "`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
     }
-    Start-Sleep -Milliseconds 100
-} while ($true)
-$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
-try {
-    $header = $utf8.GetBytes("schema=1`n")
-    $stream.Write($header, 0, $header.Length)
-    $stream.Flush($true)
     $last = ''
     while ($true) {
         $stage = 'pid_file'
@@ -3129,10 +3132,9 @@ try {
     try {
         $started = $process.Start()
         if (-not $started) { throw 'failed to start Setup health sampler' }
-        # The schema header is the sampler's started record. Wait for it or for
-        # the sampler to exit, with no wall clock: a cold pwsh start and CIM
-        # provider on a loaded runner is slow, not failed, and the sampler ends
-        # itself if its listener never appears (bounded prewarm above).
+        # The schema header is the sampler's started record, written before its
+        # CIM prewarm. Wait for it or for the sampler to exit, with no wall
+        # clock: a cold pwsh start on a loaded runner is slow, not failed.
         while (-not (Test-Path -LiteralPath $outcome -PathType Leaf)) {
             $process.Refresh()
             if ($process.HasExited) { throw "Setup health sampler exited with $($process.ExitCode)" }
@@ -3189,7 +3191,10 @@ function Wait-SetupAcceptanceHealthSamplerRecord(
             try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
             $kindProperty = $candidate.PSObject.Properties['kind']
             $candidateKind = if ($null -eq $kindProperty) { 'sample' } else { [string]$kindProperty.Value }
-            if ($candidateKind -ceq $Kind) { return $candidate }
+            # The one-shot provider prewarm is never the record a caller waits for.
+            $isPrewarm = $candidateKind -ceq 'sample_error' -and
+                [string]$candidate.stage -ceq 'listener_prewarm'
+            if ($candidateKind -ceq $Kind -and -not $isPrewarm) { return $candidate }
             if ($candidateKind -ceq 'sample_error') {
                 $diagnostics++
                 $lastDiagnostic = $candidate

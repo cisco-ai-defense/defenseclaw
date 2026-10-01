@@ -3122,9 +3122,14 @@ def test_certification_purges_through_installed_cli_without_retirement_leaks() -
     assert helper_capture_smoke.index("$nestedProcess.StandardOutput.ReadLine()") < helper_capture_smoke.index(
         "$stopwatch = [Diagnostics.Stopwatch]::StartNew()"
     )
-    # The helper outlives every parent wait, so captured EOF while it is alive
-    # is a causal no-inheritance proof rather than a race against a sleep.
-    assert "[Threading.Thread]::Sleep([Threading.Timeout]::Infinite)" in helper_capture_smoke
+    # The helper lives exactly as long as the owning smoke, so captured EOF
+    # while it is alive is a causal no-inheritance proof, and no failure path
+    # can orphan it.
+    assert "`$owner = [Diagnostics.Process]::GetProcessById($OwnerProcessId)" in helper_capture_smoke
+    assert "`$owner.StartTime.ToUniversalTime().Ticks -eq $OwnerStartTicks" in helper_capture_smoke
+    assert "`$owner.WaitForExit()" in helper_capture_smoke
+    assert "-OwnerProcessId $ownerProcessId -OwnerStartTicks $ownerStartTicks" in helper_capture_smoke
+    assert "Timeout]::Infinite" not in helper_capture_smoke
     assert "WaitSeconds" not in helper_capture_smoke
     assert "AddSeconds(" not in helper_capture_smoke
     assert "helper_alive_after_capture = $helperAlive" in helper_capture_smoke

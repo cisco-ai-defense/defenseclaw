@@ -3775,16 +3775,16 @@ connection.close()
             "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')",
             [StringComparison]::Ordinal
         )
-        return $prewarm -ge 0 -and $readiness -gt $prewarm
+        return $prewarm -ge 0 -and $readiness -ge 0 -and $prewarm -gt $readiness
     }
     Assert-True (& $hasHealthSamplerPrewarm $setupHealthSampler) `
-        'Setup health sampler initializes its listener provider before publishing readiness'
-    Assert-True ($setupHealthSampler -match '\$prewarmDeadline = \[DateTime\]::UtcNow\.AddSeconds\(20\)' -and
-        $setupHealthSampler -match '(?s)do \{.*?Get-NetTCPConnection.*?\$prewarmListeners\.Count -gt 0.*?Start-Sleep -Milliseconds 100.*?\} while \(\$true\)' -and
+        'Setup health sampler publishes its started record before its listener-provider prewarm'
+    Assert-True ($setupHealthSampler -notmatch 'prewarmDeadline' -and
+        $setupHealthSampler -match "stage = 'listener_prewarm'" -and
         $setupHealthSampler -match '(?s)while \(-not \(Test-Path -LiteralPath \$outcome -PathType Leaf\)\).*?\$process\.HasExited' -and
         $setupHealthSampler -notmatch '\$deadline = ' -and
         $setupHealthSampler -match '\$process\.Kill\(\$true\)\s+\$process\.WaitForExit\(\)') `
-        'Setup health sampler bounds only its listener prewarm; readiness and cleanup wait on its started record or exit'
+        'Setup health sampler has no wall clock; prewarm, readiness, and cleanup are event-ordered'
     Assert-True (-not (& $hasHealthSamplerPrewarm $setupHealthSampler.Replace(
                 "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
             ))) `
@@ -3793,10 +3793,10 @@ connection.close()
         "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
     ).Replace(
         "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')",
-        "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')`n`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)"
+        "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)`n`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')"
     )
     Assert-True (-not (& $hasHealthSamplerPrewarm $reorderedHealthSampler)) `
-        'Setup health sampler prewarm predicate rejects readiness published before preload'
+        'Setup health sampler prewarm predicate rejects a prewarm that delays the started record'
     Assert-True ($setupHealthSamplerContract -match '\$listener = \[Net\.Sockets\.TcpListener\]::new\(\[Net\.IPAddress\]::Loopback, 0\)' -and
         $setupHealthSamplerContract -match 'started_at = \$startedAt' -and
         $setupHealthSamplerContract -match 'uptime_ms = 1' -and

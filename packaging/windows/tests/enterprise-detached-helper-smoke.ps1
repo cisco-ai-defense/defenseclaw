@@ -6,7 +6,9 @@
 [CmdletBinding()]
 param(
     [switch]$Child,
-    [string]$Root
+    [string]$Root,
+    [int]$OwnerProcessId,
+    [long]$OwnerStartTicks
 )
 
 Set-StrictMode -Version Latest
@@ -23,6 +25,9 @@ $modulePath = [IO.Path]::GetFullPath(
 if ($Child) {
     if ([string]::IsNullOrWhiteSpace($Root)) {
         throw 'detached-helper child mode requires -Root'
+    }
+    if ($OwnerProcessId -le 0 -or $OwnerStartTicks -le 0) {
+        throw 'detached-helper child mode requires the owning smoke identity'
     }
     $childRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
     $helperPath = Microsoft.PowerShell.Management\Join-Path `
@@ -70,11 +75,25 @@ Microsoft.PowerShell.Core\Import-Module -Name '$moduleLiteral' -Force
     ),
     [Text.UTF8Encoding]::new(`$false)
 )
-# Publish atomically, then stay alive until the smoke kills this helper. A
-# helper that outlives every parent wait makes "alive after captured EOF" a
-# causal no-inheritance proof instead of a race against a fixed sleep.
+# Publish atomically, then live exactly as long as the owning smoke. The
+# smoke outlives every capture wait, so "alive after captured EOF" is a causal
+# no-inheritance proof; the smoke kills this helper after the proof, and on any
+# path where the smoke ends first this helper exits with it instead of leaking.
 [IO.File]::Move('$observationLiteral.tmp', '$observationLiteral')
-[Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+try {
+    `$owner = [Diagnostics.Process]::GetProcessById($OwnerProcessId)
+    try {
+        if (`$owner.StartTime.ToUniversalTime().Ticks -eq $OwnerStartTicks) {
+            `$owner.WaitForExit()
+        }
+    }
+    finally {
+        `$owner.Dispose()
+    }
+}
+catch {
+    # The owning smoke already exited (or its PID was reused).
+}
 "@
     [IO.File]::WriteAllText(
         $helperPath,
@@ -165,6 +184,8 @@ try {
         $enginePath = [IO.Path]::GetFullPath(
             [string]$currentProcess.MainModule.FileName
         )
+        $ownerProcessId = $currentProcess.Id
+        $ownerStartTicks = $currentProcess.StartTime.ToUniversalTime().Ticks
     }
     finally {
         $currentProcess.Dispose()
@@ -175,7 +196,8 @@ try {
     $startInfo.FileName = $enginePath
     $startInfo.Arguments = (
         '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-        "-File $quotedScript -Child -Root $quotedRoot"
+        "-File $quotedScript -Child -Root $quotedRoot " +
+        "-OwnerProcessId $ownerProcessId -OwnerStartTicks $ownerStartTicks"
     )
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
@@ -286,9 +308,9 @@ try {
             'returned'
         )
     }
-    # The helper never exits on its own, so both pipes reaching EOF while it
-    # is still alive proves it inherited no capture handle. That proof is
-    # causal; capture_elapsed_ms is reported for diagnostics only.
+    # The helper lives until this smoke exits or kills it, so both pipes
+    # reaching EOF while it is still alive proves it inherited no capture
+    # handle. That proof is causal; capture_elapsed_ms is diagnostic only.
     $observationPath = [IO.Path]::GetFullPath(
         [string]$childResult.observation_path
     ).TrimEnd('\')
