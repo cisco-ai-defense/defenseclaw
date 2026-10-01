@@ -1678,7 +1678,7 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
 
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
-        _AUDIT_FULL_INTEGRITY_MAX_BYTES,
+        _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
         AuditDBHealthStatus,
         inspect_audit_db,
     )
@@ -1727,21 +1727,18 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         )
         return
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
+        # Nothing was found wrong: the walk only ran out of time on a very
+        # large file. That is not a health problem, so it must not raise a
+        # WARN on every Doctor run of a long-lived install.
         size_mib = max(health.file_bytes, 0) // (1024 * 1024)
-        limit_mib = _AUDIT_FULL_INTEGRITY_MAX_BYTES // (1024 * 1024)
-        _emit(
-            "warn",
-            "Audit database",
-            f"{db_path}; required schema present; integrity not checked because the {size_mib} MiB file "
-            f"is above Doctor's {limit_mib} MiB limit. No action is needed unless the gateway "
-            f"reports audit errors; to check it, stop the gateway and run: sqlite3 {db_path} 'PRAGMA quick_check'",
-            r=r,
-            check_id="doctor.state.audit-db",
-            reason_code=health.reason_code,
-            remediation=f"defenseclaw-gateway stop; sqlite3 {db_path} 'PRAGMA quick_check'",
+        budget = f"{_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS:g}"
+        detail = (
+            f"{db_path}; required schema present; no errors in the first {budget} s of the "
+            f"integrity check on the {size_mib} MiB file (full check: stop the gateway and run "
+            f"sqlite3 {db_path} 'PRAGMA quick_check')"
         )
-        return
-    detail = f"{db_path}; SQLite quick_check=ok; required schema present"
+    else:
+        detail = f"{db_path}; SQLite quick_check=ok; required schema present"
     _emit(
         "pass",
         "Audit database",
@@ -8845,8 +8842,8 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
         return RepairDecision(
             "noop",
-            "audit database schema is present; the file is above Doctor's integrity-check size "
-            "limit, so Doctor leaves it as is",
+            "audit database schema is present and the integrity check found no errors "
+            "before its time budget ran out, so Doctor leaves it as is",
             effects=effects,
         )
     if health.status is AuditDBHealthStatus.INVALID:
@@ -8901,7 +8898,7 @@ def _fix_audit_db_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if health.status is AuditDBHealthStatus.VALID:
         return ("skip", "audit database already passed integrity and schema checks")
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
-        return ("skip", "audit database schema is present; it is above the integrity-check size limit and is kept")
+        return ("skip", "audit database schema is present and no integrity errors were found; it is kept")
     if health.status is AuditDBHealthStatus.INVALID:
         return (
             "fail",
