@@ -256,7 +256,7 @@ func (s *Sidecar) retryManagedProxyInspector(ctx context.Context) {
 		return
 	}
 	cfg := s.currentConfig()
-	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cloudreg.Registered() ||
+	if cfg == nil || !cfg.ManagedAIDOnly() || !cloudreg.Registered() ||
 		strings.TrimSpace(cfg.CiscoAIDefense.Endpoint) == "" {
 		return
 	}
@@ -355,7 +355,7 @@ func (s *Sidecar) maintainManagedInspection(ctx context.Context) {
 // at startup stays unwired until a reload. While the proxy runs, its lane
 // also counts toward the managed inspection state.
 func (s *Sidecar) runGuardrailProxy(ctx context.Context, proxy *GuardrailProxy) error {
-	if cfg := s.currentConfig(); cfg != nil && cfg.Guardrail.Enabled && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg := s.currentConfig(); cfg != nil && cfg.Guardrail.Enabled && cfg.ManagedAIDOnly() {
 		s.managedGuardrailProxy.Store(proxy)
 		defer func() {
 			s.managedGuardrailProxy.CompareAndSwap(proxy, nil)
