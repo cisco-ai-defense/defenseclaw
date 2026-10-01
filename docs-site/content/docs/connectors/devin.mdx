@@ -37,7 +37,10 @@ macOS, and Linux, from source review. On Linux it is also pinned to
 `3000.11.3`, which delivers the `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` events under these names
 and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse`
-(`PermissionRequest` and `PostCompaction` are not verified).
+(`PermissionRequest` and `PostCompaction` are not verified). Other Devin
+CLI versions from `3000.4.25` on use the same contract as untested newer
+versions unless they are known broken
+([version policy](/docs/connectors/compatibility#version-policy)).
 
 ## Platform support
 
@@ -126,8 +129,10 @@ standalone enterprise profile DefenseClaw also:
   `/usr/share/devin-desktop` (the `.deb` package) or an unpacked `.tar.gz`
   `Devin` folder in `/opt` or the user's home on Linux; and for `Devin.exe`
   in `%LOCALAPPDATA%\Programs\Devin` or `%ProgramFiles%\Devin` on Windows.
-  A bundled CLI version outside the `devin-hooks-v1` pins, or a Desktop with
-  no bundled CLI, is recorded in `unprotected-agents.json` instead, as is
+  A bundled CLI version from `3000.4.25` on (Devin Desktop 3.10 bundles
+  `3000.10.x`) is enrolled as an untested newer version. One below
+  `3000.4.25` or on the known-broken list, or a Desktop with no bundled CLI,
+  is recorded in `unprotected-agents.json` instead, as is
   any Desktop under `enterprise.enrollment.unverified_versions: refuse`
   until Devin Desktop completes a live validation run.
 - **Checks plugin hooks.** Devin plugins can ship hooks that run in every

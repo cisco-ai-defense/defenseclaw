@@ -69,8 +69,10 @@ it knows otherwise:
   Claude Code, Codex or Devin after an update) uses the newest contract.
   Setup keeps the mode you asked for, and doctor and setup show an
   informational line: "untested newer version: ... no known problems".
-  OmniGent 0.15.0, and Devin 3000.11.3 on macOS and Windows, run this way
-  until their hook contracts are measured on those builds.
+  A version between two exact pins of one contract counts too, so Devin
+  3000.10.x (the CLI Devin Desktop 3.10 bundles) runs this way on Linux, where
+  3000.11.3 is also pinned. OmniGent 0.15.0, and Devin 3000.11.3 on macOS and
+  Windows, run this way until their hook contracts are measured on those builds.
 - **Floors stay.** A version below the lowest tested version, a version in a
   gap between tested ranges, and a build that carries the same version as an
   exact-build pin but not its build ID (such as Cursor's Agent build) have no

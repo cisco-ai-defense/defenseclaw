@@ -490,6 +490,10 @@ class TestConnectorContractManifest(unittest.TestCase):
                 reviewed = resolve_connector_contract("devin", "3000.4.25", platform_name=platform_name)
                 self.assertEqual(reviewed.status, STATUS_KNOWN)
                 self.assertEqual(reviewed.contract.contract_id, "devin-hooks-v1")
+                between = resolve_connector_contract("devin", "3000.10.48", platform_name=platform_name)
+                self.assertEqual((between.status, between.untested), (STATUS_KNOWN, True))
+                below = resolve_connector_contract("devin", "3000.4.24", platform_name=platform_name)
+                self.assertEqual(below.status, STATUS_UNKNOWN)
 
     def test_unversioned_connectors_use_default_contract(self) -> None:
         compat = resolve_connector_contract("cursor", "")

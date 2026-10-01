@@ -43,7 +43,7 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(page), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for path, data := range map[string]string{filepath.Join(devin, "Devin.exe"): "MZ", page: ".TH devin 1  \"devin 3000.4.25 (0)\" \n"} {
+	for path, data := range map[string]string{filepath.Join(devin, "Devin.exe"): "MZ", page: ".TH devin 1  \"devin 3000.10.48 (0)\" \n"} {
 		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -84,7 +84,7 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, "2.1.300"); got != "2.1.220" || len(reported) != 0 {
 		t.Fatalf("claudecode CLI plus older extension version = %q, reported %+v", got, reported)
 	}
-	if got := windowsStandaloneSurfaceVersion(row("devin"), nil, rowContext, ""); got != "3000.4.25" || len(reported) != 0 {
+	if got := windowsStandaloneSurfaceVersion(row("devin"), nil, rowContext, ""); got != "3000.10.48" || len(reported) != 0 {
 		t.Fatalf("devin Desktop-only version = %q, reported %+v", got, reported)
 	}
 	if got := windowsStandaloneSurfaceVersion(row("codex"), nil, rowContext, ""); got != "" || len(reported) != 1 ||

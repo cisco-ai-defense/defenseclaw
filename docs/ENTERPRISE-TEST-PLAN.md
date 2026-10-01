@@ -2551,7 +2551,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R25, W-57, L-27, M-18 | Desktop-app or editor-extension-only users are not enrolled (#912) | Every OS |
 | R26, W-58, L-28, M-19 | Copilot in VS Code (Local harness) is not governed (#913) | Every OS |
 | R27, W-59, L-29 | Agent sessions in WSL are partly covered (#914): CLIs inside the distribution, Remote - WSL windows and the Codex app's agent environment stay open; a Linux install inside WSL is refused | Windows |
-| R28, W-60, L-30, M-20 | Devin Desktop enrolled only at a pinned bundled Devin CLI version; Cascade in builds 3.0.12 to before 3.9.19 refused through the machine-level Cascade hooks file, not inspected (#915) | Every OS |
+| R28, W-60, L-30, M-20 | Devin Desktop enrolled at a bundled Devin CLI version from 3000.4.25 on that is not known broken; Cascade in builds 3.0.12 to before 3.9.19 refused through the machine-level Cascade hooks file, not inspected (#915) | Every OS |
 | R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Kiro IDE Windows hook shell not live-verified (#916) | Every OS |
 | R30, L-33, M-23 | A project `.openhands/hooks.json` replaces the user's, so none of DefenseClaw's OpenHands hooks run in that project (OpenHands shows "1 hook" instead of six) | OpenHands |
 | R31 | Per-account hook budget (60/s, burst 120, 32 in flight): under `hook_fail_mode: open` a user who floods their own budget makes their own hooks allow | Standalone |
