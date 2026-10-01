@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -1289,6 +1292,10 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 // stays in a lifecycle_diagnostic warning), and records which gateway the
 // recovery ran and why.
 func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
+	// The host's own API listener is not part of this report.
+	previousListeners := windowsEnterpriseAPIListeners
+	t.Cleanup(func() { windowsEnterpriseAPIListeners = previousListeners })
+	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) { return nil, nil }
 	internalDetail := `managed Windows DACL on C:\Users\alice\.defenseclaw\hooks has 2 ACEs, expected 7`
 	failure := `managed-hook lifecycle snapshot retire failed: retire amp managed runtime generations for SID S-1-5-21-1-2-3-1017: ` + internalDetail
 	document, err := json.Marshal(map[string]any{
@@ -1390,5 +1397,25 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
 	if result.Errors[0].Message != failure {
 		t.Fatalf("verify error rewritten: %q", result.Errors[0].Message)
+	}
+}
+
+// WIN-R2-03: Setup run from an elevated prompt cannot act as the accounts the
+// guardian registered, so the rollback names that cause and a remedy the
+// administrator can run from that prompt.
+func TestWindowsFirstInstallRollbackLeftoverNamesTheElevatedPrompt(t *testing.T) {
+	account := "bob (S-1-5-21-1-2-3-1019) [copilot]"
+	err := fmt.Errorf("restore: %w", enterprisehooks.ErrWindowsEnterpriseNotLocalSystem)
+	leftover := windowsFirstInstallRollbackAccountLeftover(account, err)
+	if leftover != account+": DefenseClaw's agent registrations, because Setup did not run as LocalSystem" {
+		t.Fatalf("leftover = %q", leftover)
+	}
+	if got := windowsFirstInstallRollbackAccountLeftover(account, nil); got != "" {
+		t.Fatalf("removed registrations reported as %q", got)
+	}
+	raw, _ := json.Marshal([]string{leftover})
+	warnings := windowsEnterpriseRollbackLeftoverWarnings(raw)
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "one-time scheduled task that runs as SYSTEM") {
+		t.Fatalf("warnings = %+v", warnings)
 	}
 }

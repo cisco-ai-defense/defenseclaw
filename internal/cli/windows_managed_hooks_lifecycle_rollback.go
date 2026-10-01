@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -90,12 +91,8 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		for _, path := range kept {
 			note("%s: %s, which changed after DefenseClaw wrote it", account, path)
 		}
-		switch {
-		case err == nil:
-		case enterprisehooks.IsWindowsTargetSessionUnavailable(err):
-			note("%s: DefenseClaw's agent registrations, because the account is not signed in", account)
-		default:
-			note("%s: DefenseClaw's agent registrations: %s", account, boundedEnterpriseHookUserCleanupText(err.Error()))
+		if leftover := windowsFirstInstallRollbackAccountLeftover(account, err); leftover != "" {
+			leftovers = append(leftovers, leftover)
 		}
 	}
 	if err := enterprisehooks.RemoveWindowsPerUserManagedEnrollments(
@@ -136,4 +133,22 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		note("managed policy locks: %v", err)
 	}
 	return leftovers
+}
+
+// windowsFirstInstallRollbackAccountLeftover names why the rollback left an
+// account's agent registrations, or "" when it removed them. Only
+// LocalSystem can act as an account: Setup run from an elevated
+// administrator prompt leaves every account's registrations, which the
+// guardian (a LocalSystem service) wrote during the install.
+func windowsFirstInstallRollbackAccountLeftover(account string, err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, enterprisehooks.ErrWindowsEnterpriseNotLocalSystem):
+		return fmt.Sprintf("%s: DefenseClaw's agent registrations, because Setup did not run as LocalSystem", account)
+	case enterprisehooks.IsWindowsTargetSessionUnavailable(err):
+		return fmt.Sprintf("%s: DefenseClaw's agent registrations, because the account is not signed in", account)
+	default:
+		return fmt.Sprintf("%s: DefenseClaw's agent registrations: %s", account, boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
 }

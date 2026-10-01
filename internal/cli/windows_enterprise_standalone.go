@@ -566,11 +566,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 // account changed after DefenseClaw wrote it is kept whole, so only a manual
 // edit removes DefenseClaw's entries from it. Everything else is removed by a
 // successful install followed by an uninstall, both as LocalSystem while the
-// accounts are signed in (an uninstall acts only for signed-in accounts).
+// accounts are signed in (an uninstall acts only for signed-in accounts). An
+// administrator at an elevated prompt gets LocalSystem from a one-time
+// scheduled task, which the remedy names.
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
-		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem while the accounts are signed in"
+		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem while the accounts are signed in " +
+			"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
+			"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
 		if strings.HasSuffix(leftover, ", which changed after DefenseClaw wrote it") {
 			remedy = "remove DefenseClaw's entries from that file by hand"
 		}

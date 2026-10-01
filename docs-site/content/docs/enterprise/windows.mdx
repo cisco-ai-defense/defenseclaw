@@ -468,6 +468,19 @@ accounts. No guardian is left to clean an account later, so the result lists
 each item it could not remove as a `rollback_leftover` warning, by account
 and connector, with the command that removes it.
 
+Setup run from an elevated administrator prompt is not LocalSystem, so its
+rollback cannot act as any account. The guardian, a LocalSystem service, may
+already have registered DefenseClaw for the signed-in accounts (for example
+Copilot's `%USERPROFILE%\.copilot\hooks\defenseclaw-vscode.json`); those
+registrations stay and point at the removed hook binary, and each account is
+named with "because Setup did not run as LocalSystem". Only the failed run's
+result lists them, because a later `/status` finds no deployment, so keep
+that result. Fix the cause of the failure, then run `/ensure` and
+`/uninstall` as LocalSystem while the accounts are signed in, as in [Run
+Setup as LocalSystem](#run-setup-as-localsystem). An empty
+`C:\Program Files\ClaudeCode\managed-settings.d` can also stay; see
+[Remove](#remove).
+
 Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
 **System**, or another MDM's system context). `/ensure` recovers the pending
 transaction and then installs or upgrades; `/uninstall` recovers it and
@@ -480,7 +493,8 @@ DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
 
 `/repair` also recovers the transaction; after a failed first install it
 then stops with "run Install", so `/ensure` is the one-step command. Outside
-an MDM, a one-time scheduled task that runs as SYSTEM gives the same context.
+an MDM, a one-time scheduled task that runs as SYSTEM gives the same context
+(see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 From a payload folder (see [Run the lifecycle CLI from a payload
 folder](#advanced-run-the-lifecycle-cli-from-a-payload-folder)),
 `"$Payload\defenseclaw.exe" enterprise windows ensure` (or `repair`,
@@ -536,6 +550,32 @@ that point with the next step, because it reapplies the installed release
 that could not start. With the same release, or from an elevated
 administrator prompt, recovery keeps the coverage failure and a
 `recovery_gateway_not_used` warning gives the reason.
+
+### Run Setup as LocalSystem
+
+Without an MDM, an administrator gets LocalSystem from a one-time scheduled
+task. Run Setup from the administrator-only staging folder, never from a
+folder a standard user can write, because the task runs whatever file is at
+that path as SYSTEM. From an elevated PowerShell session, with `$Stage` as
+in [Write the config](#2-write-the-config):
+
+```powershell title="Elevated PowerShell"
+Copy-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe $Stage
+$Setup  = "$Stage\DefenseClawSetup-Enterprise-Standalone-x64.exe"
+$Result = "$Stage\setup-as-system.json"
+$Task   = 'DefenseClaw Setup as SYSTEM'
+$Action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" `
+    -Argument "/d /c `"`"$Setup`" /ensure CONFIG=$Stage\config.yaml JSON=1 > `"$Result`"`""
+Register-ScheduledTask -TaskName $Task -Action $Action -User 'NT AUTHORITY\SYSTEM' -RunLevel Highest -Force | Out-Null
+Start-ScheduledTask -TaskName $Task
+do { Start-Sleep -Seconds 5 } while ((Get-ScheduledTask -TaskName $Task).State -in 'Queued', 'Running')
+(Get-ScheduledTaskInfo -TaskName $Task).LastTaskResult
+Unregister-ScheduledTask -TaskName $Task -Confirm:$false
+Get-Content $Result
+```
+
+`LastTaskResult` is Setup's exit code. For `/uninstall`, replace
+`/ensure CONFIG=$Stage\config.yaml` with `/uninstall`.
 
 ## Per-user installs
 
@@ -602,7 +642,7 @@ connector and user SID it could not act as, and `user_registrations_failed`
 lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
 To clean every user, run the uninstall as LocalSystem while they are signed
-in.
+in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
 `PURGE=1` also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
 folder, including that account's per-user hook tokens, whether or not the

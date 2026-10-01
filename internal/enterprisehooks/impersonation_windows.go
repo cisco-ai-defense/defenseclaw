@@ -185,6 +185,11 @@ func RequireWindowsEnterpriseTargetImpersonationIdentity() error {
 	return windowsEnterpriseMutationIdentityCheck()
 }
 
+// ErrWindowsEnterpriseNotLocalSystem is what a per-user mutation returns when
+// the process is not LocalSystem, for example Setup run from an elevated
+// administrator prompt. Match it with errors.Is.
+var ErrWindowsEnterpriseNotLocalSystem = errWindowsEnterpriseNotLocalSystem
+
 func requireWindowsEnterpriseLocalSystem() error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
