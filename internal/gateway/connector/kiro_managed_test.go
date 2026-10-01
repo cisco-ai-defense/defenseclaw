@@ -119,6 +119,12 @@ func TestKiroManagedTeardownDisablesCachedHookScript(t *testing.T) {
 	if !strings.Contains(string(script), "disabled tombstone") || !strings.Contains(string(script), "exit 0") || strings.Contains(string(script), kiroHookAPIPath) {
 		t.Fatalf("Kiro teardown left an active hook script: %s", script)
 	}
+	// The folders Setup created in a home that never ran Kiro go too.
+	for _, sub := range []string{"agents", "hooks", "settings"} {
+		if _, err := os.Stat(filepath.Join(home, sub)); !os.IsNotExist(err) {
+			t.Fatalf("Kiro teardown left the empty %s folder it created (err=%v)", sub, err)
+		}
+	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup after teardown: %v", err)
 	}

@@ -642,7 +642,11 @@ func removeKiroDefaultAgentSetting(path string, backup *managedFileBackup) error
 		}
 		return atomicWriteFile(path, backup.PristineBytes, mode)
 	}
-	if len(cfg) == 0 && !existed {
+	// A backup taken over DefenseClaw's own setting (it named only the
+	// defenseclaw agent) is no earlier user content: remove the file rather
+	// than leave an empty '{}' behind.
+	onlyManaged := len(pristine) == 1 && strings.TrimSpace(fmt.Sprint(pristine[kiroDefaultAgentSettingKey])) == kiroManagedAgentName
+	if len(cfg) == 0 && (!existed || onlyManaged) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
