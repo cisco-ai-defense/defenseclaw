@@ -230,6 +230,7 @@ _HOOK_POLICY_ONLY_CONNECTORS = frozenset(
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }
 )
 
