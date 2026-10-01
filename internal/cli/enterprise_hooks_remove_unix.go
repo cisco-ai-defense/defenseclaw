@@ -76,6 +76,9 @@ type enterpriseHooksRemoveAllReport struct {
 	// StateFailed ("user: reason") the ones whose state stayed.
 	Purged      []string `json:"purged,omitempty"`
 	StateFailed []string `json:"state_failed,omitempty"`
+	// Kept ("user: reason") names the users whose ~/.defenseclaw holds
+	// their own per-user install, which --purge left alone.
+	Kept []string `json:"kept,omitempty"`
 }
 
 func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
@@ -140,6 +143,8 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 			result, ok := answered[target.Index]
 			if target.Mode == enterpriseHookWorkerModePurge {
 				switch {
+				case ok && result.OK && result.Kept != "":
+					report.Kept = append(report.Kept, run.Job.Account.User+": "+boundedWorkerError(result.Kept))
 				case ok && result.OK:
 					report.Purged = append(report.Purged, run.Job.Account.User)
 				case ok && result.Pending:
@@ -181,6 +186,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	sort.Strings(report.Failed)
 	sort.Strings(report.Purged)
 	sort.Strings(report.StateFailed)
+	sort.Strings(report.Kept)
 	report.OK = len(report.Failed) == 0
 	return report, nil
 }

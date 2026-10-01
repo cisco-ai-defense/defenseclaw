@@ -93,6 +93,19 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	})
 }
 
+// UserInstallKeptError is PurgeUserState's answer for an account whose
+// ~/.defenseclaw holds its own per-user DefenseClaw install: the purge left
+// the folder alone (the enterprise hook registrations were already removed),
+// because it removes only what the enterprise deployment created.
+type UserInstallKeptError struct {
+	// Found names the entries of the account's own install.
+	Found []string
+}
+
+func (e *UserInstallKeptError) Error() string {
+	return "kept ~/.defenseclaw, which holds the account's own DefenseClaw install (" + strings.Join(e.Found, ", ") + ")"
+}
+
 // PurgeUserState removes one account's DefenseClaw per-user state for the
 // standalone Unix uninstall --purge, in the per-user worker with the
 // account's credentials, after RemoveUserHooks ran for its manifest
@@ -103,6 +116,9 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 // goes except the account's own hooks the foreign-hook policy moved aside
 // and the hook scripts, which become disabled stubs (see
 // connector.PurgeUserState). A home that no longer exists is not an error.
+// A ~/.defenseclaw that holds the account's own per-user install stays
+// whole, with a *UserInstallKeptError: its backups and data are that
+// install's, not the enterprise deployment's.
 func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
 		return err
@@ -149,6 +165,10 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	}
 	return connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
+			if found := connector.PersonalInstallEntries(dataDir); len(found) > 0 {
+				removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
+				return &UserInstallKeptError{Found: found}
+			}
 			names, err := connector.BackedUpConnectors(dataDir)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: list connector backups: %w", err)

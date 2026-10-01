@@ -96,6 +96,18 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	if response := runEnterpriseHookWorkerApply(context.Background(), purgeRequest); !response.Targets[1].OK || strings.Join(purged, ",") != "/home/alice/.defenseclaw" {
 		t.Fatalf("purge response %+v, purged %v", response, purged)
 	}
+	// RHEL-U2-12: an account's own per-user install is kept, and the
+	// worker reports that instead of a failure or a purge.
+	enterpriseHookWorkerPurger = func(context.Context, enterprisehooks.InstallOptions) error {
+		return &enterprisehooks.UserInstallKeptError{Found: []string{"config.yaml"}}
+	}
+	if response := runEnterpriseHookWorkerApply(context.Background(), purgeRequest); !response.Targets[1].OK || !strings.Contains(response.Targets[1].Kept, "own DefenseClaw install") {
+		t.Fatalf("kept purge response %+v", response)
+	}
+	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+		purged = append(purged, opts.DataDir)
+		return nil
+	}
 	enterpriseHookWorkerRemover = func(context.Context, enterprisehooks.InstallOptions) error {
 		return errors.New("teardown failed")
 	}

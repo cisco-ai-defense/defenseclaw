@@ -187,7 +187,7 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				if left {
 					return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"removed":2,"failed":["alice/devin: devin teardown: remove hook entries: permission denied"]}`)}, errors.New("exit 1")
 				}
-				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"]}`)}, nil
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"],"kept":["bob: kept ~/.defenseclaw, which holds the account's own DefenseClaw install (config.yaml)"]}`)}, nil
 			}}
 			failed := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, failed, codePerUserHooks)
@@ -212,6 +212,10 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 			// MAC-R1-22: the purge names the accounts whose data it deleted.
 			if !strings.Contains(strings.Join(done.Changes, "\n"), "per-user data of user alice") {
 				t.Fatalf("the purge does not report the per-user data it removed: %v", done.Changes)
+			}
+			// RHEL-U2-12: and the accounts whose own install it kept.
+			if changes := strings.Join(done.Changes, "\n"); !strings.Contains(changes, "kept the DefenseClaw per-user data of user bob") || strings.Contains(changes, "removed the DefenseClaw per-user data of user bob") {
+				t.Fatalf("the purge does not report the own install it kept: %v", done.Changes)
 			}
 			// MAC-U2-13: and says the disabled hook stubs stay.
 			if !strings.Contains(strings.Join(done.Changes, "\n"), "except ~/.defenseclaw/hooks") {

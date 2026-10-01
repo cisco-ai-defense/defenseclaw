@@ -21,6 +21,26 @@ import (
 // foreign-hook policy moved aside; only the account may put them back.
 const foreignHooksBackupDir = "foreign-hooks-backup"
 
+// personalInstallEntries are what an account's own per-user DefenseClaw
+// install keeps in ~/.defenseclaw (its config, the CLI's virtualenv, the
+// per-user gateway's audit database). The managed enterprise hook install
+// writes none of them there, so any of them records that the folder holds
+// the account's own install, which an enterprise purge must not delete.
+var personalInstallEntries = []string{"config.yaml", ".venv", "audit.db"}
+
+// PersonalInstallEntries lists the entries of dataDir that belong to the
+// account's own per-user DefenseClaw install (see personalInstallEntries);
+// none for a folder only the managed enterprise install wrote.
+func PersonalInstallEntries(dataDir string) []string {
+	var found []string
+	for _, name := range personalInstallEntries {
+		if _, err := os.Lstat(filepath.Join(dataDir, name)); err == nil {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
 // BackedUpConnectors lists the connectors that still keep DefenseClaw's
 // backups of files they changed (<dataDir>/connector_backups/<name>): each
 // one's teardown can still put those files back.

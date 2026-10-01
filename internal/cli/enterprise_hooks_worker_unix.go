@@ -199,13 +199,16 @@ type enterpriseHookWorkerCleanupReport struct {
 }
 
 type enterpriseHookWorkerTargetResult struct {
-	Index    int                            `json:"index"`
-	OK       bool                           `json:"ok"`
-	Repaired bool                           `json:"repaired,omitempty"`
-	Removed  bool                           `json:"removed,omitempty"`
-	Pending  bool                           `json:"pending,omitempty"`
-	Error    string                         `json:"error,omitempty"`
-	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
+	Index    int  `json:"index"`
+	OK       bool `json:"ok"`
+	Repaired bool `json:"repaired,omitempty"`
+	Removed  bool `json:"removed,omitempty"`
+	Pending  bool `json:"pending,omitempty"`
+	// Kept is why a purge left the account's ~/.defenseclaw alone: it
+	// holds the account's own per-user install.
+	Kept   string                         `json:"kept,omitempty"`
+	Error  string                         `json:"error,omitempty"`
+	Result *enterprisehooks.InstallResult `json:"result,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -482,6 +485,10 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				break
 			}
 			err = enterpriseHookWorkerPurger(ctx, opts)
+			var kept *enterprisehooks.UserInstallKeptError
+			if errors.As(err, &kept) {
+				outcome.Kept, err = kept.Error(), nil
+			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}
