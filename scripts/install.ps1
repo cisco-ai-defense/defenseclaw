@@ -878,6 +878,11 @@ function Restore-ExternalConfig([string]$Slot) {
 
 function Restore-Slot([string]$Slot) {
     # Put the install saved in $Slot back; what it replaces goes to .failed-<time>.
+    # Only the latest failed install is kept: with a large audit database
+    # each copy holds gigabytes, and an earlier one is not used again.
+    foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)) {
+        Invoke-Quietly { Remove-Tree $old.FullName }
+    }
     $failed = Join-Path $DataDir (".failed-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-InstallDirectory $failed
     New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
@@ -900,7 +905,9 @@ function Restore-Slot([string]$Slot) {
 function Restore-Snapshot {
     $failed = Restore-Slot $Snap
     Restart-Old
-    Write-Warn "The failed $Ver install was kept in $failed for troubleshooting"
+    $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
+    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: Remove-Item -Recurse -Force '$failed'"
 }
 
 function Save-RolledBackData {

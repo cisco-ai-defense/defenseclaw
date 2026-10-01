@@ -897,6 +897,11 @@ swap_app() {
 
 restore_snapshot() {
     local failed binary link name
+    # Only the latest failed install is kept: with a large audit database
+    # each copy holds gigabytes, and an earlier one is not used again.
+    for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
+        if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}"; fi
+    done
     failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "${failed}/data"
     for binary in ${MANAGED_BINARIES}; do
@@ -926,7 +931,8 @@ restore_snapshot() {
     restore_external_config "${SNAP}"
     rm -rf "${SNAP}"
     restart_old
-    warn "The failed ${VERSION} install was kept in ${failed} for troubleshooting"
+    warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
+    info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
 }
 
 restart_old() {
