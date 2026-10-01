@@ -3491,7 +3491,11 @@
         },
         "model_selection": {
           "type": "boolean",
-          "description": "Enable semantic router model selection so keyword-based routing decisions are enforced instead of always falling through to the default model."
+          "description": "Enable semantic router model selection algorithms (ELO, latency-aware, etc.) for smarter model ranking."
+        },
+        "semantic_cache": {
+          "type": "boolean",
+          "description": "Enable semantic cache to reduce classification latency for repeat/similar queries."
         },
         "version": {
           "type": "string",

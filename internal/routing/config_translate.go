@@ -188,6 +188,7 @@ type TranslateInput struct {
 	Port             int
 	Algorithm        string
 	ModelSelection   bool
+	SemanticCache    bool
 	MMBertModelPath  string
 	Qwen3ModelPath   string
 	Models           []TranslateModel
@@ -287,7 +288,7 @@ func Translate(input TranslateInput) *SRConfig {
 			},
 		},
 		Global: SRGlobalConfig{
-			Router: SRGlobalRouter{ModelSelection: SRFeatureToggle{Enabled: false}},
+			Router: SRGlobalRouter{ModelSelection: SRFeatureToggle{Enabled: input.ModelSelection}},
 			Services: SRGlobalServices{
 				ResponseAPI:  SRFeatureToggle{Enabled: false},
 				RouterReplay: SRFeatureToggle{Enabled: false},
@@ -298,7 +299,7 @@ func Translate(input TranslateInput) *SRConfig {
 				Authz:     SREmptyProviders{Providers: []interface{}{}},
 				RateLimit: SREmptyProviders{Providers: []interface{}{}},
 			},
-			Stores: SRGlobalStores{SemanticCache: SRFeatureToggle{Enabled: false}},
+			Stores: SRGlobalStores{SemanticCache: SRFeatureToggle{Enabled: input.SemanticCache}},
 			ModelCatalog: SRGlobalModelCatalog{
 				Embeddings: SRGlobalEmbeddings{Semantic: SRGlobalSemanticEmbedding{
 					MMBertModelPath: input.MMBertModelPath,

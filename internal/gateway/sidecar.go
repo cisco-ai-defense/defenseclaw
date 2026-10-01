@@ -615,6 +615,7 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		Port:            rcfg.Port,
 		Algorithm:       rcfg.Algorithm,
 		ModelSelection:  rcfg.ModelSelection,
+		SemanticCache:   rcfg.SemanticCache,
 		MMBertModelPath: mmBertPath,
 		Qwen3ModelPath:  qwen3Path,
 	}

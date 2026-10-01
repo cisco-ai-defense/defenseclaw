@@ -327,6 +327,7 @@ type Config struct {
 type RoutingConfig struct {
 	Enabled        bool                   `mapstructure:"enabled"            yaml:"enabled"`
 	ModelSelection bool                   `mapstructure:"model_selection"    yaml:"model_selection,omitempty"`
+	SemanticCache  bool                   `mapstructure:"semantic_cache"     yaml:"semantic_cache,omitempty"`
 	Version        string                 `mapstructure:"version"            yaml:"version,omitempty"`
 	Port           int                    `mapstructure:"port"               yaml:"port,omitempty"`
 	Algorithm      string                 `mapstructure:"algorithm"          yaml:"algorithm,omitempty"`
