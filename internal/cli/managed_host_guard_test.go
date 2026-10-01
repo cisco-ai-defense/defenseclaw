@@ -97,7 +97,7 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	}
 	root.SetArgs([]string{"setup", "kiro"})
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
-		!strings.Contains(err.Error(), "enterprise acp enroll") {
+		!strings.Contains(err.Error(), "guardrail.connectors.kiro") {
 		t.Fatalf("setup kiro on a managed Windows computer: %v", err)
 	}
 	// `doctor` was an unknown command and `status` printed the raw missing

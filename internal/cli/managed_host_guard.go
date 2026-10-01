@@ -149,8 +149,8 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 func managedWindowsSetupRefusal(where string, args []string) error {
 	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
 	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "kiro") {
-		detail = "On a managed Windows computer Kiro is protected through the ACP guard: " +
-			"your administrator enrolls it with `defenseclaw-gateway enterprise acp enroll`. "
+		detail = "On a managed Windows computer the guardian enrolls Kiro for each user when your administrator " +
+			"lists it in the deployment (guardrail.connectors.kiro); the ACP guard stays available for editors that start Kiro over ACP. "
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
