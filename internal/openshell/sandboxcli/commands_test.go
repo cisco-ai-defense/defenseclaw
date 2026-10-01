@@ -165,6 +165,8 @@ func TestActivityRendering(t *testing.T) {
 			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
 		{Seq: 17, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 80, Method: "GET",
 			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
+		// A DefenseClaw ask: the harness asks the user in its own UI.
+		{Seq: 18, Time: at, Kind: sandboxapi.ActivityToolAsked, Sandbox: "box", Tool: "Bash", Reason: "C2-WEBHOOK-SITE"},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -187,6 +189,7 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ⚠ large upload to httpbin.io (more than 1 MiB)",
 		"12:01:02 ✗ httpbin.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 		"12:01:02 ✗ httpbin.org:80 (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
+		"12:01:02 ? tool Bash asked for confirmation: C2-WEBHOOK-SITE",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))

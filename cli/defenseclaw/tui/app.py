@@ -4182,7 +4182,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         # "running..." badge so the Setup panel reflects the
                         # actual outcome and the user can retry without first
                         # closing/reopening the wizard.
-                        self.setup_model.mark_wizard_complete(args, success=False)
+                        self.setup_model.mark_wizard_complete(args, success=False, cancelled=bool(event.cancelled))
                     self._refresh_models_from_disk()
                     self._render_chrome()
                     self._refresh_hint()
@@ -11976,7 +11976,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if cancelled_label.startswith("defenseclaw "):
             argv = tuple(cancelled_label.split()[1:])
             if argv and argv[0] in WIZARD_COMMAND_FAMILIES:
-                self.setup_model.mark_wizard_complete(argv, success=False)
+                self.setup_model.mark_wizard_complete(argv, success=False, cancelled=True)
         self._refresh_hint()
 
     async def _handle_successful_command(self, binary: str, args: tuple[str, ...]) -> None:

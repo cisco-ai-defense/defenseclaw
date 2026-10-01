@@ -558,23 +558,31 @@ func TestHookLabelAndDisplayReason(t *testing.T) {
 	}
 }
 
-// Hook requests and verdicts are counted, a block is on the feed, and only an
-// alert verdict (ran, flagged) is a finding there; another binding's counts nothing.
+// Hook requests and verdicts are counted, a block and an ask are on the feed,
+// and only an alert verdict (ran, flagged) is a finding there; another
+// binding's counts nothing.
 func TestHookCoverage(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "hookbox"})
 	binding, d := e.binding("hookbox"), e.decider("hookbox", "Bash")
 	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
 	allow, block, alert, other := d("PreToolUse", "", "allow"), d("PreToolUse", "", "block"), d("PreToolUse", "", "alert"), d("PreToolUse", "", "block")
+	ask := d("PreToolUse", "", "confirm")
+	ask.Severity, ask.Reason = "HIGH", "DefenseClaw rule C2-WEBHOOK-SITE asks you to confirm this."
 	allow.Severity, other.BindingID = "NONE", "sb_other"
 	block.Severity, block.WouldBlock, block.Reason = "HIGH", true, "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command."
 	alert.Severity, alert.Reason = "high", "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT: E2E sandbox alert marker. "+
 		"The action was allowed; DefenseClaw recorded the finding for the user's review."
-	for _, dec := range []HookDecision{allow, block, alert, d("PostToolUse", "", "allow"), other} {
+	for _, dec := range []HookDecision{allow, block, alert, ask, d("PostToolUse", "", "allow"), other} {
 		e.m.ObserveHookDecision(dec)
 	}
-	if h := e.get("hookbox").Hooks; h.HookRequests != 1 || h.ToolCalls != 3 || h.ToolBlocked != 1 || h.LastBlocked != block.Reason {
+	if h := e.get("hookbox").Hooks; h.HookRequests != 1 || h.ToolCalls != 4 || h.ToolBlocked != 1 || h.ToolAsked != 1 || h.LastBlocked != block.Reason {
 		t.Fatalf("hooks = %+v", h)
+	}
+	// An ask is on the feed as one, not as a finding.
+	if got := e.events("hookbox", sandboxapi.ActivityToolAsked, ""); len(got) != 1 || got[0].Tool != "Bash" ||
+		got[0].Message != "? DefenseClaw asked you to confirm Bash: "+ask.Reason {
+		t.Fatalf("tool asks on the feed = %+v", got)
 	}
 	if got := e.events("hookbox", sandboxapi.ActivityToolBlocked, ""); len(got) != 1 || got[0].Tool != "Bash" {
 		t.Fatalf("tool blocks on the feed = %+v", got)

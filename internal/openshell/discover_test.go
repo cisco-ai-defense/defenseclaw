@@ -170,6 +170,22 @@ func TestDiscoverSelection(t *testing.T) {
 	}
 }
 
+// A gateway that has started writes its client certificates to its
+// registration directory before `openshell gateway add` registers it.
+func TestDiscoverUnregisteredGatewayCertificates(t *testing.T) {
+	skipOnWindows(t)
+	dir := realTempDir(t)
+	mtls := filepath.Join(dir, "gateways", "openshell", "mtls")
+	if err := os.MkdirAll(mtls, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(mtls, "ca.crt"), "ca", 0o600)
+	_, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir, SystemDir: realTempDir(t)})
+	if !errors.Is(err, openshell.ErrGatewayNotFound) {
+		t.Fatalf("Discover = %v, want %v", err, openshell.ErrGatewayNotFound)
+	}
+}
+
 func TestDiscoverRejectsInvalidNames(t *testing.T) {
 	skipOnWindows(t)
 	dir := t.TempDir()

@@ -359,7 +359,7 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.onUnblock(ev.Host)
 	case sandboxapi.ActivityEgressLargeUpload:
 		s.largeUploadNotice(ev)
-	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityHookFailed:
+	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookFailed:
 		// A hook of the session reached DefenseClaw.
 		s.sawHooks.Store(true)
 	case sandboxapi.ActivityFinding:
@@ -1135,18 +1135,25 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
+	asked := after.Hooks.ToolAsked - hooksBefore.ToolAsked
 	s.hadTurn = calls > 0
 	parts := []string{"Session ended"}
 	tools := plural(max(calls, 0), "tool call", "tool calls")
 	if since != "" {
 		tools += " " + since
 	}
-	if blocked > 0 {
+	switch {
+	case blocked > 0:
 		tools += fmt.Sprintf(" (%d blocked", blocked)
 		if after.Hooks.LastBlocked != "" {
 			tools += ": " + blockedReason(after.Hooks.LastBlocked)
 		}
+		if asked > 0 {
+			tools += fmt.Sprintf("; %d asked", asked)
+		}
 		tools += ")"
+	case asked > 0:
+		tools += fmt.Sprintf(" (%d asked)", asked)
 	}
 	parts = append(parts, tools)
 	// A hook call DefenseClaw answered with an error failed closed: the

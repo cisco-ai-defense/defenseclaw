@@ -882,6 +882,9 @@ func TestSummaryLine(t *testing.T) {
 	}
 	failed := sampleSandbox("f-box")
 	failed.Hooks.HookFailed = 2
+	asked := sampleSandbox("a-box")
+	asked.Hooks.ToolAsked = 1
+	onlyAsked := &sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{ToolCalls: 2, ToolAsked: 1}}
 	for _, c := range []struct {
 		before, after *sandboxapi.Sandbox
 		want          string
@@ -894,6 +897,9 @@ func TestSummaryLine(t *testing.T) {
 		{&sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}, &failed,
 			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted · 1 site blocked"},
 		{&failed, &failed, "Session ended · 0 tool calls · 0 new sites contacted"},
+		// DefenseClaw's asks, which the harness put to the user.
+		{&sandboxapi.Sandbox{}, &asked, "Session ended · 4 tool calls (1 blocked: marker; 1 asked) · 3 new sites contacted · 1 site blocked"},
+		{&sandboxapi.Sandbox{}, onlyAsked, "Session ended · 2 tool calls (1 asked) · 0 new sites contacted"},
 	} {
 		s := &session{app: newTestApp(t, "").App, before: c.before}
 		if got := s.summaryLine(c.after, nil); got != c.want {

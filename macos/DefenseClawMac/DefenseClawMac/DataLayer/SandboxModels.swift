@@ -88,6 +88,7 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var pendingApprovals = 0
     var toolCalls = 0
     var toolBlocked = 0
+    var toolAsked = 0
     /// The hook verdicts per hook event, as the harness names it, the most
     /// frequent first ("PreToolUse 12"); otherHookEvents counts those past
     /// the daemon's cap.
@@ -243,7 +244,7 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
         case "egress.blocked", "tool.blocked", "hook.failed": "✗"
         case "egress.unblocked": "↺"
         case "egress.large_upload", "finding": "⚠"
-        case "approval.requested": "?"
+        case "approval.requested", "tool.asked": "?"
         case "dropped": "…"
         default: "·"
         }
@@ -268,6 +269,8 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
             return text.isEmpty ? "asks to reach " + SandboxFormat.hostPort(host, port) : text
         case "tool.blocked":
             return (tool.isEmpty ? "tool call" : tool) + " blocked" + (reason.isEmpty ? "" : ": \(reason)")
+        case "tool.asked":
+            return (tool.isEmpty ? "tool call" : tool) + " asked for your confirmation" + (reason.isEmpty ? "" : ": \(reason)")
         default:
             return text.isEmpty ? (reason.isEmpty ? kind : reason) : text
         }
@@ -617,6 +620,7 @@ enum SandboxDecoding {
         row.pendingApprovals = int(d["pending_approvals"])
         row.toolCalls = int(hooks["tool_calls"])
         row.toolBlocked = int(hooks["tool_blocked"])
+        row.toolAsked = int(hooks["tool_asked"])
         row.hookEvents = dict(hooks["events"])
             .map { (name: $0.key, count: int($0.value)) }
             .filter { !$0.name.isEmpty && $0.count > 0 }
