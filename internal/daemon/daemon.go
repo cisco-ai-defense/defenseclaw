@@ -283,6 +283,17 @@ func (d *Daemon) verifyReplacedExecutable(info pidInfo) bool {
 	return d.verifyStartIdentity(info)
 }
 
+// RunsReplacedExecutable reports whether this data directory's gateway is
+// alive on a file that was replaced or removed after it started (#1047). It
+// is still this account's gateway; a restart loads the installed binary.
+func (d *Daemon) RunsReplacedExecutable() bool {
+	info, err := d.readPIDInfo()
+	if err != nil || !processExists(info.PID) {
+		return false
+	}
+	return !d.verifyProcess(info) && d.verifyReplacedExecutable(info)
+}
+
 // IsRetiredInstallCopy reports whether live is the copy of the recorded
 // executable that a source install moved into its retirement custody beside
 // it (".defenseclaw-install-custody/retired-<sha256>") while the process ran.
@@ -523,9 +534,17 @@ func (d *Daemon) Start(args []string) (int, error) {
 	args = stripTokenArgs(args)
 
 	env := d.childEnv(os.Environ())
-	// The child runs the file this process runs (daemonExecPath) and keeps
-	// the install path as argv[0], which the process identity checks read.
-	cmd := exec.Command(daemonExecPath(executable), args...)
+	// The child runs the file this process checked (pinDaemonLaunch) and
+	// keeps the install path as argv[0], which the process identity checks
+	// read.
+	pin, err := pinDaemonLaunch(executable)
+	if err != nil {
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
+	}
+	defer pin.close()
+	cmd := exec.Command(pin.path, args...)
 	cmd.Args[0] = executable
 	cmd.Env = env
 	cmd.Stdin = devNull
@@ -543,6 +562,13 @@ func (d *Daemon) Start(args []string) (int, error) {
 		devNull.Close()
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: start process: %w", err)
+	}
+	if err := pin.check(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
 	}
 
 	pid := cmd.Process.Pid

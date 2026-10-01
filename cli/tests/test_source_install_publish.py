@@ -1415,3 +1415,34 @@ def test_regular_replace_prunes_old_retired_binaries(tmp_path: Path) -> None:
     assert [p.readlink() for p in custody.glob("retired-*") if p.is_symlink()] == [outside]
     assert outside.read_bytes() == b"outside\n"
     assert len(list(custody.glob("intent-*.json"))) == 3
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and stage pruning")
+def test_regular_publish_prunes_day_old_own_stages_and_reports_others(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    old = install_dir / f".defenseclaw-gateway.source-install-{1:032x}"
+    fresh = install_dir / f".defenseclaw.source-install-{2:032x}"
+    for stray in (old, fresh):
+        stray.write_bytes(b"partial\n")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    destination = install_dir / "defenseclaw-gateway"
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(b"gateway\n")
+    source.chmod(0o755)
+    install_publish.publish_regular(source, destination, None, custody_root=custody)
+
+    assert not old.exists() and fresh.exists()
+    assert sorted(p.name for p in install_dir.iterdir()) == [custody.name, fresh.name, destination.name]
+
+    os.utime(fresh, (1_000_000_000, 1_000_000_000))
+    parent_fd = os.open(install_dir, os.O_RDONLY)
+    try:
+        reported = install_publish._prune_stale_stages(parent_fd, install_dir, custody, uid=os.geteuid() + 1)
+    finally:
+        os.close(parent_fd)
+    assert reported == [str(fresh)] and fresh.exists()
+    assert f"sudo rm -f {fresh}" in capsys.readouterr().err

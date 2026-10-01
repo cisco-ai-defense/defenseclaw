@@ -7,6 +7,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -60,7 +62,8 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 			t.Fatal(err)
 		}
 		attestation, err := enterprisehooks.ParseCredentialAttestation(data)
-		if err != nil || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 {
+		if err != nil || !attestation.Current() || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 ||
+			attestation.OperationID != "" || attestation.Phase != "" {
 			t.Fatalf("pass %d: attestation = %+v %v", pass, attestation, err)
 		}
 		// It is bound to the authorization ledger the same run published,
@@ -72,10 +75,31 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 		}
 		previousID = attestation.ID
 		for _, target := range attestation.Targets {
-			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified {
+			// Each names the credential it was rendered with, so readiness
+			// and a rotation can check it against the key.
+			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified ||
+				target.CredentialID != connector.UserScopedCredentialKeyID("hook-"+target.Connector+"-"+strconv.Itoa(uid)) {
 				t.Fatalf("pass %d: target = %+v", pass, target)
 			}
 		}
+	}
+	// A run while a credential rotation holds the guardian's record names
+	// that rotation's operation and phase, so the rotation takes no other
+	// run as proof.
+	record, _ := json.Marshal(enterprisehooks.CredentialTransaction{
+		Version: enterprisehooks.CredentialTransactionVersion, OperationID: strings.Repeat("0", 32), Phase: enterprisehooks.CredentialPhaseRollback,
+		ManifestSHA256: strings.Repeat("d", 64), PreviousKeyID: strings.Repeat("a", 64), NextKeyID: strings.Repeat("b", 64),
+	})
+	if err := os.WriteFile(filepath.Join(f.authDir, managed.HookGuardianCredentialTransactionFile), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianCredentialAttestationFile))
+	if attestation, err := enterprisehooks.ParseCredentialAttestation(data); err != nil ||
+		attestation.OperationID != strings.Repeat("0", 32) || attestation.Phase != enterprisehooks.CredentialPhaseRollback {
+		t.Fatalf("a run under a rotation does not name it: %+v %v", attestation, err)
 	}
 	identity := strconv.Itoa(uid)
 	targets := f.workerTargets()

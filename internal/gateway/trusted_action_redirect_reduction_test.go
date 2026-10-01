@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -264,6 +265,98 @@ func TestTrustedActionRedirectReductionDecidesNegationOnCompleteFacts(t *testing
 			}
 			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != wantAction {
 				t.Errorf("verdict = %q, want %q; findings=%v", verdict.Action, wantAction, FindingStrings(findings))
+			}
+		})
+	}
+}
+
+// TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget is the
+// corpus differential for built-in rules (#925): a POSIX corpus action that
+// blocks with an absolute redirect target also blocks with a target the
+// shell expands at run time, and one that does not block never starts to.
+// It also pins the review of every built-in code prerequisite: one that
+// holds on a redirect-target view and its static-target twin holds on the
+// action with a concrete target too. A rule whose prerequisite needs a
+// PowerShell or cmd action is inactive on the view, which is POSIX-only, and
+// keeps its fallback on the whole action.
+func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T) {
+	cases := readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl")
+	var posix []toolCallCorpusCase
+	for _, test := range cases {
+		command := strings.TrimSpace(test.Command)
+		if command == "" || len(test.Argv) != 0 {
+			continue
+		}
+		input := toolCallCorpusActionFactsInput(test)
+		if test.Dialect == actionfacts.DialectPowerShell || test.Dialect == actionfacts.DialectCMD {
+			input.Command = command + ` > "$HOME/out.txt"`
+			if _, _, ok := actionfacts.DynamicRedirectTargetReduction(input, actionfacts.Analyze(input)); ok {
+				t.Errorf("%s: %s action reduced", test.ID, test.Dialect)
+			}
+			continue
+		}
+		if strings.ContainsAny(command[len(command)-1:], `&|\`) ||
+			strings.Contains(command, "<<") || strings.Contains(command, "\n") {
+			continue
+		}
+		posix = append(posix, test)
+	}
+
+	var prerequisites []semanticOwner
+	for id, owner := range semanticOwners {
+		if owner.prerequisite != nil {
+			owner.id = id
+			prerequisites = append(prerequisites, owner)
+		}
+	}
+	for _, test := range posix {
+		base := strings.TrimSpace(test.Command)
+		input := toolCallCorpusActionFactsInput(test)
+		input.Command = base + " > ~/.ssh/authorized_keys"
+		view, twin, ok := actionfacts.DynamicRedirectTargetReduction(input, actionfacts.Analyze(input))
+		if !ok {
+			continue
+		}
+		input.Command = base + " > " + input.ActiveHome + "/.ssh/authorized_keys"
+		concrete := actionfacts.Analyze(input)
+		if !concrete.Authoritative() {
+			continue
+		}
+		for _, owner := range prerequisites {
+			if owner.eligible(view) && owner.eligible(twin) && !owner.eligible(concrete) {
+				t.Errorf("%s: prerequisite of %s holds on the view but not on %q",
+					test.ID, owner.id, input.Command)
+			}
+		}
+	}
+
+	const connector = "redirect-reduction-corpus"
+	for _, profile := range toolCallCorpusProfiles {
+		t.Run(profile, func(t *testing.T) {
+			installToolCallCorpusProfileConnector(t, connector, profile)
+			blocks := func(test toolCallCorpusCase, command, home string) bool {
+				input := toolCallCorpusActionFactsInput(test)
+				input.Command = command
+				input.ActiveHome = home
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input:              input,
+					LegacyText:         command,
+					Connector:          connector,
+					EnforcementCapable: true,
+				})
+				return buildVerdict(findings, "tool_call").Action == guardrailActionBlock
+			}
+			for _, test := range posix {
+				base := strings.TrimSpace(test.Command)
+				for _, home := range []string{"/home/alice", ""} {
+					want := blocks(test, base+" > /home/alice/out.txt", home)
+					for _, target := range []string{"~/out.txt", `"$HOME/out.txt"`, "out-*.txt"} {
+						if got := blocks(test, base+" > "+target, home); got != want {
+							t.Errorf("%s home=%q target %s: block = %t, absolute target block = %t",
+								test.ID, home, target, got, want)
+						}
+					}
+				}
 			}
 		})
 	}

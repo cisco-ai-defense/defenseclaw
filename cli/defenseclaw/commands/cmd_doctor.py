@@ -31,6 +31,7 @@ import io
 import ipaddress
 import json
 import os
+import posixpath
 import queue
 import re
 import shlex
@@ -2263,7 +2264,16 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     if code == 200:
         trust = _trusted_gateway_listener(cfg)
         holder = "" if trust.trusted else _gateway_port_holder(cfg)
-        if trust.trusted:
+        if trust.trusted and _replaced_gateway_executable(trust.record, trust.process, platform_name=sys.platform):
+            _emit(
+                "warn",
+                "Sidecar API",
+                f"{bind}:{cfg.gateway.api_port} — this account's gateway (PID {trust.pid}) is still running "
+                "a binary that was replaced after it started. Run `defenseclaw-gateway restart` to load "
+                "the installed one",
+                r=r,
+            )
+        elif trust.trusted:
             _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
         elif holder:
             # Another process's /health says nothing about this account's
@@ -2723,6 +2733,57 @@ def _gateway_executable_matches(
     return paths_same(record.executable, process.executable)
 
 
+def _retired_install_copy(recorded: str, live: str) -> bool:
+    """Mirror ``daemon.IsRetiredInstallCopy``: ``live`` is the retirement copy of ``recorded``.
+
+    A source install moves the installed file into
+    ``.defenseclaw-install-custody/retired-<sha256>`` beside it while the
+    gateway runs; the rename keeps the running inode, so Linux shows that path.
+    """
+    live = live.removesuffix(" (deleted)")
+    custody = posixpath.dirname(live)
+    digest = posixpath.basename(live).removeprefix("retired-")
+    return (
+        bool(recorded)
+        and posixpath.basename(custody) == ".defenseclaw-install-custody"
+        and posixpath.dirname(custody) == posixpath.dirname(recorded)
+        and posixpath.basename(live).startswith("retired-")
+        and len(digest) == 64
+        and all(c in "0123456789abcdef" for c in digest)
+    )
+
+
+def _replaced_gateway_executable(
+    record: PIDRecord | None,
+    process: ProcessEvidence | None,
+    *,
+    platform_name: str,
+) -> bool:
+    """A home-bound record whose gateway runs a file replaced after it started (#1047).
+
+    Linux then shows the recorded path plus " (deleted)", or the retired
+    custody copy beside it. This mirrors ``daemon.verifyReplacedExecutable``:
+    the record must still carry this home (checked by the caller), the exact
+    install path and the kernel start identity, so it is this account's
+    gateway, and a restart loads the installed binary.
+    """
+    if record is None or process is None or not platform_name.startswith("linux"):
+        return False
+    if not record.executable or not record.data_dir or not record.start_identity:
+        return False
+    live = process.executable
+    return live == record.executable + " (deleted)" or _retired_install_copy(record.executable, live)
+
+
+def _gateway_runs_replaced_binary(cfg) -> bool:
+    """Whether this home's verified gateway runs a replaced binary."""
+    try:
+        trust = _managed_gateway_process_trust(cfg)
+    except Exception:  # noqa: BLE001 - only refines an already trusted row
+        return False
+    return trust.trusted and _replaced_gateway_executable(trust.record, trust.process, platform_name=sys.platform)
+
+
 def _gateway_process_home_binding(
     cfg,
     record: PIDRecord,
@@ -2802,7 +2863,8 @@ def _gateway_process_trust(
         and bool(record.executable)
         and process.executable == record.executable + " (deleted)"
     )
-    process_name_source = record.executable if deleted_linux_migration else process.executable
+    replaced = _replaced_gateway_executable(record, process, platform_name=platform_name)
+    process_name_source = record.executable if deleted_linux_migration or replaced else process.executable
     if (
         gateway_executable_name(
             process_name_source,
@@ -2823,7 +2885,7 @@ def _gateway_process_trust(
             record=record,
             process=process,
         )
-    if not _gateway_executable_matches(record, process, platform_name=platform_name):
+    if not replaced and not _gateway_executable_matches(record, process, platform_name=platform_name):
         return _GatewayTrust(
             "identity",
             "recorded gateway executable identity changed",

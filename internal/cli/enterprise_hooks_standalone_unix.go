@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -501,6 +502,9 @@ type enterpriseHookStandaloneSlot struct {
 	// verifiable: the worker verifies the target before repairing it (a
 	// target that was not protected before is installed without a verify).
 	verifiable bool
+	// credentialID fingerprints the hook credential rendered for the
+	// target (connector.UserScopedCredentialKeyID).
+	credentialID string
 }
 
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
@@ -722,7 +726,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 		index := len(rows)
 		rows = append(rows, row)
-		slot := enterpriseHookStandaloneSlot{key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected}
+		slot := enterpriseHookStandaloneSlot{
+			key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected,
+			credentialID: connector.UserScopedCredentialKeyID(token),
+		}
 		if hasBinding && bindingMatches {
 			slot.binding = &binding
 		}
@@ -849,6 +856,14 @@ func writeEnterpriseHookCredentialAttestation(
 		KeyID:          keyID,
 		Targets:        make([]enterprisehooks.CredentialAttestationTarget, 0, len(rows)),
 	}
+	// Name the rotation this run acted under, so the rotation takes only a
+	// reconcile of its own phase as proof. The record cannot change while
+	// this run holds the reconcile lock.
+	if transaction, err := loadEnterpriseHookCredentialTransaction(cfg.DataDir); err == nil && transaction != nil {
+		attestation.OperationID, attestation.Phase = transaction.OperationID, transaction.Phase
+	} else if err != nil {
+		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: ignoring the credential transaction record: %v\n", err)
+	}
 	ledgerPath := managed.HookGuardianAuthorizationPath(cfg.DataDir)
 	if info, err := os.Lstat(ledgerPath); bound && err == nil {
 		if ledger, err := readEnterpriseHookBoundedFile(ledgerPath, info, enterprisehooks.CredentialAttestationMaxBytes, "hook guardian authorization"); err == nil {
@@ -876,6 +891,7 @@ func writeEnterpriseHookCredentialAttestation(
 				target.UID = slot.account.UID
 				target.Credentials = true
 				target.Verified = verified[index]
+				target.CredentialID = slot.credentialID
 			}
 		}
 		attestation.Targets = append(attestation.Targets, target)

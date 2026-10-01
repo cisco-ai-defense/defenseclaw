@@ -118,7 +118,7 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
-from defenseclaw.pinned_exec import run_pinned_executable
+from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
@@ -14153,12 +14153,20 @@ def _restart_defense_gateway_native(
         nl=False,
     )
     try:
-        result = runner.run(
-            [executable, action],
-            timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
-            env=native_command_environment(),
-            allow_breakaway=True,
-        )
+        # Hold the installed gateway without write or delete sharing until the
+        # lifecycle command exits: its controller starts the long-running
+        # gateway from this same path, which then still names this file (#643).
+        with pinned_executable(executable):
+            result = runner.run(
+                [executable, action],
+                timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+                env=native_command_environment(),
+                allow_breakaway=True,
+            )
+    except UnsafePathError as exc:
+        click.echo(" ✗ (installed gateway could not be held for the launch)")
+        click.echo(f"    {exc}")
+        return False
     except CommandTimeoutError as exc:
         if _wait_for_defense_gateway_api(
             data_dir,
@@ -14210,12 +14218,14 @@ def _native_gateway_lifecycle_status(runner, executable: str) -> bool:
 def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:
     from defenseclaw.observability.local_stack import LocalStackError
 
+    resolved = str(Path(executable).resolve())
     try:
-        result = runner.run(
-            [str(Path(executable).resolve()), "stop"],
-            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
-        )
-    except LocalStackError:
+        with pinned_executable(resolved):
+            result = runner.run(
+                [resolved, "stop"],
+                timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+            )
+    except (LocalStackError, UnsafePathError):
         return False
     return result.returncode == 0
 
