@@ -1697,7 +1697,11 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("ensure hook dir: %w", err)
 	}
-	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
+	// A managed Windows hook folder holds only files with the managed runtime
+	// DACL; the generic private descriptor made a later rollback refuse to
+	// remove the tombstone, which left the deployment pending.
+	return hookRuntimeFileWriter(opts.ManagedEnterprise)(
+		filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
 }
 
 // disabledHookTombstone is the body writeDisabledHookTombstone writes.

@@ -154,6 +154,13 @@ var catalogedOnlyConnectorsWithoutHookGate = map[string]bool{
 	"kiro": true,
 }
 
+// HookContractNotGated reports whether connectorName has no hook contract
+// gate, so its hook contract lock entry legitimately records no contract ID.
+func HookContractNotGated(connectorName string) bool {
+	name := normalizeConnectorName(connectorName)
+	return proxyConnectorsWithoutHookGate[name] || catalogedOnlyConnectorsWithoutHookGate[name]
+}
+
 var copilotLegacyHookEvents = []string{
 	"sessionStart",
 	"sessionEnd",

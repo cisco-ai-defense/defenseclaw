@@ -1112,8 +1112,7 @@ func validateWindowsManagedRuntimeGenerationDesired(
 		strings.ContainsAny(desired.ScopedToken, "\x00\r\n") {
 		return desired, nil, errors.New("enterprise hooks: managed runtime scoped token is invalid")
 	}
-	if !validWindowsManagedRuntimeText(desired.HookContractID, 256) ||
-		!windowsManagedRuntimeKnownContract(desired.Connector, desired.HookContractID) {
+	if !windowsManagedRuntimeValidContract(desired.Connector, desired.HookContractID) {
 		return desired, nil, errors.New("enterprise hooks: managed runtime hook contract is invalid")
 	}
 	lockTime, err := time.Parse(time.RFC3339Nano, desired.HookContractLockUpdatedAt)
@@ -1419,6 +1418,17 @@ func validateWindowsManagedRuntimeGenerationPath(path, requiredLeaf string) erro
 func validWindowsManagedRuntimeText(value string, maximum int) bool {
 	return value != "" && value == strings.TrimSpace(value) && len(value) <= maximum &&
 		!strings.ContainsAny(value, "\x00\r\n")
+}
+
+// windowsManagedRuntimeValidContract accepts a known hook contract ID, or no
+// ID for a connector without a hook contract gate (Kiro): its lock entry
+// records none, and refusing it failed every managed Kiro enrolment.
+func windowsManagedRuntimeValidContract(connectorName, contractID string) bool {
+	if contractID == "" {
+		return connector.HookContractNotGated(connectorName)
+	}
+	return validWindowsManagedRuntimeText(contractID, 256) &&
+		windowsManagedRuntimeKnownContract(connectorName, contractID)
 }
 
 func windowsManagedRuntimeKnownContract(connectorName, contractID string) bool {

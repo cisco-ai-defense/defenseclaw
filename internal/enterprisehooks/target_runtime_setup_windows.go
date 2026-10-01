@@ -149,6 +149,11 @@ const (
 	// LocalSystem only. The canonical file DACL is also accepted, for a
 	// record the guardian hardened after a successful setup.
 	windowsManagedRuntimeCleanupConnectorBackupFile
+	// windowsManagedRuntimeCleanupHookFile is a file in the account's
+	// DefenseClaw hooks folder: the canonical file DACL, or the account and
+	// LocalSystem private DACL that an older release's disabled-hook
+	// tombstone was written with during a failed enrolment's teardown.
+	windowsManagedRuntimeCleanupHookFile
 )
 
 // windowsManagedRuntimeCleanupOwnedLocks are the root leaves the connector
@@ -517,7 +522,7 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			}
 		}
 		for _, leaf := range files.hooks {
-			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupHookFile
 		}
 		if files.generation {
 			spec.generationConnectors[name] = struct{}{}
@@ -2090,16 +2095,20 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
-	case windowsManagedRuntimeCleanupConnectorBackupFile:
+	case windowsManagedRuntimeCleanupConnectorBackupFile, windowsManagedRuntimeCleanupHookFile:
+		kind := "connector backup"
+		if contract == windowsManagedRuntimeCleanupHookFile {
+			kind = "hook"
+		}
 		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
-			return "", fmt.Errorf("enterprise hooks: connector backup cleanup file owner or DACL provenance is invalid")
+			return "", fmt.Errorf("enterprise hooks: %s cleanup file owner or DACL provenance is invalid", kind)
 		}
 		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
 			system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 			if err != nil {
 				return "", err
 			}
-			if err := validateWindowsManagedRuntimeExactFileACL(label, "connector backup", descriptor, dacl, []*windows.SID{target.sid, system}); err != nil {
+			if err := validateWindowsManagedRuntimeExactFileACL(label, kind, descriptor, dacl, []*windows.SID{target.sid, system}); err != nil {
 				return "", err
 			}
 		}
@@ -2109,7 +2118,7 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		}
 		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
 		if size > windowsEnterpriseUserFileMaxBytes {
-			return "", fmt.Errorf("enterprise hooks: connector backup cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+			return "", fmt.Errorf("enterprise hooks: %s cleanup file exceeds %d bytes", kind, windowsEnterpriseUserFileMaxBytes)
 		}
 	case windowsManagedRuntimeCleanupGatewayFile:
 		administrators, administratorsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)

@@ -477,12 +477,15 @@ func applyWindowsEnterpriseInstallerReport(
 	addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
+		purge := false
 		if opts != nil {
 			configPath = opts.configPath
+			purge = opts.purge
 		}
 		if next := windowsEnterpriseStandaloneNextStep(
 			result.Action,
 			configPath,
+			purge,
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
