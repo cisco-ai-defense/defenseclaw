@@ -1665,6 +1665,19 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 		_, _ = env.Runner.Run(ctx, "systemctl", append([]string{"reset-failed"}, names...)...)
 	}
+	if env.GOOS == "darwin" {
+		// launchctl disable writes an override to launchd's database that
+		// outlives the job, so every removed label stayed listed as
+		// disabled. launchctl cannot delete an override; once a label's
+		// definition is gone, put it back to launchd's default, enabled
+		// (the state install leaves). A definition that is still there
+		// stays disabled, so a reboot does not start it.
+		for _, unit := range units {
+			if unit.Activate && !exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
+				_ = env.Services.Enable(ctx, unit)
+			}
+		}
+	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
 	// Runtime leftovers of the stopped services: the sensor helper's socket
 	// directory and the gateway's plugin cache (its TempDir is /tmp: the

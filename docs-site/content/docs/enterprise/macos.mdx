@@ -331,6 +331,14 @@ A pkg has no uninstaller, so the lifecycle removes the binaries itself. For
 a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,
 so the pkg receipt is gone afterward.
 
+launchd keeps a record for each removed label. After uninstall,
+`launchctl print system` lists the DefenseClaw labels as `enabled`, which is
+launchd's default, and no job stays loaded. macOS also keeps any privacy (TCC)
+decision about the gateway binary, such as a Full Disk Access entry, and
+uninstall cannot remove it. Remove the entry in System Settings > Privacy &
+Security > Full Disk Access. If an MDM PPPC profile granted the access, remove
+that profile.
+
 ## Upgrades and changes
 
 - **Upgrade.** Install the newer pkg, or run `ensure` with the newer tarball.
