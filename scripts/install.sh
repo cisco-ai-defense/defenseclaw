@@ -879,6 +879,12 @@ swap_in() {
         local args=(migrate --yes)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        # The previous version's agent discovery is absent or stale. Refresh
+        # it (bounded --version probes, no telemetry) before the gateway
+        # starts, so the gateway records each agent's version in the hook
+        # contract lock and doctor can check compatibility. Best effort.
+        info "Refreshing agent discovery"
+        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
     fi
 }
 

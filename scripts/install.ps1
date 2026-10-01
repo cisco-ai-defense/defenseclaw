@@ -859,6 +859,12 @@ function Install-New {
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
         if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $migrateArgs) -ne 0) { return $false }
+        # The previous version's agent discovery is absent or stale. Refresh
+        # it (bounded --version probes, no telemetry) before the gateway
+        # starts, so the gateway records each agent's version in the hook
+        # contract lock and doctor can check compatibility. Best effort.
+        Write-Info "Refreshing agent discovery"
+        Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("agent", "discover", "--refresh", "--no-emit-otel") -Quiet | Out-Null
     }
     return $true
 }
