@@ -423,6 +423,8 @@ def _force_utf8_io() -> None:
             reconfigure(encoding="utf-8")
         except (ValueError, OSError):
             pass
+    sys.stdout = ux.ascii_safe_redirected_stream(sys.stdout)
+    sys.stderr = ux.ascii_safe_redirected_stream(sys.stderr)
 
 
 def main() -> None:

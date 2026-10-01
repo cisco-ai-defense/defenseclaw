@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from typing import Any
 
 import click
 
@@ -154,6 +155,53 @@ def console_text(text: str) -> str:
     if unicode_output_enabled():
         return text
     return text.translate(_ASCII_PRESENTATION_TRANSLATION)
+
+
+def _console_output_code_page() -> int:
+    """Return the attached Windows console's output code page, or 0."""
+
+    try:
+        import ctypes
+
+        return int(ctypes.windll.kernel32.GetConsoleOutputCP())  # type: ignore[attr-defined]
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+class _ASCIIPresentationStream:
+    """Text stream proxy that writes presentation glyphs as ASCII."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, text: Any) -> int:
+        if isinstance(text, str):
+            text = text.translate(_ASCII_PRESENTATION_TRANSLATION)
+        return self._stream.write(text)
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+def ascii_safe_redirected_stream(stream: Any) -> Any:
+    """Wrap a Windows stream that is piped through a legacy-code-page console.
+
+    PowerShell decodes a native command's piped output (``defenseclaw ... |
+    Out-Host``) with the console code page, so the UTF-8 bytes of a glyph such
+    as ``✓`` come out as mojibake. Output written straight through ``click.echo``
+    skips :func:`console_text`, so the downgrade happens at the stream. JSON
+    output is unaffected: it escapes these characters.
+    """
+
+    if sys.platform != "win32" or stream is None or _stream_is_tty(stream):
+        return stream
+    if _console_output_code_page() in (0, 65001):
+        return stream
+    return _ASCIIPresentationStream(stream)
 
 
 def echo(message: object | None = None, **kwargs: object) -> None:

@@ -2433,7 +2433,7 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
 #: How a saved rule-pack / mode change reached the running gateway (also the
 #: ``gateway`` field of the ``--json`` results).
 _GATEWAY_OUTCOMES = {
-    "restarted": "Restarted the gateway; it is enforcing the change now.",
+    "restarted": "Restarted the gateway; it applies the change now.",
     "live": "The running gateway applies it now.",
     "not_running": "The gateway isn't running; it loads this when it starts.",
     "guardrail_off": "The guardrail is off; this takes effect when you run defenseclaw guardrail enable.",
