@@ -82,8 +82,14 @@ func TestHardening_RemovesHookHomeUnderAgentTMPDIR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run bash: %v: %s", err, out)
 	}
-	if home := strings.TrimSpace(string(out)); !strings.HasPrefix(home, scratch) {
-		t.Fatalf("hook HOME = %q, want it under the agent TMPDIR %q", home, scratch)
+	// macOS mktemp -t uses the per-user temp directory, so only Linux puts
+	// the HOME under TMPDIR; either way it must be gone once the hook exits.
+	home := strings.TrimSpace(string(out))
+	if !strings.Contains(home, "defenseclaw-hook.") {
+		t.Fatalf("hook HOME = %q, want a per-hook mktemp directory", home)
+	}
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatalf("hook HOME %q still exists after the hook exited: %v", home, err)
 	}
 	if left, _ := os.ReadDir(scratch); len(left) != 0 {
 		t.Fatalf("hook left %d directories in the agent TMPDIR", len(left))

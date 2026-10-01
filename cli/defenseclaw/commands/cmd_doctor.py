@@ -1727,11 +1727,12 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         return
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
         size_mib = max(health.file_bytes, 0) // (1024 * 1024)
+        limit_mib = _AUDIT_FULL_INTEGRITY_MAX_BYTES // (1024 * 1024)
         _emit(
             "warn",
             "Audit database",
             f"{db_path}; required schema present; integrity not checked because the {size_mib} MiB file "
-            f"is above Doctor's {_AUDIT_FULL_INTEGRITY_MAX_BYTES // (1024 * 1024)} MiB limit. No action is needed unless the gateway "
+            f"is above Doctor's {limit_mib} MiB limit. No action is needed unless the gateway "
             f"reports audit errors; to check it, stop the gateway and run: sqlite3 {db_path} 'PRAGMA quick_check'",
             r=r,
             check_id="doctor.state.audit-db",
