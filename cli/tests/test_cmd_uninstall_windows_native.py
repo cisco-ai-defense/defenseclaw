@@ -31,6 +31,34 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
 
         self.assertEqual(access_mask, 0x00101000)
 
+    def test_deferred_helper_waits_for_managed_runtime_launchers(self) -> None:
+        # A venv's Scripts/python.exe launcher starts the base interpreter and
+        # waits on it, as Scripts/defenseclaw.exe does beneath defenseclaw.cmd.
+        source = Path(__file__).resolve().parents[1] / "defenseclaw" / "commands" / "windows_uninstall_helper.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_venv = Path(tmp) / "data" / ".venv"
+            venv.EnvBuilder(with_pip=False).create(managed_venv)
+            # The helper is standard-library-only; load it without the package.
+            probe = textwrap.dedent(
+                f"""
+                import importlib.util, os
+                spec = importlib.util.spec_from_file_location("helper", {str(source)!r})
+                helper = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(helper)
+                plan = {{"managed_venv": {str(managed_venv)!r}, "parent_pid": os.getpid()}}
+                print([limit for _handle, limit in helper._open_launchers(plan)])
+                """
+            )
+            result = subprocess.run(
+                [str(managed_venv / "Scripts" / "python.exe"), "-I", "-c", probe],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            # The venv launcher only: the test runner above it is not cmd.exe.
+            self.assertEqual(result.stdout.strip(), "[15.0]", result.stderr)
+
     def test_deferred_helper_accepts_utf8_shim_for_non_ascii_profile(self) -> None:
         from defenseclaw.commands import windows_uninstall_helper
 

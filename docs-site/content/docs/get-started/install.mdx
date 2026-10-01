@@ -181,7 +181,9 @@ performed the current install, used by `defenseclaw rollback`),
 On Windows the same layout lives under `%USERPROFILE%`:
 `%USERPROFILE%\.defenseclaw\` holds configuration, data, and the Python
 environment, and `%USERPROFILE%\.local\bin\` holds `defenseclaw.cmd`,
-`defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`.
+`defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`,
+plus an extensionless `defenseclaw` launcher so the command also works in Git
+Bash.
 The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
 
 ## Verify

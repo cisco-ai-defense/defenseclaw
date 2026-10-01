@@ -83,10 +83,14 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
+# Git Bash does not run a .cmd file by its bare name, so `defenseclaw` there
+# runs this extensionless script. cmd.exe and PowerShell ignore it: it has no
+# PATHEXT extension.
+$PosixShim = "defenseclaw"
 # defenseclaw-hook.exe reads its data dir from the state file beside it, never
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
 $HookState = "defenseclaw-hook-state.json"
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($HookState)
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
@@ -721,6 +725,16 @@ function Install-File([string]$Source, [string]$Destination) {
     Move-Path "$Destination.new" $Destination
 }
 
+function Write-PosixShim([string]$Target) {
+    # `defenseclaw uninstall` recognizes this launcher by its exec line.
+    $path = Join-Path $BinDir $PosixShim
+    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.cmd.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
+    [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
+    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
+    Move-Path "$path.new" $path
+}
+
 function Write-Shim([string]$Name, [string]$Target) {
     # `defenseclaw uninstall` recognizes the CLI shim by this exact command line.
     $path = Join-Path $BinDir "$Name.cmd"
@@ -860,6 +874,9 @@ function Install-New {
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
+    $target = Join-Path $Venv "Scripts\defenseclaw.exe"
+    if (Test-Path -LiteralPath $target) { Write-PosixShim $target }
+    elseif (Test-Path -LiteralPath (Join-Path $BinDir $PosixShim)) { Remove-Aside (Join-Path $BinDir $PosixShim) }
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
