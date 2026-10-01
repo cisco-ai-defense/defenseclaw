@@ -13823,7 +13823,7 @@ def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
         except OSError:
             pass
     for candidate in (resolved, os.path.dirname(resolved)):
-        if windows_acl_write_error(candidate) is not None:
+        if windows_acl_write_error(candidate, trust_administrators=True) is not None:
             return None
     return resolved
 
@@ -13860,11 +13860,12 @@ def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
     from defenseclaw.file_permissions import windows_acl_write_error
 
     for candidate in (found, os.path.dirname(found)):
-        problem = windows_acl_write_error(candidate)
+        problem = windows_acl_write_error(candidate, trust_administrators=True)
         if problem is not None:
             return (
-                f"refusing to run {found}: {candidate}: {problem}; only this account and SYSTEM may "
-                "write the gateway and its folder. Run the DefenseClaw installer again, which restricts "
+                f"refusing to run {found}: {candidate}: {problem}; only this account, SYSTEM and "
+                "Administrators may write the gateway and its folder. Run the DefenseClaw installer "
+                "again, which restricts "
                 "the folder, or remove the other accounts' write access"
             )
     return ""
