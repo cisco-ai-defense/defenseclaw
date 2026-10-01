@@ -1924,6 +1924,8 @@ class TestCheckHookHealth(unittest.TestCase):
             ("uv run hermes", None),
             ("python3 -m hermes_cli.main", None),
             ("vim notes.txt", False),
+            ("claude --system-prompt You are polly, not hermes", False),
+            ("claude hermes help", False),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
