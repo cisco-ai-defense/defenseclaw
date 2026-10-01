@@ -2928,6 +2928,26 @@ class TestCheckHookHealth(unittest.TestCase):
         )
         self.assertIn("without changing enforcement posture", detail)
 
+    def test_omnigent_config_rewritten_by_omnigent_is_not_drift(self) -> None:
+        managed = (
+            "policy_modules: [defenseclaw_omnigent_policy]\n"
+            "policies:\n"
+            "  defenseclaw_guardrail: {type: function, handler: defenseclaw_omnigent_policy.defenseclaw_policy}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = os.path.join(tmp, "config.yaml")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed)
+            self._write_omnigent_backup(tmp, "config", artifact)
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write("hosts: {local: {port: 62998}}\n" + managed)
+            self.assertEqual(_omnigent_managed_artifact_drift(cfg, "config", artifact), "")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed.replace("defenseclaw_policy}", "other}"))
+            self.assertIn("drift detected", _omnigent_managed_artifact_drift(cfg, "config", artifact))
+
     def test_omnigent_missing_import_shim_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = os.path.join(tmp, "config.yaml")
