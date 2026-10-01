@@ -301,12 +301,13 @@ class SocketProbeTransport:
         self._dialer = dialer or _system_dialer
 
     def handshake(self, target: _Target, *, timeout: float) -> None:
-        if target.protocol == "grpc" and target.scheme != "https":
-            raise DestinationTestError(
-                "unsupported",
-                "a non-mutating plaintext gRPC protocol handshake requires the gateway runtime adapter",
-            )
         sock = self._open_resolved_socket(target, timeout)
+        if target.protocol == "grpc" and target.scheme != "https":
+            try:
+                _h2c_settings_handshake(sock)
+            finally:
+                sock.close()
+            return
         if target.protocol == "grpc":
             try:
                 negotiated = getattr(sock, "selected_alpn_protocol", lambda: None)()
@@ -936,6 +937,34 @@ def _request_over_socket(
         raise DestinationTestError("protocol_failed", "the destination protocol handshake failed") from exc
     finally:
         connection.close()
+
+
+_H2_PREFACE: Final = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+# An empty SETTINGS frame: length 0, type 0x4, no flags, stream 0.
+_H2_EMPTY_SETTINGS: Final = b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+
+
+def _h2c_settings_handshake(sock: socket.socket) -> None:
+    """Open plaintext HTTP/2 with prior knowledge and wait for the server's SETTINGS.
+
+    This is the start of every gRPC connection. It sends no request, so the
+    collector records nothing.
+    """
+    try:
+        sock.sendall(_H2_PREFACE + _H2_EMPTY_SETTINGS)
+        header = b""
+        while len(header) < 9:
+            chunk = sock.recv(9 - len(header))
+            if not chunk:
+                break
+            header += chunk
+    except TimeoutError as exc:
+        raise DestinationTestError("timeout", "the destination did not answer the HTTP/2 handshake") from exc
+    except OSError as exc:
+        raise DestinationTestError("connection_failed", "the destination connection failed") from exc
+    # The server's first frame must be SETTINGS (type 0x4) on stream 0.
+    if len(header) < 9 or header[3] != 0x4 or int.from_bytes(header[5:9], "big") & 0x7FFFFFFF:
+        raise DestinationTestError("protocol_failed", "the destination did not speak plaintext HTTP/2 (gRPC)")
 
 
 def _drop_case_insensitive(headers: dict[str, str], name: str) -> None:

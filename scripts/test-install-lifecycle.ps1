@@ -322,6 +322,8 @@ function Test-Fresh {
     Check (Test-Path -LiteralPath (Join-Path $DcHome "installer\install.ps1")) "installer copy was not saved"
     $shim = [IO.File]::ReadAllText((Join-Path $Bin "defenseclaw.cmd"))
     Check ($shim -ceq "@echo off`r`n`"$DcHome\.venv\Scripts\defenseclaw.exe`" %*`r`n") "unexpected defenseclaw.cmd: $shim"
+    $posix = [IO.File]::ReadAllText((Join-Path $Bin "defenseclaw"))
+    Check ($posix.Contains("exec `"$(($DcHome -replace '\\', '/'))/.venv/Scripts/defenseclaw.exe`" `"`$@`"")) "unexpected Git Bash launcher: $posix"
     foreach ($name in "defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe", "skill-scanner.cmd", "mcp-scanner.cmd") {
         Check (Test-Path -LiteralPath (Join-Path $Bin $name)) "$name is missing"
     }

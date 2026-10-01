@@ -449,6 +449,52 @@ func TestWindowsManagedRuntimeCleanupValidatesCanonicalBaselineWithoutDeletingIt
 	assertWindowsTargetOwnedCanonicalDirectory(t, preserved, target)
 }
 
+func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testing.T) {
+	previous := windowsEnterpriseStandaloneProcess
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, target); err != nil {
+		t.Fatal(err)
+	}
+	// The purge returns what it keeps to the owner-private setup shape.
+	relaxed, err := windows.SecurityDescriptorFromString(windowsSetupRelaxedDirectorySDDL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaxedDACL, _, err := relaxed.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dataDir, hookDir} {
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, relaxedDACL, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	digest := strings.Repeat("5", 64)
+
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest); err == nil {
+		t.Fatal("a Secure Client plan adopted the folder a purge kept")
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil {
+		t.Fatalf("standalone install plan refused the folder a purge kept: %v", err)
+	}
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical {
+		t.Fatalf("plan roots = %+v, want canonical baseline", plan.Roots)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+	assertWindowsTargetOwnedCanonicalDirectory(t, hookDir, target)
+}
+
 func TestWindowsManagedRuntimeCleanupRejectsCanonicalBaselineDACLDrift(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
@@ -627,26 +673,8 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 		known = append(known, path)
 	}
 
-	// An unknown nested file must reject the entire tree before even one exact
-	// root/lock/token/script artifact is deleted.
-	unexpected := filepath.Join(plan.Roots[0].DataDir, "hooks", "user-evidence.txt")
-	if err := os.WriteFile(unexpected, []byte("preserve"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
-		t.Fatal("cleanup accepted an unknown post-reconcile hook file")
-	}
-	for _, path := range known {
-		if _, err := os.Lstat(path); err != nil {
-			t.Fatalf("full-tree preflight deleted %s before rejecting unknown content: %v", path, err)
-		}
-	}
-	if data, err := os.ReadFile(unexpected); err != nil || string(data) != "preserve" {
-		t.Fatalf("unknown nested evidence changed: data=%q err=%v", data, err)
-	}
-	if err := os.Remove(unexpected); err != nil {
-		t.Fatal(err)
-	}
+	// Unknown content is kept aside instead; see
+	// TestWindowsManagedRuntimeCleanupKeepsUnexpectedContentAside.
 	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
 		t.Fatalf("cleanup exact multi-connector fresh footprint: %v", err)
 	}

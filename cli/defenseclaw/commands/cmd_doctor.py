@@ -4112,7 +4112,9 @@ def _windows_native_hook_check(
         if paths:
             config_path = paths[0]
         elif connector == "codex":
-            config_path = os.path.join(codex_home(), "managed_config.toml")
+            from defenseclaw.fail_mode import codex_windows_hook_config_path
+
+            config_path = codex_windows_hook_config_path(cfg)
         elif connector == "copilot":
             workspace = _workspace_dir(cfg)
             data_dir = getattr(cfg, "data_dir", "") or ""
@@ -4160,6 +4162,10 @@ def _windows_native_hook_check(
         managed_enterprise=(
             connector == "claudecode"
             and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        ),
+        codex_per_user=(
+            connector == "codex"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
         ),
     )
 

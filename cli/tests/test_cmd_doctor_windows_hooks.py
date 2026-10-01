@@ -311,6 +311,31 @@ class WindowsHookDoctorTests(unittest.TestCase):
                     ):
                         doctor_hooks._command_target(tampered, "antigravity")
 
+    def test_antigravity_accepts_packaged_per_user_hook(self) -> None:
+        runtime = self._runtime("defenseclaw-hook.exe")
+        document: dict[str, object] = {}
+        for event in ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"):
+            handler = {
+                "type": "command",
+                "command": self._encoded_hook_command(runtime, "antigravity", event=event),
+                "timeout": 30,
+            }
+            entries: list[object]
+            if event in {"PreToolUse", "PostToolUse"}:
+                entries = [{"matcher": "*", "hooks": [handler]}]
+            else:
+                entries = [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+        config = self.profile / ".gemini" / "config" / "hooks.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self._lock("antigravity", config, version="v8")
+
+        check = self._validate("antigravity", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn(f"target={runtime}", check.detail)
+
     def test_antigravity_rejects_managed_cmd_instead_of_protected_pe(self) -> None:
         runtime = self._runtime("defenseclaw-hook.cmd")
         document: dict[str, object] = {}

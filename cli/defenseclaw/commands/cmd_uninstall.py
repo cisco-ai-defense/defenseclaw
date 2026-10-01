@@ -582,9 +582,15 @@ def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> boo
         link = _launcher_link_target(path)
         return bool(link) and os.path.commonpath((_normalized(link), venv)) == venv
     name = os.path.basename(path)
-    if not name.lower().endswith(".cmd") or not os.path.isfile(path) or _is_reparse_path(path):
+    if not os.path.isfile(path) or _is_reparse_path(path):
         return False
-    expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
+    if name.lower().endswith(".cmd"):
+        expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
+    elif name.lower() == "defenseclaw":
+        # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
+        expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
+    else:
+        return False
     try:
         with open(path, encoding="utf-8-sig", errors="replace") as stream:
             contents = stream.read(16_385)
@@ -667,6 +673,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         install_root = os.path.abspath(os.path.join(home, ".local", "bin"))
         names = (
             "defenseclaw.cmd",
+            # The installer's extensionless launcher for Git Bash.
+            "defenseclaw",
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
@@ -1117,6 +1125,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
         allowed_names = (
             {
                 "defenseclaw.cmd",
+                "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",

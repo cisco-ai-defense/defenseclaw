@@ -166,11 +166,9 @@ def resolve_connector_fail_mode(
             runtime = claude_env
         if not registered:
             drift.append("registration-missing")
-    # Windows managed Codex registration is a structured event matrix whose
-    # native validator below checks the exact command, launcher, contract,
-    # policy, and file identities. The legacy text probe only understands the
-    # user-scoped ``[hooks]`` placeholder and would falsely mark a valid
-    # ``managed_config.toml`` matrix missing before that authoritative check.
+    # Windows Codex registration is a structured event matrix whose native
+    # validator below checks the exact command, launcher, contract, policy,
+    # trust, and file identities, so the text probe is not used there.
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
 
@@ -397,14 +395,23 @@ def _claude_registration_state(workspace: str = "") -> tuple[str | None, bool]:
     return (mode if mode in _VALID_MODES else None), registered
 
 
+def codex_windows_hook_config_path(cfg: Any) -> str:
+    """Return where native Windows Setup registers Codex hooks without a lock.
+
+    Managed enterprise installs use Codex's legacy managed layer. Per-user
+    installs use config.toml because current Codex ignores
+    CODEX_HOME/managed_config.toml on Windows.
+    """
+
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return str(Path(codex_home()) / ("managed_config.toml" if managed else "config.toml"))
+
+
 def _codex_registration_current(workspace: str = "") -> bool:
-    if _is_windows():
-        config_path = Path(codex_home()) / "managed_config.toml"
-    else:
-        paths = connector_config_files("codex", workspace_dir=workspace)
-        if not paths:
-            return False
-        config_path = Path(paths[0])
+    paths = connector_config_files("codex", workspace_dir=workspace)
+    if not paths:
+        return False
+    config_path = Path(paths[0])
     data = _read_small_file(config_path)
     if data is None:
         return False
@@ -553,10 +560,12 @@ def _windows_registration_freshness(
             return "registration-config-binding-stale"
         config_path = locked_paths[0]
     elif connector == "codex":
-        # Native Setup registers Codex hooks in the supported managed layer so
-        # they are source-trusted without a manual /hooks approval. Keep the
-        # fail-mode freshness guard on that effective source as well.
-        config_path = str(Path(codex_home()) / "managed_config.toml")
+        # Keep the fail-mode freshness guard on the source Setup recorded:
+        # config.toml for per-user installs (current Codex ignores
+        # managed_config.toml on Windows), managed_config.toml for managed
+        # enterprise installs.
+        locked_paths = _registration_hook_config_paths(cfg, connector)
+        config_path = locked_paths[0] if locked_paths else codex_windows_hook_config_path(cfg)
     else:
         workspace = _connector_workspace(cfg)
         paths = connector_config_files(connector, workspace_dir=workspace)
@@ -576,6 +585,10 @@ def _windows_registration_freshness(
         search_path=os.environ.get("PATH", ""),
         pathext=os.environ.get("PATHEXT", ""),
         inspect_effective_policy=inspect_effective_policy,
+        codex_per_user=(
+            connector == "codex"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+        ),
     )
     return None if check.healthy else f"registration-{check.state}"
 

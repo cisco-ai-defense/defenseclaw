@@ -6559,6 +6559,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         else:
             active_alerts = current.active_alerts
+        # Connector hook stats count blocks apart from alerts, while the
+        # Alerts tab lists blocks and scan alerts too; never show fewer
+        # alerts here than that tab and the critical/high banner do.
+        active_alerts = max(active_alerts, self.alerts_model.total_count())
         counts = EnforcementCounts(
             blocked_skills=current.blocked_skills,
             allowed_skills=current.allowed_skills,
