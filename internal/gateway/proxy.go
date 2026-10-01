@@ -2333,8 +2333,16 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		extraHeaders["api-key"] = apiKey
 	}
 
+	// Use VLLM provider for Azure-style endpoints — VLLM sends to
+	// {base_url}/chat/completions without the /v1/ prefix that OpenAI adds.
+	// For native OpenAI endpoints, use OpenAI provider.
+	bfProvider := schemas.OpenAI
+	if strings.ToLower(strings.TrimSpace(decision.Provider)) == "azure" {
+		bfProvider = schemas.VLLM
+	}
+
 	bp := &bifrostProvider{
-		providerKey:  schemas.OpenAI,
+		providerKey:  bfProvider,
 		model:        decision.Model,
 		apiKey:       apiKey,
 		baseURL:      baseURL,
