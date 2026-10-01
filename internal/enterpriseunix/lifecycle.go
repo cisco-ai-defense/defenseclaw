@@ -1776,6 +1776,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Pending     []string `json:"pending"`
 		Failed      []string `json:"failed"`
 		StateFailed []string `json:"state_failed"`
+		Purged      []string `json:"purged"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
@@ -1805,6 +1806,11 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
 		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user state of user %s was not removed: %s", user, reason))
+	}
+	// A purge deletes data an account created before the install; say so,
+	// instead of a bare "done".
+	for _, user := range report.Purged {
+		r.Changes = append(r.Changes, fmt.Sprintf("removed the DefenseClaw per-user data of user %s (~/.defenseclaw); the account's own hooks moved aside by the foreign-hook policy stay in its foreign-hooks-backup folder", user))
 	}
 	return left
 }

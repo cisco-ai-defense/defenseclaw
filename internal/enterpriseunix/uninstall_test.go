@@ -202,9 +202,14 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				t.Fatal("the uninstall removed the binaries the registration left still runs")
 			}
 			left = false
-			requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
 			if exists(gateway) || exists(h.env.deploymentPath()) {
 				t.Fatal("the rerun did not finish the removal")
+			}
+			// MAC-R1-22: the purge names the accounts whose data it deleted.
+			if !strings.Contains(strings.Join(done.Changes, "\n"), "per-user data of user alice") {
+				t.Fatalf("the purge does not report the per-user data it removed: %v", done.Changes)
 			}
 		})
 	}
