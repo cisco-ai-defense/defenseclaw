@@ -292,11 +292,20 @@ def test_windows_starts_the_installer_detached(
     )
     monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
     monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
     started: list[list[str]] = []
-    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda argv, **_kwargs: started.append(argv))
+    envs: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        upgrade_shim.subprocess,
+        "Popen",
+        lambda argv, **kwargs: (started.append(argv), envs.append(kwargs["env"])),
+    )
     monkeypatch.setattr(subprocess, "CREATE_NEW_CONSOLE", 16, raising=False)
 
     assert upgrade_shim.run(["upgrade", "--yes"]) == 0
+    # Windows PowerShell 5.1 cannot load its modules from PowerShell 7 folders.
+    assert not [key for key in envs[0] if key.upper() == "PSMODULEPATH"]
+    assert envs[0]["PATH"] == os.environ["PATH"]
 
     assert started[0][1:6] == ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", started[0][5]]
     assert started[0][5].endswith("install.ps1")

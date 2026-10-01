@@ -96,6 +96,14 @@ $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copil
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.
 $RunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
+# Windows PowerShell 5.1 started from a PowerShell 7 session (through cmd, or
+# an older `defenseclaw upgrade`) inherits the PowerShell 7 module folders and
+# then cannot load its own built-in modules, so Get-Acl fails. Drop them.
+if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath) {
+    $modulePath = @($env:PSModulePath -split ";" | Where-Object { $_ -and $_ -notmatch '\\PowerShell\\(7[^\\]*\\)?Modules\\?$' })
+    if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
+    $env:PSModulePath = $modulePath -join ";"
+}
 $Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
