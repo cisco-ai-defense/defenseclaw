@@ -508,6 +508,11 @@ func TestKiroSetupRewritesRegexToolMatcherFromEarlierReleases(t *testing.T) {
 			t.Fatalf("%s DefenseClaw entries after upgrade = %#v, want one with matcher \"*\"", spec.event, ours)
 		}
 	}
+	// Kiro CLI 2.x wraps even an empty userPromptSubmit result in a context
+	// entry the model reads as instructions, so the upgrade drops it.
+	if prompt, ok := agentHooks["userPromptSubmit"]; ok {
+		t.Fatalf("userPromptSubmit still registered after upgrade: %#v", prompt)
+	}
 	pre, _ := agentHooks["preToolUse"].([]interface{})
 	if len(pre) != 2 {
 		t.Fatalf("preToolUse = %#v, want the operator entry and DefenseClaw's", pre)

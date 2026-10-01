@@ -9027,7 +9027,7 @@ def _apply_hook_connector_setup(
         elif connector == "omnigent":
             click.echo("  ✓ OmniGent on-disk policy registration staged")
             ux.warn(
-                "OmniGent 0.7.0 does not expose a loaded policy generation/module/config identity. "
+                "OmniGent does not expose a loaded policy generation/module/config identity. "
                 "Reload or restart every running OmniGent server; action/fail-closed enforcement "
                 "remains unverified until then."
             )
@@ -9171,7 +9171,7 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         )
     elif connector == "omnigent":
         click.echo(
-            "    • Reload/restart every running OmniGent server; OmniGent 0.7.0 does not expose "
+            "    • Reload/restart every running OmniGent server; OmniGent does not expose "
             "loaded policy generation/module/config identity for live verification"
         )
     if os_name == "nt":
@@ -9268,7 +9268,7 @@ def _print_observability_summary(
                 ("running OmniGent hosts", "unverified; reload/restart required"),
                 (
                     "validation evidence",
-                    "on-disk registration only; loaded policy identity unavailable in OmniGent 0.7.0",
+                    "on-disk registration only; loaded policy identity unavailable from OmniGent",
                 ),
             ]
         )

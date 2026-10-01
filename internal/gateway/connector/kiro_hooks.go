@@ -48,8 +48,7 @@ var kiroV3HookSpecs = []struct {
 // their matchers as regular expressions (kiroV3MatchAllTools): measured on
 // 2.24.1, these "*" entries do not fire there for tools or at the end of a
 // turn, so each of those events reaches DefenseClaw once, through
-// .kiro/hooks; the agent's userPromptSubmit entry still fires under --v3,
-// so a v3 prompt is checked twice (once per config).
+// .kiro/hooks.
 const kiroV2MatchAllTools = "*"
 
 // kiroV2HookTimeoutMillis is the timeout_ms of DefenseClaw's CLI 2.x agent
@@ -62,12 +61,21 @@ const kiroV2MatchAllTools = "*"
 // verdict therefore let the tool run.
 const kiroV2HookTimeoutMillis = 30000
 
+// kiroV2HookSpecs has no userPromptSubmit entry. Kiro CLI 2.x adds every
+// successful userPromptSubmit hook's stdout to the prompt inside a context
+// entry that tells the model to "follow any requests" in it, and it adds the
+// entry even when the hook prints nothing (measured on kiro-cli 2.26.1: every
+// prompt carried an empty DefenseClaw entry, and the model refused harmless
+// prompts as prompt injection). The 2.x engine cannot veto a prompt
+// (KiroBlockEventsForSurface), so the hook only audited it; tool calls are
+// still checked by preToolUse, and the v3 engine checks prompts through
+// .kiro/hooks. Setup removes the entry an earlier build wrote
+// (kiroV2RetiredEvents).
 var kiroV2HookSpecs = []struct {
 	event       string
 	description string
 	matcher     string
 }{
-	{"userPromptSubmit", "DefenseClaw prompt inspection", kiroV2MatchAllTools},
 	{"preToolUse", "DefenseClaw tool-use inspection", kiroV2MatchAllTools},
 	{"postToolUse", "DefenseClaw tool-use audit", kiroV2MatchAllTools},
 	// kiro-cli 2.22's agent schema accepts `stop` only. `agentStop` is
@@ -76,6 +84,34 @@ var kiroV2HookSpecs = []struct {
 }
 
 const kiroV2StopAlias = "agentStop"
+
+// kiroV2RetiredEvents are CLI 2.x events earlier builds registered and this
+// one no longer does. Setup drops DefenseClaw's entries there, and an agent
+// that still holds one is not current, so the guardian re-renders it.
+var kiroV2RetiredEvents = []string{"userPromptSubmit"}
+
+func kiroV2EventRetired(event string) bool {
+	for _, retired := range kiroV2RetiredEvents {
+		if event == retired {
+			return true
+		}
+	}
+	return false
+}
+
+// kiroV2RetiredEntryOwned reports whether an event-keyed agent still holds a
+// DefenseClaw entry under a retired event.
+func kiroV2RetiredEntryOwned(hooks map[string]interface{}, hookScript string) bool {
+	for _, event := range kiroV2RetiredEvents {
+		list, _ := hooks[event].([]interface{})
+		for _, item := range list {
+			if kiroV2EntryOwned(item, hookScript) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func patchKiroV3Hooks(path, hookScript string) error {
 	cfg, err := readJSONObject(path)
@@ -154,6 +190,16 @@ func patchKiroV2AgentHooks(path, hookScript string) error {
 	}
 	hooks := ensureJSONObject(cfg, "hooks")
 	migrateKiroV2StopAlias(hooks, hookScript)
+	for _, event := range kiroV2RetiredEvents {
+		if _, ok := hooks[event]; !ok {
+			continue
+		}
+		if remaining := removeKiroOwnedV2Hooks(hooks[event], hookScript); len(remaining) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = remaining
+		}
+	}
 	for _, spec := range kiroV2HookSpecs {
 		entry := map[string]interface{}{
 			"command":     hookScript,
@@ -246,6 +292,12 @@ func removeKiroOwnedUniversalHooks(list []interface{}, hookScript string) []inte
 // DefenseClaw's entry for every kiroV2HookSpecs event with the matcher and
 // timeout this build writes.
 func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
+	for _, item := range list {
+		obj, _ := item.(map[string]interface{})
+		if trigger, _ := obj["trigger"].(string); kiroV2EventRetired(trigger) && kiroUniversalEntryOwned(item, hookScript) {
+			return false
+		}
+	}
 	for _, spec := range kiroV2HookSpecs {
 		current := false
 		for _, item := range list {
@@ -393,6 +445,9 @@ func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 		return kiroUniversalHooksCurrent(list, hookScript), nil
 	}
 	hooks, _ := cfg["hooks"].(map[string]interface{})
+	if kiroV2RetiredEntryOwned(hooks, hookScript) {
+		return false, nil
+	}
 	for _, spec := range kiroV2HookSpecs {
 		list, _ := hooks[spec.event].([]interface{})
 		current := false

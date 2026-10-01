@@ -98,7 +98,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"omnigent": {
 		Status: PlatformSupported,
-		Reason: "OmniGent 0.7.0 is supported on native Windows in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
+		Reason: "OmniGent is supported on native Windows in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
 	},
 	"openclaw": {
 		Status: PlatformUnsupported,

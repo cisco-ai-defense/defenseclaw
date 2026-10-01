@@ -465,7 +465,12 @@ if [[ "${ROLLBACK}" == true ]]; then
     else
         ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
-    info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+    # The swap keeps the install just left, with its data, in previous/.
+    if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
+        info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+    else
+        info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
+    fi
     exit 0
 fi
 

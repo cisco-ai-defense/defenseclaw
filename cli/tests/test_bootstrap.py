@@ -206,6 +206,8 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertIn("custom policy configured", result.detail)
         self.assertIn("live action/fail-closed enforcement is unverified", result.detail)
         self.assertIn(config_home, result.detail)
+        # The text named a fixed OmniGent release as if it were the installed one.
+        self.assertNotIn("0.7.0", result.detail)
 
     def test_kiro_readiness_finds_global_hooks(self):
         # Quickstart readiness said "unknown connector 'kiro'" while doctor passed.

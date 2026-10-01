@@ -1644,7 +1644,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult(
                 "Connector",
                 "warn",
-                f"OmniGent custom policy configured at {path}; OmniGent 0.7.0 does not expose "
+                f"OmniGent custom policy configured at {path}; OmniGent does not expose "
                 "a loaded policy generation/module identity, so live action/fail-closed "
                 "enforcement is unverified pending OmniGent reload/restart",
                 "defenseclaw doctor",
