@@ -2306,10 +2306,36 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	}
 
 	if decision == nil {
-		fmt.Fprintf(os.Stderr, "[responses-api] no routing decision, falling through to passthrough\n")
-		r.Body = io.NopCloser(bytes.NewReader(originalBody))
-		p.handlePassthrough(w, r)
-		return
+		// Use the first routing model as default when no intent matches.
+		// This ensures all Responses API traffic goes through the Bifrost
+		// bridge rather than falling to the passthrough (which would send
+		// to the default upstream like ChatGPT with wrong credentials).
+		if rc, ok := p.modelRouter.(*RemoteRouterClient); ok && len(rc.backends) > 0 {
+			for _, backend := range rc.backends {
+				apiKey := ResolveAPIKey(backend.APIKeyEnv, rc.dotenv)
+				decision = &ModelRouterDecision{
+					Provider:         backend.Provider,
+					Model:            backend.Model,
+					TargetURL:        backend.BaseURL,
+					HostHeader:       backend.HostHeader,
+					TargetURLOverride: true,
+					APIKey:           apiKey,
+					APIKeyOverride:   apiKey != "",
+					Reason:           "default (no intent matched)",
+					ExtraHeaders:     backend.ExtraHeaders,
+					ExtraBody:        backend.ExtraBody,
+					PathOverride:     backend.PathOverride,
+				}
+				fmt.Fprintf(os.Stderr, "[responses-api] no routing decision, using default model %q\n", backend.Model)
+				break
+			}
+		}
+		if decision == nil {
+			fmt.Fprintf(os.Stderr, "[responses-api] no routing decision or default, falling through to passthrough\n")
+			r.Body = io.NopCloser(bytes.NewReader(originalBody))
+			p.handlePassthrough(w, r)
+			return
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[responses-api] routing decision: provider=%s model=%s base=%s apiKeyLen=%d\n",
