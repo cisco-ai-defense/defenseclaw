@@ -3846,6 +3846,9 @@ function New-WizardFixtureExecutable([string]$AssemblyName, [string]$Source, [st
     # repeatedly crossed a fatal per-process deadline. An in-process emit has
     # no child process, pipes, or deadline to race. The fixtures reference only
     # mscorlib, so the output is the same .NET Framework console executable.
+    # Like the compiler executable's default output, it carries a version
+    # resource and the default asInvoker application manifest, so Windows
+    # never applies legacy installer-detection elevation heuristics to it.
     $frameworkCore = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll'
     if (-not (Test-Path -LiteralPath $frameworkCore -PathType Leaf)) {
         throw "Windows .NET Framework reference assembly is unavailable: $frameworkCore"
@@ -3863,11 +3866,16 @@ function New-WizardFixtureExecutable([string]$AssemblyName, [string]$Source, [st
         ),
         $options
     )
-    $stream = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $win32Resources = $compilation.CreateDefaultWin32Resources($true, $false, $null, $null)
     try {
-        $result = $compilation.Emit($stream)
+        $stream = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $result = $compilation.Emit($stream, $null, $null, $win32Resources)
+        } finally {
+            $stream.Dispose()
+        }
     } finally {
-        $stream.Dispose()
+        $win32Resources.Dispose()
     }
     if (-not $result.Success) {
         Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
@@ -4024,10 +4032,12 @@ public static class OpenCodeVersionFixture {
         )
         foreach ($fixture in $fixtures) {
             $isNativeGo = [bool]($fixture.PSObject.Properties['NativeGo'] -and $fixture.NativeGo)
-            $sourcePath = Join-Path $sourceBin ($fixture.ClassName + $(if ($isNativeGo) { '.go' } else { '.cs' }))
-            Write-BoundedText $sourcePath $fixture.Source
-            try {
-                if ($isNativeGo) {
+            if ($isNativeGo) {
+                # Only the Go toolchain reads a source file; the C# fixtures
+                # compile in memory and never touch the source directory.
+                $sourcePath = Join-Path $sourceBin ($fixture.ClassName + '.go')
+                Write-BoundedText $sourcePath $fixture.Source
+                try {
                     $previousCGO = $env:CGO_ENABLED
                     try {
                         $env:CGO_ENABLED = '0'
@@ -4039,11 +4049,11 @@ public static class OpenCodeVersionFixture {
                         if ($null -eq $previousCGO) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
                         else { $env:CGO_ENABLED = $previousCGO }
                     }
-                } else {
-                    New-WizardFixtureExecutable $fixture.ClassName $fixture.Source $fixture.Path
+                } finally {
+                    Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
                 }
-            } finally {
-                Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+            } else {
+                New-WizardFixtureExecutable $fixture.ClassName $fixture.Source $fixture.Path
             }
             if (-not (Test-Path -LiteralPath $fixture.Path -PathType Leaf)) {
                 throw "compatible connector fixture was not built: $($fixture.Path)"
@@ -4069,11 +4079,14 @@ public static class OpenCodeVersionFixture {
         if ($hermesVersion.StdOut.Trim() -ne 'Hermes Agent v0.20.0 (2026.8.3)') {
             throw "Hermes fixture returned an unexpected version: $($hermesVersion.StdOut)"
         }
-        foreach ($attempt in 1..3) {
-            $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 2
-            if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
-                throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
-            }
+        # Like its siblings, this only validates the fixture before setup uses
+        # it. Product OpenCode discovery owns its own version-probe budget
+        # (longer than the generic one, because the authentic packaged binary
+        # starts slowly under on-access scanning), so a tighter fixture-side
+        # deadline would assert a start-up speed the product never requires.
+        $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 30
+        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+            throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
         }
         Assert-WizardCodexPolicyFixture $codexPath
         return [pscustomobject]@{

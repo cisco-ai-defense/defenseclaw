@@ -1996,7 +1996,7 @@ connection.close()
             Join-Path $projectionStateRoot '.canonical-event-projection'
         ) -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
         Assert-True ($projectionFiles.Count -eq 0) `
-            'private canonical projection snapshots are deleted immediately after each read'
+            'canonical polls stream records without creating projection snapshots'
 
         $delayedSessionId = 'windows-contract-delayed-session'
         $delayedRequestId = [guid]::NewGuid().ToString()
@@ -2024,7 +2024,7 @@ import sys
 import time
 from pathlib import Path
 
-database, raw, uncommitted_ready, commit_ready, committed_ready = sys.argv[1:]
+database, raw, uncommitted_ready, commit_ready, committed_ready, bound = sys.argv[1:]
 event = json.loads(raw)
 correlation = event["correlation"]
 connection = sqlite3.connect(database, timeout=5)
@@ -2046,7 +2046,7 @@ connection.execute(
     ),
 )
 Path(uncommitted_ready).write_text("ready", encoding="utf-8")
-deadline = time.monotonic() + 10
+deadline = time.monotonic() + float(bound)
 while not Path(commit_ready).is_file():
     if time.monotonic() >= deadline:
         raise TimeoutError("commit authorization was not published")
@@ -2057,21 +2057,29 @@ Path(committed_ready).write_text("committed", encoding="utf-8")
 '@
         $pythonApplication = (Get-Command 'python.exe' -CommandType Application `
             -ErrorAction Stop | Select-Object -First 1).Source
-        $walWriter = Start-Job -ArgumentList @(
-            $pythonApplication, $walPython, $database, $delayedRaw,
-            $uncommittedReady, $commitReady, $committedReady
-        ) -ScriptBlock {
-            param($Python, $Code, $Database, $Raw, $Uncommitted, $Commit, $Committed)
-            & $Python -c $Code $Database $Raw $Uncommitted $Commit $Committed
-            if ($LASTEXITCODE -ne 0) { throw "SQLite WAL fixture exited $LASTEXITCODE" }
-        }
-        $uncommittedDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        # The writer is a direct child, not a background job, so no second
+        # PowerShell start-up sits in front of it. Its ready files are the
+        # synchronization; the bound is hang protection and uses the
+        # harness launch budget, because interpreter start-up on a loaded
+        # runner is not what this fixture measures.
+        $walBound = $CommandTimeoutSeconds
+        $walStart = [Diagnostics.ProcessStartInfo]::new($pythonApplication)
+        $walStart.UseShellExecute = $false
+        $walStart.CreateNoWindow = $true
+        $walStart.RedirectStandardError = $true
+        foreach ($argument in @(
+            '-c', $walPython, $database, $delayedRaw,
+            $uncommittedReady, $commitReady, $committedReady, [string]$walBound
+        )) { [void]$walStart.ArgumentList.Add($argument) }
+        $walWriter = [Diagnostics.Process]::Start($walStart)
+        $walWriterStderr = $walWriter.StandardError.ReadToEndAsync()
+        $uncommittedDeadline = [DateTime]::UtcNow.AddSeconds($walBound)
         while (-not (Test-Path -LiteralPath $uncommittedReady -PathType Leaf)) {
-            if ($walWriter.State -eq 'Failed') {
-                Receive-Job $walWriter -ErrorAction Stop | Out-Null
+            if ($walWriter.HasExited) {
+                throw "SQLite WAL fixture exited $($walWriter.ExitCode) before its uncommitted row: $($walWriterStderr.Result)"
             }
             if ([DateTime]::UtcNow -ge $uncommittedDeadline) {
-                throw 'SQLite WAL fixture did not publish its uncommitted row'
+                throw "SQLite WAL fixture did not publish its uncommitted row within ${walBound}s"
             }
             Start-Sleep -Milliseconds 50
         }
@@ -2104,11 +2112,10 @@ Path(committed_ready).write_text("committed", encoding="utf-8")
             -not [bool]$delayedObserved.would_block -and
             -not [bool]$delayedObserved.enforced) `
             'session-bound readiness observes the exact canonical decision after WAL commit'
-        Wait-Job -Job $walWriter -Timeout 10 | Out-Null
-        Assert-True ($walWriter.State -eq 'Completed' -and
+        $walExited = $walWriter.WaitForExit($walBound * 1000)
+        Assert-True ($walExited -and $walWriter.ExitCode -eq 0 -and
             (Test-Path -LiteralPath $committedReady -PathType Leaf)) `
             'SQLite WAL writer committed and closed within the bounded fixture'
-        Receive-Job $walWriter -ErrorAction Stop | Out-Null
 
         $validatorSnapshot = New-CanonicalAuditProjectionSnapshot
         try {
@@ -2271,11 +2278,96 @@ connection.close()
             Assert-True $corruptionRejected `
                 "canonical SQLite reader rejects a $($corruption.Name)"
         }
+
+        $servingProjector = $script:CanonicalAuditProjector
+        Assert-True ($null -ne $servingProjector -and -not $servingProjector.Process.HasExited) `
+            'canonical SQLite reads are served by a live long-lived projector'
+        $projectionRoot = Join-Path ([IO.Path]::GetFullPath($StateRoot)) '.canonical-event-projection'
+        $snapshotsBeforePolls = @(Get-ChildItem -LiteralPath $projectionRoot -Force -ErrorAction SilentlyContinue).Count
+        foreach ($poll in 1..20) {
+            Assert-True (@(Get-EventLines $script:AuditDb).Count -eq 6) `
+                "canonical poll $poll reads the committed history"
+        }
+        Assert-True (@(Get-ChildItem -LiteralPath $projectionRoot -Force -ErrorAction SilentlyContinue).Count -eq
+            $snapshotsBeforePolls) `
+            'canonical polls stream records and leave no snapshot file behind'
+        Assert-True ([object]::ReferenceEquals($script:CanonicalAuditProjector, $servingProjector) -and
+            -not $servingProjector.Process.HasExited) `
+            'repeated canonical polls and rejected projections reuse one projector process'
+
+        # Interpreter start-up is not charged to any poll: a projector that
+        # takes longer to start than the whole per-request bound still serves
+        # the poll, and later polls stay within that bound.
+        $null = Stop-CanonicalAuditProjector
+        $slowStartProjector = Join-Path $temp 'slow-start-projector.py'
+        [IO.File]::WriteAllText($slowStartProjector, @"
+import importlib.util
+import sys
+import time
+
+time.sleep(3)
+spec = importlib.util.spec_from_file_location("projector", r"$auditProjector")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sys.argv = [sys.argv[0], "--serve"]
+raise SystemExit(module.main())
+"@)
+        $script:CanonicalAuditProjectorScript = $slowStartProjector
+        $script:CanonicalAuditProjectionRequestTimeoutSeconds = 1
+        $script:CanonicalAuditProjectorStartTimeoutSeconds = 120
+        $slowStartWatch = [Diagnostics.Stopwatch]::StartNew()
+        $slowStartDecision = Wait-HookDecisionAfter `
+            -Since 5 -Deadline ([DateTime]::UtcNow.AddSeconds(120)) `
+            -SessionID $delayedSessionId -HookEvent $hookEvent
+        $slowStartWatch.Stop()
+        Assert-True ($null -ne $slowStartDecision -and
+            [string]$slowStartDecision.request_id -ceq $delayedRequestId -and
+            $slowStartWatch.Elapsed.TotalSeconds -ge 3) `
+            'a projector start-up slower than the per-request bound does not fail the poll'
+        foreach ($poll in 1..5) {
+            Assert-True (@(Get-EventLines $script:AuditDb).Count -eq 6) `
+                "poll $poll after a slow projector start-up reads the committed history"
+        }
+
+        # The per-request bound remains hang protection: a request that never
+        # answers fails within it and the hung projector is killed.
+        $null = Stop-CanonicalAuditProjector
+        $hungProjector = Join-Path $temp 'hung-request-projector.py'
+        [IO.File]::WriteAllText($hungProjector, @'
+import sys
+import threading
+
+sys.stdout.write('{"ready":true,"protocol":1}\n')
+sys.stdout.flush()
+sys.stdin.readline()
+threading.Event().wait()
+'@)
+        $script:CanonicalAuditProjectorScript = $hungProjector
+        $hungMessage = ''
+        $hungWatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $null = @(Get-EventLines $script:AuditDb)
+        } catch {
+            $hungMessage = $_.Exception.Message
+        }
+        $hungWatch.Stop()
+        $hungSurvivors = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($hungProjector) })
+        Assert-True ($hungMessage -match 'did not answer its projection request within 1s' -and
+            $null -eq $script:CanonicalAuditProjector -and
+            $hungWatch.Elapsed.TotalSeconds -lt 30 -and
+            $hungSurvivors.Count -eq 0) `
+            'a hung projection request fails within its hang-protection bound and kills the projector'
     } finally {
         if ($null -ne $walWriter) {
-            Stop-Job $walWriter -ErrorAction SilentlyContinue
-            Remove-Job $walWriter -Force -ErrorAction SilentlyContinue
+            if (-not $walWriter.HasExited) { $walWriter.Kill($true) }
+            $null = $walWriter.WaitForExit(5000)
+            $walWriter.Dispose()
         }
+        $null = Stop-CanonicalAuditProjector
+        $script:CanonicalAuditProjectorScript = ''
+        $script:CanonicalAuditProjectionRequestTimeoutSeconds = 15
+        $script:CanonicalAuditProjectorStartTimeoutSeconds = $CommandTimeoutSeconds
         $script:AuditDb = $savedAuditDb
         $StateRoot = $savedStateRoot
     }
@@ -3406,14 +3498,19 @@ connection.close()
         '\$openCodePath = Join-Path \$openCodeBin ''opencode\.exe''' -and
         $agentFixtureFunction -match 'OpenCodeVersionFixture' -and
         $agentFixtureFunction -match 'opencode 1\.18\.11' -and
-        $agentFixtureFunction -match "(?s)foreach \(\`$attempt in 1\.\.3\).*?\`$openCodePath @\('--version'\) -TimeoutSeconds 2" -and
+        $agentFixtureFunction -match "\`$openCodePath @\('--version'\) -TimeoutSeconds 30" -and
+        $agentFixtureFunction -notmatch "\`$openCodePath @\('--version'\) -TimeoutSeconds [0-9]\b" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
         $agentFixtureFunction -match 'New-WizardFixtureExecutable \$fixture\.ClassName \$fixture\.Source \$fixture\.Path' -and
         $agentFixtureFunction -notmatch 'csc\.exe' -and
         $fixtureCompiler -match 'CSharpCompilation\]::Create' -and
         $fixtureCompiler -match 'Framework64\\v4\.0\.30319\\mscorlib\.dll' -and
         $fixtureCompiler -match 'FileMode\]::CreateNew' -and
+        $fixtureCompiler -match 'CreateDefaultWin32Resources\(\$true, \$false, \$null, \$null\)' -and
+        $fixtureCompiler -match 'Emit\(\$stream, \$null, \$null, \$win32Resources\)' -and
         $fixtureCompiler -notmatch 'Invoke-WindowsNativeProcess|Start-Process|csc\.exe' -and
+        $agentFixtureFunction -match "\(\`$fixture\.ClassName \+ '\.go'\)" -and
+        $agentFixtureFunction -notmatch "'\.cs'" -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesPath' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesBin' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.OpenCodePath' -and
@@ -4881,21 +4978,44 @@ connection.close()
         $harnessText,
         '(?s)function Get-EventLines\b.*?(?=\r?\nfunction )'
     ).Value
-    Assert-True ($canonicalEventReader -match 'project-audit-events\.py' -and
-        $canonicalEventReader -match '\.canonical-event-projection' -and
+    $canonicalProjectorStart = [regex]::Match(
+        $harnessText,
+        '(?s)function Start-CanonicalAuditProjector\b.*?(?=\r?\nfunction Invoke-CanonicalAuditProjection)'
+    ).Value
+    $canonicalProjectionRequest = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-CanonicalAuditProjection\b.*?(?=\r?\nfunction New-CanonicalAuditProjectionSnapshot)'
+    ).Value
+    Assert-True ($canonicalProjectorStart -match 'project-audit-events\.py' -and
+        $canonicalProjectorStart -match "@\(\`$projectorScript, '--serve'\)" -and
+        $canonicalProjectorStart -match 'CanonicalAuditProjectorStartTimeoutSeconds' -and
+        $harnessText.Contains('$script:CanonicalAuditProjectorStartTimeoutSeconds = $CommandTimeoutSeconds') -and
+        $canonicalProjectionRequest -match 'CanonicalAuditProjectionRequestTimeoutSeconds' -and
+        $canonicalProjectionRequest -notmatch 'Start-Process|Invoke-Tool|Invoke-NativeProcess' -and
+        $canonicalEventReader -match 'Invoke-CanonicalAuditProjection' -and
+        $canonicalEventReader -notmatch 'Invoke-Tool|Invoke-NativeProcess|python\.exe' -and
+        $harnessText -notmatch "Invoke-Tool 'python\.exe' @\(\s*\`$projector\b" -and
+        $auditProjectorText -match 'def serve\(' -and
+        $auditProjectorText -match '"--serve"') `
+        'canonical audit polls reuse one long-lived projector; start-up is never charged to a poll'
+    Assert-True ($canonicalEventReader -match '\.canonical-event-projection' -and
         $canonicalEventReader -match '\[guid\]::NewGuid' -and
-        $eventLineRouter -match 'New-CanonicalAuditProjectionSnapshot' -and
-        $eventLineRouter -match 'Remove-Item -LiteralPath \$snapshot' -and
+        $eventLineRouter -match 'Invoke-CanonicalAuditProjection \(\[IO\.Path\]::GetFullPath\(\$script:AuditDb\)\)\)' -and
+        $eventLineRouter -notmatch 'New-CanonicalAuditProjectionSnapshot|Read-EventJsonLines \$snapshot' -and
+        $canonicalProjectionRequest -match "Read-CanonicalAuditProjectorLines \`$projector \(\[int\]\`$count\) \`$deadline 'projection' \`$timeout" -and
+        $canonicalProjectionRequest -notmatch 'ReadLineAsync' -and
+        $harnessText -match 'lines\.TryTake\(out line, wait\)' -and
         $harnessText -notmatch '\$script:GatewayJsonl') `
-        'Windows live readiness exclusively reads a private transient canonical SQLite projection'
+        'Windows live readiness streams the canonical SQLite projection; evidence snapshots stay private and transient'
     Assert-True ($auditProjectorText -match 'mode=ro' -and
         $auditProjectorText -match 'PRAGMA query_only=ON' -and
         $auditProjectorText -match 'ORDER BY rowid' -and
         $auditProjectorText -match 'record_schema_version != 1' -and
         $auditProjectorText -match 'os\.replace\(temporary, output\)' -and
-        $auditProjectorText -notmatch 'os\.fsync\(' -and
         $auditProjectorText -match 'output must differ from the audit database') `
         'canonical SQLite projection is read-only, ordered, schema-bound, and atomically published'
+    Assert-True ($auditProjectorText -notmatch 'os\.fsync\(') `
+        'transient evidence snapshots skip a device flush they do not need (tail latency only; polls never launch an interpreter)'
     Assert-True ($openCodeAssertionText.Contains('const probeID = basename(scratchPath, ".mjs");') -and
         [regex]::Matches(
             $openCodeAssertionText,
@@ -4912,6 +5032,8 @@ connection.close()
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and
         $isolatedCleanup -match '-not \$ancestorIds\.Contains\(\$processId\)') `
         'isolated process cleanup excludes the complete ancestor wrapper chain'
+    Assert-True ($isolatedCleanup -match 'Stop-CanonicalAuditProjector') `
+        'isolated process cleanup stops the long-lived canonical audit projector'
     Assert-True ($isolatedCleanup -match '\$matchesRoot -and' -and
         $isolatedCleanup -notmatch 'descendantIds') `
         'isolated process cleanup only terminates state-root-owned processes'

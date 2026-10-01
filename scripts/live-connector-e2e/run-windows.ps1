@@ -59,6 +59,14 @@ $script:WindowsLiveHarnessPath = [IO.Path]::GetFullPath($PSCommandPath)
 $script:PackageLiveSetupExecutable = ''
 $script:PackageLiveOriginalPath = ''
 $script:AuditDb = ''
+# One long-lived canonical audit projector serves every audit-history poll.
+# Interpreter start-up is paid once, under the same bound as any other tool
+# launch; each request is then only a read-only SQLite query and an atomic
+# snapshot write, bounded separately as hang protection.
+$script:CanonicalAuditProjector = $null
+$script:CanonicalAuditProjectorScript = ''
+$script:CanonicalAuditProjectorStartTimeoutSeconds = $CommandTimeoutSeconds
+$script:CanonicalAuditProjectionRequestTimeoutSeconds = 15
 $script:CopilotConfiguredMode = ''
 $script:ProtectedCopilotPackageInstalled = $false
 $script:ProtectedCopilotPackageMaintained = $false
@@ -4280,6 +4288,257 @@ function Read-EventJsonLines([string]$Path) {
     } while ([DateTime]::UtcNow -lt $deadline)
 }
 
+# Redirected-output async reads complete on the thread pool, one pipe buffer
+# at a time. On a saturated runner each of those hops can take tens of
+# milliseconds, so a multi-megabyte history read with ReadLineAsync costs
+# far more than the projection itself. One dedicated thread per projector
+# reads its stdout synchronously instead, and callers take whole lines from
+# it against their own deadline.
+function Initialize-CanonicalAuditProjectorLineHelper {
+    if ('DefenseClaw.CanonicalAuditProjectorLines' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Threading;
+
+namespace DefenseClaw
+{
+    public sealed class CanonicalAuditProjectorLines
+    {
+        private readonly BlockingCollection<string> lines = new BlockingCollection<string>();
+        private readonly TextReader reader;
+
+        public CanonicalAuditProjectorLines(TextReader reader)
+        {
+            if (reader == null) { throw new ArgumentNullException("reader"); }
+            this.reader = reader;
+            Thread pump = new Thread(Pump);
+            pump.IsBackground = true;
+            pump.Name = "canonical-audit-projector-stdout";
+            pump.Start();
+        }
+
+        private void Pump()
+        {
+            try
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null) { lines.Add(line); }
+            }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+            finally { lines.CompleteAdding(); }
+        }
+
+        // Returns exactly count lines, or throws TimeoutException once the
+        // deadline passes and EndOfStreamException when the projector closed
+        // its output first.
+        public string[] Take(int count, DateTime deadlineUtc)
+        {
+            if (count < 0) { throw new ArgumentOutOfRangeException("count"); }
+            string[] result = new string[count];
+            for (int index = 0; index < count; index++)
+            {
+                double remaining = (deadlineUtc - DateTime.UtcNow).TotalMilliseconds;
+                int wait = remaining <= 0 ? 0 : (int)Math.Min(int.MaxValue, Math.Ceiling(remaining));
+                string line;
+                if (!lines.TryTake(out line, wait))
+                {
+                    if (lines.IsCompleted) { throw new EndOfStreamException(); }
+                    throw new TimeoutException();
+                }
+                result[index] = line;
+            }
+            return result;
+        }
+    }
+}
+'@
+}
+
+function Stop-CanonicalAuditProjector([switch]$Kill) {
+    $projector = $script:CanonicalAuditProjector
+    $script:CanonicalAuditProjector = $null
+    if ($null -eq $projector) { return '' }
+    $process = $projector.Process
+    try {
+        if (-not $process.HasExited -and -not $Kill) {
+            # End of input is the server's only shutdown request.
+            try { $process.StandardInput.Close() } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
+            $null = $process.WaitForExit(5000)
+        }
+        if (-not $process.HasExited) {
+            try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
+            $null = $process.WaitForExit(1000)
+        }
+        $null = Wait-RedirectedOutputTask $projector.StdErrTask ([DateTime]::UtcNow.AddSeconds(1))
+        $stderr = Protect-LogText (Read-RedirectedOutputTask $projector.StdErrTask)
+        $exit = if ($process.HasExited) { "exit=$($process.ExitCode)" } else { 'exit=running' }
+        if (-not [string]::IsNullOrWhiteSpace($projector.LogPath)) {
+            try { [IO.File]::WriteAllText($projector.LogPath, $stderr) }
+            catch { Write-Warning (Protect-LogText $_.Exception.Message) }
+        }
+        Write-NativeProcessPhase $projector.FilePath $projector.ProcessId 'projector-stopped' $exit
+        return $stderr
+    } finally {
+        if (-not $projector.StdErrTask.IsCompleted) {
+            try { $process.StandardError.Dispose() } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
+        }
+        $process.Dispose()
+    }
+}
+
+function Stop-CanonicalAuditProjectorWithFailure([string]$Reason) {
+    $stderr = Stop-CanonicalAuditProjector -Kill
+    $detail = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else { "`n$stderr" }
+    throw "canonical audit projector $Reason$detail"
+}
+
+function Read-CanonicalAuditProjectorLines(
+    [object]$Projector,
+    [int]$Count,
+    [DateTime]$Deadline,
+    [string]$Phase,
+    [int]$TimeoutSeconds
+) {
+    $failure = ''
+    try {
+        $lines = $Projector.Lines.Take($Count, $Deadline)
+    } catch {
+        $exception = $_.Exception
+        while ($exception -is [Management.Automation.MethodInvocationException] -and
+            $null -ne $exception.InnerException) {
+            $exception = $exception.InnerException
+        }
+        $failure = if ($exception -is [TimeoutException]) {
+            "did not answer its $Phase request within ${TimeoutSeconds}s"
+        } elseif ($exception -is [IO.EndOfStreamException]) {
+            "exited before its $Phase response"
+        } else {
+            "could not read its $Phase response: $($exception.Message)"
+        }
+    }
+    # Fail outside the catch so the failure is not reported twice.
+    if ($failure) { Stop-CanonicalAuditProjectorWithFailure $failure }
+    return ,$lines
+}
+
+function Read-CanonicalAuditProjectorResponse(
+    [object]$Projector,
+    [DateTime]$Deadline,
+    [string]$Phase,
+    [int]$TimeoutSeconds
+) {
+    $line = (Read-CanonicalAuditProjectorLines $Projector 1 $Deadline $Phase $TimeoutSeconds)[0]
+    try {
+        $response = $line | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $response = $null
+    }
+    if ($response -isnot [pscustomobject]) {
+        Stop-CanonicalAuditProjectorWithFailure "returned a malformed $Phase response"
+    }
+    return $response
+}
+
+function Start-CanonicalAuditProjector {
+    $projectorScript = if ([string]::IsNullOrWhiteSpace($script:CanonicalAuditProjectorScript)) {
+        Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\project-audit-events.py'
+    } else {
+        $script:CanonicalAuditProjectorScript
+    }
+    $python = (Get-Command 'python.exe' -ErrorAction Stop).Source
+    Initialize-CanonicalAuditProjectorLineHelper
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $python
+    # Never pin a working directory inside a disposable state tree.
+    $start.WorkingDirectory = Split-Path -Parent $projectorScript
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardInputEncoding = $utf8
+    $start.StandardOutputEncoding = $utf8
+    $start.StandardErrorEncoding = $utf8
+    foreach ($argument in @($projectorScript, '--serve')) { [void]$start.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) {
+        $process.Dispose()
+        throw "failed to start the canonical audit projector: $python"
+    }
+    $log = ''
+    if (-not [string]::IsNullOrWhiteSpace($script:LogRoot)) {
+        $log = Join-Path $script:LogRoot ('{0:D3}-canonical-audit-projector.log' -f (++$script:CommandIndex))
+    }
+    $projector = [pscustomobject]@{
+        Process = $process
+        ProcessId = $process.Id
+        FilePath = $python
+        StdErrTask = $process.StandardError.ReadToEndAsync()
+        Lines = [DefenseClaw.CanonicalAuditProjectorLines]::new($process.StandardOutput)
+        LogPath = $log
+    }
+    $script:CanonicalAuditProjector = $projector
+    Write-NativeProcessPhase $python $process.Id 'projector-started'
+    $timeout = $script:CanonicalAuditProjectorStartTimeoutSeconds
+    $ready = Read-CanonicalAuditProjectorResponse $projector `
+        ([DateTime]::UtcNow.AddSeconds($timeout)) 'readiness' $timeout
+    $readyValue = Get-JsonPropertyValue $ready 'ready'
+    if (-not ($readyValue -is [bool] -and $readyValue) -or
+        [string](Get-JsonPropertyValue $ready 'protocol') -cne '1') {
+        Stop-CanonicalAuditProjectorWithFailure 'did not report protocol 1 readiness'
+    }
+    Write-NativeProcessPhase $python $process.Id 'projector-ready'
+    return $projector
+}
+
+# With an OutputPath the projector atomically publishes a JSONL snapshot
+# there. Without one it streams the validated records back on the pipe and
+# this returns them, so a poll writes and reads no file at all.
+function Invoke-CanonicalAuditProjection([string]$AuditDb, [string]$OutputPath = '') {
+    $projector = $script:CanonicalAuditProjector
+    if ($null -ne $projector -and $projector.Process.HasExited) {
+        Stop-CanonicalAuditProjectorWithFailure 'exited unexpectedly between requests'
+    }
+    if ($null -eq $projector) { $projector = Start-CanonicalAuditProjector }
+    $request = [ordered]@{ audit_db = $AuditDb }
+    if (-not [string]::IsNullOrEmpty($OutputPath)) { $request.out = $OutputPath }
+    $request = $request | ConvertTo-Json -Compress
+    $timeout = $script:CanonicalAuditProjectionRequestTimeoutSeconds
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeout)
+    try {
+        # Requests and responses alternate strictly, so the pipe is empty and
+        # this small write cannot block on a full buffer.
+        $projector.Process.StandardInput.WriteLine($request)
+        $projector.Process.StandardInput.Flush()
+    } catch {
+        Stop-CanonicalAuditProjectorWithFailure "did not accept its request: $($_.Exception.Message)"
+    }
+    $response = Read-CanonicalAuditProjectorResponse $projector $deadline 'projection' $timeout
+    $ok = Get-JsonPropertyValue $response 'ok'
+    if ($ok -isnot [bool]) {
+        Stop-CanonicalAuditProjectorWithFailure 'returned a malformed projection response'
+    }
+    if (-not $ok) {
+        # A rejected projection is an evidence failure, not a server failure;
+        # the server stays ready for the next request.
+        throw [string](Get-JsonPropertyValue $response 'error')
+    }
+    if (-not [string]::IsNullOrEmpty($OutputPath)) { return }
+    $count = Get-JsonPropertyValue $response 'records'
+    if (($count -isnot [long] -and $count -isnot [int]) -or $count -lt 0) {
+        Stop-CanonicalAuditProjectorWithFailure 'returned a malformed projection response'
+    }
+    # The records share the request deadline: a projector that stalls part
+    # way through is killed rather than leaving a half-read stream behind.
+    $records = Read-CanonicalAuditProjectorLines $projector ([int]$count) $deadline 'projection' $timeout
+    return $records
+}
+
 function New-CanonicalAuditProjectionSnapshot {
     if ([string]::IsNullOrWhiteSpace($script:AuditDb)) {
         throw 'canonical SQLite audit database path is unavailable'
@@ -4292,14 +4551,8 @@ function New-CanonicalAuditProjectionSnapshot {
     Protect-TestDirectory $projectionRoot
     $snapshot = Join-Path $projectionRoot `
         (([guid]::NewGuid().ToString('N')) + '.jsonl')
-    $projector = Join-Path $WorkspaceRoot `
-        'scripts\live-connector-e2e\project-audit-events.py'
     try {
-        Invoke-Tool 'python.exe' @(
-            $projector,
-            '--audit-db', $script:AuditDb,
-            '--out', $snapshot
-        ) @(0) -Timeout 15 | Out-Null
+        Invoke-CanonicalAuditProjection ([IO.Path]::GetFullPath($script:AuditDb)) $snapshot
         if (-not (Test-Path -LiteralPath $snapshot -PathType Leaf)) {
             throw 'canonical SQLite audit projection did not create its private snapshot'
         }
@@ -4321,12 +4574,7 @@ function Get-EventLines([string]$Path) {
         return @(Read-EventJsonLines $Path)
     }
 
-    $snapshot = New-CanonicalAuditProjectionSnapshot
-    try {
-        return @(Read-EventJsonLines $snapshot)
-    } finally {
-        Remove-Item -LiteralPath $snapshot -Force -ErrorAction SilentlyContinue
-    }
+    return @(Invoke-CanonicalAuditProjection ([IO.Path]::GetFullPath($script:AuditDb)))
 }
 
 function Get-JsonPropertyValue([AllowNull()][object]$Object, [string]$Name) {
@@ -9746,6 +9994,9 @@ function Stop-IsolatedProcessTree {
         [string]$ProductDataRoot = $env:DEFENSECLAW_HOME
     )
 
+    if ($PSCmdlet.ShouldProcess('canonical audit projector', 'Stop')) {
+        $null = Stop-CanonicalAuditProjector
+    }
     $root = [IO.Path]::GetFullPath($StateRoot)
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $ancestorIds = [Collections.Generic.HashSet[int]]::new()
