@@ -1199,29 +1199,29 @@ private-secret-name = "DefenseClaw must remain redacted"
         $preToolSpec[0].TimeoutSec -eq 30) 'Codex PreToolUse metadata requires broad matching and a 30s budget'
     Assert-True ($stopSpec.Count -eq 1 -and $null -eq $stopSpec[0].Matcher -and
         $stopSpec[0].TimeoutSec -eq 90) 'Codex Stop metadata requires no matcher and a 90s budget'
-    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-managed_config.toml'))
+    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-config.toml'))
     $metadataCommand = 'managed-codex-hook-command'
     $healthyMetadata = [pscustomobject]@{
         eventName = 'preToolUse'
         sourcePath = $metadataConfig
         handlerType = 'command'
         enabled = $true
-        isManaged = $true
-        source = 'legacyManagedConfigFile'
+        isManaged = $false
+        source = 'user'
         command = $metadataCommand
         matcher = '*'
         timeoutSec = 30
         statusMessage = $null
         key = $metadataConfig + ':pre_tool_use:0:0'
-        trustStatus = 'managed'
+        trustStatus = 'trusted'
         currentHash = 'sha256:' + ('a' * 64)
     }
     Assert-CodexHookMetadata $healthyMetadata $preToolSpec[0] $metadataCommand $metadataConfig 'fixture' `
         ([Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
     foreach ($mutation in @(
-        [pscustomobject]@{ Name = 'unmanaged hook'; Property = 'isManaged'; Value = $false },
-        [pscustomobject]@{ Name = 'user source'; Property = 'source'; Value = 'user' },
-        [pscustomobject]@{ Name = 'private trust state'; Property = 'trustStatus'; Value = 'trusted' },
+        [pscustomobject]@{ Name = 'managed hook'; Property = 'isManaged'; Value = $true },
+        [pscustomobject]@{ Name = 'managed source'; Property = 'source'; Value = 'legacyManagedConfigFile' },
+        [pscustomobject]@{ Name = 'untrusted hook'; Property = 'trustStatus'; Value = 'untrusted' },
         [pscustomobject]@{ Name = 'narrow matcher'; Property = 'matcher'; Value = 'Bash' },
         [pscustomobject]@{ Name = 'short timeout'; Property = 'timeoutSec'; Value = 1 },
         [pscustomobject]@{ Name = 'status override'; Property = 'statusMessage'; Value = 'tampered' }
@@ -4598,15 +4598,15 @@ connection.close()
     ) 'native Amp capture test proves span/log provider absence and required metric unknown fallback'
     Assert-True ($harnessText -match "@\('0\.129\.0', '0\.133\.0', '0\.144\.3'\)" -and
         $harnessText -match "method = 'hooks/list'" -and
-        $harnessText -match "trustStatus -cne 'managed'" -and
-        $harnessText -match "source -cne 'legacyManagedConfigFile'" -and
-        $harnessText -match "managed_config\.toml" -and
+        $harnessText -match "trustStatus -cne 'trusted'" -and
+        $harnessText -match "source -cne 'user'" -and
+        $harnessText -match "Join-Path \$codexHome 'config\.toml'" -and
         $harnessText -match '\$hook\.command -cne \$expectedCommand' -and
         $harnessText -match "Properties\['matcher'\]" -and
         $harnessText -match "Properties\['timeoutSec'\]" -and
         $harnessText -match "Properties\['statusMessage'\]" -and
         $harnessText -match '\^sha256:\[0-9a-f\]\{64\}\$') `
-        'Codex trust matrix pins transition/current clients and validates exact managed app-server command/shape/trust evidence'
+        'Codex trust matrix pins transition/current clients and validates exact user-config app-server command/shape/trust evidence'
     Assert-True ($harnessText -notmatch '(?i)dangerously-bypass-hook-trust|bypass-hook-trust') `
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
@@ -5016,7 +5016,7 @@ connection.close()
         $nativeHarnessText -match 'Cursor contract wrote to a default compatibility agent config' -and
         $harnessText -match 'function Resolve-EffectiveConnectorHome\b' -and
         $harnessText -match '\$fileName = switch \(\$ConnectorName\)' -and
-        $harnessText -match '''codex'' \{ ''managed_config\.toml'' \}' -and
+        $harnessText -match '''codex'' \{ ''config\.toml'' \}' -and
         $harnessText -match '''claudecode'' \{ ''settings\.json'' \}' -and
         $harnessText -match '''hermes'' \{ ''config\.yaml'' \}' -and
         $harnessText -match '''opencode'' \{ ''plugins\\defenseclaw\.js'' \}' -and
