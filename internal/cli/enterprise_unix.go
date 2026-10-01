@@ -103,7 +103,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		"rotate-credentials": "Rotate the per-user credential key, moving every user before the new key takes effect",
 		"status":             "Report the deployment state (read-only)",
 		"verify":             "Verify every file, permission, service and readiness check (read-only)",
-		"uninstall":          "Stop and remove the deployment; --purge also removes config and state",
+		"uninstall":          "Stop and remove the deployment and every account's hooks (each account keeps ~/.defenseclaw); --purge removes everything",
 	}
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "rotate-credentials", "status", "verify", "uninstall"} {
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
@@ -148,7 +148,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs, and each enrolled account's ~/.defenseclaw and per-user binaries in ~/.local/bin (after stopping its per-user gateway); the result names every account whose data it removed or kept")
 		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "with --purge, also delete the gateway service account")
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "reconcile", "rotate-credentials":

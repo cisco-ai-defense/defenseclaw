@@ -61,7 +61,7 @@ func init() {
 	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
 		"YAML manifest of per-user hook targets")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
-		"Also remove each enrolled user's DefenseClaw per-user state")
+		"Also remove each enrolled user's ~/.defenseclaw and per-user binaries in ~/.local/bin, after stopping its per-user gateway")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
 	enterpriseHooksCmd.AddCommand(enterpriseHooksRemoveAllCmd)
 }
@@ -84,6 +84,12 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(report)
 	} else if err == nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
+		for _, user := range report.Purged {
+			fmt.Fprintf(cmd.OutOrStdout(), "purged %s: ~/.defenseclaw and the per-user binaries in ~/.local/bin are gone\n", user)
+		}
+		for _, entry := range report.StateFailed {
+			fmt.Fprintf(cmd.OutOrStdout(), "not purged %s\n", entry)
+		}
 	}
 	if err != nil {
 		return err
@@ -128,7 +134,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
-		addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)
+		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)...)
 	}
 	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
@@ -386,16 +392,31 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 
 // addEnterpriseHookStatePurges ends the job of every account the manifest
 // enrolls with the purge of that account's DefenseClaw per-user state (each
-// data directory its rows name), except for the accounts in skip, whose
-// pending cleanup failed.
-func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) {
+// data directory its rows name) and per-user binaries, except for the
+// accounts in skip, whose pending cleanup failed and whose backups a retry
+// still needs. It returns every enrolled account it did not add a purge for,
+// as "user: reason", so the report names each account whose data stays.
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) []string {
 	dataDirs := map[int][]string{}
+	notPurged := map[string]string{}
 	for _, target := range manifest.Targets {
-		if target.UID == nil {
+		user := strings.TrimSpace(target.User)
+		if target.UID == nil || *target.UID <= 0 {
+			notPurged[user] = "its manifest row has no usable uid"
 			continue
 		}
 		job := jobs[*target.UID]
 		if job == nil {
+			reason := "its home is not trusted"
+			home := filepath.Clean(strings.TrimSpace(target.UserHome))
+			if filepath.IsAbs(home) && enterpriseHookCheckHome(home, *target.UID).State == enterprisehooks.HomePending {
+				reason = "its home is not available; rerun the purge when it is"
+			}
+			notPurged[user] = reason
+			continue
+		}
+		if skip[*target.UID] {
+			notPurged[job.Account.User] = "its pending hook cleanup failed; the state stays for a retry"
 			continue
 		}
 		dataDir := strings.TrimSpace(target.DataDir)
@@ -431,6 +452,15 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifes
 			index++
 		}
 	}
+	for uid := range dataDirs {
+		delete(notPurged, jobs[uid].Account.User)
+	}
+	var out []string
+	for user, reason := range notPurged {
+		out = append(out, user+": "+reason)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // workerErrorMaxBytes bounds one worker error in the remove-all report.

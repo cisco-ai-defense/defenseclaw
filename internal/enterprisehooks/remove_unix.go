@@ -99,10 +99,12 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 // targets. A connector that still keeps DefenseClaw's backups (one set up by
 // an earlier route, or disabled before the uninstall) is torn down first, so
 // the files DefenseClaw changed get their content back before the backups
-// go; if any teardown fails, the state stays for a rerun. Then the state
-// goes except the account's own hooks the foreign-hook policy moved aside
-// and the hook scripts, which become disabled stubs (see
-// connector.PurgeUserState). A home that no longer exists is not an error.
+// go; if any teardown fails, the state stays for a rerun. Then all of
+// ~/.defenseclaw goes, including the hook scripts and the account's own
+// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
+// and so do the binaries and launcher links the per-user install put in
+// ~/.local/bin (see RemoveUserBinaries). The caller stops the account's
+// per-user gateway first. A home that no longer exists is not an error.
 func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
 		return err
@@ -138,7 +140,11 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not a .defenseclaw folder", dataDir)
 	}
 	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
-		return nil
+		// A rerun after the state went still removes the binaries.
+		return withOwnerCredentials(uid, gid, func() error {
+			_, err := RemoveUserBinaries(home, dataDir, uid)
+			return err
+		})
 	}
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
 		return err
@@ -171,7 +177,8 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 				return fmt.Errorf("enterprise hooks: remove the per-user state: %w", err)
 			}
 			removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
-			return nil
+			_, err = RemoveUserBinaries(home, dataDir, uid)
+			return err
 		})
 	})
 }

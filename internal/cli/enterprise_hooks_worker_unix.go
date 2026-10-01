@@ -434,6 +434,9 @@ var (
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
 	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
+	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
+	// and watchdog before the purge removes the state they run from.
+	enterpriseHookWorkerStopPerUser = stopPerUserGatewayForPurge
 )
 
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
@@ -478,7 +481,10 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		case enterpriseHookWorkerModePurge:
 			if removalFailed {
-				err = errors.New("not removed, because a DefenseClaw hook registration of this account was not removed")
+				err = errors.New("a DefenseClaw hook registration of this account was not removed")
+				break
+			}
+			if err = enterpriseHookWorkerStopPerUser(opts); err != nil {
 				break
 			}
 			err = enterpriseHookWorkerPurger(ctx, opts)

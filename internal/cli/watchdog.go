@@ -714,7 +714,12 @@ func (c *execCommand) start() error {
 }
 
 func runWatchdogStop(_ *cobra.Command, _ []string) error {
-	dataDir := config.DefaultDataPath()
+	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout)
+}
+
+// stopWatchdogAt stops the watchdog that runs for dataDir, writing its
+// progress to out. Not running is not an error.
+func stopWatchdogAt(dataDir string, out io.Writer) error {
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
 	inspection := inspectWatchdogPIDOwnership(pidPath)
@@ -737,9 +742,9 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("watchdog: repair stale PID ownership: %w", cleanupErr)
 		}
 		if removed {
-			fmt.Println(Dim("Watchdog is not running (stale or invalid PID file repaired)"))
+			fmt.Fprintln(out, Dim("Watchdog is not running (stale or invalid PID file repaired)"))
 		} else {
-			fmt.Println(Dim("Watchdog is not running"))
+			fmt.Fprintln(out, Dim("Watchdog is not running"))
 		}
 		return nil
 	}
@@ -756,20 +761,20 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 
 	proc, err := os.FindProcess(info.PID)
 	if err != nil {
-		fmt.Println(Dim("Watchdog is not running"))
+		fmt.Fprintln(out, Dim("Watchdog is not running"))
 		removeWatchdogPIDIfOwned(pidPath, info)
 		return nil
 	}
 	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
-	fmt.Printf("Stopping watchdog (PID %d)... ", info.PID)
+	fmt.Fprintf(out, "Stopping watchdog (PID %d)... ", info.PID)
 	if err := watchdogRequestTerminate(info, proc); err != nil {
 		if !verifyWatchdogProcess(info) {
 			removeWatchdogPIDIfOwned(pidPath, info)
-			fmt.Println(Dim("already stopped"))
+			fmt.Fprintln(out, Dim("already stopped"))
 			return nil
 		}
-		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("watchdog: request stop: %w", err)
 	}
 
@@ -778,21 +783,21 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 		// fast-restart-and-PID-reuse window cannot be exploited to kill
 		// the new occupant of the recycled PID.
 		if !verifyWatchdogProcess(info) {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 			return errors.New("watchdog: process identity changed before force stop")
 		}
 		if err := watchdogKill(proc); err != nil && verifyWatchdogProcess(info) {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 			return fmt.Errorf("watchdog: force stop: %w", err)
 		}
 		if !watchdogWaitForExit(proc, info, 2*time.Second) {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 			return errors.New("watchdog: process did not exit after force stop")
 		}
 	}
 
 	removeWatchdogPIDIfOwned(pidPath, info)
-	fmt.Println(Style("OK", "fg=green", "bold"))
+	fmt.Fprintln(out, Style("OK", "fg=green", "bold"))
 	return nil
 }
 

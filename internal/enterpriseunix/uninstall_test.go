@@ -213,9 +213,11 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 			if !strings.Contains(strings.Join(done.Changes, "\n"), "per-user data of user alice") {
 				t.Fatalf("the purge does not report the per-user data it removed: %v", done.Changes)
 			}
-			// MAC-U2-13: and says the disabled hook stubs stay.
-			if !strings.Contains(strings.Join(done.Changes, "\n"), "except ~/.defenseclaw/hooks") {
-				t.Fatalf("the purge report does not say the hook stubs stay: %v", done.Changes)
+			// The purge removes everything, the hook scripts included, and
+			// says so (it ran only after every registration went).
+			if changes := strings.Join(done.Changes, "\n"); !strings.Contains(changes, "including its hook scripts") ||
+				!strings.Contains(changes, "per-user binaries") || strings.Contains(changes, "except ~/.defenseclaw/hooks") {
+				t.Fatalf("the purge report does not say it removed everything: %v", done.Changes)
 			}
 		})
 	}

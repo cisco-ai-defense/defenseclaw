@@ -79,8 +79,9 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	// uninstall --purge: the purge of the account's state runs after its
 	// removals, and not at all when one failed (the state holds the backups
 	// a retried removal restores from).
-	previousPurger := enterpriseHookWorkerPurger
-	t.Cleanup(func() { enterpriseHookWorkerPurger = previousPurger })
+	previousPurger, previousStop := enterpriseHookWorkerPurger, enterpriseHookWorkerStopPerUser
+	t.Cleanup(func() { enterpriseHookWorkerPurger, enterpriseHookWorkerStopPerUser = previousPurger, previousStop })
+	enterpriseHookWorkerStopPerUser = func(enterprisehooks.InstallOptions) error { return nil }
 	var purged []string
 	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
 		purged = append(purged, opts.DataDir)

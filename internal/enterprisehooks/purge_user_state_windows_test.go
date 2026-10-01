@@ -10,20 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
-	"strings"
 	"testing"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// An uninstall with purge removes an account's per-user state as
-// LocalSystem, per-user hook tokens included, and keeps only the account's
-// moved-aside hooks and each hook script as the disabled stub, written in
-// place. A junction in the folder is removed, not followed, and so is a
-// subfolder whose access list denies the purge.
-func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
+// An uninstall with purge removes an account's whole per-user folder as
+// LocalSystem: hook scripts, per-user hook tokens and the account's
+// moved-aside hooks included. A junction in the folder is removed, not
+// followed, and so is a subfolder whose access list denies the purge.
+func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 	original := windowsEnterpriseMutationIdentityCheck
 	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = original })
 	windowsEnterpriseMutationIdentityCheck = func() error { return errors.New("not LocalSystem") }
@@ -52,29 +49,10 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", filepath.Join(dataDir, "link"), outside).CombinedOutput(); err != nil {
 		t.Fatalf("create junction: %v: %s", err, output)
 	}
-	script := filepath.Join(dataDir, "hooks", "amp-hook.sh")
-	// The managed install left the kept folders and stubs with the managed
-	// DACL, whose read-only OWNER RIGHTS entry denies the account WRITE_DAC.
 	sid := currentWindowsTestSID(t)
-	hardened := map[string]string{
-		dataDir:                         windowsRelaxTestHardenedDir,
-		filepath.Join(dataDir, "hooks"): windowsRelaxTestHardenedDir,
-		script:                          windowsRelaxTestHardenedFile,
-	}
-	for path, sddl := range hardened {
-		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
-			t.Fatalf("set owner of %s: %v", path, err)
-		}
-		windowsRelaxTestSetDACL(t, path, windowsRelaxTestFormat(sddl, sid))
-	}
 	// The account can deny SYSTEM on a folder it owns; the test denies its
 	// own account, which the purge runs as here.
 	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "denied"), "D:P(D;OICI;FA;;;"+sid.String()+")")
-	before, err := os.Stat(script)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	if err := PurgeWindowsUserState(home, target, ""); err == nil {
 		t.Fatal("the purge ran without LocalSystem")
 	}
@@ -87,44 +65,20 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for dir, want := range map[string][]string{
-		dataDir:                         {"foreign-hooks-backup", "hooks"},
-		filepath.Join(dataDir, "hooks"): {"amp-hook.sh"},
-		outside:                         {"keep.txt"},
-	} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
+	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		entries, _ := os.ReadDir(dataDir)
 		var names []string
 		for _, entry := range entries {
 			names = append(names, entry.Name())
 		}
-		if !slices.Equal(names, want) {
-			t.Fatalf("%s holds %v, want %v", dir, names, want)
-		}
+		t.Fatalf("the purge left %s: %v %v", dataDir, err, names)
 	}
-	after, err := os.Stat(script)
+	entries, err := os.ReadDir(outside)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(script)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(before, after) || !strings.Contains(string(body), "disabled tombstone") || strings.Contains(string(body), "exec forward") {
-		t.Fatalf("hook script was not stubbed in place (same file %t):\n%s", os.SameFile(before, after), body)
-	}
-	// What stayed goes back to a DACL the account can manage, so a later
-	// per-user install can protect its own folder.
-	for path := range hardened {
-		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(sd.String(), windowsGuardianHardenedOwnerRightsACE) {
-			t.Fatalf("%s kept the managed DACL after the purge: %s", path, sd)
-		}
+	if len(entries) != 1 || entries[0].Name() != "keep.txt" {
+		t.Fatalf("the purge followed the junction: %s holds %v", outside, entries)
 	}
 }
 

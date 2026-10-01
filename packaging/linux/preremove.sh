@@ -8,6 +8,12 @@
 # lock for the whole wait: removing the files then would leave machine
 # policy and per-user hooks naming a deleted binary. Any other lifecycle
 # problem is reported and does not stop the package transaction.
+#
+# This uninstall never purges: dpkg passes "remove" here for both apt remove
+# and apt purge, and rpm has no purge. Each enrolled account keeps its
+# ~/.defenseclaw and per-user binaries. To remove those too, run
+# `defenseclaw-gateway enterprise linux uninstall --purge` before removing
+# the package; it names every account it purged or left alone.
 
 set -u
 case "${1:-}" in

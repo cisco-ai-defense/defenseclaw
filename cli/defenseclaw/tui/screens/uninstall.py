@@ -29,6 +29,7 @@ class UninstallOption(str, Enum):
     DRY_RUN = "dry-run"
     KEEP_DATA = "keep-data"
     WIPE_DATA = "wipe-data"
+    WIPE_ALL = "wipe-all"
 
 
 def uninstall_command_for_option(option: UninstallOption) -> CommandSpec:
@@ -40,9 +41,12 @@ def uninstall_command_for_option(option: UninstallOption) -> CommandSpec:
     elif option is UninstallOption.KEEP_DATA:
         args = ("uninstall", "--yes")
         display = "uninstall --yes"
-    else:
+    elif option is UninstallOption.WIPE_DATA:
         args = ("uninstall", "--all", "--yes")
         display = "uninstall --all --yes"
+    else:
+        args = ("uninstall", "--all", "--binaries", "--yes")
+        display = "uninstall --all --binaries --yes"
     return CommandSpec(binary="defenseclaw", args=args, display_name=display)
 
 
@@ -56,7 +60,7 @@ def build_uninstall_model() -> ConsequenceModalModel:
             "Destructive rows pass --yes because this modal is the confirmation step.",
             "Use the dry-run row first if you want to inspect the plan.",
         ),
-        consequence="Uninstall can remove hooks, plugin integration, config, audit DB, and secrets.",
+        consequence="Uninstall can remove hooks, plugin integration, config, audit DB, secrets, and binaries.",
         actions=(
             ConsequenceAction(
                 action_id=UninstallOption.DRY_RUN.value,
@@ -80,6 +84,15 @@ def build_uninstall_model() -> ConsequenceModalModel:
                 label="Uninstall and wipe data",
                 description="Also deletes ~/.defenseclaw audit DB, config, and secrets.",
                 command=uninstall_command_for_option(UninstallOption.WIPE_DATA),
+                variant="error",
+                danger=True,
+            ),
+            ConsequenceAction(
+                action_id=UninstallOption.WIPE_ALL.value,
+                hotkey="e",
+                label="Uninstall everything",
+                description="Also deletes ~/.defenseclaw and the defenseclaw binaries in ~/.local/bin.",
+                command=uninstall_command_for_option(UninstallOption.WIPE_ALL),
                 variant="error",
                 danger=True,
             ),

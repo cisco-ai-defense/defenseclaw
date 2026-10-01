@@ -89,6 +89,9 @@ type windowsEnterpriseInstallerReport struct {
 	// uninstall left ("user (SID): path"; with purge, each one it could
 	// not remove, followed by ": reason").
 	UserStateRemaining json.RawMessage `json:"user_state_remaining"`
+	// UserStatePurged names each enrolled account whose per-user folder and
+	// per-user binaries a purge removed ("user (SID): path").
+	UserStatePurged json.RawMessage `json:"user_state_purged"`
 	// Pending-transaction recovery reports each managed-hook lifecycle step
 	// it ran with the Setup's verified gateway, and why it kept the staged
 	// one. Decoded leniently, like the registration lists.
@@ -523,14 +526,18 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 }
 
-// addWindowsEnterpriseUserStateWarning names each enrolled account's
-// DefenseClaw per-user folder a purge could not remove, with the reason.
-// What stays keeps inert hook scripts and that account's per-user hook
-// tokens, which nothing accepts any more.
+// addWindowsEnterpriseUserStateWarning names each enrolled account whose
+// DefenseClaw per-user data a purge removed (in Changes), and each one it
+// could not remove, with the reason. What stays holds per-user hook tokens
+// that nothing accepts any more.
 func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	for _, account := range windowsEnterpriseReportStrings(report.UserStatePurged) {
+		result.Changes = append(result.Changes, "removed all DefenseClaw per-user data of "+account+
+			" (hook scripts and foreign-hooks-backup included) and its per-user binaries in %USERPROFILE%\\.local\\bin")
+	}
 	if remaining := windowsEnterpriseReportStrings(report.UserStateRemaining); len(remaining) > 0 {
 		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
-			"--purge could not remove the DefenseClaw per-user folder of %d enrolled account(s), which keeps inert hook scripts and per-user hook tokens that nothing accepts any more; remove each one as LocalSystem: %s",
+			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
 			len(remaining),
 			windowsEnterpriseBoundedLabels(remaining),
 		))
