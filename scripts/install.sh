@@ -741,16 +741,24 @@ data_entries() {
 }
 
 snapshot() {
-    local binary link name need have
+    local binary link name need have size biggest="" biggest_kb=0
     rm -rf "${SNAP}"
     mkdir -p "${SNAP}/bin" "${SNAP}/data" || return 1
     need=0
     while IFS= read -r name; do
-        need=$((need + $(du -sk "${DEFENSECLAW_HOME}/${name}" 2>/dev/null | awk '{print $1}')))
+        size="$(du -sk "${DEFENSECLAW_HOME}/${name}" 2>/dev/null | awk '{print $1}')"
+        size="${size:-0}"
+        need=$((need + size))
+        if [[ "${size}" -gt "${biggest_kb}" ]]; then biggest="${name}" biggest_kb="${size}"; fi
     done < <(data_entries)
     have="$(df -Pk "${DEFENSECLAW_HOME}" | awk 'NR==2{print $4}')"
     if [[ -n "${need}" && -n "${have}" && "${have}" -lt $((need + 102400)) ]]; then
-        err "Not enough free disk space next to ${DEFENSECLAW_HOME} for a rollback copy"
+        need=$((need + 102400))
+        err "Not enough free disk space next to ${DEFENSECLAW_HOME} for a rollback copy: it needs about $(((need + 1023) / 1024)) MB (a copy of the data plus 100 MB) and $((have / 1024)) MB is free"
+        if [[ -n "${biggest}" ]]; then
+            err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+        fi
+        err "Free at least $(((need - have + 1023) / 1024)) MB on that filesystem (df -h ${DEFENSECLAW_HOME}), or move the largest item elsewhere, then rerun"
         return 1
     fi
     for binary in ${MANAGED_BINARIES}; do
