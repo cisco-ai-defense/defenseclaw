@@ -3063,12 +3063,13 @@ class TestCheckHookHealth(unittest.TestCase):
             ),
             patch(
                 "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--config", config),
+                # ``omnigent run`` starts its server through the module CLI.
+                return_value=("/usr/bin/python3", "-P", "-m", "omnigent.cli", "server", "--config", config),
             ),
         ):
             status, detail = _omnigent_live_config_evidence(config)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("--config", detail)
         self.assertIn("loaded policy generation/module/config identity", detail)
         self.assertIn("action/fail-closed enforcement is unverified", detail)
@@ -3105,7 +3106,7 @@ class TestCheckHookHealth(unittest.TestCase):
         ):
             status, detail = _omnigent_live_config_evidence(managed)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("--config", detail)
         self.assertIn("pending reload/restart", detail)
 
@@ -3183,7 +3184,7 @@ class TestCheckHookHealth(unittest.TestCase):
         ):
             status, detail = _omnigent_live_config_evidence(managed)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("OMNIGENT_CONFIG", detail)
         self.assertIn("loaded policy generation/module/config identity", detail)
 
