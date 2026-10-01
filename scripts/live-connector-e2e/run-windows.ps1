@@ -5020,14 +5020,16 @@ function Get-NativeHookArguments([string]$RegisteredEvent) {
             throw "Codex registration is unavailable while resolving the hook contract: $config"
         }
         $command = Get-CodexWindowsHookCommand ([IO.File]::ReadAllText($config))
-        $contract = [regex]::Match(
-            $command.Script,
-            "(?i)'--hook-contract','(?<value>codex-hooks-v[0-9]+)'"
-        )
-        if (-not $contract.Success) {
+        # Read the contract from the launcher arguments of the exact awaited
+        # bridge, not from the quoting of one PowerShell statement.
+        $bridge = Get-AwaitedHookBridge $command.Script
+        $bridgeArguments = [string[]]@(if ($null -ne $bridge) { $bridge.Arguments })
+        $contractIndex = [Array]::IndexOf($bridgeArguments, '--hook-contract')
+        if ($contractIndex -lt 0 -or $contractIndex + 1 -ge $bridgeArguments.Count -or
+            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+$') {
             throw 'Codex registration has no finite installer-bound hook contract'
         }
-        $arguments += @('--hook-contract', $contract.Groups['value'].Value)
+        $arguments += @('--hook-contract', $bridgeArguments[$contractIndex + 1])
     }
     return $arguments
 }
