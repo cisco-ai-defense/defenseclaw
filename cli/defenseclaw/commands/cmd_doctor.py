@@ -1851,6 +1851,7 @@ def _check_component_connector_compatibility(
         HealthStatus,
         build_health_report,
         read_cached_discovery,
+        supported_range_text,
     )
 
     enabled = tuple(connector for connector in connectors if _connector_enabled(cfg, connector))
@@ -1912,18 +1913,7 @@ def _check_component_connector_compatibility(
         if finding.contract_id:
             detail += f"; contract={finding.contract_id}"
         if finding.supported_agent_ranges:
-            ranges = []
-            for supported in finding.supported_agent_ranges:
-                bounds = " ".join(
-                    part
-                    for part in (
-                        f">={supported.min_inclusive}" if supported.min_inclusive else "",
-                        f"<{supported.max_exclusive}" if supported.max_exclusive else "",
-                    )
-                    if part
-                )
-                ranges.append(bounds or supported.contract_id)
-            detail += f"; supported={','.join(ranges)}"
+            detail += f"; supported={supported_range_text(finding.supported_agent_ranges)}"
 
         if finding.status is HealthStatus.SUPPORTED:
             tag = "pass"
