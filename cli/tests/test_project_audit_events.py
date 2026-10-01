@@ -106,6 +106,22 @@ def test_projects_exact_stored_record(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8") == expected + "\n"
 
 
+def test_private_snapshot_publish_never_waits_on_disk_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def stalled_flush(_descriptor: int) -> None:
+        raise AssertionError("the transient snapshot must not fsync")
+
+    monkeypatch.setattr(PROJECTOR.os, "fsync", stalled_flush)
+    output = tmp_path / "projection.jsonl"
+    output.write_text("stale\n", encoding="utf-8")
+
+    PROJECTOR._replace_jsonl(output, ['{"a":1}'])
+
+    assert output.read_text(encoding="utf-8") == '{"a":1}\n'
+    assert [entry.name for entry in tmp_path.iterdir()] == ["projection.jsonl"]
+
+
 def test_retries_busy_and_locked_before_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
