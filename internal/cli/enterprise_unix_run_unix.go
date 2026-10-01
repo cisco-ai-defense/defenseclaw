@@ -178,6 +178,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,
 			result.Readiness.Enumerator, result.Readiness.SensorHelper)
+		if result.Inspection.Local != "" || result.Inspection.AIDefense != "" {
+			fmt.Fprintf(w, "  inspection: local=%s ai_defense=%s\n", result.Inspection.Local, result.Inspection.AIDefense)
+		}
 		for _, service := range result.Services {
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
