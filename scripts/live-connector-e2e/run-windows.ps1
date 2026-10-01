@@ -6435,8 +6435,9 @@ function Assert-OpenCodePluginContract {
     # The gateway is intentionally stopped above so its self-healer cannot
     # race the tamper assertion. A byte-for-byte restored OpenCode plugin is
     # therefore digest-current but runtime-unverified until the restart below.
+    # Doctor reports a cleanly stopped gateway as "not checked".
     $expectedStoppedRuntime =
-        'runtime load unverified: (sidecar /health is unavailable|managed gateway PID file is missing)'
+        'runtime load (unverified: (sidecar /health is unavailable|managed gateway PID file is missing)|not checked: the gateway is not running)'
     if ($recoveredChecks.Count -ne 1 -or
         $recoveredChecks[0].status -ne 'warn' -or
         $recoveredChecks[0].detail -notmatch 'managed plugin digest current' -or

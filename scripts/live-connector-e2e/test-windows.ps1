@@ -4784,7 +4784,8 @@ connection.close()
         $openCodeDoctorContract -match 'managed plugin digest current' -and
         $openCodeDoctorContract -match '\$expectedStoppedRuntime' -and
         $openCodeDoctorContract -match 'sidecar /health is unavailable' -and
-        $openCodeDoctorContract -match 'managed gateway PID file is missing') `
+        $openCodeDoctorContract -match 'managed gateway PID file is missing' -and
+        $openCodeDoctorContract -match 'not checked: the gateway is not running') `
         'OpenCode recovery distinguishes a restored digest from runtime readiness while the isolated gateway is stopped'
     Assert-True ($harnessText -match 'obsolete shell-hook guidance for native Windows') 'Doctor connector contract rejects obsolete shell guidance'
     $gatewayWait = [regex]::Match($harnessText, '(?s)function Wait-Gateway\b.*?\n\}').Value
