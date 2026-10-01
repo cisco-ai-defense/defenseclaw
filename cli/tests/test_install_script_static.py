@@ -354,6 +354,35 @@ def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     assert "an older failure" not in out
 
 
+def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:
+    # RHEL-U3-02: the low-disk refusal named no sizes, no culprit and no next step.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("is_machinery() {")
+    funcs = text[start : text.index("\n}\n", text.index("snapshot() {")) + 3]
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
+    bin_dir = tmp_path / "fake"
+    bin_dir.mkdir()
+    (bin_dir / "df").write_text("#!/bin/sh\necho head\necho fs 1 1 51200 1% /\n", encoding="utf-8")
+    (bin_dir / "df").chmod(0o755)
+    script = tmp_path / "snap.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*"; }\n'
+        + funcs
+        + f'NOT_DATA="" DEFENSECLAW_HOME="{home}" SNAP="{tmp_path / "snap"}"\n'
+        + f'PATH="{bin_dir}:$PATH"\nrc=0; snapshot || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out, out
+    assert "needs about 103 MB" in out and "50 MB is free" in out
+    assert f"{home}/audit.db (3 MB)" in out
+    assert "Free at least 53 MB" in out
+
+
 def test_windows_installer_leaves_unset_variables_unset() -> None:
     # pwsh 7 turns SetEnvironmentVariable(name, $null) into an empty value (WIN2-U2-08).
     text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
