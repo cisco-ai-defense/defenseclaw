@@ -2372,20 +2372,21 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		body, _ = json.Marshal(bodyMap)
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	flusher, canFlush := w.(http.Flusher)
 
+	var responseBuf bytes.Buffer
 	err = bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		if canFlush {
-			flusher.Flush()
-		}
+		responseBuf.Write(chunk)
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", err)
+		writeOpenAIError(w, http.StatusBadGateway, "bifrost: "+err.Error())
+		return
 	}
+
+	// Return the Bifrost Responses API JSON directly
+	w.Write(responseBuf.Bytes())
 }
 
 // handleModels returns a minimal OpenAI-compatible /v1/models response.
