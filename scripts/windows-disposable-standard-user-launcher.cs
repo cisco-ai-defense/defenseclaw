@@ -37,6 +37,12 @@ namespace DefenseClaw
         private const uint WAIT_TIMEOUT = 0x00000102;
         private const uint WAIT_FAILED = 0xFFFFFFFF;
         private const int ERROR_INSUFFICIENT_BUFFER = 122;
+        private const int ERROR_INVALID_PARAMETER = 87;
+        private const int ERROR_MORE_DATA = 234;
+        private const int JobObjectBasicProcessIdList = 3;
+        private const uint SYNCHRONIZE = 0x00100000;
+        private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
+        private const uint INFINITE = 0xFFFFFFFF;
 
         // Deliberately excludes WINSTA_EXITWINDOWS. The child may enumerate
         // and render on the existing interactive station, but cannot log the
@@ -229,6 +235,37 @@ namespace DefenseClaw
             out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information,
             uint informationLength,
             out uint returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr job,
+            int informationClass,
+            IntPtr information,
+            uint informationLength,
+            out uint returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsProcessInJob(
+            IntPtr process,
+            IntPtr job,
+            [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(
+            uint access,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+            int processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetProcessTimes(
+            IntPtr process,
+            out long creationTime,
+            out long exitTime,
+            out long kernelTime,
+            out long userTime);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -624,6 +661,134 @@ namespace DefenseClaw
             return information.ActiveProcesses;
         }
 
+        private static int[] GetJobProcessIds(IntPtr job)
+        {
+            int capacity = 64;
+            while (true)
+            {
+                int bytes = 8 + IntPtr.Size * capacity;
+                IntPtr buffer = Marshal.AllocHGlobal(bytes);
+                try
+                {
+                    uint returned;
+                    if (!QueryInformationJobObject(
+                        job,
+                        JobObjectBasicProcessIdList,
+                        buffer,
+                        (uint)bytes,
+                        out returned))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != ERROR_MORE_DATA)
+                        {
+                            throw new Win32Exception(
+                                error,
+                                "QueryInformationJobObject(process list) failed");
+                        }
+                    }
+                    int assigned = Marshal.ReadInt32(buffer, 0);
+                    int listed = Marshal.ReadInt32(buffer, 4);
+                    if (listed < assigned)
+                    {
+                        capacity = Math.Max(capacity * 2, assigned + 16);
+                        continue;
+                    }
+                    int[] ids = new int[listed];
+                    for (int i = 0; i < listed; i++)
+                    {
+                        ids[i] = unchecked((int)Marshal.ReadIntPtr(buffer, 8 + IntPtr.Size * i).ToInt64());
+                    }
+                    return ids;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+        }
+
+        // Returns once ActiveProcesses reaches zero, waiting on each member's
+        // own exit event instead of polling the count against a clock.
+        private static void WaitForJobMembersToExit(IntPtr job)
+        {
+            while (GetActiveJobProcessCount(job) != 0)
+            {
+                bool waited = false;
+                foreach (int id in GetJobProcessIds(job))
+                {
+                    IntPtr member = OpenProcess(
+                        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        false,
+                        id);
+                    if (member == IntPtr.Zero)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == ERROR_INVALID_PARAMETER) continue;
+                        throw new Win32Exception(
+                            error,
+                            "OpenProcess failed for disposable standard-user job member " + id);
+                    }
+                    try
+                    {
+                        bool inJob;
+                        if (IsProcessInJob(member, job, out inJob) && inJob)
+                        {
+                            WaitForSingleObject(member, INFINITE);
+                            waited = true;
+                        }
+                    }
+                    finally
+                    {
+                        CloseHandle(member);
+                    }
+                }
+                // A member is signaled a moment before the job's active
+                // count drops; yield across that transition.
+                if (!waited) System.Threading.Thread.Yield();
+            }
+        }
+
+        // Exit event for one exact process (PID plus creation time) that a
+        // CIM sweep just terminated. A vanished or reused PID means the
+        // original already exited.
+        public static void WaitForExactProcessExit(int processId, DateTime creationUtc)
+        {
+            IntPtr process = OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                processId);
+            if (process == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == ERROR_INVALID_PARAMETER) return;
+                throw new Win32Exception(
+                    error,
+                    "OpenProcess failed for exact-SID process " + processId);
+            }
+            try
+            {
+                long creation, exit, kernel, user;
+                if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "GetProcessTimes failed for exact-SID process " + processId);
+                }
+                long delta = DateTime.FromFileTimeUtc(creation).Ticks - creationUtc.ToUniversalTime().Ticks;
+                if (Math.Abs(delta) >= TimeSpan.TicksPerMillisecond) return;
+                if (WaitForSingleObject(process, INFINITE) != WAIT_OBJECT_0)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "WaitForSingleObject failed for exact-SID process " + processId);
+                }
+            }
+            finally
+            {
+                CloseHandle(process);
+            }
+        }
+
         private static byte[] ReadUserObjectDacl(IntPtr userObject, string label)
         {
             uint information = DACL_SECURITY_INFORMATION;
@@ -952,15 +1117,13 @@ namespace DefenseClaw
 
             // Closing a kill-on-close handle is not enough evidence for a
             // privileged caller to begin traversing child-writable paths. CI
-            // explicitly terminates the job, observes ActiveProcesses reach
-            // zero, and only then releases the handle.
-            public void TerminateAndDrain(int milliseconds)
+            // explicitly terminates the job, waits for every member's exit
+            // event until ActiveProcesses is zero, and only then releases the
+            // handle. The enclosing step timeout bounds a host that cannot
+            // kill its own job.
+            public void TerminateAndDrain()
             {
                 if (disposed) return;
-                if (milliseconds < 1)
-                {
-                    throw new ArgumentOutOfRangeException("milliseconds");
-                }
                 if (job != IntPtr.Zero)
                 {
                     if (!TerminateJobObject(job, 1603))
@@ -969,20 +1132,11 @@ namespace DefenseClaw
                             Marshal.GetLastWin32Error(),
                             "TerminateJobObject failed for disposable standard-user harness");
                     }
-                    Stopwatch timer = Stopwatch.StartNew();
-                    while (GetActiveJobProcessCount(job) != 0)
-                    {
-                        if (timer.ElapsedMilliseconds >= milliseconds)
-                        {
-                            throw new InvalidOperationException(
-                                "disposable standard-user job retained active processes after termination");
-                        }
-                        System.Threading.Thread.Sleep(50);
-                    }
+                    WaitForJobMembersToExit(job);
                     CloseHandle(job);
                     job = IntPtr.Zero;
                 }
-                if (!WaitForNativeExit(milliseconds))
+                if (!WaitForNativeExit(-1))
                 {
                     throw new InvalidOperationException(
                         "disposable standard-user root process did not exit after job termination");
@@ -991,7 +1145,7 @@ namespace DefenseClaw
 
             public void Terminate()
             {
-                TerminateAndDrain(30000);
+                TerminateAndDrain();
             }
 
             public void Dispose()

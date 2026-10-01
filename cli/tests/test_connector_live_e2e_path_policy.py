@@ -84,6 +84,7 @@ def _selects_full_connector_matrix(path: str) -> bool:
         "scripts/windows-native-ci.ps1",
         "scripts/windows-native-paths.ps1",
         "scripts/windows_installer_artifacts.py",
+        "scripts/windows-contained-process.cs",
         "scripts/windows-disposable-file-guard.cs",
         "scripts/windows-disposable-standard-user-launcher.cs",
         "scripts/windows-setup-standard-user-launcher.cs",

@@ -692,8 +692,12 @@ function Stop-AndVerifyDisposableSidProcesses(
                 throw "could not terminate disposable-SID process $($process.ProcessId): $($termination.ReturnValue)"
             }
             [void]$terminated.Add([int]$process.ProcessId)
+            # Terminate is asynchronous; wait on this exact process's exit
+            # event before the next sweep instead of sleeping.
+            [DefenseClaw.DisposableStandardUserLauncher]::WaitForExactProcessExit(
+                [int]$current.ProcessId,
+                ([datetime]$current.CreationDate).ToUniversalTime())
         }
-        Start-Sleep -Milliseconds 250
     }
     $remaining = @(Get-DisposableSidProcesses $Sid $UnverifiableBaseline)
     if ($remaining.Count -ne 0) {
@@ -753,7 +757,7 @@ function Complete-DisposableExecutionBoundary {
     $initialJobFailure = ''
     if ($null -ne $Process) {
         try {
-            $Process.TerminateAndDrain(30000)
+            $Process.TerminateAndDrain()
             $jobDrained = [uint32]$Process.ActiveProcessCount -eq 0
             if (-not $jobDrained) {
                 throw 'disposable process job did not drain to ActiveProcesses=0'
@@ -785,7 +789,7 @@ function Complete-DisposableExecutionBoundary {
 
     if ($null -ne $Process -and -not $jobDrained) {
         try {
-            $Process.TerminateAndDrain(30000)
+            $Process.TerminateAndDrain()
             $jobDrained = [uint32]$Process.ActiveProcessCount -eq 0
             if (-not $jobDrained) {
                 throw 'disposable process job still reports active processes after SID sweep'
@@ -1033,6 +1037,7 @@ try {
         'validate_packaged_v8_resources.py',
         'windows-native-ci.ps1',
         'windows-native-paths.ps1',
+        'windows-contained-process.cs',
         'windows-disposable-file-guard.cs',
         'windows-disposable-user-safety.ps1',
         'windows-setup-standard-user-launcher.cs',

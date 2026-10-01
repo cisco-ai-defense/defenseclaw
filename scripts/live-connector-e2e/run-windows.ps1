@@ -3937,18 +3937,6 @@ function Get-ProcessTreeSnapshot {
     return @($descendants)
 }
 
-function Update-RootProcessExitBound([object]$RecordedProcess, [Diagnostics.Process]$Process) {
-    if (-not $Process.HasExited -or
-        -not [string]::IsNullOrWhiteSpace([string]$RecordedProcess.ExitDate)) {
-        return
-    }
-    try {
-        $RecordedProcess.ExitDate = $Process.ExitTime.ToUniversalTime().ToString('O')
-    } catch {
-        Write-Warning (Protect-LogText "could not record process exit bound: $($_.Exception.Message)")
-    }
-}
-
 function Add-ProcessTreeSnapshot([hashtable]$Tracked, [object]$RootProcess) {
     $roots = @($RootProcess) + @($Tracked.Values)
     try {
@@ -3961,78 +3949,18 @@ function Add-ProcessTreeSnapshot([hashtable]$Tracked, [object]$RootProcess) {
     }
 }
 
-function Test-SameProcessIdentity($RecordedProcess) {
-    $native = $null
-    try {
-        $native = [Diagnostics.Process]::GetProcessById([int]$RecordedProcess.ProcessId)
-        $expected = [DateTime]::Parse(
-            [string]$RecordedProcess.CreationDate,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::RoundtripKind
-        ).ToUniversalTime()
-        if ([Math]::Abs(($native.StartTime.ToUniversalTime() - $expected).TotalMilliseconds) -ge 1) {
-            return $false
-        }
-        if (-not [string]::IsNullOrWhiteSpace([string]$RecordedProcess.ExecutablePath)) {
-            $currentImage = [string]$native.MainModule.FileName
-            if (-not [string]::Equals(
-                $currentImage,
-                [string]$RecordedProcess.ExecutablePath,
-                [StringComparison]::OrdinalIgnoreCase
-            )) {
-                return $false
-            }
-        }
-        return $true
-    } catch {
-        return $false
-    } finally {
-        if ($null -ne $native) { $native.Dispose() }
-    }
+if (-not ('DefenseClaw.ContainedProcess' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot '..\windows-contained-process.cs')
 }
 
-function Stop-ExactProcessTree([object[]]$Descendants) {
-    foreach ($recorded in @($Descendants)) {
-        if (-not (Test-SameProcessIdentity $recorded)) { continue }
-        $native = $null
-        try {
-            $native = [Diagnostics.Process]::GetProcessById([int]$recorded.ProcessId)
-            $started = $native.StartTime.ToUniversalTime()
-            $expected = [DateTime]::Parse(
-                [string]$recorded.CreationDate,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [Globalization.DateTimeStyles]::RoundtripKind
-            ).ToUniversalTime()
-            if ([Math]::Abs(($started - $expected).TotalMilliseconds) -ge 1) { continue }
-            $native.Kill($true)
-        } catch {
-            Write-Warning (Protect-LogText "could not stop tracked PID $($recorded.ProcessId): $($_.Exception.Message)")
-        } finally {
-            if ($null -ne $native) { $native.Dispose() }
-        }
-    }
-}
-
-function Wait-ProcessTreeExit([object[]]$Descendants, [int]$TimeoutMilliseconds = 5000) {
-    if (@($Descendants).Count -eq 0) { return }
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
-    do {
-        $alive = @($Descendants | Where-Object { Test-SameProcessIdentity $_ })
-        if ($alive.Count -eq 0) { return }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $deadline)
-}
-
-function Get-TrackedProcessIdentitySummary([object[]]$Descendants) {
-    $rows = @($Descendants | Sort-Object ProcessId, CreationDate | Select-Object -First 16 | ForEach-Object {
-        $image = if ([string]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) {
-            'unknown'
-        } else {
-            [IO.Path]::GetFileName([string]$_.ExecutablePath)
-        }
-        "pid=$($_.ProcessId),created=$($_.CreationDate),image=$image"
-    })
-    if (@($Descendants).Count -gt 16) { $rows += 'additional-identities=truncated' }
+function Get-JobProcessSummary([object]$Process) {
+    $rows = @($Process.GetActiveProcessIds() | Where-Object { $_ -ne $Process.Id } |
+        Sort-Object | Select-Object -First 17 | ForEach-Object {
+            $image = 'unknown'
+            try { $image = (Get-Process -Id $_ -ErrorAction Stop).ProcessName } catch {}
+            "pid=$_,image=$image"
+        })
+    if ($rows.Count -gt 16) { $rows = @($rows[0..15]) + 'additional-identities=truncated' }
     if ($rows.Count -eq 0) { return 'none' }
     return $rows -join ';'
 }
@@ -4064,16 +3992,6 @@ function Read-RedirectedOutputTask([Threading.Tasks.Task[string]]$Task) {
     catch { return "[redirected output unavailable: $($_.Exception.Message)]" }
 }
 
-function Test-RedirectedOutputTasksHealthy(
-    [Threading.Tasks.Task[string]]$StdOutTask,
-    [Threading.Tasks.Task[string]]$StdErrTask
-) {
-    return -not (
-        $StdOutTask.IsFaulted -or $StdOutTask.IsCanceled -or
-        $StdErrTask.IsFaulted -or $StdErrTask.IsCanceled
-    )
-}
-
 function Invoke-NativeProcess {
     [CmdletBinding()]
     param(
@@ -4086,7 +4004,7 @@ function Invoke-NativeProcess {
         [switch]$CaptureDescendants,
         [scriptblock]$WhileRunning = $null
     )
-    $inputText = $null
+    $inputBytes = $null
     if (-not [string]::IsNullOrWhiteSpace($InputPath)) {
         $resolvedInput = (Resolve-Path -LiteralPath $InputPath -ErrorAction Stop).Path
         $inputInfo = Get-Item -LiteralPath $resolvedInput -Force -ErrorAction Stop
@@ -4096,135 +4014,70 @@ function Invoke-NativeProcess {
         if ([Text.Encoding]::UTF8.GetByteCount($inputText) -gt 1048576) {
             throw "native process decoded input exceeds the 1 MiB limit: $resolvedInput"
         }
+        $inputBytes = [Text.UTF8Encoding]::new($false).GetBytes($inputText)
     }
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FilePath
     $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $start.RedirectStandardInput = $null -ne $inputText
     foreach ($argument in $ArgumentList) { [void]$start.ArgumentList.Add($argument) }
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $start
-    if (-not $process.Start()) {
-        $process.Dispose()
-        throw "failed to start $FilePath"
-    }
+    # Own job, file-backed stdin/stdout/stderr, explicit inherited-handle
+    # list: root exit ends the command, and a timeout kills the job and
+    # waits for it to be empty. See scripts/windows-contained-process.cs.
+    $process = [DefenseClaw.ContainedProcess]::Start($start, $inputBytes)
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $trackedDescendants = @{}
         $rootProcessIdentity = [pscustomobject]@{
             ProcessId = $process.Id
             ParentProcessId = 0
-            CreationDate = $process.StartTime.ToUniversalTime().ToString('O')
+            CreationDate = $process.StartTimeUtc.ToString('O')
             ExitDate = ''
             ExecutablePath = ''
         }
-        $timeoutIdentitySummary = 'none'
-        $inputWriteFailed = $false
-        $inputWriteFailure = ''
-        $inputTimedOut = $false
         Write-NativeProcessPhase $FilePath $process.Id 'started'
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
         if ($null -ne $WhileRunning) {
             try {
-                & $WhileRunning $process
+                & $WhileRunning $process.Process
             } catch {
-                if (-not $process.HasExited) {
-                    try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
-                    $null = $process.WaitForExit(1000)
-                }
+                $process.TerminateTree()
                 throw
             }
         }
-        if ($null -ne $inputText) {
-            $inputWriteTask = $process.StandardInput.WriteAsync($inputText)
-            $inputWriteComplete = Wait-RedirectedOutputTask $inputWriteTask $deadline
-            if (-not $inputWriteComplete) {
-                $inputTimedOut = $true
-            } elseif ($inputWriteTask.IsFaulted -or $inputWriteTask.IsCanceled) {
-                $inputWriteFailed = $true
-                try { $inputWriteTask.GetAwaiter().GetResult() }
-                catch { $inputWriteFailure = Protect-LogText $_.Exception.Message }
-            } else {
-                try { $process.StandardInput.Close() }
-                catch {
-                    $inputWriteFailed = $true
-                    $inputWriteFailure = Protect-LogText $_.Exception.Message
-                }
-            }
-        }
-        $timeoutPhase = if ($inputTimedOut) { 'stdin-write' } else { 'parent' }
-        $timedOut = $inputTimedOut
-        if (-not $timedOut -and -not $inputWriteFailed) {
-            if ($CaptureDescendants) {
-                do {
-                    Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
-                    $remainingMilliseconds = [int][Math]::Max(
-                        0,
-                        [Math]::Min([int]::MaxValue, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-                    )
-                    if ($remainingMilliseconds -le 0) {
-                        $timedOut = $true
-                        break
-                    }
-                    $exited = $process.WaitForExit([Math]::Min(100, $remainingMilliseconds))
-                } while (-not $exited)
-            } else {
-                $parentWaitMilliseconds = [int][Math]::Max(
+        $timedOut = $false
+        if ($CaptureDescendants) {
+            do {
+                Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
+                $remainingMilliseconds = [int][Math]::Max(
                     0,
                     [Math]::Min([int]::MaxValue, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
                 )
-                $timedOut = -not $process.WaitForExit($parentWaitMilliseconds)
-            }
+                if ($remainingMilliseconds -le 0) {
+                    $timedOut = $true
+                    break
+                }
+                $exited = $process.WaitForExit([Math]::Min(100, $remainingMilliseconds))
+            } while (-not $exited)
+        } else {
+            $parentWaitMilliseconds = [int][Math]::Max(
+                0,
+                [Math]::Min([int]::MaxValue, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            )
+            $timedOut = -not $process.WaitForExit($parentWaitMilliseconds)
         }
-        if (-not $timedOut -and -not $inputWriteFailed) {
-            Write-NativeProcessPhase $FilePath $process.Id 'parent-exited'
-            $drainGrace = [DateTime]::UtcNow.AddSeconds(5)
-            $drainDeadline = if ($drainGrace -lt $deadline) { $drainGrace } else { $deadline }
-            $stdoutComplete = Wait-RedirectedOutputTask $stdoutTask $drainDeadline
-            $stderrComplete = Wait-RedirectedOutputTask $stderrTask $drainDeadline
-            if (-not ($stdoutComplete -and $stderrComplete)) {
-                $timedOut = $true
-                $timeoutPhase = 'output-drain'
-            }
-        }
-        $outputReadFailed = -not $timedOut -and -not $inputWriteFailed -and
-            -not (Test-RedirectedOutputTasksHealthy $stdoutTask $stderrTask)
-        if ($timedOut -or $inputWriteFailed) {
-            Update-RootProcessExitBound $rootProcessIdentity $process
-            Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
-            $timeoutIdentitySummary = Get-TrackedProcessIdentitySummary @($trackedDescendants.Values)
-            if ($timedOut) {
-                Write-NativeProcessPhase $FilePath $process.Id "timeout-$timeoutPhase" "descendants=$timeoutIdentitySummary"
-            } else {
-                Write-NativeProcessPhase $FilePath $process.Id 'failed-input' "descendants=$timeoutIdentitySummary"
-            }
-            if (-not $process.HasExited) {
-                try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
-                $null = $process.WaitForExit(1000)
-            }
-            Update-RootProcessExitBound $rootProcessIdentity $process
-            Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
-            $timeoutIdentitySummary = Get-TrackedProcessIdentitySummary @($trackedDescendants.Values)
-            Stop-ExactProcessTree @($trackedDescendants.Values)
-            Wait-ProcessTreeExit @($trackedDescendants.Values) 1000
-            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(1)
-            $null = Wait-RedirectedOutputTask $stdoutTask $cleanupDeadline
-            $null = Wait-RedirectedOutputTask $stderrTask $cleanupDeadline
-            if (-not $stdoutTask.IsCompleted) { $process.StandardOutput.Dispose() }
-            if (-not $stderrTask.IsCompleted) { $process.StandardError.Dispose() }
-        }
-        $stdout = Protect-LogText (Read-RedirectedOutputTask $stdoutTask)
-        $stderr = Protect-LogText (Read-RedirectedOutputTask $stderrTask)
+        $jobSummary = Get-JobProcessSummary $process
         if ($timedOut) {
-            $stderr = @($stderr, "[timeout descendants: $timeoutIdentitySummary]" | Where-Object { $_ }) -join [Environment]::NewLine
-        } elseif ($inputWriteFailed) {
-            $stderr = @($stderr, "[standard input write failed: $inputWriteFailure]" | Where-Object { $_ }) -join [Environment]::NewLine
+            Write-NativeProcessPhase $FilePath $process.Id 'timeout-parent' "descendants=$jobSummary"
+            $process.TerminateTree()
+        } else {
+            Write-NativeProcessPhase $FilePath $process.Id 'parent-exited' "released-descendants=$jobSummary"
+            $process.Release()
         }
-        $exitCode = if ($timedOut) { 124 } elseif ($inputWriteFailed) { 125 } else { $process.ExitCode }
+        $stdout = Protect-LogText $process.ReadStandardOutput()
+        $stderr = Protect-LogText $process.ReadStandardError()
+        if ($timedOut) {
+            $stderr = @($stderr, "[timeout descendants: $jobSummary]" | Where-Object { $_ }) -join [Environment]::NewLine
+        }
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
         $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
         if ($LogPath) {
             $parent = Split-Path -Parent $LogPath
@@ -4239,13 +4092,7 @@ function Invoke-NativeProcess {
             ProcessId = $process.Id
             CapturedProcesses = @($trackedDescendants.Values)
         }
-        Write-NativeProcessPhase $FilePath $process.Id $(if ($timedOut) { 'failed-timeout' } elseif ($inputWriteFailed) { 'failed-input' } elseif ($outputReadFailed) { 'failed-output' } elseif ($exitCode -in $AllowedExitCodes) { 'completed' } else { 'failed-exit' })
-        if ($inputWriteFailed) {
-            throw "$FilePath standard input write failed`n$combined"
-        }
-        if ($outputReadFailed) {
-            throw "$FilePath redirected output capture failed`n$combined"
-        }
+        Write-NativeProcessPhase $FilePath $process.Id $(if ($timedOut) { 'failed-timeout' } elseif ($exitCode -in $AllowedExitCodes) { 'completed' } else { 'failed-exit' })
         if ($exitCode -notin $AllowedExitCodes) {
             $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
             throw "$FilePath $reason`n$combined"

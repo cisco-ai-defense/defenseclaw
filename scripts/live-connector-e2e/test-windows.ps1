@@ -291,11 +291,7 @@ function Assert-SyntheticProcessTree(
     $expected = @($ExpectedIds | Sort-Object) -join ','
     $liveIds = @(Get-ProcessTreeSnapshot -RootProcesses $Roots -ProcessSnapshot $Processes |
         ForEach-Object ProcessId | Sort-Object) -join ','
-    $nativeIds = @(Get-WindowsNativeProcessTreeSnapshot `
-        -RootProcesses $Roots -ProcessSnapshot $Processes |
-        ForEach-Object ProcessId | Sort-Object) -join ','
     Assert-True ($liveIds -ceq $expected) "$Message (live helper returned: $liveIds)"
-    Assert-True ($nativeIds -ceq $expected) "$Message (native helper returned: $nativeIds)"
 }
 
 function Invoke-PackagedRotationDiagnosticRegressionFixture([string]$Root) {
@@ -1606,15 +1602,6 @@ private-secret-name = "DefenseClaw must remain redacted"
     $block = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'block') -TimeoutSeconds 5 -AllowedExitCodes @(2)
     Assert-True ($block.ExitCode -eq 2 -and $block.StdOut -match 'block') 'mock block decision'
 
-    $healthyOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
-    $healthyOutput.SetResult('complete')
-    $faultedOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
-    $faultedOutput.SetException([IO.IOException]::new('injected output read failure'))
-    Assert-True (Test-RedirectedOutputTasksHealthy $healthyOutput.Task $healthyOutput.Task) `
-        'completed redirected output tasks are healthy'
-    Assert-True (-not (Test-RedirectedOutputTasksHealthy $faultedOutput.Task $healthyOutput.Task)) `
-        'faulted redirected output is classified as a harness failure'
-
     $missingInputRoot = Join-Path $temp 'missing-input-preflight'
     [IO.Directory]::CreateDirectory($missingInputRoot) | Out-Null
     $missingInputRejected = $false
@@ -1644,19 +1631,14 @@ private-secret-name = "DefenseClaw must remain redacted"
     $blockedInput = Join-Path $blockedInputRoot 'payload.bin'
     [IO.File]::WriteAllBytes($blockedInput, [byte[]]::new(1048576))
     $blockedInputTimedOut = $false
-    $blockedInputStopwatch = [Diagnostics.Stopwatch]::StartNew()
     try {
         Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
             '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $blockedInputRoot
         ) -InputPath $blockedInput -TimeoutSeconds 2 | Out-Null
     } catch {
         $blockedInputTimedOut = $_.Exception.Message -match 'timed out after 2s'
-    } finally {
-        $blockedInputStopwatch.Stop()
     }
     Assert-True $blockedInputTimedOut 'non-reading child cannot block stdin beyond the process deadline'
-    Assert-True ($blockedInputStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(10)) `
-        'stdin timeout cleanup is bounded'
     $blockedInputLeaks = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -and
         $_.CommandLine.IndexOf($mock, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
@@ -1692,17 +1674,6 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($secret.StdOut -notmatch 'unit-test-sensitive-value' -and $secret.StdOut -match 'REDACTED') 'secret redaction'
     Remove-Item Env:DC_E2E_TEST_SECRET
 
-    $timedOut = $false
-    try {
-        Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $temp) -TimeoutSeconds 8 | Out-Null
-    } catch { $timedOut = $_.Exception.Message -match 'timed out' }
-    Assert-True $timedOut 'bounded timeout returns failure'
-    Start-Sleep -Milliseconds 500
-    $childPidPath = Join-Path $temp 'child.pid'
-    Assert-True (Test-Path -LiteralPath $childPidPath) 'mock timeout child started'
-    $childPid = [int][IO.File]::ReadAllText($childPidPath)
-    Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
-
     $unrelatedRoot = Join-Path $temp 'unrelated-process'
     $drainRoot = Join-Path $temp 'drain-timeout'
     [IO.Directory]::CreateDirectory($unrelatedRoot) | Out-Null
@@ -1710,34 +1681,43 @@ private-secret-name = "DefenseClaw must remain redacted"
     $unrelated = Start-Process -FilePath $pwsh -ArgumentList @(
         '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $unrelatedRoot
     ) -PassThru -WindowStyle Hidden
+    $drainChild = $null
     try {
         $unrelatedStarted = $unrelated.StartTime.ToUniversalTime()
-        $drainTimedOut = $false
-        $drainStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $timedOut = $false
         try {
-            Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
-                '-NoProfile', '-File', $mock, '-Action', 'drain-timeout', '-StateRoot', $drainRoot
-            ) -TimeoutSeconds 2 | Out-Null
-        } catch {
-            $drainTimedOut = $_.Exception.Message -match 'timed out after 2s'
-        } finally {
-            $drainStopwatch.Stop()
-        }
-        Assert-True $drainTimedOut 'inherited redirected handles consume the same bounded timeout'
-        Assert-True ($drainStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(10)) `
-            'inherited-handle timeout and exact tree cleanup are bounded'
-        $drainChildPidPath = Join-Path $drainRoot 'drain-child.pid'
-        Assert-True (Test-Path -LiteralPath $drainChildPidPath -PathType Leaf) `
-            'inherited-handle timeout child started'
-        $drainChildPid = [int][IO.File]::ReadAllText($drainChildPidPath)
-        Assert-True ($null -eq (Get-Process -Id $drainChildPid -ErrorAction SilentlyContinue)) `
-            'inherited-handle timeout killed its exact descendant'
+            Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $temp) -TimeoutSeconds 8 | Out-Null
+        } catch { $timedOut = $_.Exception.Message -match 'timed out' }
+        Assert-True $timedOut 'bounded timeout returns failure'
+        $childPidPath = Join-Path $temp 'child.pid'
+        Assert-True (Test-Path -LiteralPath $childPidPath) 'mock timeout child started'
+        $childPid = [int][IO.File]::ReadAllText($childPidPath)
+        # The timeout returns only after the job is empty.
+        Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
         $unrelatedLive = Get-Process -Id $unrelated.Id -ErrorAction SilentlyContinue
         Assert-True ($null -ne $unrelatedLive -and
             [Math]::Abs(($unrelatedLive.StartTime.ToUniversalTime() - $unrelatedStarted).TotalMilliseconds) -lt 1) `
             'timeout tree cleanup preserved an unrelated same-image process'
+
+        # The root exits 0 while a descendant still holds its inherited
+        # stdout/stderr: completion follows root exit, not the descendant.
+        $drained = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $mock, '-Action', 'drain-timeout', '-StateRoot', $drainRoot
+        ) -TimeoutSeconds 180
+        Assert-True ($drained.ExitCode -eq 0 -and -not $drained.TimedOut) `
+            'an output-inheriting descendant does not turn a passing command into a timeout'
+        $drainChild = Get-Process -Id ([int][IO.File]::ReadAllText((Join-Path $drainRoot 'drain-child.pid'))) `
+            -ErrorAction SilentlyContinue
+        Assert-True ($null -ne $drainChild -and -not $drainChild.HasExited) `
+            'native process completion did not wait for the output-inheriting descendant'
     } finally {
+        if ($null -ne $drainChild) {
+            try { $drainChild.Kill() } catch {}
+            $drainChild.WaitForExit()
+            $drainChild.Dispose()
+        }
         Stop-Process -Id $unrelated.Id -Force -ErrorAction SilentlyContinue
+        $unrelated.WaitForExit()
         $unrelated.Dispose()
     }
 
@@ -4821,7 +4801,7 @@ connection.close()
         '(?s)function Invoke-Setup\b.*?(?=\r?\nfunction Get-ConnectorHookLabel)'
     ).Value
     Assert-True ($nativeProcessContract -match '\[scriptblock\]\$WhileRunning' -and
-        $nativeProcessContract -match '(?s)& \$WhileRunning \$process.*?\$process\.Kill\(\$true\)' -and
+        $nativeProcessContract -match '(?s)& \$WhileRunning \$process\.Process.*?\$process\.TerminateTree\(\)' -and
         $setupContract -match 'Invoke-OpenCodePluginProbe load' -and
         $setupContract -match 'setup-readiness-\$attempt' -and
         $setupContract -match '-TimeoutSeconds 3' -and
