@@ -1861,10 +1861,46 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     if failures:
         raise OSError("; ".join(failures))
 
-    # Clean up the pip-installed Python package symlink if operators
-    # used ``pip install defenseclaw`` — we don't shell out to pip
-    # because we can't be sure which environment they used.
-    ux.subhead("if you installed the Python CLI via pip, run 'pip uninstall defenseclaw' manually")
+    _remove_install_bookkeeping(plan.install_root)
+
+    # A pip-installed CLI is outside this plan; we don't shell out to pip
+    # because we can't be sure which environment was used. Mention it only
+    # when another defenseclaw is still on PATH.
+    remaining = shutil.which("defenseclaw")
+    if remaining:
+        ux.subhead(
+            f"another defenseclaw remains at {remaining}; if you installed it with pip, run 'pip uninstall defenseclaw'"
+        )
+
+
+# Hidden files the installers keep next to the launchers: the source-install
+# marker and the publish custody directory. Neither is useful once the
+# launchers are gone.
+_INSTALL_BOOKKEEPING = (".defenseclaw-source-root", ".defenseclaw-install-custody")
+
+
+def _remove_install_bookkeeping(install_root: str) -> None:
+    for name in _INSTALL_BOOKKEEPING:
+        path = os.path.join(install_root, name)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not inspect {path}: {exc}")
+            continue
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            ux.warn(f"left {path}: it is not owned by this account")
+            continue
+        try:
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
 
 
 def _expand(p: str) -> str:

@@ -300,6 +300,28 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             cmd_uninstall._remove_binaries(plan)
             self.assertTrue(unrelated.is_file())
 
+    def test_binary_removal_drops_install_bookkeeping_and_pip_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "bin"
+            custody = root / ".defenseclaw-install-custody" / "retired"
+            custody.mkdir(parents=True)
+            (custody / "old").write_text("x", encoding="utf-8")
+            (root / ".defenseclaw-source-root").write_text("checkout", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name=sys.platform,
+                install_root=str(root),
+                gateway_path=str(root / "defenseclaw-gateway"),
+                binary_targets=(),
+                remove_binaries=True,
+            )
+            with (
+                patch.object(cmd_uninstall.shutil, "which", return_value=None),
+                patch.object(cmd_uninstall.ux, "subhead") as subhead,
+            ):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertEqual(sorted(os.listdir(root)), [])
+            subhead.assert_not_called()
+
     def test_binary_failure_propagates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve() / "bin"
