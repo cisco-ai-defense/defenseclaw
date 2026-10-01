@@ -960,7 +960,10 @@ finish_swap() {
     rm -f "${tmp}"
     rm -rf "${DEFENSECLAW_HOME}/.upgrade-recovery" "${DEFENSECLAW_HOME}/.upgrade-receipts" \
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
-    find "${TMPDIR:-/tmp}" -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
+    # Pre-1.0 installers kept retired binaries in the temp folder they ran
+    # with. On macOS that is often /tmp although TMPDIR now names a per-user
+    # folder, so look in both.
+    find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
 }

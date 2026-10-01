@@ -1879,9 +1879,22 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
 _INSTALL_BOOKKEEPING = (".defenseclaw-source-root", ".defenseclaw-install-custody")
 
 
+def _legacy_custody_parents() -> list[str]:
+    """Temp folders where pre-1.0 installers parked retired binaries."""
+    if sys.platform == "win32":
+        return []
+    return sorted({tempfile.gettempdir(), "/tmp"})
+
+
 def _remove_install_bookkeeping(install_root: str) -> None:
-    for name in _INSTALL_BOOKKEEPING:
-        path = os.path.join(install_root, name)
+    paths = [os.path.join(install_root, name) for name in _INSTALL_BOOKKEEPING]
+    for parent in _legacy_custody_parents():
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        paths.extend(os.path.join(parent, name) for name in names if name.startswith(".defenseclaw-install-custody-"))
+    for path in paths:
         try:
             info = os.lstat(path)
         except FileNotFoundError:
@@ -1890,7 +1903,8 @@ def _remove_install_bookkeeping(install_root: str) -> None:
             ux.warn(f"could not inspect {path}: {exc}")
             continue
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
-            ux.warn(f"left {path}: it is not owned by this account")
+            if os.path.dirname(path) == install_root:
+                ux.warn(f"left {path}: it is not owned by this account")
             continue
         try:
             if stat.S_ISDIR(info.st_mode):
