@@ -95,3 +95,37 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 		t.Fatalf("plugin directories left behind: %v", err)
 	}
 }
+
+func TestCopilotVSCodeRepairsAnEmptiedHookFile(t *testing.T) {
+	home := t.TempDir()
+	run := func(keep, dryRun bool) CopilotVSCodeUserResult {
+		t.Helper()
+		result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+			Home: home, GOOS: "linux", HookBinary: testHookBinary, HookFile: keep, DryRun: dryRun,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	run(true, false)
+	hookFile := CopilotVSCodeLocalHookFilePath(home)
+	if err := os.WriteFile(hookFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(true, true); len(result.Changed) != 1 || len(result.Kept) != 0 {
+		t.Fatalf("verify must report the emptied hook file as drift: %+v", result)
+	}
+	if result := run(true, false); !result.HookFileOK {
+		t.Fatalf("setup must repair the emptied hook file: %+v", result)
+	}
+	if err := os.WriteFile(hookFile, []byte(`{"hooks":{"PreToolUse":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(false, false); len(result.Removed) != 1 {
+		t.Fatalf("uninstall must remove the emptied hook file: %+v", result)
+	}
+	if _, err := os.Stat(hookFile); !os.IsNotExist(err) {
+		t.Fatalf("hook file left behind: %v", err)
+	}
+}

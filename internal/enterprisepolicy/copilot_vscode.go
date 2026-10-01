@@ -209,7 +209,7 @@ func ensureOwnedUserFile(result *CopilotVSCodeUserResult, owned GuardRequest, pa
 		if current, err = os.ReadFile(path); err != nil {
 			return false, err
 		}
-		if !bytes.Equal(current, want) && !(hooksDoc && owned.ownedHooksDocument(current)) {
+		if !bytes.Equal(current, want) && !(hooksDoc && (owned.ownedHooksDocument(current) || inertHooksDocument(current))) {
 			result.Kept = append(result.Kept, path)
 			return false, nil
 		}
@@ -271,6 +271,40 @@ func (r GuardRequest) ownedHooksDocument(data []byte) bool {
 		}
 	}
 	return handlers > 0
+}
+
+// inertHooksDocument reports a hook document that registers no handler at
+// all: an empty file, {}, or hooks whose every event list is empty. At
+// DefenseClaw's own path it is a tampered or truncated copy, not the user's
+// configuration, so it is repaired (or removed) instead of kept.
+func inertHooksDocument(data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return true
+	}
+	doc, _, err := decodeGuardDocument(data)
+	if err != nil {
+		return false
+	}
+	for _, key := range doc.keys {
+		if key != "hooks" && key != "version" {
+			return false
+		}
+	}
+	value, present := doc.get("hooks")
+	if !present || value == nil {
+		return true
+	}
+	hooks, ok := value.(*object)
+	if !ok {
+		return false
+	}
+	for _, event := range hooks.keys {
+		value, _ := hooks.get(event)
+		if list, ok := value.([]any); !ok || len(list) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // CopilotVSCodeUserState reports, read-only, whether home holds
