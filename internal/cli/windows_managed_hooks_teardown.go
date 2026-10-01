@@ -542,9 +542,15 @@ func runWindowsManagedHooksTeardown(
 			report.SurvivingOwnedPathReferences = surviving
 		}
 		if err == nil {
+			// The users' registrations and, with purge, their per-user folders
+			// go before the journal records the phase finalized: a rerun of
+			// an uninstall interrupted while they were removed finds the
+			// phase still prepared and runs finalize, and so this cleanup,
+			// again. Once the phase is finalized, a rerun skips finalize.
 			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
 				journal,
 				report.JournalPath,
+				func() { completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest) },
 			)
 		}
 		if err == nil {
@@ -552,9 +558,6 @@ func runWindowsManagedHooksTeardown(
 			report.SafeToRemoveBinary = true
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
-		}
-		if err == nil {
-			completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
 		}
 	}
 	if err != nil {
@@ -1193,9 +1196,14 @@ func restoreWindowsManagedHooksRuntimeSelectors(
 	return nil
 }
 
+// finalizeWindowsManagedHooksTeardown retires the machine wiring the
+// prepared journal records, runs beforeFinalized, and only then records the
+// phase finalized, so whatever beforeFinalized does is retried by a rerun
+// that an interruption sent back to the prepared phase.
 func finalizeWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
+	beforeFinalized func(),
 ) (int, error) {
 	collected := 0
 	for _, target := range journal.Targets {
@@ -1234,6 +1242,9 @@ func finalizeWindowsManagedHooksTeardown(
 	// selector locks in the vendor machine-policy directories can go too.
 	if err := enterprisehooks.RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
 		return collected, fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
+	}
+	if beforeFinalized != nil {
+		beforeFinalized()
 	}
 	journal.Phase = "finalized"
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {

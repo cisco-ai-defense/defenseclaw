@@ -20,7 +20,8 @@ import (
 // An uninstall with purge removes an account's per-user state as
 // LocalSystem, per-user hook tokens included, and keeps only the account's
 // moved-aside hooks and each hook script as the disabled stub, written in
-// place. A junction in the folder is removed, not followed.
+// place. A junction in the folder is removed, not followed, and so is a
+// subfolder whose access list denies the purge.
 func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 	original := windowsEnterpriseMutationIdentityCheck
 	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = original })
@@ -37,6 +38,7 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		filepath.Join(dataDir, "foreign-hook-sessions", "record.json"):         "{}",
 		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"): "{}",
 		filepath.Join(dataDir, "agent_selection.json"):                         "{}",
+		filepath.Join(dataDir, "logs", "denied", "secret.txt"):                 "secret",
 		filepath.Join(outside, "keep.txt"):                                     "keep",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -64,6 +66,9 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		}
 		windowsRelaxTestSetDACL(t, path, windowsRelaxTestFormat(sddl, sid))
 	}
+	// The account can deny SYSTEM on a folder it owns; the test denies its
+	// own account, which the purge runs as here.
+	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "denied"), "D:P(D;OICI;FA;;;"+sid.String()+")")
 	before, err := os.Stat(script)
 	if err != nil {
 		t.Fatal(err)
