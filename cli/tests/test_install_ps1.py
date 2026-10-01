@@ -109,8 +109,13 @@ def test_connector_choices_are_the_windows_supported_connectors() -> None:
 
 def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     hook_state = re.search(r'\$HookState = "([^"]+)"', _text())
-    assert hook_state is not None
-    written = set(_list("ManagedBinaries")) | {f"{shim}.cmd" for shim in _list("ManagedShims")} | {hook_state.group(1)}
+    posix_shim = re.search(r'\$PosixShim = "([^"]+)"', _text())
+    assert hook_state is not None and posix_shim is not None
+    written = (
+        set(_list("ManagedBinaries"))
+        | {f"{shim}.cmd" for shim in _list("ManagedShims")}
+        | {hook_state.group(1), posix_shim.group(1)}
+    )
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
     # Install-Uv adds uv and the digest record uninstall checks it against.

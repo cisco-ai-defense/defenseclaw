@@ -80,6 +80,11 @@ refuse() {
     if [[ "${FOREIGN_INSTALL}" -eq 1 && "${IS_WINDOWS}" -eq 0 ]]; then
         echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
         echo "  defenseclaw uninstall --binaries --yes && make all" >&2
+    elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
+        # Windows finishes removing binaries a moment after the CLI exits.
+        echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), wait a few seconds, then build again:" >&2
+        echo "  defenseclaw.cmd uninstall --binaries --yes" >&2
+        echo "  make all" >&2
     else
         echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
     fi

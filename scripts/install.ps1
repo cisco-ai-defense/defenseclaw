@@ -83,10 +83,14 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
+# Git Bash does not run a .cmd file by its bare name, so `defenseclaw` there
+# runs this extensionless script. cmd.exe and PowerShell ignore it: it has no
+# PATHEXT extension.
+$PosixShim = "defenseclaw"
 # defenseclaw-hook.exe reads its data dir from the state file beside it, never
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
 $HookState = "defenseclaw-hook-state.json"
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($HookState)
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
@@ -721,6 +725,16 @@ function Install-File([string]$Source, [string]$Destination) {
     Move-Path "$Destination.new" $Destination
 }
 
+function Write-PosixShim([string]$Target) {
+    # `defenseclaw uninstall` recognizes this launcher by its exec line.
+    $path = Join-Path $BinDir $PosixShim
+    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.cmd.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
+    [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
+    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
+    Move-Path "$path.new" $path
+}
+
 function Write-Shim([string]$Name, [string]$Target) {
     # `defenseclaw uninstall` recognizes the CLI shim by this exact command line.
     $path = Join-Path $BinDir "$Name.cmd"
@@ -860,6 +874,9 @@ function Install-New {
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
+    $target = Join-Path $Venv "Scripts\defenseclaw.exe"
+    if (Test-Path -LiteralPath $target) { Write-PosixShim $target }
+    elseif (Test-Path -LiteralPath (Join-Path $BinDir $PosixShim)) { Remove-Aside (Join-Path $BinDir $PosixShim) }
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
@@ -1191,7 +1208,7 @@ Options:
   -Rollback             Restore the install that the last upgrade replaced
   -Connector NAME       First install only: agent to guard ($($ConnectorChoices -join ', '))
   -NoOpenclaw           First install only: same as -Connector none
-  -Quickstart           First install only: run 'defenseclaw quickstart' afterwards
+  -Quickstart           Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   -QuickstartMode MODE  observe or action (implies -Quickstart)
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
@@ -1517,10 +1534,17 @@ function Invoke-Install {
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
+    $configured = (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG
     if (-not $PrevVersion) {
         Invoke-FirstInstallExtras
+    } elseif ($Quickstart -and -not $configured) {
+        # Installed but never set up, so the asked-for quickstart is still the first run.
+        Invoke-FirstInstallExtras
     } elseif ($Quickstart) {
-        Write-Warn "Skipped -Quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+        $rerun = "defenseclaw quickstart"
+        if ($Connector -and $Connector -ne "none") { $rerun += " --connector $Connector" }
+        if ($QuickstartMode) { $rerun += " --mode $QuickstartMode" }
+        Write-Warn "Skipped -Quickstart: DefenseClaw is already configured. To run it now: $rerun"
     }
     $setupBin = if ($Setup) { Join-Path $Setup.Root "bin" } else { "" }
     $pathChanged = Update-UserPath -Add $BinDir -Remove $setupBin

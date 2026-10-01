@@ -18,6 +18,7 @@ from pathlib import Path
 
 _ALLOWED_BINARIES = {
     "defenseclaw.cmd",
+    "defenseclaw",
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
     "defenseclaw-hook.exe",
@@ -32,6 +33,25 @@ _ALLOWED_BINARIES = {
 }
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
+_LAUNCHER_WAIT_SECONDS = 15.0
+# An interactive cmd.exe that ran the shim stays open; do not wait long on it.
+_SHIM_SHELL_WAIT_SECONDS = 5.0
+_MAX_LAUNCHER_DEPTH = 4
+
+
+class _ProcessEntry(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
 
 
 def _kernel32():
@@ -49,6 +69,12 @@ def _kernel32():
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ProcessEntry))
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ProcessEntry))
+    kernel32.Process32NextW.restype = wintypes.BOOL
     return kernel32
 
 
@@ -152,6 +178,64 @@ def _open_parent(plan: dict[str, object]) -> int:
     return handle
 
 
+def _parent_pids(kernel32) -> dict[int, int]:
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return {}
+    parents: dict[int, int] = {}
+    try:
+        entry = _ProcessEntry()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry)
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return parents
+
+
+def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
+    """Open the managed-runtime launchers waiting on the uninstall CLI.
+
+    defenseclaw.cmd runs Scripts/defenseclaw.exe, which can start the venv's
+    python.exe launcher, which starts the base interpreter. cmd.exe reads the
+    rest of the shim only after the outermost launcher returns, and that can
+    be well after the base interpreter exits. Deleting the shim earlier ends a
+    successful uninstall with "The batch file cannot be found" and exit 1.
+    Ancestors whose image lives in the managed runtime's Scripts folder are
+    opened, then the cmd.exe running the shim (a shorter wait, since an
+    interactive prompt stays open); the walk stops at any other process.
+    Each entry is (handle, seconds to wait at most).
+    """
+    kernel32 = _kernel32()
+    scripts = _norm(os.path.join(str(plan["managed_venv"]), "Scripts")) + os.sep
+    parents = _parent_pids(kernel32)
+    handles: list[tuple[int, float]] = []
+    process_id = parents.get(int(plan["parent_pid"]), 0)
+    for _ in range(_MAX_LAUNCHER_DEPTH):
+        if not process_id:
+            break
+        handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, process_id)
+        if not handle:
+            break
+        size = wintypes.DWORD(32768)
+        image = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(size)):
+            kernel32.CloseHandle(handle)
+            break
+        if _norm(image.value).startswith(scripts):
+            handles.append((handle, _LAUNCHER_WAIT_SECONDS))
+            process_id = parents.get(process_id, 0)
+            continue
+        if handles and os.path.basename(_norm(image.value)) == "cmd.exe":
+            handles.append((handle, _SHIM_SHELL_WAIT_SECONDS))
+        else:
+            kernel32.CloseHandle(handle)
+        break
+    return handles
+
+
 def _remove_tree(path: str, *, marker_names: set[str] | None = None) -> None:
     """Remove a tree without traversing a reparse-point entry."""
     if _is_reparse(path):
@@ -230,6 +314,7 @@ def main() -> int:
     status_path = ""
     ready_path = ""
     handle = 0
+    launchers: list[tuple[int, float]] = []
     try:
         with open(manifest_path, encoding="utf-8") as stream:
             plan = json.load(stream)
@@ -237,19 +322,25 @@ def main() -> int:
         ready_path = os.path.abspath(str(plan["ready_path"]))
         _, data_dir, targets = _validate_plan(plan)
         handle = _open_parent(plan)
+        try:
+            launchers = _open_launchers(plan)
+        except OSError:
+            launchers = []
         _write_json(ready_path, {"status": "ready"})
 
         kernel32 = _kernel32()
         if kernel32.WaitForSingleObject(handle, 120_000) != 0:
             raise TimeoutError("uninstall parent did not exit within 120 seconds")
+        # Bounded: a launcher or shell that outlives its wait does not block
+        # cleanup.
+        started = time.monotonic()
+        for launcher, limit in launchers:
+            remaining = max(0, int((started + limit - time.monotonic()) * 1000))
+            kernel32.WaitForSingleObject(launcher, remaining)
 
-        # The managed Python process can be running beneath defenseclaw.cmd.
-        # Its exit wakes this detached helper before cmd.exe has necessarily
-        # resumed the batch file to capture the exit code and return. Deleting
-        # that live shim immediately races cmd.exe and intermittently changes a
-        # successful uninstall into "The batch file cannot be found"/exit 1.
-        # Leave a bounded unwind window before removing launcher files; all
-        # paths are revalidated again below before any deletion occurs.
+        # cmd.exe resumes the shim just after its launcher child exits. Leave a
+        # bounded unwind window before removing launcher files; all paths are
+        # revalidated again below before any deletion occurs.
         time.sleep(_LAUNCHER_UNWIND_GRACE_SECONDS)
 
         _, data_dir, targets = _validate_plan(plan)
@@ -283,6 +374,8 @@ def main() -> int:
     finally:
         if handle:
             _kernel32().CloseHandle(handle)
+        for launcher, _limit in launchers:
+            _kernel32().CloseHandle(launcher)
         try:
             os.unlink(manifest_path)
         except OSError:
