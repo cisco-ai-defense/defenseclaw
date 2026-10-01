@@ -501,6 +501,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("Multiple connectors detected/configured", output)
         self.assertIn("claudecode, codex", output)
         self.assertIn("Re-run with --connector <name>", output)
+        self.assertIn("'defenseclaw init'", output)
 
     def test_picked_hint_does_not_mask_ambiguous_detection(self):
         # The installer's picked_connector hint is advisory; it must not hide
