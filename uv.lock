@@ -17,7 +17,7 @@ overrides = [
     { name = "idna", specifier = ">=3.15" },
     { name = "importlib-metadata", specifier = ">=8.7.1,<8.8" },
     { name = "jsonschema", specifier = ">=4.26.0" },
-    { name = "litellm", specifier = ">=1.88.6,<1.89.0" },
+    { name = "litellm", specifier = ">=1.91.5,<1.92.0" },
     { name = "openai", specifier = "==2.30.0" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pygments", specifier = ">=2.20,<3" },
@@ -719,7 +719,7 @@ requires-dist = [
     { name = "idna", specifier = ">=3.15" },
     { name = "importlib-metadata", specifier = ">=8.7.1,<8.8" },
     { name = "jsonschema", specifier = ">=4.23.0,<5" },
-    { name = "litellm", specifier = ">=1.88.6,<1.89.0" },
+    { name = "litellm", specifier = ">=1.91.5,<1.92.0" },
     { name = "magika", specifier = ">=1.0.2,<2" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "opentelemetry-proto", specifier = ">=1.28.0,<2" },
@@ -1678,7 +1678,7 @@ wheels = [
 
 [[package]]
 name = "litellm"
-version = "1.88.6"
+version = "1.91.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1694,9 +1694,9 @@ dependencies = [
     { name = "tiktoken" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f4/a6/d2312da4d65390f0d899a669731500983c8a10bd89009657680949c5766d/litellm-1.88.6.tar.gz", hash = "sha256:07d947dfe92f137d5296c40285dbcf97cb405b4300d73c0feda48d76468d6eb4", size = 13889078, upload-time = "2026-08-09T00:06:33.818Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/97/e68511e3dff7d18c99faf39258096cd2fc0b59540b2523e9eef43d33922a/litellm-1.91.5.tar.gz", hash = "sha256:f3a69ce82f61216903ca5e08aabe76a535862d4b935d7a7863953cbc8947e2f7", size = 14877642, upload-time = "2026-08-09T02:01:45.825Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f7/0b/2e42b95ccca2e2a8a524808e9c414f70a0352165dac589efa01192afb8ba/litellm-1.88.6-py3-none-any.whl", hash = "sha256:8c01f7e9aebded5b3509128be648518a2ec4f1feb8dfb87a539895091651898b", size = 15271205, upload-time = "2026-08-09T00:06:30.607Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/21/268c8febd55265d9bbb611c06496356186bdea37b64e1142eb92e9d48b7e/litellm-1.91.5-py3-none-any.whl", hash = "sha256:db09c6ea0b7c7de034b6c8b628208b000b54e02ef557468f84c2e63fbd7c8560", size = 16675846, upload-time = "2026-08-09T02:01:43.257Z" },
 ]
 
 [[package]]
