@@ -64,9 +64,18 @@ var (
 )
 
 const (
-	childPIDRegistrationTimeout = 5 * time.Second
-	childPIDRegistrationPoll    = 5 * time.Millisecond
-	forcedStopWait              = 2 * time.Second
+	// childPIDRegistrationTimeout bounds the wait for a Windows child to
+	// publish its PID record. A first launch of a new binary on a busy host
+	// (antivirus scans it before it runs) took longer than 5 seconds, so an
+	// upgrade rolled back a healthy gateway. A child that exits ends the
+	// wait at once.
+	childPIDRegistrationTimeout = 60 * time.Second
+	// legacyStartIdentityWindow is how far the native start second of a
+	// darwin process may be from the start time recorded just before
+	// cmd.Start, for a PID record written by an older release.
+	legacyStartIdentityWindow = 5 * time.Second
+	childPIDRegistrationPoll  = 5 * time.Millisecond
+	forcedStopWait            = 2 * time.Second
 )
 
 // GracefulStopRequest asks the authenticated gateway control plane to stop the
@@ -345,7 +354,7 @@ func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool
 	// origin/main's `ps -o lstart=` token inherited locale and timezone, so
 	// it cannot always be reproduced after upgrade. Its StartTime was captured
 	// immediately before cmd.Start. Bind that launch lower bound to the native
-	// kernel start second within the same five-second registration window.
+	// kernel start second within a five-second window.
 	nativeIdentity, err := darwinProcessStartIdentity(info.PID)
 	if err != nil {
 		return false
@@ -359,7 +368,7 @@ func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool
 		return false
 	}
 	delta := nativeSeconds - info.StartTime
-	return delta >= 0 && delta <= int64(childPIDRegistrationTimeout/time.Second)
+	return delta >= 0 && delta <= int64(legacyStartIdentityWindow/time.Second)
 }
 
 func (d *Daemon) verifyExecutable(info pidInfo) bool {
