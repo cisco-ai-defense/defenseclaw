@@ -414,8 +414,8 @@ func codexTOMLString(value string) string {
 	return out.String()
 }
 
-func renderWindowsCodexRequirementsGroup(group codexHookGroup, hookBinary, newline string) string {
-	command := codexTOMLString(windowsCodexManagedHookCommand(hookBinary))
+func renderWindowsCodexRequirementsGroup(group codexHookGroup, opts WindowsCodexMachineRequirementsOptions, newline string) string {
+	command := codexTOMLString(windowsCodexManagedHookCommandFor(opts, group.eventType))
 	event := codexTOMLKey(group.eventType)
 	lines := []string{"[[hooks." + event + "]]"}
 	if group.matcher != "" {
@@ -523,7 +523,7 @@ func renderWindowsCodexRequirementsMerge(
 		if doc.keyValue("hooks", group.eventType) != nil {
 			return nil, windowsCodexRequirementsUneditableError("hooks." + group.eventType)
 		}
-		tailBlocks = append(tailBlocks, renderWindowsCodexRequirementsGroup(group, opts.HookBinary, newline))
+		tailBlocks = append(tailBlocks, renderWindowsCodexRequirementsGroup(group, opts, newline))
 	}
 	if len(rootLines) > 0 {
 		var text strings.Builder
