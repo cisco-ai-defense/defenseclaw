@@ -596,6 +596,11 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 
 	switch name {
 	case "kiro":
+		if kiroWindowsManagedHookContractID(hookContractID) {
+			// Managed Windows Kiro hooks keep the explicit canonical
+			// correlation every unpinned Kiro hook uses.
+			return CorrelationSpec{}, false
+		}
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "params.sessionId"),
 			reported(CorrelationTargetTurn, ns, "request", "id"),

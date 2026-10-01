@@ -1420,24 +1420,12 @@ func validWindowsManagedRuntimeText(value string, maximum int) bool {
 		!strings.ContainsAny(value, "\x00\r\n")
 }
 
-// windowsManagedRuntimeValidContract accepts a known hook contract ID, or no
-// ID for a connector without a hook contract gate (Kiro): its lock entry
-// records none, and refusing it failed every managed Kiro enrolment.
+// windowsManagedRuntimeValidContract accepts a hook contract ID registered
+// for the connector on this host, the managed Windows Kiro contracts
+// included. Every managed footprint pins one.
 func windowsManagedRuntimeValidContract(connectorName, contractID string) bool {
-	if contractID == "" {
-		return connector.HookContractNotGated(connectorName)
-	}
 	return validWindowsManagedRuntimeText(contractID, 256) &&
-		windowsManagedRuntimeKnownContract(connectorName, contractID)
-}
-
-func windowsManagedRuntimeKnownContract(connectorName, contractID string) bool {
-	for _, contract := range connector.KnownHookContracts(connectorName) {
-		if contract.ContractID == contractID {
-			return true
-		}
-	}
-	return false
+		connector.HookContractRegistered(connectorName, contractID)
 }
 
 func requireWindowsManagedRuntimeEffectiveTarget(target *windows.SID) error {

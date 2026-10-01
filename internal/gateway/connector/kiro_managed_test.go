@@ -255,9 +255,11 @@ func writeKiroCustomDefaultAgent(t *testing.T, home string) (custom, settings st
 // left in their agent.
 func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
+		// Managed Windows Setup refuses a profile that still has the
+		// .defenseclaw folder a per-user install left (users uninstall it
+		// first), and the managed locks refuse that install's lock files, so
 		// no managed Setup follows a per-user one there.
-		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
+		t.Skip("a per-user footprint is removed before a managed Windows install")
 	}
 	home := t.TempDir()
 	workspace := t.TempDir()
@@ -351,9 +353,11 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 // agent, which must not stay the default without them.
 func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
+		// Managed Windows Setup refuses a profile that still has the
+		// .defenseclaw folder a per-user install left (users uninstall it
+		// first), and the managed locks refuse that install's lock files, so
 		// no managed Setup follows a per-user one there.
-		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
+		t.Skip("a per-user footprint is removed before a managed Windows install")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only folder")

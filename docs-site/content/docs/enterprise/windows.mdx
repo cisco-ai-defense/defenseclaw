@@ -458,6 +458,18 @@ vendor machine policy the transaction had already published can still point
 at the stopped gateway. `status` shows the state; `verify` refuses until the
 transaction is recovered. The failed result names the command to run next.
 
+The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
+that it cannot prove DefenseClaw wrote: a file or folder it did not create,
+a file other than a DefenseClaw hook file whose owner or permissions changed,
+or a hard link. A DefenseClaw hook file whose permissions changed is removed.
+The rollback does not stay pending for the rest either, and the same holds
+when the account changed the owner or permissions of the folder itself or
+replaced it: it renames the folder to
+`%USERPROFILE%\.defenseclaw.rollback-<random>`, with that content inside, and
+finishes. Review that folder and delete it. A file or folder another program
+holds open still makes the rollback wait, because a retry can finish once the
+program closes it.
+
 The rollback of a failed first install also puts back each account's agent
 configuration and removes the machine policy the install published. It acts
 as each account, which needs LocalSystem. For a signed-out account it uses a
@@ -824,7 +836,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent. A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

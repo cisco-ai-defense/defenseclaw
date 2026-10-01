@@ -235,7 +235,7 @@ func hookInvocationCommandWith(goos, connector, unixCommand string, hookBinary f
 	// awaits the launcher and returns its exit status through a PowerShell
 	// host, cmd.exe or a direct start (windowsKiroHookCommandForBinary).
 	if connector == "kiro" {
-		return windowsKiroHookCommandForBinary(hookBinary(), "")
+		return windowsKiroHookCommandForBinary(hookBinary(), "", false)
 	}
 	// Claude Code evaluates hook command strings with PowerShell on Windows.
 	// A quoted executable path alone is only a string expression there; the
