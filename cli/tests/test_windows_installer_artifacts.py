@@ -1217,6 +1217,67 @@ def test_go_inventory_records_a_source_directory_replacement_apart_from_the_upst
     assert upstream["checksums"] == [{"algorithm": "SHA256", "checksumValue": "02" * 32}]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".",
+        "..",
+        "./x",
+        "../x",
+        ".\\x",
+        "..\\x",
+        "/abs/x",
+        "\\rooted\\x",
+        "\\\\server\\share\\x",
+        "C:\\x",
+        "c:/x",
+        "D:x",
+    ],
+)
+def test_go_local_replacement_matches_go_directory_paths(path: str) -> None:
+    assert artifacts._is_local_go_replacement(path)
+
+
+@pytest.mark.parametrize("path", ["github.com/example/fork", "example.com/x", ".x", "..x", "1:x"])
+def test_go_local_replacement_rejects_module_paths(path: str) -> None:
+    assert not artifacts._is_local_go_replacement(path)
+
+
+def test_go_inventory_keeps_a_versioned_replacement_apart_from_a_direct_dependency_on_the_target(
+    tmp_path: Path,
+) -> None:
+    target_sum = "h1:" + base64.b64encode(b"\x03" * 32).decode()
+    direct = {"path": "github.com/example/fork", "version": "v1.2.0", "sum": target_sum}
+    replaced = {
+        "path": "github.com/example/upstream",
+        "version": "v1.0.0",
+        "sum": None,
+        "replace": {"path": "github.com/example/fork", "version": "v1.2.0", "sum": target_sum},
+    }
+
+    document = artifacts.SpdxDocument(
+        "DefenseClaw Windows Setup", "https://example.invalid/sbom", "2026-01-01T00:00:00Z", "0" * 40
+    )
+    components = {}
+    inventory = {"schema_version": 1, "components": {}}
+    for label, dependency in (("gateway", replaced), ("cosign", direct)):
+        digest = hashlib.sha256(label.encode()).hexdigest()
+        components[label] = document.add_package(f"payload:{label}", label, "1.0.0", "APPLICATION", checksum=digest)
+        inventory["components"][label] = {"sha256": digest, "runtime": "go1.26.4", "dependencies": [dependency]}
+
+    inventory_path = tmp_path / "go-components.json"
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    assert artifacts._add_go_inventory(document, inventory_path, components) == 3
+
+    modules = [package for package in document.packages.values() if package["name"] == "github.com/example/fork"]
+    assert len(modules) == 2
+    via_replace = next(package for package in modules if "sourceInfo" in package)
+    plain = next(package for package in modules if "sourceInfo" not in package)
+    assert via_replace["sourceInfo"] == "replaces github.com/example/upstream@v1.0.0"
+    assert via_replace["versionInfo"] == plain["versionInfo"] == "v1.2.0"
+    assert via_replace["checksums"] == plain["checksums"] == [{"algorithm": "SHA256", "checksumValue": "03" * 32}]
+
+
 def test_sbom_fails_closed_when_go_inventory_is_not_for_exact_binary(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     inventory = json.loads(args.go_inventory.read_text(encoding="utf-8"))

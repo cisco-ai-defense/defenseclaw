@@ -855,9 +855,14 @@ def _go_sum_sha256(value: str | None) -> str | None:
 
 
 def _is_local_go_replacement(path: str) -> bool:
-    # Go treats a replacement as a directory when it is a relative path that
-    # starts with ./ or ../, or an absolute path.
-    return path.startswith(("./", "../", ".\\", "..\\", "/")) or bool(re.match(r"^[A-Za-z]:[\\/]", path))
+    # Mirrors modfile.IsDirectoryPath: Go treats a replacement as a directory
+    # when it is . or .., starts with ./ ../ .\ ..\ / or \ (rooted and UNC
+    # Windows paths), or starts with a drive letter and a colon.
+    return (
+        path in (".", "..")
+        or path.startswith(("./", "../", ".\\", "..\\", "/", "\\"))
+        or bool(re.match(r"^[A-Za-z]:", path))
+    )
 
 
 def _add_go_inventory(
@@ -925,9 +930,12 @@ def _add_go_inventory(
                     checksum = None
                     source_info = f"{path}@{version} replaced by the source directory {replace_path}"
                 else:
+                    # Keep the replaced module in the identity: another
+                    # binary can depend on the same target module directly,
+                    # and that record has no sourceInfo.
                     source_info = f"replaces {path}@{version}"
+                    identity = f"go-module:{replace_path}@{replace_version}<={path}@{version}"
                     path, version = replace_path, replace_version
-                    identity = f"go-module:{path}@{version}"
                     checksum = _go_sum_sha256(replace.get("sum"))
                 if not version:
                     raise ArtifactError(f"Go inventory replacement has no version for {label}: {path}")

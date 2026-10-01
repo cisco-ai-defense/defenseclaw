@@ -406,7 +406,7 @@ async def test_pipe_executor_flushes_unterminated_fragment_on_controlled_timeout
         wait_calls += 1
         if wait_calls == 2:
             awaitable.close()
-            raise TimeoutError
+            raise asyncio.TimeoutError
         return await awaitable
 
     monkeypatch.setattr(asyncio, "wait_for", controlled_wait_for)
