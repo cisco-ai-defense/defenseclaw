@@ -185,6 +185,26 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
 
 
+def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # WIN2-U2-12: a failed auto-restart left the gateway down and add ended in a traceback.
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    app.logger = SimpleNamespace(
+        log_action=lambda *_a, **_k: (_ for _ in ()).throw(CanonicalObservabilityUnavailableError("down"))
+    )
+    args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
+    result = CliRunner().invoke(observability, [*args, "--protocol", "grpc", "--allow-private-networks"], obj=app)
+
+    assert result.exit_code == 1, result.output
+    assert "Traceback" not in result.output and not isinstance(result.exception, CanonicalObservabilityUnavailableError)
+    assert "the gateway isn't running" in result.output
+
+
 def test_setup_v8_explicit_token_takes_precedence_over_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
