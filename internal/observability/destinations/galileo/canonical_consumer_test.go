@@ -595,6 +595,8 @@ func TestCanonicalConsumerShutdownIsRetryableIdempotentAndCannotReactivate(t *te
 	case <-fixture.adapter.closeEntered:
 	case err := <-first:
 		t.Fatalf("first shutdown returned %v before adapter close was entered", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first shutdown to reach adapter close")
 	}
 	cancel()
 	if err := <-first; !errors.Is(err, context.Canceled) {
