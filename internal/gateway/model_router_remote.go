@@ -39,8 +39,9 @@ type RemoteRouterClient struct {
 	timeout      time.Duration
 	client       *http.Client
 	healthClient *http.Client
-	backends     map[string]ModelRouterBackend
-	dotenv       string
+	backends      map[string]ModelRouterBackend
+	dotenv        string
+	minConfidence float64
 	keywordSignals   []LocalKeywordSignal
 	keywordDecisions []LocalKeywordDecision
 }
@@ -255,6 +256,14 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 		outcome.FailureCode = SemanticRouteFailureDecode
 		return outcome
 	}
+	// Enforce min_confidence threshold — low-confidence matches fall through
+	// to the default provider instead of routing to the wrong model.
+	if c.minConfidence > 0 && classResp.Classification.Confidence < c.minConfidence {
+		fmt.Fprintf(os.Stderr, "[routing] confidence %.2f below threshold %.2f for %q: no routing override\n",
+			classResp.Classification.Confidence, c.minConfidence, routerDecision)
+		return outcome
+	}
+
 	reason := fmt.Sprintf("decision=%s model=%s confidence=%.2f",
 		routerDecision, recommendedAlias, classResp.Classification.Confidence)
 

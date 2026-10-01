@@ -1127,6 +1127,17 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 				buildModelRouterBackends(s.currentConfig()),
 				filepath.Join(s.currentConfig().DataDir, ".env"),
 			)
+			// Set min_confidence from routing decisions — use the lowest
+			// configured threshold so all decisions are enforced.
+			minConf := 0.0
+			for _, dec := range s.currentConfig().Routing.Decisions {
+				for _, cond := range dec.Conditions {
+					if cond.MinConfidence > 0 && (minConf == 0 || cond.MinConfidence < minConf) {
+						minConf = cond.MinConfidence
+					}
+				}
+			}
+			client.minConfidence = minConf
 			client.SetLocalKeywords(
 				buildLocalKeywordSignals(s.currentConfig()),
 				buildLocalKeywordDecisions(s.currentConfig()),
