@@ -65,6 +65,9 @@ class AlertEvent:
     request_id: str = ""
     session_id: str = ""
     connector: str = ""
+    # Labelled facts from the canonical record (connector, rule, scanner,
+    # decision) that the flat audit row behind it does not carry.
+    facts: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +297,28 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         detail_parts.append(f"redaction_profile={row.redaction_profile}")
     if summary:
         detail_parts.append(f"summary={summary}")
+    facts: list[tuple[str, str]] = []
+    if row.connector:
+        facts.append(("Connector", row.connector))
+    rule = ": ".join(
+        value
+        for value in (
+            payload_text(payload, "defenseclaw.finding.rule_id"),
+            payload_text(payload, "defenseclaw.finding.title"),
+        )
+        if value
+    )
+    if rule:
+        facts.append(("Rule", rule))
+    if scanner := payload_text(payload, "defenseclaw.scan.scanner"):
+        facts.append(("Scanner", scanner))
+    if decision := payload_text(
+        payload,
+        "defenseclaw.enforcement.effective_action",
+        "defenseclaw.guardrail.decision",
+        "defenseclaw.network.decision",
+    ):
+        facts.append(("Decision", decision))
     severity = (row.severity or "INFO").upper()
     if row.bucket == "network.egress" and severity == "INFO":
         severity = "WARNING"
@@ -314,6 +339,7 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         request_id=row.request_id,
         session_id=row.session_id,
         connector=row.connector,
+        facts=tuple(facts),
     )
 
 
@@ -1043,10 +1069,11 @@ class AlertsPanelModel:
             lines = [
                 f"[bold #22D3EE]{rich_escape(display_severity)} {rich_escape(event.action)}[/]",
                 f"Target: {rich_escape(event.target)}",
+                *(f"{label}: {rich_escape(value)}" for label, value in event.facts),
                 f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
             ]
             if event.details:
-                human = humanize_alert_details(event.details)
+                human = "" if event.facts else humanize_alert_details(event.details)
                 if human and human != event.details:
                     lines.append(f"Summary: {rich_escape(human)}")
                 lines.append(f"Details: {rich_escape(event.details)}")
@@ -1109,6 +1136,15 @@ class AlertsPanelModel:
             # compatibility INFO severity. Keep the alert projection's visible
             # promotion when hydrating its full detail row.
             hydrated = replace(hydrated, severity=event.severity)
+        if hydrated is not None and event.facts:
+            # A canonical finding's audit row has no target and only its
+            # event name as details (RHEL-U3-05); keep what the row showed.
+            hydrated = replace(
+                hydrated,
+                target=hydrated.target or event.target,
+                details=hydrated.details if "=" in hydrated.details else event.details,
+                facts=event.facts,
+            )
         event = hydrated or event
         return AlertDetailInfo(
             event=event,
@@ -1136,6 +1172,7 @@ class AlertsPanelModel:
             ("Severity", display_severity),
             ("Action", event.action),
             ("Target", event.target),
+            *event.facts,
             ("Timestamp", event.timestamp.isoformat()),
         ]
         if _is_hook_event(event):
@@ -1145,7 +1182,7 @@ class AlertsPanelModel:
             elif event.details:
                 pairs.append(("Details", event.details))
         else:
-            human = humanize_alert_details(event.details)
+            human = "" if event.facts else humanize_alert_details(event.details)
             if human and human != event.details:
                 pairs.append(("Summary", human))
             if event.details:
