@@ -58,6 +58,10 @@ const (
 	setupValidationTimeout     = 30 * time.Second
 	setupConfigurationTimeout  = 5 * time.Minute
 	setupMigrationTimeout      = 15 * time.Minute
+	// Compiling the CLI startup closure is a one-time, install-time cost that
+	// can take tens of seconds on a loaded host with real-time scanning. It
+	// gets its own bound so the 30-second identity probes measure startup only.
+	setupBytecodeWarmupTimeout = 5 * time.Minute
 	nativeConnectorStateLimit  = int64(64 << 10)
 	nativeConfigRosterLimit    = int64(4 << 20)
 	maxRunCommandUTF16Units    = 260
@@ -1742,6 +1746,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.SitePackages), sitePackages); err != nil {
 		return fmt.Errorf("extract managed Python packages: %w", err)
 	}
+	if err := warmManagedPythonBytecode(filepath.Join(staging, "runtime", "python")); err != nil {
+		return err
+	}
 	if err := extractGateway(payload, filepath.Join(staging, "bin")); err != nil {
 		return err
 	}
@@ -1912,6 +1919,34 @@ func publishNativeLaunchers(staging string) error {
 
 func validateInstall(root, version string) error {
 	return validateInstallContext(context.Background(), root, version)
+}
+
+// managedBytecodeWarmupScript imports the CLI entry module without running
+// it. The payload ships site-packages without bytecode (the build strips it
+// for reproducibility), so without this step the first defenseclaw.exe launch,
+// which is the bounded --version-json identity probe, compiles and writes every
+// module of the eager CLI import closure. Importing here writes that bytecode
+// into the staged tree under the same interpreter flags the launcher uses.
+const managedBytecodeWarmupScript = `import defenseclaw.main`
+
+func managedBytecodeWarmupArgs() []string {
+	return []string{"-I", "-c", managedBytecodeWarmupScript}
+}
+
+func warmManagedPythonBytecode(pythonDir string) error {
+	python := filepath.Join(pythonDir, "python.exe")
+	output, err := runCapturedSetupCommandContext(
+		context.Background(),
+		setupBytecodeWarmupTimeout,
+		false,
+		sanitizePythonEnv(os.Environ()),
+		python,
+		managedBytecodeWarmupArgs()...,
+	)
+	if err != nil {
+		return fmt.Errorf("compile managed CLI bytecode: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func validateInstallContext(ctx context.Context, root, version string) error {
