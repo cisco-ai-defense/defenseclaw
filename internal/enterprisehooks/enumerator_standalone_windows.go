@@ -204,9 +204,13 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		}
 		emit := applyPreviousRowState(row, previous, logf)
 		row.AgentVersion = version
+		if emit {
+			reportWindowsRefusedSurfaces(row, logf, rowContext)
+		}
 		return emit
 	}
 	version, reason := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+	cliVersion := version
 	if version == "" {
 		// A user with only the desktop app or an editor extension is
 		// enrolled at its admitted engine version.
@@ -245,6 +249,9 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	row.AgentVersion = version
 	row.Enabled = &enabled
 	row.Deferred = true
+	if cliVersion != "" {
+		reportWindowsRefusedSurfaces(row, logf, rowContext)
+	}
 	logfSafely(
 		logf,
 		row.SID,

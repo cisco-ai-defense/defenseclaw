@@ -3578,6 +3578,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
 			if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+				if a.refuseUnverifiedSurface(w, r, route, hookScope) {
+					return
+				}
 				a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
 					return withAuthenticatedHookConnector(ctx, hookScope)
 				})
@@ -3610,6 +3613,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered {
 				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+					if a.refuseUnverifiedSurface(w, r, route, hookScope) {
+						return
+					}
 					a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
 						return withAuthenticatedInspectConnector(ctx, hookScope)
 					})

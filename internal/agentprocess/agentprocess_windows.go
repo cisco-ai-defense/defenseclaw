@@ -59,6 +59,23 @@ func newLookup() (func(int) (Process, error), func()) {
 	return lookup, func() {}
 }
 
+func executablePath(pid int) string {
+	if pid <= 0 || pid > int(^uint32(0)) {
+		return ""
+	}
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(handle)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(handle, 0, &buf[0], &size); err != nil {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:size])
+}
+
 func processStart(pid int) (int64, bool, error) {
 	if pid <= 0 || pid > int(^uint32(0)) {
 		return 0, false, errNotFound

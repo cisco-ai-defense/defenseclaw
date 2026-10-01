@@ -22,14 +22,68 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows/registry"
 )
 
 // Windows app and extension discovery is static, like
-// standaloneWindowsAgentVersionExplain: the LocalSystem enumerator reads
-// folder names and package metadata under the profile, refuses reparse
-// chains, bounds every read, and executes nothing. Reading as the profile
-// owner (impersonation) is not done yet. Layouts vendors do not document
-// are marked "live check".
+// standaloneWindowsAgentVersionExplain: it reads folder names and package
+// metadata, refuses reparse chains, bounds every read, and executes
+// nothing. Every read of a user-writable location (the profile's extension
+// folders, app data and package folders, and a relocated VSCODE_EXTENSIONS
+// folder) runs under the profile owner's active-session token
+// (windowsSurfaceReadAs), so it can reach nothing the user could not; only
+// administrator-protected sources (WindowsApps) are read as LocalSystem. A
+// signed-out user has no token, so their surfaces are discovered after
+// they sign in. Layouts vendors do not document are marked "live check".
+
+// windowsSurfaceReadAs runs fn under the token of the profile owner sid
+// (replaceable in tests).
+var windowsSurfaceReadAs = func(sid, profileHome string, fn func() error) error {
+	return runAsTarget(TargetCredentials{UserHome: profileHome, SID: sid}, fn)
+}
+
+// windowsUserEnvironment reads a value of the user's persistent
+// environment (HKU\<sid>\Environment), "" when unset (replaceable in
+// tests). The hive is loaded while the user is signed in.
+var windowsUserEnvironment = func(sid, name string) string {
+	key, err := registry.OpenKey(registry.USERS, sid+`\Environment`, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer key.Close()
+	value, _, err := key.GetStringValue(name)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+// windowsRelocatedExtensionsRoot is the VS Code extensions folder the
+// user's persistent VSCODE_EXTENSIONS names, or "". %USERPROFILE%,
+// %APPDATA% and %LOCALAPPDATA% are expanded to the profile's folders; any
+// other variable leaves it unresolved. A folder set only for one launch
+// (--extensions-dir, or a variable set in one shell) has no persistent
+// source; the hook still names such an extension's calls by the engine's
+// path (connector.ClassifyAgentSurface).
+func windowsRelocatedExtensionsRoot(sid, profileHome string) string {
+	value := strings.TrimSpace(windowsUserEnvironment(sid, "VSCODE_EXTENSIONS"))
+	if value == "" {
+		return ""
+	}
+	for variable, dir := range map[string]string{
+		"%USERPROFILE%":  profileHome,
+		"%APPDATA%":      filepath.Join(profileHome, "AppData", "Roaming"),
+		"%LOCALAPPDATA%": filepath.Join(profileHome, "AppData", "Local"),
+	} {
+		if len(value) >= len(variable) && strings.EqualFold(value[:len(variable)], variable) {
+			value = dir + value[len(variable):]
+		}
+	}
+	if strings.Contains(value, "%") || !filepath.IsAbs(value) {
+		return ""
+	}
+	return filepath.Clean(value)
+}
 
 // windowsExtensionRoots are the VS Code-family extensions folders under a
 // profile (https://code.visualstudio.com/docs/configure/extensions/extension-marketplace).
@@ -59,35 +113,60 @@ var windowsSurfaceExtensions = map[string]struct {
 const windowsSurfaceMaxEntries = 4096
 
 // DiscoverWindowsAgentSurfaces lists connectorName's app and extension
-// installs under profileHome.
-func DiscoverWindowsAgentSurfaces(profileHome, connectorName string) []connector.AgentSurface {
+// installs of the profile owner sid under profileHome, reading the
+// profile under the owner's token. It fails when the owner has no active
+// session.
+func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]connector.AgentSurface, error) {
 	profileHome = strings.TrimSpace(profileHome)
 	probe, ok := windowsSurfaceExtensions[strings.ToLower(strings.TrimSpace(connectorName))]
 	if !ok || !filepath.IsAbs(profileHome) {
-		return nil
+		return nil, nil
 	}
 	profileHome = filepath.Clean(profileHome)
-	var out []connector.AgentSurface
+	roots := make([]struct{ host, dir string }, 0, len(windowsExtensionRoots)+1)
 	for _, root := range windowsExtensionRoots {
-		dir, version := newestWindowsExtensionDir(filepath.Join(profileHome, root.dir), probe.id)
-		if dir == "" {
-			continue
-		}
-		surface := connector.AgentSurface{Surface: connector.HostSurfaceExtension, Host: root.host, Path: dir, HostVersion: version}
-		if packageVersion, ok := readWindowsAgentVersionCandidate(filepath.Join(dir, "package.json")); ok {
-			surface.HostVersion = packageVersion
-		}
-		if probe.engineIsHost {
-			surface.EngineVersion = surface.HostVersion
-		}
-		out = append(out, surface)
+		roots = append(roots, struct{ host, dir string }{root.host, filepath.Join(profileHome, root.dir)})
 	}
-	for _, prober := range probe.desktopProbers {
-		if surface, ok := prober(profileHome); ok {
+	if relocated := windowsRelocatedExtensionsRoot(sid, profileHome); relocated != "" {
+		roots = append(roots, struct{ host, dir string }{"vscode", relocated})
+	}
+	var out []connector.AgentSurface
+	err := windowsSurfaceReadAs(sid, profileHome, func() error {
+		seen := map[string]bool{}
+		for _, root := range roots {
+			dir, version := newestWindowsExtensionDir(root.dir, probe.id)
+			if dir == "" || seen[strings.ToLower(dir)] {
+				continue
+			}
+			seen[strings.ToLower(dir)] = true
+			surface := connector.AgentSurface{Surface: connector.HostSurfaceExtension, Host: root.host, Path: dir, HostVersion: version}
+			if packageVersion, ok := readWindowsAgentVersionCandidate(filepath.Join(dir, "package.json")); ok {
+				surface.HostVersion = packageVersion
+			}
+			if probe.engineIsHost {
+				surface.EngineVersion = surface.HostVersion
+			}
 			out = append(out, surface)
 		}
+		for _, prober := range probe.desktopProbers {
+			if surface, ok := prober(profileHome); ok {
+				out = append(out, surface)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return out
+	// Administrator-protected package folders are read as LocalSystem.
+	for i := range out {
+		if out[i].Host == "codex-app" {
+			if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
+				out[i].HostVersion = newestWindowsPackageVersion(filepath.Join(programFiles, "WindowsApps"), "OpenAI.Codex_")
+			}
+		}
+	}
+	return out, nil
 }
 
 // discoverWindowsClaudeDesktop finds the Claude Code build Claude Desktop
@@ -111,8 +190,8 @@ func discoverWindowsClaudeDesktop(profileHome string) (connector.AgentSurface, b
 
 // discoverWindowsCodexApp reports the Codex app's MSIX package data folder.
 // Its engine version has no static source (live check), so it is reported
-// and never enrolled on its own; the host version comes from the package
-// folder name under WindowsApps when LocalSystem can list it.
+// and never enrolled on its own; DiscoverWindowsAgentSurfaces takes the
+// host version from the package folder name under WindowsApps.
 func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool) {
 	packages, _ := filepath.Glob(filepath.Join(profileHome, "AppData", "Local", "Packages", "OpenAI.Codex_*"))
 	for _, pkg := range packages {
@@ -122,11 +201,7 @@ func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool) 
 		if info, err := os.Lstat(pkg); err != nil || !info.IsDir() {
 			continue
 		}
-		surface := connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}
-		if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
-			surface.HostVersion = newestWindowsPackageVersion(filepath.Join(programFiles, "WindowsApps"), "OpenAI.Codex_")
-		}
-		return surface, true
+		return connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}, true
 	}
 	return connector.AgentSurface{}, false
 }
@@ -204,12 +279,35 @@ func readWindowsDirBounded(dir string) []os.DirEntry {
 	return entries
 }
 
+// windowsStandaloneSurfaces is the admission of the profile's app and
+// extension surfaces, or false while the owner is signed out (discovery
+// needs the owner's token; the sign-in cycle discovers them).
+func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext) (surfaceAdmission, bool) {
+	name := strings.ToLower(strings.TrimSpace(row.Connector))
+	if _, ok := windowsSurfaceExtensions[name]; !ok {
+		return surfaceAdmission{}, false
+	}
+	if !rowContext.sessionActive {
+		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery waits until the user signs in")
+		return surfaceAdmission{}, false
+	}
+	surfaces, err := DiscoverWindowsAgentSurfaces(canonicalManifestTargetSID(row.SID), row.UserHome, name)
+	if err != nil {
+		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery failed: "+err.Error())
+		return surfaceAdmission{}, false
+	}
+	return admitSurfaces(name, UnverifiedVersionsFor(name), surfaces), true
+}
+
 // windowsStandaloneSurfaceVersion is the row version of a profile with no
 // agent CLI: the oldest engine version among its admitted app and extension
 // surfaces, or "". Rejected surfaces are reported.
 func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext) string {
 	name := strings.ToLower(strings.TrimSpace(row.Connector))
-	admission := admitSurfaces(name, UnverifiedVersionsFor(name), DiscoverWindowsAgentSurfaces(row.UserHome, name))
+	admission, ok := windowsStandaloneSurfaces(row, logf, rowContext)
+	if !ok {
+		return ""
+	}
 	enrolled := len(admission.admitted) != 0
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "", RefusalMissing
@@ -217,7 +315,7 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 		case enrolled && !rejected.refused:
 			continue
 		case enrolled:
-			consequence = "the user's admitted " + name + " install shares its hooks and its hook calls do not name their surface, so nothing refuses it"
+			consequence, refusal = surfaceRefusalConsequence(name, rejected)
 		case windowsStandaloneMachinePolicyConnector(name):
 			consequence, refusal = "its machine-policy hooks refuse this user's tool calls until it is enrolled", RefusalEnforced
 		default:
@@ -232,4 +330,23 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 		logfSafely(logf, row.SID, "(SID, "+name+") no agent CLI; enrolling at "+version+", the oldest admitted "+admission.surface+" engine version")
 	}
 	return version
+}
+
+// reportWindowsRefusedSurfaces reports, under unverified_versions: refuse,
+// the refused app and extension surfaces of a profile enrolled through its
+// CLI: they share the row's hooks, and the gateway refuses the calls that
+// name their surface.
+func reportWindowsRefusedSurfaces(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext) {
+	name := strings.ToLower(strings.TrimSpace(row.Connector))
+	if rowContext.report == nil || UnverifiedVersionsFor(name) != connector.UnverifiedVersionsRefuse {
+		return
+	}
+	admission, ok := windowsStandaloneSurfaces(row, logf, rowContext)
+	if !ok {
+		return
+	}
+	for _, rejected := range admission.rejected {
+		consequence, refusal := surfaceRefusalConsequence(name, rejected)
+		rowContext.report(rejected.unprotected(rowContext.user, canonicalManifestTargetSID(row.SID), nil, name, consequence, refusal))
+	}
 }

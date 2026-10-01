@@ -540,7 +540,21 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				versions[conn] = rowVersion
 				logfSafely(opts.Logger, name, fmt.Sprintf("(%s, %s) follows its %s surface at engine version %s", name, conn, admission.surface, rowVersion))
 			}
-			if check.State == HomeAvailable {
+			// A per-user connector's user whose only installs are refused
+			// surfaces gets a refusal row: its hooks are installed so the
+			// gateway can refuse the user's calls, instead of the agent
+			// running without DefenseClaw.
+			refusalVersion := ""
+			if check.State == HomeAvailable && !isMachine && versions[conn] == "" {
+				refusalVersion = unixRefusalRowVersion(conn, admission)
+			}
+			if refusalVersion != "" {
+				report.RefusedSurfaces = append(report.RefusedSurfaces, UnixRefusedSurface{User: name, UID: intPointer(account.UID), Connector: conn})
+				for _, rejected := range admission.rejected {
+					report.Unprotected = append(report.Unprotected, rejected.unprotected(account.Name, "", intPointer(account.UID), conn,
+						"it is the user's only "+conn+" install, so DefenseClaw enrolls a refusal row and the gateway refuses this user's "+conn+" hook calls (surface_unverified)", RefusalEnforced))
+				}
+			} else if check.State == HomeAvailable {
 				_, known := previous[key]
 				report.Unprotected = append(report.Unprotected, unixRejectedSurfaces(account, conn, isMachine, known || versions[conn] != "", admission)...)
 			}
@@ -587,6 +601,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			version := versions[conn]
 			if check.State != HomeAvailable && opts.MachineVersion != nil {
 				version = opts.MachineVersion(conn)
+			}
+			if version == "" && refusalVersion != "" {
+				version = refusalVersion
+				logfSafely(opts.Logger, name, fmt.Sprintf("(%s, %s) enrolled as a refusal row at %s: the user's only installs are refused surfaces", name, conn, version))
 			}
 			if version == "" {
 				reason := reasons[conn]
@@ -1031,8 +1049,8 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 // unixRejectedSurfaces reports the surfaces of one (user, connector) that
 // were not admitted. With a row (enrolled) a surface the report policy did
 // not admit still runs the hooks rendered for the row, so it is reported
-// only when it is refused: its hook calls look like the enrolled
-// install's, so nothing refuses it.
+// only when it is refused: the gateway refuses the hook calls that name it
+// (surfaceRefusalConsequence).
 func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, enrolled bool, admission surfaceAdmission) []UnprotectedAgent {
 	var out []UnprotectedAgent
 	for _, rejected := range admission.rejected {
@@ -1041,7 +1059,7 @@ func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, 
 		case enrolled && !rejected.refused:
 			continue
 		case enrolled:
-			consequence = "it shares the enrolled " + conn + " install's hooks and its hook calls do not name their surface, so nothing refuses it"
+			consequence, refusal = surfaceRefusalConsequence(conn, rejected)
 		case isMachine:
 			consequence, refusal = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)", RefusalEnforced
 		}
@@ -1050,12 +1068,32 @@ func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, 
 	return out
 }
 
+// unixRefusalRowVersion is the version a refusal row of a per-user
+// connector is enrolled at (its default contract's minimum), or "" when the
+// user has an admitted surface or no refused one.
+func unixRefusalRowVersion(conn string, admission surfaceAdmission) string {
+	if len(admission.admitted) != 0 {
+		return ""
+	}
+	for _, rejected := range admission.rejected {
+		if rejected.refused {
+			version := connector.ResolveHookContract(conn, "").Contract.MinAgentVersion
+			if version == "" || connector.ResolveHookContract(conn, version).Status != connector.HookCompatibilityKnown {
+				return ""
+			}
+			return version
+		}
+	}
+	return ""
+}
+
 // unixSurfaceOnlyRefusals reports the surfaces of a machine-policy
 // connector whose unenrolled users are inspected, for a user under
 // unverified_versions: refuse. refused is true when the user's only
 // installs are refused surfaces: the gateway then refuses the user's hook
 // calls for the connector. A user with an admitted install keeps being
-// inspected, so a refused surface next to it is not refused.
+// inspected; the gateway refuses only the calls that name a refused
+// surface.
 func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion string, surfaces []connector.AgentSurface, policy string) ([]UnprotectedAgent, bool) {
 	admission := admitSurfaces(conn, policy, surfaces)
 	if len(admission.rejected) == 0 {
@@ -1066,7 +1104,7 @@ func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion stri
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "the gateway refuses this user's "+conn+" hook calls (surface_unverified)", RefusalEnforced
 		if admittedInstall {
-			consequence, refusal = "the user's admitted "+conn+" install shares its hooks and its hook calls do not name their surface, so nothing refuses it", RefusalMissing
+			consequence, refusal = surfaceRefusalConsequence(conn, rejected)
 		}
 		out = append(out, rejected.unprotected(account.Name, "", intPointer(account.UID), conn, consequence, refusal))
 	}
