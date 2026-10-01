@@ -32,6 +32,40 @@ import (
 func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
 	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)
+	enterprisehooks.SetWindowsCopilotVSCodeUser(windowsCopilotVSCodeUser)
+}
+
+// windowsCopilotVSCodeUser places, checks (verify) or removes DefenseClaw's
+// VS Code Local hook file and Copilot plugin in home, from the loaded
+// config. The install and remove calls run under the target user's
+// impersonation.
+func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
+	opts, _, standalone, err := windowsStandaloneGuardianOptions()
+	if !standalone {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
+	if remove {
+		hookFile, plugin = false, false
+	}
+	result, err := enterprisepolicy.EnsureCopilotVSCodeUser(enterprisepolicy.CopilotVSCodeUserRequest{
+		Home:       home,
+		GOOS:       "windows",
+		HookBinary: opts.HookBinary,
+		HookFile:   hookFile,
+		Plugin:     plugin,
+		DryRun:     verify,
+	})
+	if err != nil {
+		return err
+	}
+	if verify && len(result.Changed)+len(result.Removed) > 0 {
+		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
+	}
+	return nil
 }
 
 // windowsClaudeManagedHooksOnlyEnforced reports whether the loaded config's

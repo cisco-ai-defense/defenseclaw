@@ -290,17 +290,70 @@ values it added. Uninstall removes only those, and only while they still
 hold DefenseClaw's value. `ownership: verify_only` reports missing values
 without writing them.
 
+**Local hook file and plugin (enterprise, standalone profile).** While the
+Copilot machine policy is not `ownership: off` and `local_harness` is
+`govern`, DefenseClaw places `~/.copilot/hooks/defenseclaw-vscode.json` for
+every enrolled user. It binds `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse` and `Stop` to the administrator's hook binary with
+`--hook-surface vscode-local`. With `managed_hooks_only: enforce` it also
+places the same hooks as a plugin under
+`~/.copilot/installed-plugins/defenseclaw/defenseclaw/`, enables
+`ChatPluginsEnabled`, and adds `enabledPlugins["defenseclaw@defenseclaw"]` to
+Copilot's managed settings. DefenseClaw writes these files as the user,
+rewrites only files it rendered, and keeps any other file at those paths,
+reporting it. Verify reports drift, and uninstall removes only DefenseClaw's
+copies.
+
+Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
+VS Code runs both the file and the plugin. The gateway therefore answers a
+second delivery of the same tool call with the first verdict, so the call is
+evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
+the two Copilot CLI formats, by the same session, event, tool and arguments
+within a few seconds.
+
+**Local harness lock.** Copilot's managed settings key
+`allowManagedHooksOnly` makes the Local harness run only managed hooks and
+plugins. DefenseClaw sets it only when all of these hold: Linux
+(`/etc/github-copilot/managed-settings.json`); `managed_hooks_only: enforce`;
+every enrolled user already has DefenseClaw's plugin; and every VS Code
+installation found is 1.139.x, the version whose plugin store DefenseClaw
+writes. Otherwise status explains why it is not set. Values the administrator
+set are kept, and uninstall removes only the keys DefenseClaw added. On macOS
+DefenseClaw reports the keys to deploy through device management and writes
+nothing. On Windows it does not write the lock.
+
+**Harness settings.** Two keys under `enterprise.machine_policy.connectors.copilot`:
+
+| Key | Values | Effect |
+| --- | --- | --- |
+| `harness_preference` | `sdk` (default), `unmanaged` | `sdk` enables `ChatEditorPreferCopilotHarness`; `unmanaged` leaves the editor's harness choice to the user |
+| `local_harness` | `govern` (default), `retire` | `govern` places the Local hook file (and the plugin under `managed_hooks_only: enforce`); `retire` places neither and sets `sandbox.enabled` in Copilot's managed settings |
+
+The Copilot status row lists both settings, the VS Code installations found
+with their versions, and how many enrolled users have the Local hook file and
+the plugin.
+
+**Foreign-hook guard.** In a Local harness request the guard also checks the
+Local harness's own hook sources:
+
+- `~/.claude/settings.json`;
+- `chat.hookFilesLocations` in VS Code user and workspace settings;
+- custom agents in `.github/agents/*.agent.md` whose frontmatter declares hooks;
+- installed Copilot plugins.
+
+All of these are report-only, and DefenseClaw never edits them. A linked plugin
+directory cannot be verified, so the guard treats it as an unreadable source.
+
 **Not covered yet.**
 
-- DefenseClaw does not yet place a Local hook file (`~/.copilot/hooks/defenseclaw-vscode.json`)
-  per user, so a chat moved back to the Local harness is ungoverned unless
-  you bind the hook yourself. Copilot CLI also reads `~/.copilot/hooks`, so
-  such a file is evaluated by both clients.
+- Under the lock, the guard still treats user-installed plugins and
+  custom-agent hooks as foreign. Whether `allowManagedHooksOnly` also stops
+  them in the Local harness is not yet confirmed live.
+- VS Code 1.140 and later keep plugin records in `~/.copilot/config.json`,
+  which DefenseClaw does not write yet, so the lock is not set for them.
+- `retire` does not yet pick the editor's harness for the user.
 - Per-user Copilot hook files written in the Copilot CLI format are not
   decoded correctly when the Local harness runs them.
-- The managed plugin route, the Local harness lock with version gating, a
-  retire mode, macOS profile export, foreign-hook guard sources for Local
-  hook files, and VS Code version discovery in status.
 - VS Code publishes no list of built-in tool names. The mapped names above
   follow the current tool set and are confirmed live with an audit-only hook.
 

@@ -33,6 +33,39 @@ var windowsOpenCodeMachinePolicy struct {
 	check func() (string, bool)
 }
 
+// windowsCopilotVSCodeUser places (or, with verify, checks) DefenseClaw's
+// VS Code Local hook file and Copilot plugin in a Copilot row's home, as
+// the target user. enterprisepolicy owns the files and the CLI resolves
+// what the administrator's config wants, so the CLI installs it with
+// SetWindowsCopilotVSCodeUser. Unset, Copilot rows leave the home alone.
+var windowsCopilotVSCodeUser struct {
+	sync.Mutex
+	apply func(home string, verify, remove bool) error
+}
+
+// SetWindowsCopilotVSCodeUser installs the Copilot VS Code user files hook.
+func SetWindowsCopilotVSCodeUser(apply func(home string, verify, remove bool) error) {
+	windowsCopilotVSCodeUser.Lock()
+	defer windowsCopilotVSCodeUser.Unlock()
+	windowsCopilotVSCodeUser.apply = apply
+}
+
+func applyWindowsCopilotVSCodeUser(connectorName, home string, verify, remove bool) error {
+	if connectorName != "copilot" {
+		return nil
+	}
+	windowsCopilotVSCodeUser.Lock()
+	apply := windowsCopilotVSCodeUser.apply
+	windowsCopilotVSCodeUser.Unlock()
+	if apply == nil {
+		return nil
+	}
+	if err := apply(home, verify, remove); err != nil {
+		return fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", err)
+	}
+	return nil
+}
+
 // SetWindowsOpenCodeMachinePolicy installs OpenCode's machine policy check.
 func SetWindowsOpenCodeMachinePolicy(check func() (policyPath string, inForce bool)) {
 	windowsOpenCodeMachinePolicy.Lock()
@@ -238,6 +271,11 @@ func installWindowsRuntimeOnlyManagedResult(
 			if err := hardenWindowsUserRuntime(target.home, target.dataDir, transaction.paths, target.sid); err != nil {
 				return fail(err)
 			}
+			// The VS Code Local harness never reads policy.d: its hooks
+			// live in the user's home, written here as the user.
+			if err := applyWindowsCopilotVSCodeUser(name, target.home, false, false); err != nil {
+				return fail(err)
+			}
 			if err := verifyWindowsRuntimeOnlyUserRuntime(target, policyPath); err != nil {
 				return fail(err)
 			}
@@ -296,6 +334,11 @@ func verifyWindowsRuntimeOnlyManagedResult(
 		return InstallResult{}, fmt.Errorf("enterprise hooks: load %s managed hook contract: %w", name, err)
 	}
 	if err := verifyWindowsPerUserManagedRegistration(target, lock.ContractID); err != nil {
+		return InstallResult{}, err
+	}
+	// A missing or stale Local hook file or plugin fails verify, so the
+	// guardian repairs the row.
+	if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
 		return InstallResult{}, err
 	}
 	return InstallResult{
@@ -372,6 +415,9 @@ func removeWindowsRuntimeOnlyManagedRuntime(ctx context.Context, opts InstallOpt
 	}
 	return windowsEnterpriseTargetImpersonation(targetSID, home, func() error {
 		if err := removeWindowsRuntimeOnlyUserRegistration(ctx, conn, home, dataDir, hookExecutable, targetSID); err != nil {
+			return err
+		}
+		if err := applyWindowsCopilotVSCodeUser(connectorName, home, false, true); err != nil {
 			return err
 		}
 		if _, statErr := os.Lstat(dataDir); errors.Is(statErr, os.ErrNotExist) {

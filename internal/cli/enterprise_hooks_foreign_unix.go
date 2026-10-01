@@ -64,19 +64,29 @@ var enterpriseHookForeignCleanupState struct {
 
 // enterpriseHookForeignCleanupConnectors resolves the connectors whose
 // policy removes foreign hooks, with the request each worker needs.
-func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignCleanup, error) {
+func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignCleanup, *enterpriseHookWorkerCopilotVSCode, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return nil, nil
+		return nil, nil, nil
 	}
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	names := enterprisepolicy.StandaloneConnectors(cfg)
+	// The VS Code Local harness file and plugin follow the Copilot row:
+	// placed while Copilot is governed, removed when it is off or the
+	// Local harness is retired, untouched when Copilot is not deployed.
+	var vscode *enterpriseHookWorkerCopilotVSCode
+	for _, name := range names {
+		if name == enterprisepolicy.ConnectorCopilot {
+			hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
+			vscode = &enterpriseHookWorkerCopilotVSCode{HookBinary: opts.HookBinary, HookFile: hookFile, Plugin: plugin}
+		}
+	}
 	summary := enterprisepolicy.BuildPublicPolicy(opts, names)
 	out := []enterpriseHookWorkerForeignCleanup{}
 	for _, name := range names {
@@ -86,7 +96,7 @@ func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignClea
 		}
 		out = append(out, enterpriseHookWorkerForeignCleanup{Connector: name, HookBinary: opts.HookBinary, Policy: policy})
 	}
-	return out, nil
+	return out, vscode, nil
 }
 
 // enterpriseHookPerUserEnrolled names, per user, the connectors the
@@ -119,7 +129,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
-	cleanups, err := enterpriseHookForeignCleanupConnectors()
+	cleanups, vscode, err := enterpriseHookForeignCleanupConnectors()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %v\n", err)
 		return 0
@@ -140,12 +150,18 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return out
 	}
 	fingerprint := enterpriseHookForeignCleanupFingerprint(cleanups, accounts)
+	if vscode != nil {
+		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
+	}
+	// A governed Local harness is re-checked every interval (a user can
+	// delete the file); a removal runs once per change.
+	governed := vscode != nil && (vscode.HookFile || vscode.Plugin)
 	for _, account := range accounts {
 		fingerprint += account.User + "=" + strings.Join(leftovers(account.User), ",") + ";"
 	}
 	enterpriseHookForeignCleanupState.Lock()
 	due := fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
-		((len(cleanups) > 0 || !enterpriseHookForeignCleanupState.leftoversClean) &&
+		((len(cleanups) > 0 || governed || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
 		enterpriseHookForeignCleanupState.last = now
@@ -170,13 +186,13 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			clean = false
 			continue
 		}
-		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true}
+		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscode}
 		for _, cleanup := range cleanups {
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
 		}
 		names := leftovers(account.User)
-		if len(cleanups) == 0 && len(names) == 0 {
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
 			continue
 		}
 		for index, name := range names {
@@ -237,6 +253,21 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
+		if report := outcome.Response.CopilotVSCode; report != nil {
+			for _, path := range boundedStrings(report.Changed, 8) {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: wrote DefenseClaw's VS Code Local hooks for %s at %s\n", user, boundedString(path, 512))
+			}
+			for _, path := range boundedStrings(report.Removed, 8) {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: removed DefenseClaw's VS Code Local hooks for %s at %s\n", user, boundedString(path, 512))
+			}
+			for _, path := range boundedStrings(report.Kept, 8) {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: left %s for %s in place: it holds hooks DefenseClaw did not write\n", boundedString(path, 512), user)
+			}
+			if report.Error != "" {
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local hooks for %s: %s\n", user, boundedString(report.Error, 512))
+			}
+		}
 		for _, name := range sortedCleanupConnectors(outcome.Response.Cleanup) {
 			report := outcome.Response.Cleanup[name]
 			for _, path := range boundedStrings(report.Removed, 32) {
@@ -302,6 +333,23 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 		out[name] = report
 	}
 	return out
+}
+
+// runEnterpriseHookWorkerCopilotVSCode runs inside the worker as the user.
+func runEnterpriseHookWorkerCopilotVSCode(request enterpriseHookWorkerRequest) *enterpriseHookWorkerCopilotVSCodeReport {
+	want := request.CopilotVSCode
+	result, err := enterprisepolicy.EnsureCopilotVSCodeUser(enterprisepolicy.CopilotVSCodeUserRequest{
+		Home:       filepath.Clean(request.Home),
+		GOOS:       runtime.GOOS,
+		HookBinary: want.HookBinary,
+		HookFile:   want.HookFile,
+		Plugin:     want.Plugin,
+	})
+	report := &enterpriseHookWorkerCopilotVSCodeReport{Changed: result.Changed, Removed: result.Removed, Kept: result.Kept}
+	if err != nil {
+		report.Error = err.Error()
+	}
+	return report
 }
 
 func enterpriseHookForeignCleanupFingerprint(cleanups []enterpriseHookWorkerForeignCleanup, accounts []enterprisehooks.UnixEligibleAccount) string {

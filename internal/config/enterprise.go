@@ -145,6 +145,13 @@ const (
 	ClaudeVersionFloorReport  = "report"
 	ClaudeVersionFloorOff     = "off"
 
+	// GitHub Copilot in VS Code harness knobs
+	// (enterprise.machine_policy.connectors.copilot).
+	CopilotHarnessPreferenceSDK       = "sdk"
+	CopilotHarnessPreferenceUnmanaged = "unmanaged"
+	CopilotLocalHarnessGovern         = "govern"
+	CopilotLocalHarnessRetire         = "retire"
+
 	// Windows WSL knobs (enterprise.machine_policy.windows_wsl).
 	WSLAgentSessionsBlock = "block"
 	WSLAgentSessionsAllow = "allow"
@@ -179,10 +186,44 @@ type EnterpriseConnectorPolicy struct {
 	// sets requiredMinimumVersion; report only reports; off does neither.
 	// It does not inherit from default.
 	VersionFloor string `mapstructure:"version_floor" yaml:"version_floor,omitempty"`
+	// HarnessPreference and LocalHarness are valid only in
+	// connectors.copilot and do not inherit from default. They govern
+	// GitHub Copilot in VS Code. HarnessPreference: sdk (default) sets the
+	// VS Code policy ChatEditorPreferCopilotHarness so new editor chats
+	// open on the Copilot SDK harness, which reads policy.d; unmanaged
+	// leaves the harness choice to VS Code and removes a value DefenseClaw
+	// set. LocalHarness: govern (default) governs the Local harness with
+	// the DefenseClaw plugin and user hook file; retire also sets the
+	// Copilot managed setting sandbox.enabled, which keeps agent sessions
+	// on sandboxed harnesses.
+	HarnessPreference string `mapstructure:"harness_preference" yaml:"harness_preference,omitempty"`
+	LocalHarness      string `mapstructure:"local_harness"      yaml:"local_harness,omitempty"`
 }
 
 // versionFloorConnector is the only connector with a version_floor key.
 const versionFloorConnector = "claudecode"
+
+// copilotHarnessConnector is the only connector with harness_preference and
+// local_harness keys.
+const copilotHarnessConnector = "copilot"
+
+// CopilotHarnessPreference returns the effective harness_preference of
+// connectors.copilot (sdk unless set).
+func (m EnterpriseMachinePolicyConfig) CopilotHarnessPreference() string {
+	if value := strings.ToLower(strings.TrimSpace(m.Connectors[copilotHarnessConnector].HarnessPreference)); value != "" {
+		return value
+	}
+	return CopilotHarnessPreferenceSDK
+}
+
+// CopilotLocalHarness returns the effective local_harness of
+// connectors.copilot (govern unless set).
+func (m EnterpriseMachinePolicyConfig) CopilotLocalHarness() string {
+	if value := strings.ToLower(strings.TrimSpace(m.Connectors[copilotHarnessConnector].LocalHarness)); value != "" {
+		return value
+	}
+	return CopilotLocalHarnessGovern
+}
 
 // EnterpriseMachinePolicyConfig holds the default connector policy and
 // per-connector overrides.
@@ -623,7 +664,8 @@ func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
 func connectorPolicyEmpty(p EnterpriseConnectorPolicy) bool {
 	return strings.TrimSpace(p.Ownership) == "" && strings.TrimSpace(p.ManagedHooksOnly) == "" &&
 		strings.TrimSpace(p.ForeignHooks) == "" && strings.TrimSpace(p.HigherPrecedenceSources) == "" &&
-		len(p.AllowedHooks) == 0 && strings.TrimSpace(p.VersionFloor) == ""
+		len(p.AllowedHooks) == 0 && strings.TrimSpace(p.VersionFloor) == "" &&
+		strings.TrimSpace(p.HarnessPreference) == "" && strings.TrimSpace(p.LocalHarness) == ""
 }
 
 // validateEnterpriseConfig checks a managed deployment's enterprise block.
@@ -794,7 +836,19 @@ func validateConnectorPolicy(prefix string, p EnterpriseConnectorPolicy) error {
 	if prefix != floorPrefix && strings.TrimSpace(p.VersionFloor) != "" {
 		return fmt.Errorf("config: %s.version_floor is not a setting; the Claude Code version floor is %s.version_floor", prefix, floorPrefix)
 	}
-	return oneOf(prefix+".version_floor", p.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff)
+	if err := oneOf(prefix+".version_floor", p.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff); err != nil {
+		return err
+	}
+	harnessPrefix := "enterprise.machine_policy.connectors." + copilotHarnessConnector
+	for _, knob := range [][2]string{{"harness_preference", p.HarnessPreference}, {"local_harness", p.LocalHarness}} {
+		if prefix != harnessPrefix && strings.TrimSpace(knob[1]) != "" {
+			return fmt.Errorf("config: %s.%s is not a setting; the GitHub Copilot in VS Code setting is %s.%s", prefix, knob[0], harnessPrefix, knob[0])
+		}
+	}
+	if err := oneOf(prefix+".harness_preference", p.HarnessPreference, CopilotHarnessPreferenceSDK, CopilotHarnessPreferenceUnmanaged); err != nil {
+		return err
+	}
+	return oneOf(prefix+".local_harness", p.LocalHarness, CopilotLocalHarnessGovern, CopilotLocalHarnessRetire)
 }
 
 // validateEnterpriseAgentPrefix accepts an absolute, administrator-style
