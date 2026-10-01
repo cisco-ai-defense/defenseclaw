@@ -9199,9 +9199,7 @@ function Write-DefenseClawAgentApplicationControlAttestation {
 
 function Get-DefenseClawAgentApplicationControlAttestationSchemaVersion {
     <#
-        Standalone evidence is schema 3: Claude effective-policy evidence is
-        bound to the Claude policy identity. The Secure Client profile keeps
-        its historical schema.
+        Both profiles write schema 3 Claude policy identity evidence.
     #>
     if (Test-DefenseClawStandaloneProfile) {
         return 3
@@ -9224,7 +9222,7 @@ function Get-DefenseClawClaudeManagedPolicyPaths {
     }
 }
 
-function Get-DefenseClawClaudeEffectivePolicyBinding {
+function Get-DefenseClawStandaloneClaudeEffectivePolicyBinding {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # The live Claude proof exercises the machine-wide DefenseClaw policy
     # fragment and the hook binary it launches, so the evidence binds exactly
@@ -9325,7 +9323,7 @@ function Get-DefenseClawStandaloneClaudeEvidenceStaleReason {
         throw 'Claude effective-policy evidence is not bound to a Claude policy identity'
     }
     try {
-        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+        $current = Get-DefenseClawStandaloneClaudeEffectivePolicyBinding -Layout $Layout
     }
     catch {
         return "the installed DefenseClaw Claude policy identity is unavailable: $($_.Exception.Message)"
@@ -9352,7 +9350,7 @@ function Write-DefenseClawStandaloneAgentApplicationControlAttestation {
             throw "refusing to re-publish stale Claude effective-policy evidence: $staleReason"
         }
         try {
-            $claudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+            $claudeBinding = Get-DefenseClawStandaloneClaudeEffectivePolicyBinding -Layout $Layout
         }
         catch {
             throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"

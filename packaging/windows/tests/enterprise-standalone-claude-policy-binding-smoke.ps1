@@ -213,11 +213,16 @@ try {
             Set-TestAttestation @{ claude_effective_policy_verified = $true }
             Assert-TestThrows 'verified without a policy binding' { Get-TestStaleReason }
 
-            # The Secure Client profile keeps its schema and manifest binding.
+            # Secure Client now writes the same schema-3 policy binding.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
             Set-TestAttestation @{ minimum_claude_version = '2.1.152' }
-            Assert-TestThrows 'Secure Client rejects schema 3' { Get-TestStaleReason }
-            if ((Get-DefenseClawAgentApplicationControlAttestationSchemaVersion) -ne 2 -or
+            Assert-TestFresh 'Secure Client accepts unverified schema 3'
+            Set-TestAttestation @{
+                schema_version = 4
+                minimum_claude_version = '2.1.152'
+            }
+            Assert-TestThrows 'Secure Client rejects unsupported schema 4' { Get-TestStaleReason }
+            if ((Get-DefenseClawAgentApplicationControlAttestationSchemaVersion) -ne 3 -or
                 (Get-DefenseClawClaudeMinimumClientVersion) -cne '2.1.152') {
                 $failures.Add('Secure Client schema or Claude floor changed')
             }
