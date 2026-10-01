@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
@@ -857,15 +859,17 @@ func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, 
 
 // Kiro has no hook contract gate, so its lock entry records no contract ID;
 // the managed runtime generation must accept that for Kiro only (WIN-R1-20).
-func TestWindowsManagedRuntimeValidContractAcceptsUngatedKiroOnly(t *testing.T) {
-	if !windowsManagedRuntimeValidContract("kiro", "") {
-		t.Fatal("kiro with no contract ID was refused")
-	}
-	if windowsManagedRuntimeValidContract("codex", "") {
-		t.Fatal("codex with no contract ID was accepted")
+func TestWindowsManagedRuntimeValidContractRequiresRegisteredKiroContract(t *testing.T) {
+	if windowsManagedRuntimeValidContract("kiro", "") {
+		t.Fatal("kiro with no contract ID was accepted")
 	}
 	if windowsManagedRuntimeValidContract("kiro", "kiro-cli-hooks-v1") {
-		t.Fatal("kiro with an unregistered contract ID was accepted")
+		t.Fatal("kiro with the sandbox-only contract ID was accepted")
+	}
+	for _, id := range []string{connector.KiroWindowsManagedCLIContractID, connector.KiroWindowsManagedIDEContractID} {
+		if !windowsManagedRuntimeValidContract("kiro", id) {
+			t.Fatalf("kiro with its managed contract ID %s was refused", id)
+		}
 	}
 	if !windowsManagedRuntimeValidContract("codex", "codex-hooks-v1") {
 		t.Fatal("codex with its known contract ID was refused")

@@ -1074,7 +1074,8 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	// below the floor is still refused as drift, below), because refusing
 	// the repair would leave the row not OK, the gateway would then refuse
 	// the user's hook calls, and the hook script fails open by default.
-	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" && previous.Connector == "" {
+	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" &&
+		resolution.Status == connector.HookCompatibilityNotGated && previous.Connector == "" {
 		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
 			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
 		}
@@ -1161,7 +1162,8 @@ func sortedUnique(vals []string) []string {
 // keeps exact-range gating even in a process that has not loaded config.
 func resolveHookContract(connectorName, agentVersion string) connector.HookContractResolution {
 	if standaloneProfileProcess() {
-		return connector.ResolveHookContract(connectorName, agentVersion)
+		// Managed Windows Kiro resolves against its reviewed contracts.
+		return connector.ResolveManagedHookContract(connectorName, agentVersion)
 	}
 	return connector.ResolveHookContractStrict(connectorName, agentVersion)
 }

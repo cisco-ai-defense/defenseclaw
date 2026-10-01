@@ -514,8 +514,9 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
 // returned, and $LASTEXITCODE is its status. The launcher keeps the agent's
 // stdin and stderr. Continue keeps a host that turns native stderr into
 // error records from ending the script with 1.
-// The arguments are fixed tokens without spaces or quotes. Kiro is not part
-// of any enterprise profile on Windows, so only per-user setup writes this.
+// The arguments are fixed tokens without spaces or quotes. Managed Windows
+// writes the same bridge under the target user token; there hookBinary is the
+// standalone defenseclaw-hook.exe, which serves the enterprise-managed runtime.
 func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string) string {
 	arguments := "hook --connector kiro"
 	if surface != "" {
