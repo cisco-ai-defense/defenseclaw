@@ -1,0 +1,64 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: Set up Go from a cached toolchain
+description: >-
+  Restores the Go toolchain that go.mod names from the Actions cache before
+  actions/setup-go runs, so a runner downloads the toolchain archive only on a
+  cache miss for that Go version.
+inputs:
+  cache:
+    description: Forwarded to actions/setup-go (Go module and build cache).
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Resolve the Go toolchain cache path
+      id: toolchain
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $match = Select-String -LiteralPath go.mod -Pattern '^go\s+(\d+\.\d+\.\d+)\s*$' | Select-Object -First 1
+        if (-not $match) { throw 'go.mod must name an exact Go version (go X.Y.Z)' }
+        $version = $match.Matches[0].Groups[1].Value
+        $linkRoot = Join-Path $env:RUNNER_TOOL_CACHE "go/$version"
+        $storeRoot = $linkRoot
+        # On hosted Windows runners actions/setup-go extracts the toolchain onto
+        # D: and links the C: tool cache entry to it. Cache the extracted copy.
+        if ($IsWindows -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and
+            (Test-Path -LiteralPath 'C:\') -and (Test-Path -LiteralPath 'D:\')) {
+          $storeRoot = Join-Path ($env:RUNNER_TOOL_CACHE -replace '^[Cc]:', 'D:') "go/$version"
+        }
+        "version=$version" >> $env:GITHUB_OUTPUT
+        "store=$storeRoot" >> $env:GITHUB_OUTPUT
+        "link=$linkRoot" >> $env:GITHUB_OUTPUT
+    - name: Restore the Go toolchain
+      id: restore
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ steps.toolchain.outputs.store }}
+        key: go-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}
+    - name: Link the restored Go toolchain into the tool cache
+      if: steps.restore.outputs.cache-hit == 'true' && steps.toolchain.outputs.store != steps.toolchain.outputs.link
+      shell: pwsh
+      env:
+        GO_TOOLCHAIN_STORE: ${{ steps.toolchain.outputs.store }}
+        GO_TOOLCHAIN_LINK: ${{ steps.toolchain.outputs.link }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # The same layout actions/setup-go creates after a download: a junction
+        # per architecture directory and its .complete marker next to it.
+        New-Item -ItemType Directory -Path $env:GO_TOOLCHAIN_LINK -Force | Out-Null
+        foreach ($arch in Get-ChildItem -LiteralPath $env:GO_TOOLCHAIN_STORE -Directory) {
+          $link = Join-Path $env:GO_TOOLCHAIN_LINK $arch.Name
+          if (Test-Path -LiteralPath $link) { continue }
+          New-Item -ItemType Junction -Path $link -Target $arch.FullName | Out-Null
+          if (Test-Path -LiteralPath "$($arch.FullName).complete") {
+            New-Item -ItemType File -Path "$link.complete" -Force | Out-Null
+          }
+        }
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      with:
+        go-version-file: go.mod
+        cache: ${{ inputs.cache }}

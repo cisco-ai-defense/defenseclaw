@@ -717,12 +717,27 @@ jobs:
           }
           $archive = Join-Path $env:DC_WINDOWS_PACKAGE_ROOT 'windows-native-package.zip'
           $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID/zip"
-          Invoke-WebRequest -Headers $headers -Uri $uri -OutFile $archive -TimeoutSec 300
-          $actualDigest = 'sha256:' + (
-            Get-FileHash -LiteralPath $archive -Algorithm SHA256
-          ).Hash.ToLowerInvariant()
-          if ($actualDigest -cne $env:EXPECTED_ARTIFACT_DIGEST) {
-            throw 'Downloaded package archive digest does not match its immutable artifact identity'
+          # Retry a failed or truncated transfer; every attempt must match the
+          # immutable artifact digest before the archive is used.
+          $maxAttempts = 5
+          for ($attempt = 1; ; $attempt++) {
+            $failure = $null
+            try {
+              Invoke-WebRequest -Headers $headers -Uri $uri -OutFile $archive -TimeoutSec 300
+              $actualDigest = 'sha256:' + (
+                Get-FileHash -LiteralPath $archive -Algorithm SHA256
+              ).Hash.ToLowerInvariant()
+              if ($actualDigest -cne $env:EXPECTED_ARTIFACT_DIGEST) {
+                $failure = 'Downloaded package archive digest does not match its immutable artifact identity'
+              }
+            } catch {
+              $failure = "Package archive download failed: $($_.Exception.Message)"
+            }
+            if (-not $failure) { break }
+            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+            if ($attempt -ge $maxAttempts) { throw "$failure (after $maxAttempts attempts)" }
+            Write-Warning "$failure; retrying ($attempt of $maxAttempts)"
+            Start-Sleep -Seconds (5 * $attempt)
           }
           Expand-Archive -LiteralPath $archive -DestinationPath $env:DC_WINDOWS_PACKAGE_ROOT
           Remove-Item -LiteralPath $archive -Force

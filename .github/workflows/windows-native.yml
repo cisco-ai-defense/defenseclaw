@@ -44,10 +44,7 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/setup-go-cached-toolchain
       - name: Run native Windows Go DACL regressions explicitly
         if: ${{ matrix.shard == 0 }}
         run: |
@@ -405,10 +402,7 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/setup-go-cached-toolchain
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.28"
@@ -478,10 +472,7 @@ jobs:
           }
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/setup-go-cached-toolchain
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -649,10 +640,9 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: ./.github/actions/setup-go-cached-toolchain
         if: ${{ matrix.connector == 'opencode' }}
         with:
-          go-version-file: go.mod
           cache: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
