@@ -886,6 +886,13 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 			d.removePIDFileIfStarted(started)
 			return nil
 		}
+		// On Windows TerminateProcess returns ERROR_ACCESS_DENIED while an
+		// accepted shutdown request is still exiting. The retained original
+		// handle, not that return value, says whether the process is gone.
+		if waitForProcessExit(proc, pid, forcedStopWait) {
+			d.removePIDFileIfStarted(started)
+			return nil
+		}
 		return fmt.Errorf("daemon: send term signal: %w", err)
 	}
 
@@ -985,6 +992,16 @@ func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 		}
 	}
 	return d.Start(args)
+}
+
+// RecordedExecutable returns the executable path recorded for the running
+// sidecar, or "" when no identity is recorded.
+func (d *Daemon) RecordedExecutable() string {
+	info, err := d.readPIDInfo()
+	if err != nil {
+		return ""
+	}
+	return info.Executable
 }
 
 func (d *Daemon) readPIDInfo() (pidInfo, error) {

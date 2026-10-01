@@ -285,6 +285,7 @@ def test_destination_test_fails_safely_when_runtime_does_not_acknowledge(tmp_pat
     assert result.exit_code != 0
     assert "gateway_rejected" in result.output
     assert "did not acknowledge" in result.output
+    assert "--deployment self-hosted --trace-endpoint" in result.output
 
 
 def test_destination_test_refuses_disabled_galileo_before_canary(tmp_path, monkeypatch) -> None:

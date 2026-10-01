@@ -6,6 +6,8 @@ package windowsresources
 import (
 	"bytes"
 	"encoding/xml"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -201,5 +203,16 @@ func TestVersionParsingIsStrictAndWindowsBounded(t *testing.T) {
 		if _, err := parseVersion(invalid); err == nil {
 			t.Errorf("parseVersion(%q) unexpectedly succeeded", invalid)
 		}
+	}
+}
+
+func TestPublishHintNamesRunningGateway(t *testing.T) {
+	denied := &os.LinkError{Op: "rename", Old: "a", New: "b", Err: fs.ErrPermission}
+	hint := publishHint(denied, filepath.Join("src", "defenseclaw-gateway.exe"))
+	if !strings.Contains(hint, "defenseclaw-gateway stop") {
+		t.Fatalf("hint = %q, want the gateway stop command", hint)
+	}
+	if got := publishHint(fs.ErrNotExist, "x.exe"); got != "" {
+		t.Fatalf("hint for a missing file = %q, want none", got)
 	}
 }
