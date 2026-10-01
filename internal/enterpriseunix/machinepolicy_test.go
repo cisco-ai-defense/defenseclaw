@@ -443,8 +443,8 @@ func TestUninstallRemovesPerUserHooksWithTheServiceEnvironment(t *testing.T) {
 }
 
 // The Copilot VS Code Local hook file is the guardian's (WIN-R1-25, #1055):
-// verify fails while an enrolled user's copy is missing or edited, and
-// passes once the guardian has rewritten it.
+// status and verify fail while an enrolled user's copy is missing or
+// edited, and pass once the guardian has rewritten it.
 func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
@@ -452,15 +452,18 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	eligible := filepath.Join(filepath.Dir(h.env.Layout.ManifestPath), "eligible-accounts.json")
 	writeHostFile(t, h, eligible, `{"version": 1, "accounts": [{"user": "alice", "uid": 501, "home": "/home/alice"}]}`)
 	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath("/home/alice")
-	verify := h.run(Options{Action: ActionVerify})
-	requireError(t, verify, codeVerify)
-	if got := messagesOf(verify.Warnings, codeMachinePolicyIncomplete); !strings.Contains(got, hookFile) || verify.SecurityComplete {
-		t.Fatalf("verify must name the missing Local hook file: %+v", verify.Warnings)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		requireError(t, got, codeVerify)
+		if !strings.Contains(messagesOf(got.Errors, codeVerify), hookFile) || got.SecurityComplete {
+			t.Fatalf("%s must fail naming the missing Local hook file: %+v", action, got.Errors)
+		}
 	}
 	hooks, err := enterprisepolicy.RenderCopilotVSCodeLocalHooks("linux", enterprisepolicy.HookBinaryPath(h.env.Layout))
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeHostFile(t, h, hookFile, string(hooks))
+	requireOK(t, h.run(Options{Action: ActionStatus}))
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 }

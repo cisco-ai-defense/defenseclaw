@@ -112,8 +112,10 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	if result := run(true, true); len(result.Changed) != 1 {
 		t.Fatalf("verify must report the deleted hook file as drift: %+v", result)
 	}
+	// Edited and marked read-only (0o400 sets the Windows read-only
+	// attribute), which a rename alone cannot replace there.
 	edited := []byte(`{"hooks":{"PreToolUse":[{"type":"command","command":"user-tool"}]}}`)
-	if err := os.WriteFile(hookFile, edited, 0o600); err != nil {
+	if err := os.WriteFile(hookFile, edited, 0o400); err != nil {
 		t.Fatal(err)
 	}
 	if result := run(true, true); len(result.Changed) != 1 || len(result.Kept) != 0 {

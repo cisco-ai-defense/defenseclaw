@@ -242,7 +242,10 @@ func ensureOwnedUserFile(result *CopilotVSCodeUserResult, path string, want []by
 		result.Changed = append(result.Changed, path)
 		return false, nil
 	}
-	if exists && !regular {
+	// An outright path is cleared first: the rename in writePrivateUserFile
+	// cannot replace a file a user marked read-only on Windows, and
+	// os.Remove clears that attribute.
+	if exists && (!regular || outright) {
 		if err := os.RemoveAll(path); err != nil {
 			return false, err
 		}

@@ -312,27 +312,29 @@ func missingClaudeVersionFloor(result enterprisepolicy.Result) string {
 }
 
 // describeMachinePolicy reports the vendor machine policy of the installed
-// config without writing.
-func (l *lifecycle) describeMachinePolicy(record *Deployment) {
+// config without writing. It returns the problems that fail both status
+// and verify: enrolled users' guardian-owned hook files that are missing
+// or modified.
+func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	env, r := l.env, l.result
 	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err != nil {
-		return
+		return nil
 	}
 	validated, err := env.validateConfig(raw)
 	if err != nil {
-		return
+		return nil
 	}
 	l.warnNoConnectorsEnabled(validated)
 	intended, err := env.MachinePolicy.Intended(validated.Loaded)
 	if err != nil {
 		r.AddWarning(codeMachinePolicy, err.Error())
-		return
+		return nil
 	}
 	result, verifyErr := env.MachinePolicy.Verify(validated.Loaded)
 	if isCoded(verifyErr, codeMachinePolicy) {
 		r.AddWarning(codeMachinePolicy, verifyErr.Error())
-		return
+		return nil
 	}
 	// A connector the last transaction placed that is gone from its vendor
 	// file now is reported once, with the file and the command that puts it
@@ -373,10 +375,9 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 	}
 	// A per-user file the guardian owns (Copilot's VS Code Local hook file)
 	// that a user deleted or edited leaves that agent surface unguarded
-	// until the guardian's next pass rewrites it. Like every machine-policy
-	// gap, verify fails on it and status reports it (security_complete
-	// false) without failing: status stays the health view the guardian's
-	// own repair window must not flip.
+	// until the guardian rewrites it, so status and verify both fail on it
+	// (WIN-R1-25, #1055), as on managed Windows.
+	var drift []string
 	for _, state := range result.States {
 		if len(state.UserFileDrift) == 0 {
 			continue
@@ -385,11 +386,12 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 		if len(paths) > 5 {
 			paths = append(append([]string{}, paths[:5]...), fmt.Sprintf("and %d more", len(state.UserFileDrift)-5))
 		}
-		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+		drift = append(drift, fmt.Sprintf(
 			"DefenseClaw's %s hook file is missing or modified for %d enrolled user(s): %s; the hook guardian rewrites it on its next pass",
 			state.Connector, len(state.UserFileDrift), strings.Join(paths, ", ")))
 		r.SecurityComplete = false
 	}
+	return drift
 }
 
 // codeNoConnectorsEnabled names a deployment whose config enables no

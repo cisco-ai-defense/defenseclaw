@@ -73,7 +73,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.describe(ctx, record, true)
-	l.describeMachinePolicy(record)
+	problems = append(problems, l.describeMachinePolicy(record)...)
 	if strict {
 		l.warnUnprivilegedUserNamespaces()
 	}
@@ -82,8 +82,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// account (an unverified hook contract, an agent it could not enroll)
 		// stays a warning for that account: the rest of the host is
 		// compliant, as on Windows.
-		// Machine-policy gaps (a removed vendor policy, a missing or
-		// edited guardian-owned per-user hook file) fail verify only;
+		// Machine-policy gaps (a removed vendor policy) fail verify only;
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected {

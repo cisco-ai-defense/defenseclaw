@@ -320,6 +320,7 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 		cfg = previousCfg
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		enterpriseHookForeignCleanupState.unrepaired = nil
 	})
 	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
 	cfg = &config.Config{
