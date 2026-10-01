@@ -18,6 +18,7 @@ intact when diagnosing a problem.
 | Default location | Purpose | Manual editing |
 | --- | --- | --- |
 | `%USERPROFILE%\.local\bin\defenseclaw.cmd` | CLI/TUI launcher for the installed Python environment. | Do not replace or wrap; re-run the installer to repair it. |
+| `%USERPROFILE%\.local\bin\defenseclaw` | The same launcher for Git Bash, which does not run `.cmd` files by bare name. cmd.exe and PowerShell ignore it. | Do not replace; re-run the installer to repair it. |
 | `%USERPROFILE%\.local\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
 | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` | No-console hook runner that connector registrations record. | Do not invoke with fabricated credentials or replace. |
 | `%USERPROFILE%\.local\bin\defenseclaw-acp.exe` | ACP guard. | Do not replace. |

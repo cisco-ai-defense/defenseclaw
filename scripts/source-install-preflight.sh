@@ -70,11 +70,21 @@ readonly MODE DEV_RECLAIM_SOURCE
 FOREIGN_INSTALL=0
 refuse() {
     echo "error: source install refused: $1" >&2
-    echo "No installed files or services were changed." >&2
+    case "${MODE}" in
+        publish-gateway|publish-acp|claim)
+            echo "This step changed nothing; earlier make all steps may already have published the CLI." >&2
+            ;;
+        *) echo "No installed files or services were changed." >&2 ;;
+    esac
     echo "Release installs upgrade with: defenseclaw upgrade (or re-run the release install.sh / install.ps1)." >&2
     if [[ "${FOREIGN_INSTALL}" -eq 1 && "${IS_WINDOWS}" -eq 0 ]]; then
         echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
         echo "  defenseclaw uninstall --binaries --yes && make all" >&2
+    elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
+        # Windows finishes removing binaries a moment after the CLI exits.
+        echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), wait a few seconds, then build again:" >&2
+        echo "  defenseclaw.cmd uninstall --binaries --yes" >&2
+        echo "  make all" >&2
     else
         echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
     fi
@@ -309,6 +319,16 @@ check_owner() {
         # Git Bash may omit PATHEXT from `command -v` even though it executes
         # the .exe. Normalize that presentation before the ownership check.
         path_cli="${path_cli}.exe"
+    fi
+    if [[ "${IS_WINDOWS}" -eq 1 && -n "${path_cli}" ]]; then
+        # Git Bash prints /c/... paths while INSTALL_DIR uses the C:/ form.
+        # Compare both in that form, ignoring case as Windows does.
+        path_cli_key="$(cygpath -am "${path_cli}" 2>/dev/null || printf '%s' "${path_cli}")"
+        expected_cli_key="$(cygpath -am "${EXPECTED_CLI}" 2>/dev/null || printf '%s' "${EXPECTED_CLI}")"
+        path_cli_key="${path_cli_key,,}"
+        if [[ "${path_cli_key}" == "${CLI_PATH,,}" || "${path_cli_key}" == "${expected_cli_key,,}" ]]; then
+            path_cli=""
+        fi
     fi
     if [[ -n "${path_cli}" && "${path_cli}" != "${CLI_PATH}" && "${path_cli}" != "${EXPECTED_CLI}" ]]; then
         refuse_foreign "PATH resolves ${PATH_COMMAND} to another installation (${path_cli})"
