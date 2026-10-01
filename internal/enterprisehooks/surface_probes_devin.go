@@ -12,63 +12,50 @@ package enterprisehooks
 
 import (
 	"path/filepath"
-	"strings"
+	"regexp"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
-// Devin Desktop runs Devin Local, the Devin CLI harness it fetches from the
-// server (https://docs.devin.ai/desktop/devin-local). A user who has the
-// Desktop but no Devin CLI whose version discovery can read still runs
-// Devin, so discovery reports the Desktop as an install without a readable
-// version and the enumerator records the agent as unprotected instead of
-// skipping it silently. The locations are the installers' defaults (the
-// vendor documents none): macOS Devin.app in ~/Applications or
-// /Applications; Windows the per-user install under
-// %LOCALAPPDATA%\Programs\Devin or the machine install under
-// %ProgramFiles%\Devin. Linux has no probe until the package layout is
-// captured on a desktop host.
+// Devin Desktop runs Devin Local, the Devin CLI harness
+// (https://docs.devin.ai/desktop/devin-local), from a Devin CLI it bundles
+// under its resources/app folder. That CLI is the engine that runs the
+// user's Devin hooks, so the Desktop is a desktop surface of the devin
+// connector whose engine version is the bundled CLI's. The bundled CLI's
+// man page names that version in its .TH header ("devin 3000.10.48
+// (fcf7ba39)"), which discovery reads without running anything; the
+// bundled changelog runs ahead of the build and the Windows devin.exe has
+// no version resource, so neither is used. The install folders are the
+// 3.10 packages' defaults (the vendor documents none):
+//   - macOS: Devin.app in /Applications or ~/Applications;
+//   - Linux: the .deb's /usr/share/devin-desktop, or the .tar.gz's Devin
+//     folder unpacked in the home or /opt (live check);
+//   - Windows: %LOCALAPPDATA%\Programs\Devin (per-user) or
+//     %ProgramFiles%\Devin (machine).
+//
+// A Desktop that has not bundled its CLI (it may fetch one on first use,
+// location is a live check) is reported without an engine version.
 
-// desktopSurfaceProbe finds a connector's desktop app for a home. It
-// returns the file that shows the install, or "".
-type desktopSurfaceProbe func(goos, home, programFiles string, present func(string) bool) string
-
-// desktopSurfaceProbes are the desktop apps that run a connector's agent.
-var desktopSurfaceProbes = map[string]desktopSurfaceProbe{
-	"devin": devinDesktopSurface,
+// devinDesktopManPage is the bundled CLI's man page under an app's
+// resources/app folder.
+func devinDesktopManPage(appRoot string) string {
+	return filepath.Join(appRoot, legacyconnector.DesktopBundledCLIDir(), "share", "man", "man1", "devin.1")
 }
 
-func devinDesktopSurface(goos, home, programFiles string, present func(string) bool) string {
-	var candidates []string
-	switch goos {
-	case "darwin":
-		for _, root := range []string{filepath.Join(home, "Applications"), "/Applications"} {
-			candidates = append(candidates, filepath.Join(root, "Devin.app", "Contents", "Info.plist"))
-		}
-	case "windows":
-		candidates = append(candidates, filepath.Join(home, "AppData", "Local", "Programs", "Devin", "Devin.exe"))
-		if programFiles != "" {
-			candidates = append(candidates, filepath.Join(programFiles, "Devin", "Devin.exe"))
-		}
-	}
-	for _, candidate := range candidates {
-		if present(candidate) {
-			return candidate
-		}
-	}
-	return ""
-}
+// devinManPageVersion matches the man page header of the Devin CLI.
+var devinManPageVersion = regexp.MustCompile(`(?m)^\.TH devin 1\s+"devin ([0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6})[ "]`)
 
-// desktopSurfaceInstalled returns the file that shows connector's desktop
-// app is installed for home, or "".
-func desktopSurfaceInstalled(goos, home, connector, programFiles string, present func(string) bool) string {
-	probe := desktopSurfaceProbes[strings.ToLower(strings.TrimSpace(connector))]
-	if probe == nil || strings.TrimSpace(home) == "" {
+// parseDevinManPageVersion returns the Devin CLI version a man page's .TH
+// header names, or "".
+func parseDevinManPageVersion(data []byte) string {
+	match := devinManPageVersion.FindSubmatch(data)
+	if match == nil {
 		return ""
 	}
-	return probe(goos, filepath.Clean(home), programFiles, present)
+	return string(match[1])
 }
 
-// desktopSurfaceReason is the discovery reason for a desktop app whose
-// agent version cannot be read.
-func desktopSurfaceReason(path string) string {
-	return path + " (a desktop app that runs this agent; the version of the agent it runs cannot be read)"
+// devinDesktopCLI is the bundled CLI under an app's resources/app folder.
+func devinDesktopCLI(appRoot, name string) string {
+	return filepath.Join(appRoot, legacyconnector.DesktopBundledCLIDir(), "bin", name)
 }

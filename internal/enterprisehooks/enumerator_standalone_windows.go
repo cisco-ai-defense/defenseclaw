@@ -216,13 +216,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	version = windowsStandaloneSurfaceVersion(row, logf, rowContext, version)
 	if version == "" {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
-		path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector)
-		if path == "" {
-			// A desktop app that runs the agent (Devin Desktop) is an
-			// install too.
-			path = windowsDesktopSurfaceInstalled(row.UserHome, row.Connector)
-		}
-		if path != "" {
+		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path != "" {
 			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read, so no hook contract can be selected", path))
 		}
 		return false

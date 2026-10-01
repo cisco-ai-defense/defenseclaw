@@ -265,9 +265,14 @@ var targets = map[string]Target{
 	ConnectorOpenCode:   opencodeTarget{},
 }
 
-// TargetFor returns the machine policy target for connector.
+// TargetFor returns the machine policy target for connector or companion
+// (companionTargets).
 func TargetFor(connector string) (Target, bool) {
-	target, ok := targets[strings.ToLower(strings.TrimSpace(connector))]
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	if companion, ok := companionTargets[connector]; ok {
+		return companion.target, true
+	}
+	target, ok := targets[connector]
 	return target, ok
 }
 
@@ -275,7 +280,7 @@ func TargetFor(connector string) (Target, bool) {
 func RouteFor(connector, goos string) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	switch connector {
-	case ConnectorCodex, ConnectorClaudeCode, ConnectorCursor, ConnectorCopilot:
+	case ConnectorCodex, ConnectorClaudeCode, ConnectorCursor, ConnectorCopilot, ConnectorDevinCascade:
 		return RouteMachinePolicy
 	case "kiro":
 		// Kiro has no vendor mechanism that delivers hooks from a machine

@@ -67,7 +67,7 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 	}
 	opts := LayoutOptions(layout, programFiles, programData)
 	opts.Policies = map[string]config.ResolvedConnectorPolicy{}
-	for _, name := range StandaloneConnectors(cfg) {
+	for _, name := range withCompanions(StandaloneConnectors(cfg)) {
 		opts.Policies[name] = cfg.Enterprise.MachinePolicy.PolicyFor(name)
 	}
 	opts.ClaudeVersionFloor = cfg.Enterprise.MachinePolicy.ClaudeVersionFloor()
@@ -79,7 +79,8 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 
 // StandaloneConnectors is the connector set the standalone lifecycle
 // protects: every active connector plus any connector the administrator
-// configured under enterprise.machine_policy.connectors.
+// configured under enterprise.machine_policy.connectors. A companion's key
+// there (devincascade) configures the companion, not a connector.
 func StandaloneConnectors(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -88,7 +89,7 @@ func StandaloneConnectors(cfg *config.Config) []string {
 	for name := range cfg.Enterprise.MachinePolicy.Connectors {
 		names = append(names, name)
 	}
-	names = normalizeConnectors(names)
+	names = withoutCompanions(normalizeConnectors(names))
 	sort.Strings(names)
 	return names
 }

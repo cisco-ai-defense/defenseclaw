@@ -21,7 +21,8 @@ import (
 
 // A profile with only the Claude Code extension (here in the folder the
 // user's VSCODE_EXTENSIONS names) is enrolled at the extension's engine
-// version; the Codex app, which has no engine version, is reported; and
+// version, one with only Devin Desktop at its bundled Devin CLI's version;
+// the Codex app, which has no engine version, is reported; and
 // unverified_versions: refuse refuses the extension. The profile is read
 // only under its owner's token, so a signed-out owner or a failed
 // impersonation finds nothing.
@@ -36,6 +37,16 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	}
 	if err := os.MkdirAll(filepath.Join(home, "AppData", "Local", "Packages", "OpenAI.Codex_test"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	devin := filepath.Join(home, "AppData", "Local", "Programs", "Devin")
+	page := devinDesktopManPage(filepath.Join(devin, "resources", "app"))
+	if err := os.MkdirAll(filepath.Dir(page), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string]string{filepath.Join(devin, "Devin.exe"): "MZ", page: ".TH devin 1  \"devin 3000.4.25 (0)\" \n"} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	const sid = "S-1-5-21-1-2-3-1001"
 	previousReadAs, previousEnvironment := windowsSurfaceReadAs, windowsUserEnvironment
@@ -72,6 +83,9 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	}
 	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, "2.1.300"); got != "2.1.220" || len(reported) != 0 {
 		t.Fatalf("claudecode CLI plus older extension version = %q, reported %+v", got, reported)
+	}
+	if got := windowsStandaloneSurfaceVersion(row("devin"), nil, rowContext, ""); got != "3000.4.25" || len(reported) != 0 {
+		t.Fatalf("devin Desktop-only version = %q, reported %+v", got, reported)
 	}
 	if got := windowsStandaloneSurfaceVersion(row("codex"), nil, rowContext, ""); got != "" || len(reported) != 1 ||
 		reported[0].Code != UnprotectedCodeSurfaceUnverified || reported[0].Surface != "desktop" || reported[0].Refusal != "" {

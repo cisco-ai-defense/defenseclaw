@@ -66,3 +66,29 @@ func TestDiscoverUnixAgentSurfacesReadsExtensionsAndNeverRunsHostApps(t *testing
 		t.Fatal("a host app launcher was executed")
 	}
 }
+
+// A Linux user with only Devin Desktop (an unpacked tarball) is enrolled at
+// the version the bundled Devin CLI's man page names; nothing is run.
+func TestDiscoverUnixDevinDesktopReadsBundledCLIVersion(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("surface discovery runs only in the per-user worker, never as root")
+	}
+	origGOOS := unixSurfaceGOOS
+	unixSurfaceGOOS = "linux"
+	t.Cleanup(func() { unixSurfaceGOOS = origGOOS })
+	home := t.TempDir()
+	page := devinDesktopManPage(filepath.Join(home, "Devin", "resources", "app"))
+	if err := os.MkdirAll(filepath.Dir(page), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(page, []byte(".ie \\n(.g .ds Aq \\(aq\n.el .ds Aq '\n.TH devin 1  \"devin 3000.4.25 (fcf7ba39)\" \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	surfaces := DiscoverUnixAgentSurfaces(context.Background(), home, "devin", true)
+	if len(surfaces) != 1 || surfaces[0].Host != "devin-desktop" || surfaces[0].EngineVersion != "3000.4.25" {
+		t.Fatalf("devin surfaces = %+v", surfaces)
+	}
+	if got := admitSurfaces("devin", connector.UnverifiedVersionsReport, surfaces).rowVersion(""); got != "3000.4.25" {
+		t.Fatalf("Desktop-only row version = %q", got)
+	}
+}

@@ -322,9 +322,6 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	if installedAt != "" {
 		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
 	}
-	if desktop := unixDesktopSurfaceReason(home, connector); desktop != "" {
-		return "", desktop
-	}
 	return "", fmt.Sprintf("no %s installation found for this user", connector)
 }
 
@@ -364,9 +361,6 @@ func DiscoverUnixAgentVersionStatically(ctx context.Context, home, connector str
 		if unixAgentExecutablePresent(candidate) {
 			return "", UnixAgentUnversionedReasonPrefix + candidate
 		}
-	}
-	if desktop := unixDesktopSurfaceReason(home, connector); desktop != "" {
-		return "", desktop
 	}
 	return "", reason
 }
