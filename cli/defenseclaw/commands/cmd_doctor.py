@@ -5855,7 +5855,7 @@ def _omnigent_live_config_evidence(config_path: str) -> tuple[str, str]:
     return (
         "warn",
         f"{record_detail}; live {source} selects {_omnigent_path_ref('managed-config-artifact', config_path)}, "
-        "but OmniGent 0.7.0 "
+        "but OmniGent "
         "does not expose a loaded policy generation/module/config identity; policy registration "
         "is configured but live action/fail-closed enforcement is unverified pending reload/restart",
     )

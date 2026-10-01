@@ -133,7 +133,7 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "omnigent": ConnectorPlatformSupport(
         SUPPORTED,
-        "OmniGent 0.7.0 is supported on native Windows in degraded mode; "
+        "OmniGent is supported on native Windows in degraded mode; "
         "DefenseClaw uses its awaited in-process policy API "
         "without terminal wrapping or filesystem/network sandbox parity.",
     ),
