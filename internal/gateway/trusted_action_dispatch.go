@@ -405,7 +405,46 @@ func dispatchTrustedAction(
 		legacyFindings = withSequenceProvenFindings(legacyFindings, sequenceFindings)
 	}
 	findings = append(semanticFindings, legacyFindings...)
-	return finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	if staticTargetTwin == nil {
+		return finalized
+	}
+	// The recovery lanes and the context checks also judge the static-target
+	// twin of a redirect-target view, and, as for semantic rules, only a block
+	// proven there counts. The twin's stand-in target is no sensitive path,
+	// so such a block rests on the rest of the action, which the runtime
+	// target does not change; any other result keeps the whole-action one.
+	twinLegacy, _ := fallbackLanes(append([]RuleFinding(nil), scanned...), *staticTargetTwin)
+	twinFindings := finalizeTrustedActionFindings(
+		generation,
+		request,
+		*staticTargetTwin,
+		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
+	)
+	return withTwinProvenBlocks(finalized, twinFindings)
+}
+
+// withTwinProvenBlocks returns findings, the finalized findings of a
+// redirect-target action, with each finding of twin, the same lanes judged on
+// its static-target twin, that may block there in place of the finding of the
+// same rule or owner that may not.
+func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
+	for _, proven := range twin {
+		if !proven.contributesToEnforcement() {
+			continue
+		}
+		key := trustedActionFindingKey(proven.RuleID)
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return trustedActionFindingKey(finding.RuleID) == key
+		})
+		switch {
+		case index < 0:
+			findings = append(findings, proven)
+		case !findings[index].contributesToEnforcement():
+			findings[index] = proven
+		}
+	}
+	return findings
 }
 
 // withSequenceProvenFindings returns findings, the fallback findings checked
@@ -2132,11 +2171,8 @@ func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 	deduplicated := make([]RuleFinding, 0, len(findings))
 	positions := make(map[string]int, len(findings))
 	for _, finding := range findings {
-		key := canonicalTrustedRuleID(finding.RuleID)
-		owner, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
-		if claimed {
-			key = canonicalTrustedRuleID(owner.id)
-		}
+		key := trustedActionFindingKey(finding.RuleID)
+		_, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
 		if position, duplicate := positions[key]; duplicate {
 			current := deduplicated[position]
 			candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(finding.Severity))]
@@ -2155,6 +2191,15 @@ func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 		deduplicated = append(deduplicated, finding)
 	}
 	return deduplicated
+}
+
+// trustedActionFindingKey is the identity deduplication gives a finding: the
+// owner of a rule a semantic owner claims, otherwise the rule itself.
+func trustedActionFindingKey(ruleID string) string {
+	if owner, claimed := trustedSemanticOwnerClaimingRule(ruleID); claimed {
+		return canonicalTrustedRuleID(owner.id)
+	}
+	return canonicalTrustedRuleID(ruleID)
 }
 
 // trustedFixtureSourceInspectionAction identifies the one tool-call shape in

@@ -29,7 +29,9 @@ import (
 // double quotes), and are otherwise literal ("> ~/.ssh/authorized_keys",
 // tee -a "$HOME/.ssh/authorized_keys"). Each such word is replaced by the same
 // path under input.ActiveHome, single-quoted. && and || lists are read as
-// sequences, as ShortCircuitListReduction reads them.
+// sequences, as ShortCircuitListReduction reads them, and any other
+// runtime-expanded redirect target that can only name a file is a placeholder
+// path, as in DynamicRedirectTargetReduction.
 //
 // The twin assumes the shell's HOME is the caller's home, which holds for an
 // agent's own shell unless the action changes it, so an action that mentions
@@ -59,7 +61,15 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 	if !ok {
 		return Facts{}, false
 	}
-	twin, _ = analyzeWithRedirectTargets(input, resolved)
+	twin, capture = analyzeWithRedirectTargets(input, resolved)
+	if !twin.Authoritative() {
+		// A runtime-expanded redirect target the home does not resolve (a
+		// filename pattern) becomes a static placeholder path, as in the
+		// twin of DynamicRedirectTargetReduction.
+		if static, _, ok := capture.twin(); ok {
+			twin, _ = analyzeWithRedirectTargets(input, static)
+		}
+	}
 	if !twin.Authoritative() || len(twin.Parse.Issues) != 0 ||
 		twin.Parse.Dialect != DialectPOSIX || len(twin.Commands) == 0 {
 		return Facts{}, false
