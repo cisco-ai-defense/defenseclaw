@@ -483,6 +483,10 @@ def test_alerts_slash_search_and_exact_severity_filter() -> None:
     assert model.handle_key("escape").handled is True
     assert model.filter_text == ""
     assert model.filtered
+    # RHEL-U2-10: the hint says Esc clears a severity filter; a second Esc does.
+    assert model.handle_key("escape").handled is True
+    assert model.active_filter_label() == "Actionable"
+    assert model.handle_key("escape").handled is False
 
 
 def test_alerts_connector_column_and_shared_filter() -> None:
