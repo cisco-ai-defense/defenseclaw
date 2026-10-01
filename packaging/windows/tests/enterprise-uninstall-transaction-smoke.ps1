@@ -1944,7 +1944,8 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$Purge
+                [switch]$Purge,
+                [switch]$NativeSealed
             )
             return Invoke-DefenseClawManagedHooksTeardownCommand `
                 -Layout $Layout `
@@ -2365,7 +2366,9 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 $ManagedHooksActivation,
                 [bool]$DeferredConfigPending = $false,
-                [bool]$Installed = $true
+                [bool]$Installed = $true,
+                [string]$InstallRootIdentity = '',
+                [string]$StateRootIdentity = ''
             )
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
@@ -2388,7 +2391,8 @@ targets:
         function script:Set-DefenseClawPreservedStateAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
-                [Parameter(Mandatory)][string]$GatewayServiceSID
+                [Parameter(Mandatory)][string]$GatewayServiceSID,
+                [switch]$Purge
             )
             if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
                 throw 'preserved-state ACL restoration lost its gateway SID'

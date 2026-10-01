@@ -37,6 +37,27 @@ BOOTSTRAP_ENVIRONMENT_SMOKE = (
     / "enterprise-bootstrap-environment-smoke.ps1"
 )
 UNINSTALL_TRANSACTION_SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-uninstall-transaction-smoke.ps1"
+UNINSTALL_ACL_RECOVERY_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-acl-recovery-smoke.ps1"
+)
+UNINSTALL_NATIVE_CONTRACT_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-native-contract-smoke.ps1"
+)
+UNTRUSTED_METADATA_FALLBACK_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-untrusted-metadata-fallback-smoke.ps1"
+)
 SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     ROOT
     / "packaging"
@@ -1444,6 +1465,36 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
             ),
         ),
         (
+            UNINSTALL_ACL_RECOVERY_SMOKE,
+            (
+                "canonical_noop",
+                "inherited_acl_repaired",
+                "metadata_bytes_preserved",
+                "hashed_attestation_repaired",
+                "changed_attestation_rejected",
+                "trusted_admin_deny_repaired",
+                "purge_skipped_denied_state_child",
+                "non_purge_rejected_denied_state_child",
+                "foreign_writer_rejected",
+                "explorer_full_control_rejected",
+            ),
+        ),
+        (
+            UNINSTALL_NATIVE_CONTRACT_SMOKE,
+            (
+                "seal_and_delete_bound",
+                "internal_helper_rejected",
+                "absent_delete_idempotent",
+            ),
+        ),
+        (
+            UNTRUSTED_METADATA_FALLBACK_SMOKE,
+            (
+                "partial_dispatch",
+                "protected_evidence_blocks_fallback",
+            ),
+        ),
+        (
             SELF_UNINSTALL_HELPER_CAPTURE_SMOKE,
             (
                 "engine",
@@ -1463,6 +1514,9 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
         "bootstrap",
         "bootstrap-environment",
         "uninstall-transaction",
+        "uninstall-acl-recovery",
+        "uninstall-native-contract",
+        "untrusted-metadata-fallback",
         "helper-capture",
     ),
 )
