@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [remove, readd]
+        mode: [remove, close]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:

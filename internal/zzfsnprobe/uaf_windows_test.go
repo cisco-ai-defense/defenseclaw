@@ -15,15 +15,30 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+func drain(w *fsnotify.Watcher) {
+	for {
+		select {
+		case _, ok := <-w.Events:
+			if !ok {
+				return
+			}
+		case _, ok := <-w.Errors:
+			if !ok {
+				return
+			}
+		}
+	}
+}
+
 // TestRemoveChurnUnderGC adds and removes directory watches while the GC
-// runs constantly. A watch removed with a pending ReadDirectoryChangesW
-// read becomes unreachable before its aborted completion is dequeued.
+// runs constantly. PROBE_MODE=remove churns Add/Remove on one watcher;
+// PROBE_MODE=close opens, fills and closes a watcher each round.
 func TestRemoveChurnUnderGC(t *testing.T) {
 	d, _ := time.ParseDuration(os.Getenv("PROBE_DURATION"))
 	if d == 0 {
 		d = 2 * time.Minute
 	}
-	mode := os.Getenv("PROBE_MODE") // "remove" or "close"
+	mode := os.Getenv("PROBE_MODE")
 	debug.SetGCPercent(1)
 	root := t.TempDir()
 	dirs := make([]string, 16)
@@ -43,26 +58,18 @@ func TestRemoveChurnUnderGC(t *testing.T) {
 			}
 		}
 	}()
+	defer stop.Store(true)
+	newWatcher := func() *fsnotify.Watcher {
+		w, err := fsnotify.NewWatcher()
+		if err != nil {
+			t.Fatal(err)
+		}
+		go drain(w)
+		return w
+	}
 	deadline := time.Now().Add(d)
 	iters := 0
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		for {
-			select {
-			case _, ok := <-w.Events:
-				if !ok {
-					return
-				}
-			case _, ok := <-w.Errors:
-				if !ok {
-					return
-				}
-			}
-		}
-	}()
+	w := newWatcher()
 	for time.Now().Before(deadline) {
 		for _, dir := range dirs {
 			if err := w.Add(dir); err != nil {
@@ -75,8 +82,23 @@ func TestRemoveChurnUnderGC(t *testing.T) {
 				_ = w.Remove(dir)
 			}
 		}
+		if mode == "close" {
+			closed := make(chan error, 1)
+			go func(w *fsnotify.Watcher) { closed <- w.Close() }(w)
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatalf("Close did not return within 30s after %d rounds", iters)
+			}
+			w = newWatcher()
+		}
 		iters++
 	}
-	stop.Store(true)
+	if err := w.Close(); err != nil {
+		t.Fatalf("final Close: %v", err)
+	}
 	t.Logf("mode=%s iterations=%d", mode, iters)
 }
