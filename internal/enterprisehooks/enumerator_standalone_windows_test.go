@@ -111,7 +111,7 @@ func TestEnumerateWindowsStandaloneAdmitsEntraUsersAndDefersNewRows(t *testing.T
 	}
 }
 
-func TestEnumerateWindowsSecureClientKeepsLegacyFilterAndRowState(t *testing.T) {
+func TestEnumerateWindowsSecureClientKeepsLegacyFilterAndDefersNewRow(t *testing.T) {
 	stubMachineWinGet(t, map[string]string{"OpenAI.Codex": "0.150.0"})
 	injectWindowsProfileList(t, map[string]string{
 		testLocalUserSID: codexProfile(t, "0.140.0"),
@@ -127,8 +127,8 @@ func TestEnumerateWindowsSecureClientKeepsLegacyFilterAndRowState(t *testing.T) 
 	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != testLocalUserSID {
 		t.Fatalf("Secure Client targets = %+v, want only the S-1-5-21 user", manifest.Targets)
 	}
-	if manifest.Targets[0].Deferred {
-		t.Fatal("Secure Client new row must keep Deferred=false")
+	if !manifest.Targets[0].Deferred {
+		t.Fatal("Secure Client new row must be deferred until the user signs in")
 	}
 	if !strings.Contains(strings.Join(logged, "\n"), testEntraUserSID+": not an interactive-user SID (S-1-5-21-…)") {
 		t.Fatalf("Secure Client must refuse the Entra ID SID with the historical reason; log:\n%s", strings.Join(logged, "\n"))
