@@ -68,6 +68,28 @@ func TestHardening_ValidateTraceparent(t *testing.T) {
 	}
 }
 
+// TestHardening_RemovesHookHomeUnderAgentTMPDIR covers agents (Hermes) that
+// point TMPDIR at their own cache: the per-hook HOME must not be left there.
+func TestHardening_RemovesHookHomeUnderAgentTMPDIR(t *testing.T) {
+	helperPath := materializeHardeningHelper(t)
+	scratch := filepath.Join(t.TempDir(), "agent-cache", "scratch")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", `source "$0" >/dev/null 2>&1; defenseclaw_harden_env; echo "$HOME"`, helperPath)
+	cmd.Env = append(os.Environ(), "TMPDIR="+scratch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run bash: %v: %s", err, out)
+	}
+	if home := strings.TrimSpace(string(out)); !strings.HasPrefix(home, scratch) {
+		t.Fatalf("hook HOME = %q, want it under the agent TMPDIR %q", home, scratch)
+	}
+	if left, _ := os.ReadDir(scratch); len(left) != 0 {
+		t.Fatalf("hook left %d directories in the agent TMPDIR", len(left))
+	}
+}
+
 // TestHardening_ExtractTraceContext locks the helper's output shape.
 // On a valid env it emits "-H\ntraceparent: <value>\n"; on a missing
 // env it emits nothing. Hostile env values are silently dropped (the

@@ -138,8 +138,12 @@ defenseclaw_harden_env() {
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
   # mktemp is unavailable.
+  _DEFENSECLAW_HOOK_HOME_OWNED=""
   if command -v mktemp >/dev/null 2>&1; then
     DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
+    if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
+      _DEFENSECLAW_HOOK_HOME_OWNED=1
+    fi
   fi
   if [ -z "${DEFENSECLAW_HOOK_HOME:-}" ]; then
     DEFENSECLAW_HOOK_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/hook-tmp.$$"
@@ -346,6 +350,13 @@ _defenseclaw_hook_cleanup() {
     case "$DEFENSECLAW_HOOK_HOME" in
       /tmp/*|/var/folders/*|"${DEFENSECLAW_HOME:-/dev/null}"/hook-tmp.*)
         rm -rf -- "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
+        ;;
+      */defenseclaw-hook.*)
+        # mktemp -t honours TMPDIR, which some agents (Hermes) point at
+        # their own cache; remove the directory this hook created there.
+        if [ "${_DEFENSECLAW_HOOK_HOME_OWNED:-}" = 1 ]; then
+          rm -rf -- "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
+        fi
         ;;
     esac
   fi
