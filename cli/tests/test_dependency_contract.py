@@ -42,7 +42,7 @@ RUNTIME_CONTRACT = {
     "rich": (">=14.2,<15", None),
     "textual": (">=8.2.8,<9", None),
     "pygments": (">=2.20,<3", None),
-    "litellm": (">=1.84.0,<1.92.0", None),
+    "litellm": (">=1.91.5,<1.92.0", None),
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
@@ -113,7 +113,8 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
     ):
         requirements = _requirements(requirement_set)
         assert Version("1.83.7") not in requirements["litellm"].specifier
-        assert Version("1.84.0") in requirements["litellm"].specifier
+        assert Version("1.91.4") not in requirements["litellm"].specifier
+        assert Version("1.91.5") in requirements["litellm"].specifier
         assert Version("1.92.0") not in requirements["litellm"].specifier
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
@@ -252,7 +253,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
     # skill scanner 2.0.4: rich>=13, textual>=1, and litellm>=1.77;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
-    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.84,<1.92.
+    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.91.5,<1.92.
     # Scanner 2.0.5-2.0.9 instead pin old LiteLLM/Textual releases, and
     # 2.0.10-2.0.13 cap Textual<8, so 2.0.4 is the newest viable wheel.
     intersections = {
@@ -261,7 +262,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
         "litellm": [
             Requirement("litellm>=1.77.0"),
             Requirement("litellm>=1.77.0"),
-            Requirement("litellm>=1.84.0,<1.92.0"),
+            Requirement("litellm>=1.91.5,<1.92.0"),
         ],
         "importlib-metadata": [
             Requirement("importlib-metadata>=8.7.1,<8.8"),
@@ -270,7 +271,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     witnesses = {
         "rich": Version("14.3.4"),
         "textual": Version(TEXTUAL_LOCKED_VERSION),
-        "litellm": Version("1.91.0"),
+        "litellm": Version("1.91.5"),
         "importlib-metadata": Version("8.7.1"),
     }
     for name, requirements in intersections.items():
