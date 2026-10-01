@@ -3948,6 +3948,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					"guardian_verified":   covered,
 				}
 				if s.currentConfig().StandaloneEnterprise() {
+					// The local engine remains available when the optional
+					// AI Defense client is unavailable.
+					detail["inspection_available"] = true
 					s.addStandaloneAIDefenseHealth(detail)
 				} else {
 					s.addManagedInspectionHealth(ctx, detail)
@@ -4515,6 +4518,9 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			"guardian_verified":   covered,
 		}
 		if s.currentConfig().StandaloneEnterprise() {
+			// The local engine remains available when the optional
+			// AI Defense client is unavailable.
+			detail["inspection_available"] = true
 			s.addStandaloneAIDefenseHealth(detail)
 		} else {
 			s.addManagedInspectionHealth(ctx, detail)
