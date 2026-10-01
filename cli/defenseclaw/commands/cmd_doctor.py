@@ -5624,6 +5624,41 @@ def _windows_command_line_argv(command_line: str) -> tuple[str, ...] | None:
         return None
 
 
+_HERMES_HOST_EXECUTABLES = frozenset({"hermes", "hermes-agent"})
+
+
+def _hermes_host_running() -> bool | None:
+    """Whether a Hermes host runs as this account; ``None`` when unknown.
+
+    Hermes reads its hook registration only at startup, so doctor can not
+    prove a running host loaded it. With no host running there is nothing to
+    reload: the next host starts with the registration.
+    """
+    if os.name == "nt" or not hasattr(os, "getuid"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-A", "-o", "uid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    uid = str(os.getuid())
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2 or fields[0] != uid:
+            continue
+        # A script launcher puts the interpreter first: python .../bin/hermes.
+        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in fields[1:3]):
+            return True
+    return False
+
+
 def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:
     """Read bounded argv evidence for a recorded OmniGent server process."""
     if pid <= 0:
@@ -5956,6 +5991,15 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         r=r,
                     )
             elif connector == "hermes":
+                if not r.passive and _hermes_host_running() is False:
+                    _emit(
+                        "pass",
+                        label,
+                        f"registered at {path}; no Hermes host is running, so the next one "
+                        "starts with the DefenseClaw hooks",
+                        r=r,
+                    )
+                    return
                 _emit(
                     "fail",
                     label,

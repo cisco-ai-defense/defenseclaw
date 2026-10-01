@@ -1900,12 +1900,18 @@ class TestCheckHookHealth(unittest.TestCase):
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
-            r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertEqual(r.checks[-1]["label"], "Hermes hooks (fail-open)")
-        self.assertIn(hook, r.checks[-1]["detail"])
-        self.assertIn("live=false", r.checks[-1]["detail"])
+            results = {}
+            for running in (True, False):
+                r = _DoctorResult()
+                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                    _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+                results[running] = r.checks[-1]
+        self.assertEqual(results[True]["status"], "fail")
+        self.assertEqual(results[True]["label"], "Hermes hooks (fail-open)")
+        self.assertIn(hook, results[True]["detail"])
+        self.assertIn("live=false", results[True]["detail"])
+        # With no Hermes host running there is nothing to reload.
+        self.assertEqual(results[False]["status"], "pass", results[False])
 
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

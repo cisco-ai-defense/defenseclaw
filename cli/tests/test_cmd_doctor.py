@@ -135,7 +135,7 @@ class DoctorHermesPathTests(unittest.TestCase):
             with patch(
                 "defenseclaw.commands.cmd_doctor.hermes_config_path",
                 return_value=config_path,
-            ):
+            ), patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=True):
                 _check_hook_health(cfg, "hermes", result)
 
             self.assertEqual(result.passed, 0, result.checks)
