@@ -122,8 +122,8 @@ func TestAdapterAcceptsGalileoJSONEmptySuccessAndAcknowledgesExactCanary(t *test
 			t.Fatal("enqueue rejected")
 		}
 	}
-	_ = waitRequest(t, capture.requests)
 	closeDispatcher(t, dispatcher)
+	_ = deliveredRequest(t, capture.requests)
 
 	if capture.calls.Load() != 1 {
 		t.Fatalf("requests = %d, JSON success was retried", capture.calls.Load())
@@ -170,8 +170,8 @@ func TestAdapterGalileoJSONPartialSuccessRejectsExactlyAndNeverAcknowledgesCanar
 			t.Fatal("enqueue rejected")
 		}
 	}
-	_ = waitRequest(t, capture.requests)
 	closeDispatcher(t, dispatcher)
+	_ = deliveredRequest(t, capture.requests)
 
 	if capture.calls.Load() != 1 {
 		t.Fatalf("requests = %d, JSON partial success was retried", capture.calls.Load())
@@ -225,8 +225,8 @@ func TestAdapterExportsRichRedactedCanaryAndAcknowledgesExactTrace(t *testing.T)
 			t.Fatalf("enqueue = %+v", enqueue)
 		}
 	}
-	request := waitRequest(t, capture.requests)
 	closeDispatcher(t, dispatcher)
+	request := deliveredRequest(t, capture.requests)
 
 	spans := requestSpans(request)
 	if len(spans) != 2 {
@@ -344,8 +344,8 @@ func TestAdapterPartialSuccessIsExactTerminalAndNeverAcknowledgesCanary(t *testi
 			t.Fatal("enqueue rejected")
 		}
 	}
-	_ = waitRequest(t, capture.requests)
 	closeDispatcher(t, dispatcher)
+	_ = deliveredRequest(t, capture.requests)
 	if capture.calls.Load() != 1 {
 		t.Fatalf("requests = %d, partial success was retried", capture.calls.Load())
 	}
@@ -450,8 +450,8 @@ func TestAdapterMalformedNegativePartialIsTerminalAndContentFree(t *testing.T) {
 	if !dispatcher.Enqueue(payload).Accepted() {
 		t.Fatal("enqueue rejected")
 	}
-	_ = waitRequest(t, capture.requests)
 	closeDispatcher(t, dispatcher)
+	_ = deliveredRequest(t, capture.requests)
 	if capture.calls.Load() != 1 {
 		t.Fatalf("requests = %d, malformed partial was retried", capture.calls.Load())
 	}
@@ -761,13 +761,17 @@ func newTestAdapter(t *testing.T, endpoint string, observer otlp.CanaryAcknowled
 	return adapter
 }
 
+// newTestDispatcher returns a dispatcher whose worker cuts a batch only when
+// closeDispatcher stops intake. The scheduled delay never elapses inside a
+// test, so every payload a test enqueues before closeDispatcher is in the
+// batch, however slowly the test goroutine runs between two Enqueue calls.
 func newTestDispatcher(t *testing.T, adapter *Adapter, batchSize int) *delivery.Dispatcher {
 	t.Helper()
 	dispatcher, err := delivery.NewDispatcher(delivery.Config{
 		Destination: "galileo", Enabled: true,
 		MaxQueueItems: 8, MaxQueueBytes: 8 * 1024 * 1024,
 		MaxBatchItems: batchSize, MaxBatchBytes: 8 * 1024 * 1024,
-		ScheduledDelay: 100 * time.Millisecond, AttemptTimeout: 2 * time.Second,
+		ScheduledDelay: time.Hour, AttemptTimeout: 2 * time.Second,
 		Retry: delivery.RetryPolicy{MaxAttempts: 2, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 	}, adapter)
 	if err != nil {
@@ -777,10 +781,12 @@ func newTestDispatcher(t *testing.T, adapter *Adapter, batchSize int) *delivery.
 	return dispatcher
 }
 
+// closeDispatcher stops intake, which releases the pending batch, and returns
+// once the worker has finished delivering it. The attempt timeout bounds each
+// delivery; the test binary -timeout catches a wedged worker.
 func closeDispatcher(t *testing.T, dispatcher *delivery.Dispatcher) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	ctx := context.Background()
 	if err := dispatcher.StopIntake(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -792,13 +798,16 @@ func closeDispatcher(t *testing.T, dispatcher *delivery.Dispatcher) {
 	}
 }
 
-func waitRequest(t *testing.T, requests <-chan *collectortracepb.ExportTraceServiceRequest) *collectortracepb.ExportTraceServiceRequest {
+// deliveredRequest returns the request the stub captured. Call it after
+// closeDispatcher: the handler queues the request before it responds, and
+// Drain returns only after the worker has the response.
+func deliveredRequest(t *testing.T, requests <-chan *collectortracepb.ExportTraceServiceRequest) *collectortracepb.ExportTraceServiceRequest {
 	t.Helper()
 	select {
 	case request := <-requests:
 		return request
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for Galileo OTLP request")
+	default:
+		t.Fatal("dispatcher drained without delivering a Galileo OTLP request")
 		return nil
 	}
 }

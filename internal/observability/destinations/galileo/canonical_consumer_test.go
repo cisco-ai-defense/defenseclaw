@@ -1157,11 +1157,12 @@ func canonicalDispatcherConfigWithDelay(destination string, queue int, generatio
 	}
 }
 
+// flushCanonical returns once every accepted record reached a terminal
+// disposition. The dispatcher's attempt timeout bounds each delivery; the test
+// binary -timeout catches a wedged worker.
 func flushCanonical(t *testing.T, consumer *CanonicalTraceConsumer) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := consumer.ForceFlush(ctx); err != nil {
+	if err := consumer.ForceFlush(context.Background()); err != nil {
 		t.Fatalf("ForceFlush: %v", err)
 	}
 }
