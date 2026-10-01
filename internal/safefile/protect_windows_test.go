@@ -184,6 +184,7 @@ func TestWindowsPrivateOwnershipRepairUsesImpersonatedSubject(t *testing.T) {
 	repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(
 		descriptor,
 		identity,
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -194,12 +195,38 @@ func TestWindowsPrivateOwnershipRepairUsesImpersonatedSubject(t *testing.T) {
 	repairable, err = privateSecurityDescriptorIsWriterRepairableForSubject(
 		descriptor,
 		windowsProtectionSubject{sid: processUser.User.Sid},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if repairable {
 		t.Fatal("repairability accepted the different process-token subject")
+	}
+}
+
+// A profile folder inherits an Administrators full-control entry (WIN2-U2-06).
+func TestWriterRepairabilityAdmitsAdministratorsOnlyWhenAsked(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + sid + "D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;" + sid + ")",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := windowsProtectionSubject{sid: user.User.Sid}
+	for _, trust := range []bool{false, true} {
+		repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(descriptor, subject, trust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if repairable != trust {
+			t.Fatalf("trustAdministrators=%v: repairable=%v", trust, repairable)
+		}
 	}
 }
 
