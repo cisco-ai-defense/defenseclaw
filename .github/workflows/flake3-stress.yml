@@ -53,7 +53,7 @@ jobs:
           git diff --stat
       - name: Build connector test binary
         run: go test -c -vet=off -o (Join-Path $env:RUNNER_TEMP 'conn.test.exe') ./internal/gateway/connector
-      - name: Stress the reload test (cold node image per run, CPU load)
+      - name: Stress the reload test (never-seen node image per run, CPU and scan load)
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
@@ -64,8 +64,29 @@ jobs:
           $basePath = $env:PATH
           $pkgDir = (Resolve-Path 'internal/gateway/connector').Path
           Write-Host "node=$node cpus=$([Environment]::ProcessorCount)"
-          $burners = @(1..8 | ForEach-Object {
+          try { $mp = Get-MpComputerStatus; Write-Host "realtime=$($mp.RealTimeProtectionEnabled) onaccess=$($mp.OnAccessProtectionEnabled) mode=$($mp.AMRunningMode)" } catch { Write-Host "defender status unavailable: $_" }
+          $burners = @(1..6 | ForEach-Object {
             Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'while ($true) { }') -PassThru -WindowStyle Hidden
+          })
+          # Scan pressure: keep writing fresh, unique executables (copies of
+          # go.exe with a random tail) so the real-time scanner has a backlog,
+          # like a runner that has just built and linked the test binaries.
+          $goExe = (Get-Command go.exe -ErrorAction Stop).Source
+          $scanScript = Join-Path $env:RUNNER_TEMP 'scan-pressure.ps1'
+          Set-Content -Path $scanScript -Value @'
+          param([string]$Source, [string]$Dir)
+          New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+          $bytes = [IO.File]::ReadAllBytes($Source)
+          $n = 0
+          while ($true) {
+            $n++
+            $f = Join-Path $Dir ("p{0}.exe" -f ($n % 20))
+            [Array]::Copy([Security.Cryptography.RandomNumberGenerator]::GetBytes(64), 0, $bytes, $bytes.Length - 64, 64)
+            [IO.File]::WriteAllBytes($f, $bytes)
+          }
+          '@
+          $burners += @(1..2 | ForEach-Object {
+            Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', $scanScript, '-Source', $goExe, '-Dir', (Join-Path $env:RUNNER_TEMP "scan-$_")) -PassThru -WindowStyle Hidden
           })
           $pass = 0; $fail = 0; $failures = [System.Collections.Generic.List[string]]::new()
           try {
@@ -75,6 +96,10 @@ jobs:
               $dir = Join-Path $env:RUNNER_TEMP "node-cold-$i"
               New-Item -ItemType Directory -Force -Path $dir | Out-Null
               Copy-Item -Path $node -Destination (Join-Path $dir 'node.exe')
+              # A unique tail gives the copy a never-seen hash, so the real-time
+              # scanner cannot reuse an earlier verdict for it.
+              $fs = [IO.File]::Open((Join-Path $dir 'node.exe'), 'Append')
+              $tail = [Security.Cryptography.RandomNumberGenerator]::GetBytes(64); $fs.Write($tail, 0, $tail.Length); $fs.Dispose()
               $env:PATH = "$dir;$basePath"
               $out = Join-Path $env:RUNNER_TEMP "run-$i.out"
               $err = Join-Path $env:RUNNER_TEMP "run-$i.err"
