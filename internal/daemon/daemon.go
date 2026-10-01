@@ -283,6 +283,17 @@ func (d *Daemon) verifyReplacedExecutable(info pidInfo) bool {
 	return d.verifyStartIdentity(info)
 }
 
+// RunsReplacedExecutable reports whether this data directory's gateway is
+// alive on a file that was replaced or removed after it started (#1047). It
+// is still this account's gateway; a restart loads the installed binary.
+func (d *Daemon) RunsReplacedExecutable() bool {
+	info, err := d.readPIDInfo()
+	if err != nil || !processExists(info.PID) {
+		return false
+	}
+	return !d.verifyProcess(info) && d.verifyReplacedExecutable(info)
+}
+
 // IsRetiredInstallCopy reports whether live is the copy of the recorded
 // executable that a source install moved into its retirement custody beside
 // it (".defenseclaw-install-custody/retired-<sha256>") while the process ran.

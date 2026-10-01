@@ -18,9 +18,10 @@ import (
 
 // Seams for tests.
 var (
-	gatewayPortHolder   = daemon.FindPortHolder
-	gatewayPortAnswers  = gatewayPortAcceptsConnections
-	gatewayManagedState = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
+	gatewayPortHolder         = daemon.FindPortHolder
+	gatewayPortAnswers        = gatewayPortAcceptsConnections
+	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
+	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }
 )
 
 // foreignGatewayListener explains a listener on the configured API port that

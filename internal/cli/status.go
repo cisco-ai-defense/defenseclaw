@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -212,6 +213,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayStatusBanner()
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
+	if !cfg.StandaloneEnterprise() && !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		gatewayRunsReplacedBinary() {
+		Warn("This account's gateway is running a binary that was replaced after it started")
+		Subhead("Load the installed one with: defenseclaw-gateway restart")
+	}
 	fmt.Println()
 
 	bind := gatewayBindHost(cfg)
