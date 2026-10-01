@@ -116,12 +116,23 @@ sha256_of() {
     fi
 }
 
+# Read one answer from the terminal. A terminal left in -icrnl by an earlier
+# program sends Enter as a bare carriage return, so map CR to NL for this
+# read only, and drop a stray trailing CR from the answer.
+read_tty_line() {
+    local saved="" line=""
+    saved=$(stty -g < /dev/tty 2>/dev/null) && stty icrnl < /dev/tty 2>/dev/null
+    read -r line < /dev/tty 2>/dev/null || { [[ -n "${saved}" ]] && stty "${saved}" < /dev/tty 2>/dev/null; return 1; }
+    [[ -n "${saved}" ]] && stty "${saved}" < /dev/tty 2>/dev/null
+    printf '%s' "${line%$'\r'}"
+}
+
 ask_yes_no() {
     local prompt="$1" default="${2:-y}" answer
     [[ "${YES}" == true ]] && return 0
     if [[ "${default}" == y ]]; then prompt="${prompt} [Y/n]"; else prompt="${prompt} [y/N]"; fi
     printf "  %s " "${prompt}" >&2
-    read -r answer < /dev/tty 2>/dev/null || answer="${default}"
+    answer=$(read_tty_line) || answer="${default}"
     answer="${answer:-${default}}"
     [[ "${answer}" =~ ^[Yy]$ ]]
 }
@@ -1214,7 +1225,7 @@ pick_connector() {
         index=$((index + 1))
     done
     printf "  Choice [default 1=codex]: " >&2
-    read -r choice < /dev/tty 2>/dev/null || choice=""
+    choice=$(read_tty_line) || choice=""
     choice="${choice:-1}"
     index=1
     CONNECTOR=codex
