@@ -229,7 +229,7 @@ jobs:
 
   connector-contract:
     name: Windows x64 connector contract / ${{ matrix.connector }} / ${{ matrix.rep }}
-    needs: [powershell-static, package-artifact]
+    needs: [package-artifact]
     runs-on: windows-latest
     timeout-minutes: ${{ matrix.connector == 'devin' && 50 || 35 }}
     strategy:
