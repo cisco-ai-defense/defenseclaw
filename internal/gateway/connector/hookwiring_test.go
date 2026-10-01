@@ -1286,6 +1286,31 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 	}
 }
 
+// The exact ownership set is cached; a changed launcher must render a new
+// one, so a command for the previous launcher is no longer claimed.
+func TestNativeHookOwnershipFollowsTheCurrentLauncher(t *testing.T) {
+	const first = `C:\DefenseClawOwnershipTest\first\defenseclaw-hook.exe`
+	const second = `C:\DefenseClawOwnershipTest\second\defenseclaw-hook.exe`
+	firstCommand := windowsNativePowerShellHookCommandForBinary("codex", first)
+	secondCommand := windowsCopilotPowerShellHookCommandForBinary(second)
+
+	setHookBinaryOverride(t, first)
+	if !isNativeHookCommand(firstCommand) {
+		t.Fatal("the current launcher's Codex bridge is not owned")
+	}
+	if isNativeHookCommand(secondCommand) {
+		t.Fatal("another launcher's Copilot program is owned")
+	}
+
+	defenseclawHookBinaryOverride = second
+	if isNativeHookCommand(firstCommand) {
+		t.Fatal("the previous launcher's Codex bridge is still owned")
+	}
+	if !isNativeHookCommand(secondCommand) {
+		t.Fatal("the current launcher's Copilot program is not owned")
+	}
+}
+
 func TestAntigravityWindowsHookCommandBindsOfficialEvent(t *testing.T) {
 	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, windowsExe)

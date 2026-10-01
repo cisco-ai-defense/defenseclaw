@@ -937,42 +937,8 @@ func isNativeHookCommand(cmd string) bool {
 	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
 	// without shell interpolation. Compare against the exact commands we emit;
 	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
-	hookBinaries := nativeHookBinaryOwnershipCandidates()
-	for _, connectorName := range []string{"codex", "antigravity"} {
-		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
-				cmd == legacyStartProcessWindowsNativePowerShellHookCommand(connectorName, "", "", hookBinary) ||
-				cmd == legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
-				cmd == legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
-				return true
-			}
-		}
-	}
-	for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-		for _, contract := range builtinHookContracts["codex"] {
-			for _, event := range contract.Events {
-				if cmd == windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary) ||
-					cmd == legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contract.ContractID, hookBinary) ||
-					cmd == legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary) {
-					return true
-				}
-			}
-		}
-	}
-	for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-		if cmd == windowsCopilotPowerShellHookCommandForBinary(hookBinary) ||
-			cmd == legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary) ||
-			cmd == legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary) {
-			return true
-		}
-		for _, event := range copilotCurrentHookEvents {
-			if cmd == windowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
-				return true
-			}
-			if cmd == legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
-				return true
-			}
-		}
+	if _, ok := nativeHookExactCommands(nativeHookBinaryOwnershipCandidates())[cmd]; ok {
+		return true
 	}
 	// Codex's Windows command uses PATH with current-directory lookup disabled;
 	// strip only that exact hardening prefix before applying the existing strict
@@ -1035,6 +1001,83 @@ func isDevinBashNativeHookCommand(command string) bool {
 		}
 	}
 	return false
+}
+
+// nativeHookExactCommandCache holds the exact command set for the last
+// ownership inputs. Rendering it means encoding every current and legacy
+// bridge for every launcher candidate, and matchers ask once per hook
+// command, so a large hooks file rendered the same set hundreds of times.
+var nativeHookExactCommandCache struct {
+	mu       sync.Mutex
+	key      string
+	commands map[string]struct{}
+}
+
+// nativeHookExactCommands returns every exact command isNativeHookCommand
+// accepts for hookBinaries: the encoded Codex and Antigravity bridges, the
+// event-bound Codex bridges and the Copilot programs, current and legacy.
+// The cache key covers every input the builders read, so a changed launcher
+// candidate, system directory or built-in event set renders a new set.
+// Callers must not modify the returned map.
+func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
+	hookBinaries = uniqueNonEmptyStrings(hookBinaries)
+	codexContracts := builtinHookContracts["codex"]
+	var key strings.Builder
+	key.WriteString(windowsSystemPowerShellExe())
+	for _, hookBinary := range hookBinaries {
+		key.WriteString("\x00b")
+		key.WriteString(hookBinary)
+	}
+	for _, contract := range codexContracts {
+		key.WriteString("\x00c")
+		key.WriteString(contract.ContractID)
+		for _, event := range contract.Events {
+			key.WriteString("\x00e")
+			key.WriteString(event)
+		}
+	}
+	for _, event := range copilotCurrentHookEvents {
+		key.WriteString("\x00p")
+		key.WriteString(event)
+	}
+
+	cache := &nativeHookExactCommandCache
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.commands != nil && cache.key == key.String() {
+		return cache.commands
+	}
+	commands := make(map[string]struct{})
+	add := func(cmd string) { commands[cmd] = struct{}{} }
+	for _, connectorName := range []string{"codex", "antigravity"} {
+		for _, hookBinary := range hookBinaries {
+			add(windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
+			add(legacyStartProcessWindowsNativePowerShellHookCommand(connectorName, "", "", hookBinary))
+			add(legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
+			add(legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
+		}
+	}
+	for _, hookBinary := range hookBinaries {
+		for _, contract := range codexContracts {
+			for _, event := range contract.Events {
+				add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
+				add(legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contract.ContractID, hookBinary))
+				add(legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
+			}
+		}
+	}
+	for _, hookBinary := range hookBinaries {
+		add(windowsCopilotPowerShellHookCommandForBinary(hookBinary))
+		add(legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary))
+		add(legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary))
+		for _, event := range copilotCurrentHookEvents {
+			add(windowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
+			add(legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
+		}
+	}
+	cache.key = key.String()
+	cache.commands = commands
+	return commands
 }
 
 func nativeHookBinaryOwnershipCandidates() []string {
