@@ -458,7 +458,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     fi
     if [[ "${restart}" == true ]]; then
         start_gateway && restart_openclaw \
-            || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+            || warn_not_started
     fi
     if version_lt "${back_to}" 1.0.0; then
         ok "Now running DefenseClaw ${back_to}. To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
@@ -838,7 +838,7 @@ recover_interrupted_run() {
     fi
     [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
     if [[ "${restart}" == true && -z "$(gateway_pid || true)" ]]; then
-        start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+        start_gateway || warn_not_started
     fi
 }
 
@@ -942,8 +942,45 @@ restart_old() {
 }
 
 start_gateway() {
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0
     info "Starting the gateway"
-    PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start
+    [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
+    PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+    [[ ${rc} -eq 0 || ${rc} -eq 3 ]] || explain_start_failure "${log}" "${from}"
+    return "${rc}"
+}
+
+# warn_not_started: the generic advice, unless the start already said why.
+warn_not_started() {
+    [[ -n "${START_EXPLAINED:-}" ]] || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+}
+
+# explain_start_failure LOG OFFSET: say why the gateway stopped, from what it
+# wrote to its log during this start. A restored older release, for example,
+# refuses to start when an agent was updated after it recorded its hook lock,
+# and its start command only reports a readiness timeout.
+explain_start_failure() {
+    local log=$1 from=$2 size lines reason conn before after
+    [[ -f "${log}" ]] || return 0
+    size="$(wc -c < "${log}" | tr -d ' ')"
+    [[ "${size}" -ge "${from}" ]] || from=0
+    lines="$(tail -c "+$((from + 1))" "${log}" 2>/dev/null | tail -n 400)"
+    reason="$(printf '%s\n' "${lines}" | grep 'hook contract drift detected' | tail -n 1)"
+    if [[ -n "${reason}" ]]; then
+        conn="$(printf '%s' "${reason}" | sed -nE 's/.*connector ([A-Za-z0-9_-]+) hook contract drift detected.*/\1/p')"
+        before="$(printf '%s' "${reason}" | sed -nE 's/.*previous version="([^"]*)".*/\1/p')"
+        after="$(printf '%s' "${reason}" | sed -nE 's/.*current version="([^"]*)".*/\1/p')"
+        warn "The gateway refused to start: ${conn:-a connector}'s agent changed (${before:-?} -> ${after:-?}) after this DefenseClaw recorded its hook contract lock"
+        if [[ "${reason}" == *DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1* ]]; then
+            info "To accept the new agent version and refresh the lock, start it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start"
+        else
+            info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
+        fi
+        START_EXPLAINED=1
+        return 0
+    fi
+    reason="$(printf '%s\n' "${lines}" | grep -E '^Error: |exited with error: ' | tail -n 1 | sed -E 's/^Error: //; s/.*exited with error: //' | cut -c1-300)"
+    [[ -z "${reason}" ]] || { warn "The gateway stopped: ${reason}"; info "Its log: ${log}"; START_EXPLAINED=1; }
 }
 
 finish_swap() {

@@ -295,3 +295,39 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     assert completed.stdout.strip() == f"7|{rerun}"
     summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
+
+
+def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
+    # MAC-U2-01: after a rollback, the restored 0.8.x gateway refused to start
+    # on hook contract drift, and the installer only relayed a readiness timeout.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("start_gateway() {")
+    funcs = text[start : text.index("\n}\n", text.index("explain_start_failure() {")) + 3]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "gateway.log").write_text("Error: an older failure\n", encoding="utf-8")
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f"echo '[sidecar] guardrail exited with error: connector claudecode hook contract drift detected: "
+        f'previous version="2.1.276 (Claude Code)" contract=v1 current version="2.1.286 (Claude Code)" contract=v1 '
+        f"(rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)' >> '{tmp_path}/gateway.log'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = tmp_path / "start.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + funcs
+        + f'DEFENSECLAW_HOME="{tmp_path}" BIN_DIR="{bin_dir}"\nrc=0; start_gateway || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    out = completed.stdout
+    assert "rc=1" in out, out + completed.stderr
+    assert "claudecode's agent changed (2.1.276 (Claude Code) -> 2.1.286 (Claude Code))" in out
+    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start" in out
+    assert "an older failure" not in out
