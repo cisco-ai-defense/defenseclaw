@@ -7658,8 +7658,15 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
         tag = "pass"
         conditions: list[str] = []
         if item.managed_config_state == "drifted":
-            tag = "fail"
-            conditions.append("managed-exporter drift detected")
+            # The file changed after setup: agents such as Codex write their
+            # own settings to it. Teardown then removes only DefenseClaw's
+            # entries, so this is not a failure; setup re-applies and
+            # records the new contents.
+            tag = "warn"
+            conditions.append(
+                "managed-exporter drift detected (the file changed after setup); "
+                f"run 'defenseclaw setup {item.connector}' to re-apply"
+            )
         elif item.managed_config_state == "unverifiable":
             tag = "warn"
             conditions.append("managed-exporter state is unverifiable")
