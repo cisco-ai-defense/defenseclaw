@@ -1528,3 +1528,52 @@ func withWindowsManagedRuntimeRestrictedTarget(t *testing.T, fn func()) {
 	reverted = true
 	safeUnlock = true
 }
+
+// A hook file whose DACL a guardian retry rewrote must not wedge the
+// rollback (WIN-R1-20): the hook contract accepts it, the backup one still
+// requires its exact DACL.
+func TestWindowsManagedRuntimeCleanupAcceptsHookFileWithRewrittenDACL(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	path := filepath.Join(t.TempDir(), "kiro-hook.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsManagedRuntimeTestAccess(target, 0x001f01ff),
+		windowsManagedRuntimeTestAccess(system, 0x001f01ff),
+		windowsManagedRuntimeTestAccess(users, 0x001200a9),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, rewritten, nil); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	info := windowsManagedRuntimeTarget{sid: target}
+	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupHookFile, path); err != nil {
+		t.Fatalf("hook file with a rewritten DACL was refused: %v", err)
+	}
+	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupConnectorBackupFile, path); err == nil {
+		t.Fatal("connector backup with a rewritten DACL was accepted")
+	}
+}

@@ -150,9 +150,10 @@ const (
 	// record the guardian hardened after a successful setup.
 	windowsManagedRuntimeCleanupConnectorBackupFile
 	// windowsManagedRuntimeCleanupHookFile is a file in the account's
-	// DefenseClaw hooks folder: the canonical file DACL, or the account and
-	// LocalSystem private DACL that an older release's disabled-hook
-	// tombstone was written with during a failed enrolment's teardown.
+	// DefenseClaw hooks folder, owned by the account, LocalSystem or
+	// Administrators, with any DACL: a guardian retry, an older release's
+	// disabled-hook tombstone or the account may have rewritten it, and
+	// refusing such a file left the rollback pending with no recovery.
 	windowsManagedRuntimeCleanupHookFile
 )
 
@@ -2059,7 +2060,7 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: cleanup file owner is unavailable")
 	}
 	dacl, daclDefaulted, err := descriptor.DACL()
-	if err != nil || dacl == nil {
+	if (err != nil || dacl == nil) && contract != windowsManagedRuntimeCleanupHookFile {
 		return "", fmt.Errorf("enterprise hooks: cleanup file DACL is unavailable")
 	}
 	switch contract {
@@ -2095,11 +2096,25 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
-	case windowsManagedRuntimeCleanupConnectorBackupFile, windowsManagedRuntimeCleanupHookFile:
-		kind := "connector backup"
-		if contract == windowsManagedRuntimeCleanupHookFile {
-			kind = "hook"
+	case windowsManagedRuntimeCleanupHookFile:
+		// The handle identity already proves a regular, single-link file
+		// reached without a reparse point inside the authenticated root, and
+		// the hooks folder only ever holds DefenseClaw scripts and
+		// tombstones, so the DACL is not provenance here: removing the file
+		// fails safe, refusing it wedged the rollback.
+		if ownerDefaulted || !windowsManagedRuntimeHookCleanupOwner(owner, target.sid) {
+			return "", fmt.Errorf("enterprise hooks: hook cleanup file has foreign owner %s", windowsSIDString(owner))
 		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: hook cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
+	case windowsManagedRuntimeCleanupConnectorBackupFile:
+		kind := "connector backup"
 		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
 			return "", fmt.Errorf("enterprise hooks: %s cleanup file owner or DACL provenance is invalid", kind)
 		}
@@ -2132,6 +2147,23 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: unknown cleanup file contract")
 	}
 	return identity, nil
+}
+
+// windowsManagedRuntimeHookCleanupOwner reports whether owner is one a
+// DefenseClaw writer leaves on a hook file: the account (writes under its
+// token) or the machine (writes as LocalSystem, owned by LocalSystem or
+// Administrators).
+func windowsManagedRuntimeHookCleanupOwner(owner, target *windows.SID) bool {
+	if owner.Equals(target) {
+		return true
+	}
+	for _, known := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
+		sid, err := windows.CreateWellKnownSid(known)
+		if err == nil && owner.Equals(sid) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateWindowsManagedRuntimeOwnedLockACL accepts exactly the descriptor
