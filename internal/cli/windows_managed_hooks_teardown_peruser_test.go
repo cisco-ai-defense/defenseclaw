@@ -243,3 +243,44 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		t.Fatalf("remaining without LocalSystem = %v", report.UserStateRemaining)
 	}
 }
+
+// Finalize removes the users' registrations before the journal records the
+// phase finalized, so an uninstall interrupted during that cleanup, or one
+// failing before it, stays prepared and its rerun runs finalize again.
+func TestFinalizeWindowsManagedHooksTeardownCleansUpUsersWhilePrepared(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "")
+	originalMachine, originalWriter, originalRemover := windowsManagedHooksTeardownStandaloneMachineFinalizer,
+		windowsManagedHooksTeardownJournalWriter, windowsManagedHooksStandaloneUserRegistrationRemover
+	t.Cleanup(func() {
+		windowsManagedHooksTeardownStandaloneMachineFinalizer, windowsManagedHooksTeardownJournalWriter,
+			windowsManagedHooksStandaloneUserRegistrationRemover = originalMachine, originalWriter, originalRemover
+	})
+	// The journal writer needs an administrator-owned folder; the phase it
+	// would write stands in for the journal on disk.
+	written := "prepared"
+	windowsManagedHooksTeardownJournalWriter = func(_ string, journal windowsManagedHooksTeardownJournal) error {
+		written = journal.Phase
+		return nil
+	}
+	cleanedUpAt := ""
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(context.Context, string, enterprisehooks.Manifest) enterpriseHookUserCleanupResult {
+		cleanedUpAt = written
+		return enterpriseHookUserCleanupResult{}
+	}
+	machineErr := errors.New("finalize standalone hook runtime directories: access denied")
+	windowsManagedHooksTeardownStandaloneMachineFinalizer = func() error { return machineErr }
+	finalize := func() error {
+		var report windowsManagedHooksTeardownReport
+		_, err := finalizeWindowsManagedHooksTeardown(windowsManagedHooksTeardownJournal{Phase: "prepared"},
+			"journal.json", &report, `C:\ProgramData\DefenseClaw\runtime`, perUserTeardownManifest("devin"))
+		return err
+	}
+	if err := finalize(); !errors.Is(err, machineErr) || written != "prepared" || cleanedUpAt != "" {
+		t.Fatalf("failed finalize: err=%v phase=%s cleanup at %q", err, written, cleanedUpAt)
+	}
+	windowsManagedHooksTeardownStandaloneMachineFinalizer = func() error { return nil }
+	if err := finalize(); err != nil || cleanedUpAt != "prepared" || written != "finalized" {
+		t.Fatalf("finalize: err=%v phase=%s, users cleaned up at phase %q", err, written, cleanedUpAt)
+	}
+}

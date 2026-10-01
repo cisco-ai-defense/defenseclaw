@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -78,6 +79,10 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		t.Fatal("the purge ran without LocalSystem")
 	}
 	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	// LocalSystem holds SeBackupPrivilege and SeRestorePrivilege disabled,
+	// so the purge must enable them itself to get past the denying
+	// subfolder. An elevated test session may hold them enabled already.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	if err := PurgeWindowsUserState(home, target, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -120,5 +125,29 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		if strings.Contains(sd.String(), windowsGuardianHardenedOwnerRightsACE) {
 			t.Fatalf("%s kept the managed DACL after the purge: %s", path, sd)
 		}
+	}
+}
+
+// disableWindowsProcessPrivilegesForTest disables the named privileges in
+// the process token until the test ends.
+func disableWindowsProcessPrivilegesForTest(t *testing.T, names ...string) {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { token.Close() })
+	for _, name := range names {
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+			t.Fatal(err)
+		}
+		disable := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{Luid: luid}}}
+		var previous windows.Tokenprivileges
+		var size uint32
+		if err := windows.AdjustTokenPrivileges(token, false, &disable, uint32(unsafe.Sizeof(previous)), &previous, &size); err != nil {
+			t.Fatalf("disable %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil) })
 	}
 }
