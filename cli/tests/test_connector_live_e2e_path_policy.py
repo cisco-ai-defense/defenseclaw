@@ -180,6 +180,7 @@ def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
         "copilot",
         "openhands",
         "hermes",
+        "deepseek",
         "devin",
         "antigravity",
     }

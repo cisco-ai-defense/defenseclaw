@@ -70,7 +70,7 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # Data-dir entries that are install machinery, not user data.
 readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
-readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
+readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor deepseek devin copilot openhands antigravity opencode amp omnigent kiro none"
 
 if [[ -t 1 ]] || [[ "${FORCE_COLOR:-}" == "1" ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'

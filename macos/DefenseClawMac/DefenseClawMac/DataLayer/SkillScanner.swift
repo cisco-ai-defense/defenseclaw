@@ -45,6 +45,7 @@ enum SkillScanner {
         case "cursor":
             return [p(".cursor", "skills"), p(".agents", "skills"),
                     p(".claude", "skills"), p(".codex", "skills")]
+        case "deepseek": return [] // Cordis assets are profile-dependent and unsupported.
         case "devin": return [p(".config", "devin", "skills"), p(".agents", "skills")]
         case "copilot": return [p(".copilot", "skills")]
         case "openhands":
@@ -212,6 +213,7 @@ enum MCPScanner {
             return [(p(".hermes", "config.yaml"), .yaml([["mcp", "servers"], ["mcpServers"]]))]
         case "cursor":
             return [(p(".cursor", "mcp.json"), .dotMCPJSON)]
+        case "deepseek": return [] // Cordis assets are profile-dependent and unsupported.
         case "devin":
             return [
                 (p(".config", "devin", "mcp_config.json"), .dotMCPJSON),

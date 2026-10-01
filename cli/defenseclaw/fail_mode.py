@@ -46,7 +46,7 @@ _EXPECTED_CONTRACTS = {
     ),
     "devin": frozenset({"devin-hooks-v1"}),
 }
-_UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
+_UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "deepseek", "hermes"})
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
 _WINDOWS_LAUNCHER_CONNECTORS = frozenset({"claudecode", "codex"})
 _SHARED_HOOK_SCRIPTS = frozenset(

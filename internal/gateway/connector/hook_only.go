@@ -533,6 +533,9 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	if c.name == "devin" {
 		profile.Decode = devinProfileDecode
 	}
+	if c.name == "deepseek" {
+		profile.Decode = deepseekProfileDecode
+	}
 	// NOTE: hermes needs no Decode override. Its nested `extra` content
 	// is recovered by the generic decoder's ContentEnvelopeKey fallback
 	// (declared on the hermes hook contract), and its wire replies are
@@ -715,6 +718,12 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	}
 
 	switch c.name {
+	case "deepseek":
+		caps.MCP = unsupportedSurface("Cordis MCP bundles are not yet inventoried or writable.")
+		caps.Skills = unsupportedSurface("Skill loading is profile-dependent; asset installation is not supported.")
+		caps.Rules = unsupportedSurface("Profile-dependent rule loading is not yet inventoried.")
+		caps.Plugins = unsupportedSurface("Cordis plugin bundles are not yet inventoried or writable.")
+		caps.Agents = unsupportedSurface("Profile-dependent subagents are not yet inventoried.")
 	case "amp":
 		settings := ampSettingsPaths(opts)
 		plugins := ampPluginPaths(opts)
@@ -1728,6 +1737,9 @@ func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
 
 func (c *hookOnlyConnector) hookCommandForOS(goos string, opts SetupOpts) string {
 	unixCommand := filepath.Join(opts.DataDir, "hooks", c.scriptName)
+	if c.name == "deepseek" && goos != "windows" {
+		return shellSingleQuote(unixCommand)
+	}
 	if goos == "windows" && c.name == "hermes" && strings.TrimSpace(opts.HookExecutable) != "" {
 		return windowsHermesDirectHookCommand(opts.HookExecutable)
 	}
@@ -2457,6 +2469,8 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 			filepath.Join(opts.DataDir, "hooks", c.scriptName),
 			c.effectiveFailClosed(opts),
 		)
+	case "deepseek":
+		err = patchDeepSeekHooks(path, hookScript)
 	case "devin":
 		err = patchDevinHooks(path, hookScript, devinOwnedHookCommands(opts, hookScript)...)
 	case "copilot":
@@ -2530,6 +2544,8 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 		return removeJSONHookReferences(path, cursorOwnedHookCommands(opts)...)
 	case "copilot":
 		return removeCopilotHookReferences(path, hookScript)
+	case "deepseek":
+		return removeDeepSeekHookReferences(path, hookScript)
 	case "openhands":
 		return removeJSONHookReferences(path, hookScript)
 	case "devin":

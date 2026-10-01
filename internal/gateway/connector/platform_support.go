@@ -52,6 +52,10 @@ var proxyConnectors = map[string]struct{}{
 // connector availability. Keep it in exact parity with the Python
 // cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT mapping.
 var windowsConnectorSupport = map[string]PlatformSupport{
+	"deepseek": {
+		Status: PlatformNotCertified,
+		Reason: "DeepSeek Harness command-hook shell transport has not been validated on native Windows.",
+	},
 	"codex": {
 		Status: PlatformSupported,
 		Reason: "Codex CLI and the DefenseClaw hook entrypoint are supported on native Windows x64; authentic packaged plus official-client validation metadata is not recorded and live evidence remains false.",
@@ -121,6 +125,9 @@ func IsProxyConnector(name string) bool {
 // classification with a human-readable reason. Unknown plugin connectors fail
 // closed on Windows pending separate certification.
 func ConnectorSupportOnOS(name, goos string) PlatformSupport {
+	if name == "deepseek" && goos != "windows" {
+		return PlatformSupport{Status: PlatformPreview, Reason: "DeepSeek Harness developer-preview bridge; live certification pending and upstream errors fail open."}
+	}
 	if goos == "windows" {
 		if support, ok := windowsConnectorSupport[name]; ok {
 			return support

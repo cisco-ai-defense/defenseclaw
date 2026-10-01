@@ -223,6 +223,7 @@ _HOOK_POLICY_ONLY_CONNECTORS = frozenset(
         "claudecode",
         "hermes",
         "cursor",
+        "deepseek",
         "devin",
         "copilot",
         "openhands",

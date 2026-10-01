@@ -2070,7 +2070,7 @@ func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedM
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "deepseek", "devin", "hermes", "kiro", "opencode", "openhands"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

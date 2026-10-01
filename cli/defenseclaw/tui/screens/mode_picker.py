@@ -59,6 +59,13 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
         "command hooks + event-scoped deny; no native human approval",
     ),
     ModeChoice(
+        "deepseek",
+        "DeepSeek Harness",
+        "j",
+        False,
+        "preview command-hook bridge; upstream failures fail open",
+    ),
+    ModeChoice(
         "devin",
         "Devin",
         "d",

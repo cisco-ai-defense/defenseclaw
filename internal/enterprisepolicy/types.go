@@ -278,6 +278,8 @@ func RouteFor(connector, goos string) string {
 			return RouteACP
 		}
 		return RoutePerUser
+	case "deepseek":
+		return RouteUnsupported // Preview bridge can be disabled by user patches and fails open.
 	case "openclaw", "zeptoclaw":
 		return RouteUnsupported
 	case "openhands", "omnigent":

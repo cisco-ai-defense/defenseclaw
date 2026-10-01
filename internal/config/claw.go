@@ -215,6 +215,8 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
 	switch normalizeConnectorKey(connector) {
+	case "deepseek":
+		return nil, nil
 	case "claudecode":
 		return readMCPServersClaudeCode(workspaceDir)
 	case "codex":
@@ -625,6 +627,11 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 	home, _ := os.UserHomeDir()
 
 	switch normalizeConnectorKey(connector) {
+	case "deepseek":
+		if root := os.Getenv("DSH_HOME"); filepath.IsAbs(root) {
+			return root
+		}
+		return filepath.Join(home, ".dsh")
 	case "claudecode":
 		return connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude")
 	case "codex":
@@ -757,6 +764,8 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 	cwd := c.ConnectorWorkspaceDir()
 
 	switch normalizeConnectorKey(connector) {
+	case "deepseek":
+		return nil
 	case "claudecode":
 		configDir := c.ConnectorHomeDir("claudecode")
 		dirs := []string{
@@ -846,6 +855,8 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 	cwd := c.ConnectorWorkspaceDir()
 
 	switch normalizeConnectorKey(connector) {
+	case "deepseek":
+		return nil
 	case "claudecode":
 		configDir := c.ConnectorHomeDir("claudecode")
 		pluginParent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))

@@ -20,7 +20,7 @@ import SwiftUI
 
 struct ConnectorDiscoverySelection: Equatable {
     static let onboardingConnectors = [
-        "codex", "claudecode", "hermes", "cursor", "devin", "copilot",
+        "codex", "claudecode", "hermes", "cursor", "deepseek", "devin", "copilot",
         "openhands", "antigravity", "opencode", "amp", "omnigent",
     ]
 

@@ -72,6 +72,7 @@ func TestSupportedConnectorParityMatrix(t *testing.T) {
 	// regression can't hide behind "some connector should be here".
 	// Keep this list narrow and audited.
 	zeroSurfacesExempt := map[string]string{
+		"deepseek": "preview hook bridge only; profile-dependent Cordis assets are explicitly unsupported",
 		"omnigent": "custom policy bridge with ALLOW/ASK/DENY enforcement — no MCP, skill, or plugin surfaces are user-facing",
 	}
 
@@ -114,6 +115,7 @@ func TestSupportedConnectorMCPOnEveryConnector(t *testing.T) {
 	// still fails, while genuinely-MCP-less agents don't trip the
 	// test. Keep this list narrow and audited.
 	mcpExempt := map[string]bool{
+		"deepseek": true, // Cordis MCP bundles are profile-dependent and not yet inventoried by this connector.
 		"omnigent": true, // OmniGent uses a proprietary custom policy bridge, not MCP.
 	}
 
@@ -154,7 +156,7 @@ func TestSupportedConnectorCountMatchesRegistry(t *testing.T) {
 			seen[s] = true
 		}
 	}
-	const expected = 14
+	const expected = 15
 	if len(seen) != expected {
 		names := make([]string, 0, len(seen))
 		for n := range seen {

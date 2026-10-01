@@ -423,3 +423,11 @@ behind each control:
   [Linux](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/LINUX-ENTERPRISE-THREAT-MODEL.md)
   and [macOS](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/MACOS-ENTERPRISE-THREAT-MODEL.md):
   the per-platform threat rows.
+
+### DeepSeek Harness preview
+
+The `deepseek` connector refuses managed enterprise enrollment on every OS.
+Its user-editable Cordis patches can disable the bridge, and the vendor allows
+execution after hook configuration errors, crashes or timeouts. Local preview
+setup is not a tamper-resistant enterprise policy boundary. See
+[DeepSeek Harness](/docs/connectors/deepseek) for supported local hook events.

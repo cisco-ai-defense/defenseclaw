@@ -104,6 +104,10 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     "opencode": (os.path.join("connector_backups", "opencode", "config.json"),),
     "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
+    "deepseek": (
+        os.path.join("connector_backups", "deepseek", "config.json"),
+        os.path.join("connector_backups", "deepseek", "cordis.patch.yml.json"),
+    ),
     "devin": (os.path.join("connector_backups", "devin", "config.json"),),
     # A retired connector ID's setup backup still selects gateway teardown,
     # which Go resolves through connector.RetiredConnector.

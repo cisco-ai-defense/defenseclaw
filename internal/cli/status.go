@@ -473,6 +473,8 @@ func friendlyConnectorName(name string) string {
 		return "Hermes"
 	case "cursor":
 		return "Cursor"
+	case "deepseek":
+		return "DeepSeek Harness"
 	case "devin":
 		return "Devin"
 	case "copilot":

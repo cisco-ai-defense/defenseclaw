@@ -1168,6 +1168,8 @@ func foreignHookStopEvent(connector, event string) bool {
 		case "stop", "subagentstop", "sessionend":
 			return true
 		}
+	case "deepseek":
+		return event == "Stop" || event == "SubagentStop"
 	case "devin":
 		switch event {
 		case "Stop", "SessionEnd":

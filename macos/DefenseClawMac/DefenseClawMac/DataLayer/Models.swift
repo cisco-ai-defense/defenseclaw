@@ -218,6 +218,7 @@ func friendlyConnectorName(_ connector: String) -> String {
     case "codex": return "Codex"
     case "hermes": return "Hermes"
     case "cursor": return "Cursor"
+    case "deepseek": return "DeepSeek Harness (preview)"
     case "devin": return "Devin"
     case "copilot": return "GitHub Copilot CLI"
     case "openhands": return "OpenHands"

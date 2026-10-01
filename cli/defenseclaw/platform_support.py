@@ -70,6 +70,10 @@ class ConnectorPlatformSupport:
 # Keep in exact parity with the Go ``windowsConnectorSupport`` map. A working
 # upstream Windows binary is not sufficient for DefenseClaw certification.
 WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
+    "deepseek": ConnectorPlatformSupport(
+        NOT_CERTIFIED,
+        "DeepSeek Harness command-hook shell transport has not been validated on native Windows.",
+    ),
     "kiro": ConnectorPlatformSupport(
         SUPPORTED,
         "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on "
@@ -204,6 +208,11 @@ def connector_platform_support(
     Unknown/plugin connectors require separate native Windows certification.
     """
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    if name == "deepseek" and resolved_os != "windows":
+        return ConnectorPlatformSupport(
+            PREVIEW,
+            "DeepSeek Harness developer-preview bridge; live certification pending and upstream errors fail open.",
+        )
     if resolved_os == "windows":
         return WINDOWS_CONNECTOR_SUPPORT.get(
             name,

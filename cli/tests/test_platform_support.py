@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -79,7 +78,7 @@ WINDOWS_SUPPORTED: set[str] = {
     "antigravity",
 }
 WINDOWS_PREVIEW: set[str] = set()
-WINDOWS_NOT_CERTIFIED: set[str] = set()
+WINDOWS_NOT_CERTIFIED: set[str] = {"deepseek"}
 WINDOWS_UNSUPPORTED = {"openhands", "openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
@@ -184,7 +183,7 @@ def test_non_windows_behavior_is_unchanged() -> None:
     for os_name in ("linux", "darwin"):
         for name in ALL_CONNECTORS:
             support = connector_platform_support(name, os_name)
-            assert support.status == SUPPORTED
+            assert support.status == (PREVIEW if name == "deepseek" else SUPPORTED)
             assert support.available
 
 
@@ -273,7 +272,10 @@ def test_windows_views_include_supported_and_labeled_preview_connectors() -> Non
 
 def test_non_windows_views_are_unfiltered() -> None:
     assert supported_connector_choices("linux") == tuple(CONNECTORS)
-    assert visible_mode_picker_choices("darwin") == tuple(MODE_PICKER_CHOICES)
+    choices = visible_mode_picker_choices("darwin")
+    assert [c.wire for c in choices] == [c.wire for c in MODE_PICKER_CHOICES]
+    assert next(c for c in choices if c.wire == "deepseek").label == "DeepSeek Harness (preview)"
+    assert [c for c in choices if c.wire != "deepseek"] == [c for c in MODE_PICKER_CHOICES if c.wire != "deepseek"]
     assert visible_connector_choices("linux") == tuple(CONNECTOR_CHOICES)
 
 

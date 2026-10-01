@@ -8,6 +8,13 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## Unreleased
+
+- Add preview DeepSeek Harness (`dsh`) command-hook support on macOS and Linux,
+  including pre-tool block/approval, prompt blocking, event correlation, setup,
+  teardown, discovery and UI selection. Vendor hook failures remain fail-open;
+  Windows, managed enterprise and profile-dependent asset management are not certified.
+
 ## [1.0.0] — Release-owned upgrades
 
 1.0 replaces the 0.x upgrade system. `defenseclaw upgrade` now downloads the

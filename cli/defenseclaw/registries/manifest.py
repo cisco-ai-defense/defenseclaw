@@ -77,6 +77,7 @@ KNOWN_CONNECTORS = {
     "zeptoclaw",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",

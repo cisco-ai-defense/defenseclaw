@@ -27,7 +27,7 @@ native telemetry, and approval support therefore vary by connector.
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, and Kiro. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream. Kiro also has native ACP support." />
+  <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, DeepSeek Harness (preview), Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, and Kiro. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream. Kiro also has native ACP support." />
   <Card title="Custom policy connector" description="OmniGent. DefenseClaw installs an in-process Python policy bridge and maps six awaited policy phases to ALLOW, ASK, or DENY without proxying model traffic." />
   <Card title="ACP guard" href="/docs/acp-guard" description="The shared guard protects verified native ACP entry points for Kiro and other connectors without creating an IDE-specific extension." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
@@ -56,6 +56,7 @@ evidence has not been recorded.
 | [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | Regular connector: workspace-scoped native hooks in `.kiro/hooks` for Kiro IDE and `kiro-cli --v3`, a CLI 2.x agent config for bare `kiro-cli`, plus optional ACP via the shipped stdio guard. |
 | [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
 | [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
+| [DeepSeek Harness](/docs/connectors/deepseek) | **Preview** | **Not certified** | Source-pinned command-hook bridge; upstream errors fail open; no managed enterprise support. |
 | [Devin CLI and Devin Desktop](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` hook admission. Devin Desktop's default Devin Local agent shares the CLI hooks; its legacy Cascade agent is not covered. The separate native `devin acp` entry point is cataloged for the shared guard, while cloud Devin, proxy, and native OTLP remain excluded. |
 | [GitHub Copilot CLI](/docs/connectors/copilot) | **Supported** | **Supported** | Uses Copilot's PowerShell hook field; upstream Windows sandboxing cannot enforce per-path denials. |
 | [Antigravity](/docs/connectors/antigravity) | **Supported** | **Supported** | Native PowerShell launcher; only `PreToolUse` can block or ask. |
@@ -75,7 +76,7 @@ removed, are listed with migration steps in
 | Family | Connectors | Data path | Enforcement boundary |
 | --- | --- | --- | --- |
 | Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
-| Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Kiro | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook. Kiro also exposes native ACP. |
+| Hook | Claude Code, Codex, Amp, Cursor, DeepSeek Harness (preview), Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Kiro | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook. Kiro also exposes native ACP. |
 | Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
 | ACP | Tested Kiro + Zed path; cataloged native modes for Cursor, Hermes, OpenCode, Copilot, and Devin. Native entry points only — no bridges | DefenseClaw mediates client ↔ agent JSON-RPC | Bidirectional prompt, output, approval, filesystem, terminal, and extension-method policy |
 

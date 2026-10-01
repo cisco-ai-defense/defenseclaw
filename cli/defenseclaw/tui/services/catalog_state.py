@@ -1690,6 +1690,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Hermes"
         case "cursor":
             return "Cursor"
+        case "deepseek":
+            return "DeepSeek Harness"
         case "devin":
             return "Devin"
         case "copilot":

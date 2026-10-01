@@ -1,0 +1,64 @@
+---
+title: DeepSeek Harness
+description: Preview DeepSeek Harness integration through its shipped command-hook bridge.
+keywords:
+  - DeepSeek Harness
+  - dsh
+  - DeepSeek guardrails
+---
+
+The `deepseek` connector governs [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+(`dsh`) through its shipped `@deepseek-ai/dsh-hooks-claude-code` plugin.
+This is separate from selecting DeepSeek as a model provider.
+The source-reviewed contract is pinned to `0.2.0-rc.2`, revision
+`639ed015397290b3745d163aafe02ffee4aa3f84`. Live OS certification is pending.
+
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Preview** | Local command-hook bridge; vendor configuration errors, crashes and timeouts fail open. |
+| Native Windows x64 | **Not certified** | Shell transport is unverified; setup refuses enrollment. |
+
+## Setup
+
+Install the vendor's `dsh` CLI separately, then run:
+
+```bash
+defenseclaw setup deepseek --mode observe
+```
+
+Setup preserves the user's `~/.dsh/cordis.patch.yml`, inserts one named
+DefenseClaw bridge, and writes dedicated `~/.dsh/defenseclaw-hooks.json`.
+An absolute `DSH_HOME` redirects both files. Existing Claude Code settings
+are not used or modified. Restart `dsh` after setup or teardown: the bridge
+reads its hook configuration once at startup. The selected profile must include
+the bridge package and its `shell` and `sessionProjections` dependencies.
+Later profile or command-line patches can disable or replace this insertion.
+
+After reviewing observations, enable enforcement with:
+
+```bash
+defenseclaw setup deepseek --mode action
+```
+
+Unknown versions require the normal explicit hook-contract override. A matching
+version means a source-reviewed contract, not live vendor certification.
+
+## Coverage and limitations
+
+- `PreToolUse` supports block and native one-shot approval; `UserPromptSubmit`
+  supports block. The vendor receives its exact Claude-compatible JSON shape.
+- `PostToolUse`, `SessionStart`, `Stop`, `SubagentStart`, and `SubagentStop`
+  provide observations. Stop never forces a continuation loop.
+- `session_id` and `tool_use_id` provide correlation. The result payload omits
+  `isError`, so successful state transitions are not inferred from result text.
+- Vendor failures can allow execution. **Fail-closed and managed enterprise
+  enrollment are not supported.** User-editable profile patches are not a
+  tamper-resistant policy boundary.
+- No native OTLP, ACP, OpenShell sandbox, or profile-dependent MCP, skill,
+  plugin, rule, or agent asset-management coverage is claimed. Other vendor
+  plugins or remote children outside this bridge are outside coverage.
+
+See the pinned [vendor bridge implementation](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/hooks/hooks-claude-code/src/index.ts)
+and [hook error handling](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/hooks/hook-protocol/src/runner.ts).

@@ -40,7 +40,7 @@ enum SetupSecretTransportPolicy {
 /// source of truth.
 enum TUIWizards {
     static let connectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
-                             "cursor", "devin", "copilot", "openhands",
+                             "cursor", "deepseek", "devin", "copilot", "openhands",
                              "antigravity", "opencode", "amp", "omnigent"]
     static let proxyConnectors = ["openclaw", "zeptoclaw"]
     static let hookConnectors = connectors.filter { !proxyConnectors.contains($0) }

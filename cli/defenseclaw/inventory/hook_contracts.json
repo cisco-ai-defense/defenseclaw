@@ -2247,6 +2247,106 @@
           ]
         }
       ]
+    },
+    "deepseek": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "dsh --version",
+      "contracts": [
+        {
+          "contract_id": "deepseek-hooks-v1",
+          "agent_version": {
+            "exact": [
+              "0.2.0-rc.2"
+            ]
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v1",
+          "hook_script": "deepseek-hook.sh",
+          "hook_config_path_templates": [
+            "~/.dsh/defenseclaw-hooks.json",
+            "~/.dsh/cordis.patch.yml"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [],
+            "authoritative_failure_events": [],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "none",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "Stop",
+                "SubagentStart",
+                "SubagentStop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/hooks/hooks-claude-code/src/index.ts"
+            ],
+            "limitations": [
+              "PostToolUse flattens output to text and omits isError; no authoritative success/failure or session terminal event is claimed.",
+              "Hook infrastructure failures and missing configuration fail open upstream; native OTLP and managed enterprise are not supported."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "PreToolUse"
+            ],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user"
+          },
+          "notes": [
+            "https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/packages/hooks/hooks-claude-code/src/index.ts",
+            "Preview: shipped Claude-compatible bridge; missing config, crashes and timeouts fail open. Restart dsh after setup. PostToolUse is observation only; no enterprise or native OTLP coverage."
+          ]
+        }
+      ]
     }
   }
 }

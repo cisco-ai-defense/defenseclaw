@@ -414,6 +414,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "codex": "Codex",
     "hermes": "Hermes",
     "cursor": "Cursor",
+    "deepseek": "DeepSeek Harness",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",

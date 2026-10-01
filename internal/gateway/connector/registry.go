@@ -193,6 +193,7 @@ func newBuiltinConnectors() []Connector {
 		NewHermesConnector(),
 		NewCursorConnector(),
 		NewDevinConnector(),
+		NewDeepSeekConnector(),
 		NewCopilotConnector(),
 		NewOpenHandsConnector(),
 		NewAntigravityConnector(),

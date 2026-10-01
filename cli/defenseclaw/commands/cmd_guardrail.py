@@ -86,6 +86,7 @@ _CONNECTOR_LABELS = {
     "zeptoclaw": "ZeptoClaw",
     "hermes": "Hermes",
     "cursor": "Cursor",
+    "deepseek": "DeepSeek Harness",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",

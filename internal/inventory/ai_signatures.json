@@ -2943,6 +2943,42 @@
         "$LOCALAPPDATA/Google/Chrome/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
         "$LOCALAPPDATA/Microsoft/Edge/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd"
       ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek Harness",
+      "vendor": "DeepSeek",
+      "category": "supported_connector",
+      "confidence": 0.98,
+      "supported_connector": "deepseek",
+      "binary_names": [
+        "dsh"
+      ],
+      "process_names": [
+        "dsh"
+      ],
+      "config_paths": [
+        "~/.dsh/cordis.patch.yml",
+        "$DSH_HOME/cordis.patch.yml"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "@deepseek-ai/dsh"
+      ],
+      "env_var_names": [
+        "DSH_HOME"
+      ],
+      "domain_patterns": [],
+      "history_patterns": [
+        "dsh web"
+      ],
+      "application_names": [
+        "DeepSeek Harness"
+      ],
+      "local_endpoints": [],
+      "skill_paths": [],
+      "plugin_paths": []
     }
   ]
 }

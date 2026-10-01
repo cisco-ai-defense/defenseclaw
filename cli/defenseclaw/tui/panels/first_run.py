@@ -28,6 +28,7 @@ CONNECTOR_CHOICES: tuple[str, ...] = (
     "openclaw",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",

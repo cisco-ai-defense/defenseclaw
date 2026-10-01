@@ -116,6 +116,9 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			Apply:          hookOnlyFixtureApply("cursor"),
 		},
 		{
+			Name: "deepseek", DestinationApp: "deepseek", ClawMode: "deepseek", Apply: hookOnlyFixtureApply("deepseek"),
+		},
+		{
 			Name:           "devin",
 			DestinationApp: "devin",
 			ClawMode:       "devin",
@@ -173,6 +176,8 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.CursorHooksPathOverride
 			connector.CursorHooksPathOverride = filepath.Join(home, ".cursor", "hooks.json")
 			t.Cleanup(func() { connector.CursorHooksPathOverride = prev })
+		case "deepseek":
+			t.Setenv("DSH_HOME", filepath.Join(home, ".dsh"))
 		case "devin":
 			prev := connector.DevinHooksPathOverride
 			connector.DevinHooksPathOverride = filepath.Join(home, ".config", "devin", "config.json")
