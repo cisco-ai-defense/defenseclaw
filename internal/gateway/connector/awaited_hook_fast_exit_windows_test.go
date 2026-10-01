@@ -13,6 +13,7 @@
 package connector
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -21,12 +22,17 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 const (
 	awaitedHookChildEnv = "DEFENSECLAW_TEST_AWAITED_HOOK_CHILD"
 	awaitedHookMarker   = "awaited-hook-fast-exit-marker"
 	awaitedHookStdout   = `{"decision":"block","reason":"` + awaitedHookMarker + `"}`
+	// awaitedHookCaseDeadline bounds the runs of one bridge, which take a few
+	// seconds, so a bridge that never returns fails its case with the runs it
+	// lost instead of hanging the package until the go test timeout.
+	awaitedHookCaseDeadline = 2 * time.Minute
 )
 
 // init makes this test binary stand in for the release hook launcher when
@@ -64,22 +70,22 @@ func TestWindowsAwaitedHookCommandsReturnFastExitStatus(t *testing.T) {
 	const contract = "codex-hooks-v4"
 	cmdExe := filepath.Join(trustedWindowsSystemDirectory(), "cmd.exe")
 	systemPowerShell := windowsSystemPowerShellExe()
-	throughCmd := func(command string) func() *exec.Cmd {
-		return func() *exec.Cmd {
-			cmd := exec.Command(cmdExe)
+	throughCmd := func(command string) func(context.Context) *exec.Cmd {
+		return func(ctx context.Context) *exec.Cmd {
+			cmd := exec.CommandContext(ctx, cmdExe)
 			cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /d /s /c "` + command + `"`}
 			return cmd
 		}
 	}
-	direct := func(command string) func() *exec.Cmd {
-		return func() *exec.Cmd {
+	direct := func(command string) func(context.Context) *exec.Cmd {
+		return func(ctx context.Context) *exec.Cmd {
 			argv := strings.Fields(command)
-			return exec.Command(argv[0], argv[1:]...)
+			return exec.CommandContext(ctx, argv[0], argv[1:]...)
 		}
 	}
-	throughCommand := func(shell, script string) func() *exec.Cmd {
-		return func() *exec.Cmd {
-			return exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	throughCommand := func(shell, script string) func(context.Context) *exec.Cmd {
+		return func(ctx context.Context) *exec.Cmd {
+			return exec.CommandContext(ctx, shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 		}
 	}
 	bareScript := func(arguments ...string) string {
@@ -93,7 +99,7 @@ func TestWindowsAwaitedHookCommandsReturnFastExitStatus(t *testing.T) {
 	cases := []struct {
 		name  string
 		args  string
-		start func() *exec.Cmd
+		start func(context.Context) *exec.Cmd
 	}{
 		{"codex per-user through cmd", "hook --connector codex --event PreToolUse --hook-contract " + contract, throughCmd(codexUser)},
 		{"codex standalone through cmd", "hook --connector codex --enterprise-managed --event PreToolUse --hook-contract " + contract,
@@ -112,25 +118,31 @@ func TestWindowsAwaitedHookCommandsReturnFastExitStatus(t *testing.T) {
 		cases = append(cases, struct {
 			name  string
 			args  string
-			start func() *exec.Cmd
+			start func(context.Context) *exec.Cmd
 		}{"copilot managed through pwsh -Command", strings.Join(copilotArgs, " "), throughCommand(pwsh, bareScript(copilotArgs...))})
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			const runs, parallel = 32, 8
+			ctx, cancel := context.WithTimeout(context.Background(), awaitedHookCaseDeadline)
+			defer cancel()
 			results := make(chan string, runs)
 			slots := make(chan struct{}, parallel)
 			for i := 0; i < runs; i++ {
 				slots <- struct{}{}
 				go func() {
 					defer func() { <-slots }()
-					cmd := testCase.start()
+					cmd := testCase.start(ctx)
+					// The killed bridge's launcher may still hold the output pipes.
+					cmd.WaitDelay = 5 * time.Second
 					cmd.Stdin = strings.NewReader(`{"tool":"` + awaitedHookMarker + `"}`)
 					cmd.Env = append(os.Environ(), awaitedHookChildEnv+"="+testCase.args)
 					var stdout, stderr strings.Builder
 					cmd.Stdout, cmd.Stderr = &stdout, &stderr
 					_ = cmd.Run()
 					switch {
+					case ctx.Err() != nil && (cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 2):
+						results <- fmt.Sprintf("no result within %s: stdout=%q stderr=%q", awaitedHookCaseDeadline, stdout.String(), stderr.String())
 					case cmd.ProcessState == nil:
 						results <- "not started"
 					case cmd.ProcessState.ExitCode() != 2:
