@@ -251,7 +251,7 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        home = os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+        home = os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
         print("  → The installer continues in a new window, which shows the result when it ends.")
         print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
         print("    Confirm the result afterwards with: defenseclaw --version")

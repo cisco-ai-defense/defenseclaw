@@ -208,3 +208,5 @@ def test_the_upgrade_window_keeps_the_outcome_on_screen_with_yes() -> None:
     body = text[text.index("function Wait-BeforeClose") : text.index("# -- Existing install")]
     assert "if ($Yes -or" not in body
     assert "[Console]::KeyAvailable" in body and "$Run.Log" in body
+    # Windows PowerShell 5.1 runs this installer and has no [uint] accelerator.
+    assert '"uint[]"' not in body

@@ -486,7 +486,9 @@ function Wait-BeforeClose([int]$Code) {
     if (-not $RunAsFile) { return }
     try {
         Initialize-Native
-        if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint[]" 4), 4) -ne 1) { return }
+        # Windows PowerShell 5.1 has no [uint] accelerator, so a uint array threw here
+        # and the catch below closed the window at once.
+        if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint32[]" 4), 4) -ne 1) { return }
         if ($Run.Log) { Write-Host "  Install log: $($Run.Log)" }
         if (-not $Yes) {
             [void](Read-Host "  Press Enter to close this window")
