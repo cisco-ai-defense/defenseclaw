@@ -78,9 +78,10 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 		}
 		script := decodeTestEncodedCommand(t, command)
 		for _, want := range []string{
-			"Start-Process -FilePath '" + opts.HookBinary + "'",
-			"'--enterprise-managed','--event','" + group.eventType + "','--hook-contract','" + opts.HookContractID + "'",
-			"-NoNewWindow -Wait -PassThru",
+			"[System.Diagnostics.ProcessStartInfo]::new('" + opts.HookBinary + "'",
+			"'--enterprise-managed' '--event' '" + group.eventType + "' '--hook-contract' '" + opts.HookContractID + "'",
+			"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+			"$hookProcess.WaitForExit()",
 			"exit $hookProcess.ExitCode",
 		} {
 			if !strings.Contains(script, want) {
