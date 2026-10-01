@@ -891,7 +891,10 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             and target not in plan.data_bound_launchers
             and os.path.basename(target) != _UV_RECORD
         ]
-        if kept:
+        developer = _windows_developer_files(plan.install_root) if plan.platform_name == "win32" else []
+        if developer:
+            click.echo(f"      {ux.dim('·')} kept: {_windows_developer_removal(developer)}")
+        elif kept:
             click.echo(
                 f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
                 f"in {plan.install_root} (add --binaries to remove them too)"
@@ -1043,6 +1046,49 @@ def _validate_windows_ancestor_chain(path: str, label: str) -> None:
         candidate = candidate.parent
 
 
+# What `make all` (Makefile _source-dev-install) publishes into the Windows
+# install root: regular-file copies plus the source ownership marker.
+_WINDOWS_DEVELOPER_FILES = (
+    "defenseclaw.exe",
+    "defenseclaw-gateway.exe",
+    "defenseclaw-acp.exe",
+    "litellm.exe",
+    "skill-scanner.exe",
+    "skill-scanner-api.exe",
+    "skill-scanner-pre-commit.exe",
+    "mcp-scanner.exe",
+    "mcp-scanner-api.exe",
+    ".defenseclaw-source-root",
+)
+
+
+def _windows_developer_files(install_root: str) -> list[str]:
+    """Return the files a `make all` developer install published, if it is one.
+
+    A developer install has the source ownership marker and no installer
+    shim. Uninstall does not remove it (the CLI runs from one of these
+    copies); the plan and the refusal name the files instead.
+    """
+    if not install_root or os.path.lexists(os.path.join(install_root, "defenseclaw.cmd")):
+        return []
+    if not os.path.lexists(os.path.join(install_root, ".defenseclaw-source-root")):
+        return []
+    return [
+        os.path.join(install_root, name)
+        for name in _WINDOWS_DEVELOPER_FILES
+        if os.path.lexists(os.path.join(install_root, name))
+    ]
+
+
+def _windows_developer_removal(files: list[str]) -> str:
+    quoted = ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+    return (
+        "this is a developer install from 'make all', which uninstall does not remove. "
+        "Run 'defenseclaw uninstall' without --binaries (add --all to remove data too), "
+        f"then remove the developer files from PowerShell:\n  Remove-Item -LiteralPath {quoted}"
+    )
+
+
 def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
     """Require the installer-authored CLI shim before removing paired artifacts."""
     existing = [path for path in plan.binary_targets if os.path.lexists(path)]
@@ -1050,6 +1096,9 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         return
     shim = os.path.join(plan.install_root, "defenseclaw.cmd")
     if not os.path.isfile(shim) or _is_reparse_path(shim):
+        developer = _windows_developer_files(plan.install_root)
+        if developer:
+            raise click.ClickException(f"refusing Windows binary removal: {_windows_developer_removal(developer)}")
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
         with open(shim, encoding="utf-8-sig", errors="strict") as stream:

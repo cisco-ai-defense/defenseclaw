@@ -386,6 +386,27 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 with patch.object(cmd_uninstall.time, "sleep"), self.assertRaises(OSError):
                     cmd_uninstall._remove_binaries(plan)
 
+    def test_windows_developer_install_refusal_names_the_files_to_remove(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            root.mkdir()
+            for name in ("defenseclaw.exe", "defenseclaw-gateway.exe", "litellm.exe", ".defenseclaw-source-root"):
+                (root / name).write_text("dev", encoding="ascii")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                gateway_path=str(root / "defenseclaw-gateway.exe"),
+                binary_targets=(str(root / "defenseclaw-gateway.exe"),),
+                remove_binaries=True,
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                cmd_uninstall._validate_windows_binary_ownership(plan)
+            message = raised.exception.message
+            self.assertIn("developer install from 'make all'", message)
+            self.assertIn(f"'{root / 'litellm.exe'}'", message)
+            self.assertIn(f"'{root / '.defenseclaw-source-root'}'", message)
+            self.assertTrue((root / "defenseclaw-gateway.exe").is_file())
+
     def test_same_named_unrelated_windows_files_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "bin"
