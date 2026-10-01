@@ -471,6 +471,13 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                 pass
         if connector == "codex" and os.path.normcase(os.path.abspath(root)) != paired_codex_root:
             candidates.extend(_codex_npm_native_candidates(root))
+        if connector == "amp" and os.name == "nt":
+            # npm puts only amp.cmd/amp.ps1 shims on PATH; the native image
+            # they launch sits at this fixed package-relative path, the same
+            # one the per-user admission table names.
+            candidate = os.path.join(root, *_AMP_NPM_NATIVE_RELATIVE)
+            if os.path.isfile(candidate):
+                candidates.append(candidate)
 
     # Prefer a native image over a script wrapper. This both avoids shell
     # interpretation and binds the protected digest to the process that
@@ -488,6 +495,9 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             seen.add(key)
             result.append(candidate)
     return tuple(result)
+
+
+_AMP_NPM_NATIVE_RELATIVE = ("node_modules", "@ampcode", "cli", "bin", "amp.exe")
 
 
 def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
