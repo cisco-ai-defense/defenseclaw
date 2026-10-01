@@ -217,3 +217,24 @@ func TestCustodyRetiredExecutableStaysRecognized(t *testing.T) {
 		t.Fatal("a path outside the custody naming was accepted")
 	}
 }
+
+// A daemon child started from /proc/self/exe keeps its install name, which
+// ps-based checks such as the installer's restart gate read (#643).
+func TestDaemonChildStartedFromProcSelfExeKeepsInstallName(t *testing.T) {
+	if os.Getenv("DC_TEST_REPORT_COMM") == "1" {
+		comm, _ := os.ReadFile("/proc/self/comm")
+		_, _ = os.Stdout.Write(comm)
+		os.Exit(0)
+	}
+	cmd := exec.Command("/proc/self/exe", "-test.run=^TestDaemonChildStartedFromProcSelfExeKeepsInstallName$")
+	cmd.Args[0] = filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	cmd.Env = append(os.Environ(), "DC_TEST_REPORT_COMM=1")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The kernel keeps 15 bytes of a process name.
+	if got := strings.TrimSpace(string(out)); got != "defenseclaw-gat" {
+		t.Fatalf("child process name = %q, want %q", got, "defenseclaw-gat")
+	}
+}

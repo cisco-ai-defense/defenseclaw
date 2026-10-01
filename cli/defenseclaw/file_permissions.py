@@ -1448,8 +1448,22 @@ def atomic_write_private_bytes(
     )
 
 
-def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
-    """Return why an untrusted SID can write *path*, or ``None`` when safe."""
+_WINDOWS_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def windows_acl_write_error(
+    path: str | os.PathLike[str],
+    *,
+    trust_administrators: bool = False,
+) -> str | None:
+    """Return why an untrusted SID can write *path*, or ``None`` when safe.
+
+    Only the current user (who must own *path*), OWNER RIGHTS and LocalSystem
+    may hold write rights. ``trust_administrators`` also admits the built-in
+    Administrators group, matched by its well-known SID only: a profile folder
+    such as ``~\\.local\\bin`` inherits its full-control entry, and a local
+    administrator can already take over the account's files.
+    """
     if os.name != "nt":
         return None
     try:
@@ -1469,6 +1483,8 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
     trusted = {"S-1-3-4", "S-1-5-18", current_sid}  # OWNER RIGHTS, LocalSystem, current user
+    if trust_administrators:
+        trusted.add(_WINDOWS_BUILTIN_ADMINISTRATORS_SID)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2) or not permissions & write_mask:
@@ -2148,7 +2164,19 @@ def _set_windows_owner_only_acl(path: str, *, set_owner: bool = False) -> None:
 
 
 def _set_windows_current_user_owner(path: str) -> None:
-    """Assign a DefenseClaw-managed path to the current token user."""
+    """Assign a DefenseClaw-managed path to the current token user.
+
+    A path the user already owns is left alone: setting the owner needs
+    WRITE_OWNER even when it does not change, and a folder that grants the
+    user Modify, such as a per-session TEMP folder on a Windows server, does
+    not grant it.
+    """
+    try:
+        already_owned = _windows_acl_snapshot(path)[0] == _windows_current_user_sid()
+    except OSError:
+        already_owned = False
+    if already_owned:
+        return
     import ctypes
     from ctypes import wintypes
 

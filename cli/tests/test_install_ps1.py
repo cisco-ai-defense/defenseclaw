@@ -180,3 +180,14 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
     go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
     assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
+
+
+def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4() -> None:
+    text = _text()
+    extras = text[text.index("function Invoke-FirstInstallExtras") : text.index("function Show-Usage")]
+    assert "$quickstartRc = Invoke-Native" in extras
+    assert '$Run.QuickstartRerun = "defenseclaw " + ($quickstartArgs -join " ")' in extras
+    summary = text[text.index('Write-Host "  DefenseClaw $Ver is installed."') : text.index("$savedEnv = @{}")]
+    assert summary.index("if ($Run.QuickstartRerun)") < summary.index("return 4") < summary.index("return $startRc")
+    # `irm | iex` cannot exit; it reports the installed-but-not-set-up outcome instead.
+    assert text.index("if ($code -eq 4) { throw") < text.index('throw "DefenseClaw was not installed"')

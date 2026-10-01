@@ -270,10 +270,13 @@ func executable(p string) bool {
 
 // findVMDriver is the openshell-driver-vm the gateway starts: the one in
 // [openshell.drivers.vm] driver_dir, else the formula's (libexec, else
-// bin, of the keg under the Homebrew prefix), else the one next to the
-// openshell-gateway on PATH (in its directory or the libexec beside it, as
-// OpenShell's release archives lay them out). A gateway that runs the
-// driver from anywhere else names it through its running process.
+// bin, of the keg under the Homebrew prefix), else one in the directories
+// the gateway itself searches (~/.local/libexec/openshell,
+// /usr/libexec/openshell, /usr/local/libexec/openshell,
+// /usr/local/libexec), else the one next to the openshell-gateway on PATH
+// (in its directory or the libexec beside it, as OpenShell's release
+// archives lay them out). A gateway that runs the driver from anywhere
+// else names it through its running process.
 func (r *doctorRun) findVMDriver(ctx context.Context) string {
 	var dirs []string
 	if r.config != nil && filepath.IsAbs(r.config.VM.DriverDir) {
@@ -283,6 +286,10 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 		keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
 		dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
 	}
+	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
+		dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
+	}
+	dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
 	if gw, err := r.LookPath(GatewayBinary); err == nil && filepath.IsAbs(gw) {
 		bins := []string{filepath.Dir(gw)}
 		if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {

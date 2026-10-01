@@ -29,7 +29,7 @@ from unittest.mock import Mock
 import pytest
 from defenseclaw import doctor_gateway, file_permissions
 from defenseclaw import gateway as gateway_module
-from defenseclaw.commands import cmd_doctor
+from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.gateway import gateway_api_client_host
 
 
@@ -319,6 +319,54 @@ def test_windows_confidentiality_rejects_empty_effective_dacl(monkeypatch):
     problem = file_permissions.windows_acl_confidentiality_error("synthetic.env")
 
     assert problem == "owner/SYSTEM effective access is missing"
+
+
+@pytest.mark.parametrize(
+    ("sid", "trusted"),
+    [
+        ("S-1-5-32-544", True),  # BUILTIN\Administrators, as a profile folder inherits it
+        ("S-1-5-32-545", False),  # BUILTIN\Users
+        # A group that is only named Administrators: trust follows the SID, never the name.
+        ("S-1-5-21-1111111111-2222222222-3333333333-1001", False),
+    ],
+)
+def test_windows_gateway_custody_trusts_the_builtin_administrators_sid_only(monkeypatch, tmp_path, sid, trusted):
+    """The per-user gateway and its folder may inherit full control for BUILTIN\\Administrators."""
+    current_sid = "S-1-5-21-current"
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_bytes(b"synthetic")
+    inherited_full_control = 0x10 | 0x03  # INHERITED, OBJECT_INHERIT | CONTAINER_INHERIT
+    entries = [
+        (0x001F01FF, 1, inherited_full_control, current_sid),
+        (0x001F01FF, 1, inherited_full_control, "S-1-5-18"),
+        (0x001F01FF, 1, inherited_full_control, sid),
+    ]
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (current_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(cmd_setup, "os", SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setattr(gateway_module, "packaged_windows_gateway_path", lambda: "")
+
+    resolved = cmd_setup._trusted_gateway_lifecycle_executable(os.fspath(gateway))
+
+    assert resolved == (str(gateway.resolve()) if trusted else None)
+    # Private files keep trusting only the user, OWNER RIGHTS and SYSTEM.
+    assert file_permissions.windows_acl_write_error(os.fspath(gateway)) == f"ACL grants write access to untrusted SID {sid}"
+
+
+def test_windows_owner_assignment_leaves_a_path_the_user_already_owns(monkeypatch):
+    """Setting an unchanged owner needs WRITE_OWNER, which a Modify-only TEMP folder does not grant.
+
+    Doctor's observability snapshot in a per-session TEMP folder ended in
+    "PermissionError: [WinError 5] Access is denied." that way.
+    """
+    current_sid = "S-1-5-21-current"
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (current_sid, False, []))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(ctypes, "WinDLL", Mock(side_effect=AssertionError("owner rewritten")), raising=False)
+
+    file_permissions._set_windows_current_user_owner("snapshot.yaml")
 
 
 def test_windows_system_powershell_checks_every_system_directory_ancestor(
