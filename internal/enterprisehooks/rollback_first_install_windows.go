@@ -26,8 +26,9 @@ import (
 // the bytes setup found, or no file when setup created it
 // (connector.RestoreManagedFileBackups). It runs before the rollback removes
 // the folder that holds the records, and writes nothing into it. An account
-// without a session returns an error IsWindowsTargetSessionUnavailable
-// recognizes.
+// without a session is impersonated from an S4U logon (unless
+// windowsStandaloneSignedOutRollbackSwitch is "0"); when that fails, it
+// returns an error IsWindowsTargetSessionUnavailable recognizes.
 func RestoreWindowsStandaloneUserAgentConfigs(userHome, ownerSID, dataDir string) (restored, kept []string, err error) {
 	home, sid, err := validateWindowsEnterpriseHome(userHome, ownerSID)
 	if err != nil {
@@ -59,12 +60,34 @@ func RestoreWindowsStandaloneUserAgentConfigs(userHome, ownerSID, dataDir string
 			relaxErrs = append(relaxErrs, err)
 		}
 	}
-	err = windowsEnterpriseTargetImpersonation(sid, home, func() error {
+	restore := func() error {
 		var restoreErr error
 		restored, kept, restoreErr = connector.RestoreManagedFileBackups(resolved, home)
 		return restoreErr
-	})
+	}
+	err = windowsEnterpriseTargetImpersonation(sid, home, restore)
+	if IsWindowsTargetSessionUnavailable(err) && windowsStandaloneSignedOutRollbackEnabled() {
+		// No guardian is left after the rollback to do it at the account's
+		// next sign-in, so do it now as the account, from an S4U logon.
+		// When that fails too, the account stays named as not signed in.
+		if s4uErr := windowsEnterpriseS4UTargetImpersonation(sid, home, restore); s4uErr != nil {
+			err = errors.Join(err, s4uErr)
+		} else {
+			err = nil
+		}
+	}
 	return restored, kept, errors.Join(append(relaxErrs, err)...)
+}
+
+// windowsStandaloneSignedOutRollbackSwitch turns off, with "0", the rollback's
+// S4U restore of a signed-out account's agent files.
+const windowsStandaloneSignedOutRollbackSwitch = "DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS"
+
+// Replaceable in tests.
+var windowsEnterpriseS4UTargetImpersonation = withWindowsEnterpriseS4UTargetImpersonation
+
+func windowsStandaloneSignedOutRollbackEnabled() bool {
+	return strings.TrimSpace(os.Getenv(windowsStandaloneSignedOutRollbackSwitch)) != "0"
 }
 
 // RemoveWindowsStandalonePerUserRuntimeSelectors removes the runtime selector
