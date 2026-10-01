@@ -1208,7 +1208,7 @@ Options:
   -Rollback             Restore the install that the last upgrade replaced
   -Connector NAME       First install only: agent to guard ($($ConnectorChoices -join ', '))
   -NoOpenclaw           First install only: same as -Connector none
-  -Quickstart           First install only: run 'defenseclaw quickstart' afterwards
+  -Quickstart           Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   -QuickstartMode MODE  observe or action (implies -Quickstart)
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
@@ -1534,10 +1534,17 @@ function Invoke-Install {
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
+    $configured = (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG
     if (-not $PrevVersion) {
         Invoke-FirstInstallExtras
+    } elseif ($Quickstart -and -not $configured) {
+        # Installed but never set up, so the asked-for quickstart is still the first run.
+        Invoke-FirstInstallExtras
     } elseif ($Quickstart) {
-        Write-Warn "Skipped -Quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+        $rerun = "defenseclaw quickstart"
+        if ($Connector -and $Connector -ne "none") { $rerun += " --connector $Connector" }
+        if ($QuickstartMode) { $rerun += " --mode $QuickstartMode" }
+        Write-Warn "Skipped -Quickstart: DefenseClaw is already configured. To run it now: $rerun"
     }
     $setupBin = if ($Setup) { Join-Path $Setup.Root "bin" } else { "" }
     $pathChanged = Update-UserPath -Add $BinDir -Remove $setupBin
