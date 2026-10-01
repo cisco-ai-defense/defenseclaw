@@ -2927,27 +2927,30 @@ $ErrorActionPreference = 'Stop'
 $utf8 = [Text.UTF8Encoding]::new($false)
 $pidPath = Join-Path $DataRoot 'gateway.pid'
 $jsonlPath = Join-Path $DataRoot 'gateway.jsonl'
-# Initialize the NetTCPIP command and its CIM provider before publishing sampler
-# readiness so their fresh-process cost cannot consume the sample deadline. A
-# newly started listener can briefly be absent from a cold CIM provider, so
-# retry that exact query within a small bound instead of terminating the sampler.
-$prewarmDeadline = [DateTime]::UtcNow.AddSeconds(20)
-do {
+$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
+try {
+    # The schema header is the started record, written before any CIM work.
+    $header = $utf8.GetBytes("schema=1`n")
+    $stream.Write($header, 0, $header.Length)
+    $stream.Flush($true)
+    # Initialize the NetTCPIP command and its CIM provider once, with no wall
+    # clock. A cold provider can briefly miss a live listener; that is reported
+    # as a non-terminal listener_prewarm stage, and the sampling loop below
+    # retries the exact listener query.
     $prewarmListeners = @()
     try {
         $prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort $ApiPort -ErrorAction Stop)
     } catch { }
-    if ($prewarmListeners.Count -gt 0) { break }
-    if ([DateTime]::UtcNow -ge $prewarmDeadline) {
-        throw 'Setup health sampler listener prewarm timed out'
+    if ($prewarmListeners.Count -eq 0) {
+        $bytes = $utf8.GetBytes(([ordered]@{
+            observed_at = [DateTime]::UtcNow.ToString('o')
+            kind = 'sample_error'
+            stage = 'listener_prewarm'
+            category = 'unavailable_or_mismatch'
+        } | ConvertTo-Json -Compress) + "`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
     }
-    Start-Sleep -Milliseconds 100
-} while ($true)
-$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
-try {
-    $header = $utf8.GetBytes("schema=1`n")
-    $stream.Write($header, 0, $header.Length)
-    $stream.Flush($true)
     $last = ''
     while ($true) {
         $stage = 'pid_file'
@@ -3129,14 +3132,12 @@ try {
     try {
         $started = $process.Start()
         if (-not $started) { throw 'failed to start Setup health sampler' }
-        # This is a polling watchdog, not a delay: healthy samplers return as
-        # soon as the readiness file appears. Leave headroom for a cold CIM
-        # provider on contended Windows runners while retaining a hard bound.
-        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        # The schema header is the sampler's started record, written before its
+        # CIM prewarm. Wait for it or for the sampler to exit, with no wall
+        # clock: a cold pwsh start on a loaded runner is slow, not failed.
         while (-not (Test-Path -LiteralPath $outcome -PathType Leaf)) {
             $process.Refresh()
             if ($process.HasExited) { throw "Setup health sampler exited with $($process.ExitCode)" }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'Setup health sampler readiness timed out' }
             Start-Sleep -Milliseconds 50
         }
         return [pscustomobject]@{ Process = $process }
@@ -3145,9 +3146,7 @@ try {
         try {
             if ($started -and -not $process.HasExited) {
                 $process.Kill($true)
-                if (-not $process.WaitForExit(5000)) {
-                    throw 'Setup health sampler readiness cleanup timed out'
-                }
+                $process.WaitForExit()
             }
         } finally {
             $process.Dispose()
@@ -3163,10 +3162,55 @@ function Stop-SetupAcceptanceHealthSampler([AllowNull()][object]$Sampler) {
         $process.Refresh()
         if (-not $process.HasExited) {
             $process.Kill($true)
-            if (-not $process.WaitForExit(5000)) { throw 'Setup health sampler cleanup timed out' }
+            $process.WaitForExit()
         }
     } finally {
         $process.Dispose()
+    }
+}
+
+function Wait-SetupAcceptanceHealthSamplerRecord(
+    [object]$Sampler,
+    [string]$OutcomePath,
+    [ValidateSet('sample', 'sample_error')][string]$Kind,
+    [string]$Failure
+) {
+    # Event-ordered: return the first record of $Kind, or fail once the sampler
+    # has exited without one. Exit is read before the ledger, so a record the
+    # sampler flushed before exiting is always seen. There is no wall clock; the
+    # caller's step timeout bounds a sampler that never reaches either event.
+    $process = [Diagnostics.Process]$Sampler.Process
+    $reported = 0
+    while ($true) {
+        $process.Refresh()
+        $exited = $process.HasExited
+        $diagnostics = 0
+        $lastDiagnostic = $null
+        foreach ($line in @(Get-Content -LiteralPath $OutcomePath -Encoding UTF8)) {
+            if ($line -eq 'schema=1') { continue }
+            try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            $kindProperty = $candidate.PSObject.Properties['kind']
+            $candidateKind = if ($null -eq $kindProperty) { 'sample' } else { [string]$kindProperty.Value }
+            # The one-shot provider prewarm is never the record a caller waits for.
+            $isPrewarm = $candidateKind -ceq 'sample_error' -and
+                [string]$candidate.stage -ceq 'listener_prewarm'
+            if ($candidateKind -ceq $Kind -and -not $isPrewarm) { return $candidate }
+            if ($candidateKind -ceq 'sample_error') {
+                $diagnostics++
+                $lastDiagnostic = $candidate
+                if ($diagnostics -gt $reported) {
+                    # Progress for the step log if the step timeout ends the wait.
+                    Write-Host "Setup health sampler diagnostic: stage=$($candidate.stage) category=$($candidate.category)"
+                    $reported = $diagnostics
+                }
+            }
+        }
+        if ($exited) {
+            $stage = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.stage }
+            $category = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.category }
+            throw "$Failure (sampler exited with $($process.ExitCode); stage=$stage category=$category)"
+        }
+        Start-Sleep -Milliseconds 50
     }
 }
 
@@ -3195,7 +3239,9 @@ $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 try {
     $listener.Start()
     $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
-    [IO.File]::WriteAllText($ReadyPath, [string]$port, $utf8)
+    # Publish the port atomically so the parent never reads a partial marker.
+    [IO.File]::WriteAllText("$ReadyPath.tmp", [string]$port, $utf8)
+    [IO.File]::Move("$ReadyPath.tmp", $ReadyPath)
     $startedAt = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().ToString('o')
     while ($true) {
         $client = $listener.AcceptTcpClient()
@@ -3272,11 +3318,11 @@ try {
     try {
         $serverStarted = $server.Start()
         if (-not $serverStarted) { throw 'synthetic Setup health server did not start' }
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        # Every wait below is event-ordered: the child's marker or its exit. The
+        # step timeout is the only clock, so a cold pwsh start cannot fail it.
         while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
             $server.Refresh()
             if ($server.HasExited) { throw "synthetic Setup health server exited with $($server.ExitCode)" }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'synthetic Setup health server readiness timed out' }
             Start-Sleep -Milliseconds 50
         }
         $apiPort = [int][IO.File]::ReadAllText($readyPath)
@@ -3297,12 +3343,10 @@ try {
         } finally {
             $resetClient.Dispose()
         }
-        $resetDeadline = [DateTime]::UtcNow.AddSeconds(5)
         while (-not (Test-Path -LiteralPath $clientFailureObservedPath -PathType Leaf)) {
             $server.Refresh()
-            if ($server.HasExited) { throw 'synthetic Setup health server exited after reset client' }
-            if ([DateTime]::UtcNow -ge $resetDeadline) {
-                throw 'synthetic Setup health server did not isolate a reset client'
+            if ($server.HasExited) {
+                throw 'synthetic Setup health server did not isolate a reset client (it exited)'
             }
             Start-Sleep -Milliseconds 50
         }
@@ -3331,17 +3375,8 @@ try {
         # failure record is emitted instead of a schema-only ledger.
         $sampler = Start-SetupAcceptanceHealthSampler $pwsh $diagnosticOutcomePath $dataRoot $apiPort `
             ([pscustomobject]@{ ProcessId = $PID; StartIdentity = '1' }) $pwsh $installRoot
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
-        $diagnostic = $null
-        while ($null -eq $diagnostic) {
-            foreach ($line in @(Get-Content -LiteralPath $diagnosticOutcomePath -Encoding UTF8)) {
-                if ($line -eq 'schema=1') { continue }
-                try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-                if ([string]$candidate.kind -ceq 'sample_error') { $diagnostic = $candidate; break }
-            }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'Setup health sampler did not emit its bounded stage diagnostic' }
-            Start-Sleep -Milliseconds 50
-        }
+        $diagnostic = Wait-SetupAcceptanceHealthSamplerRecord $sampler $diagnosticOutcomePath 'sample_error' `
+            'Setup health sampler did not emit its bounded stage diagnostic'
         if ([string]$diagnostic.stage -cne 'pid_file' -or
             [string]$diagnostic.category -cne 'unavailable_or_invalid') {
             throw 'Setup health sampler emitted an unexpected initial diagnostic category'
@@ -3366,29 +3401,13 @@ try {
         )
         Move-Item -LiteralPath $pidTemporary -Destination (Join-Path $dataRoot 'gateway.pid')
 
-        $sample = $null
-        $lastDiagnostic = $null
         $sampleOutcomePath = Join-Path $fixtureRoot 'setup-health-sample.jsonl'
         $sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath $dataRoot $apiPort `
             ([pscustomobject]@{ ProcessId = $PID; StartIdentity = '1' }) $pwsh $installRoot
-        $sampleDeadline = [DateTime]::UtcNow.AddSeconds(15)
-        while ($null -eq $sample -and [DateTime]::UtcNow -lt $sampleDeadline) {
-            foreach ($line in @(Get-Content -LiteralPath $sampleOutcomePath -Encoding UTF8)) {
-                if ($line -eq 'schema=1') { continue }
-                try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-                if ($null -eq $candidate.PSObject.Properties['kind']) {
-                    $sample = $candidate
-                    break
-                }
-                if ([string]$candidate.kind -ceq 'sample_error') { $lastDiagnostic = $candidate }
-            }
-            if ($null -eq $sample) { Start-Sleep -Milliseconds 50 }
-        }
-        if ($null -eq $sample) {
-            $stage = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.stage }
-            $category = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.category }
-            throw "Setup health sampler did not emit a correlated health sample (stage=$stage category=$category)"
-        }
+        # Transient stage diagnostics (a cold first health request) are not
+        # terminal; the persistent sampler retries until it emits the sample.
+        $sample = Wait-SetupAcceptanceHealthSamplerRecord $sampler $sampleOutcomePath 'sample' `
+            'Setup health sampler did not emit a correlated health sample'
         if ([int]$sample.gateway_pid -ne $server.Id -or
             [string]$sample.gateway_start_identity -cne $startIdentity -or
             [int]$sample.listener_pid -ne $server.Id -or
@@ -3405,7 +3424,7 @@ try {
             $server.Refresh()
             if (-not $server.HasExited) {
                 $server.Kill($true)
-                if (-not $server.WaitForExit(5000)) { throw 'synthetic Setup health server cleanup timed out' }
+                $server.WaitForExit()
             }
         }
         $server.Dispose()

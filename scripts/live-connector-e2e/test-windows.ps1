@@ -3858,15 +3858,16 @@ threading.Event().wait()
             "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')",
             [StringComparison]::Ordinal
         )
-        return $prewarm -ge 0 -and $readiness -gt $prewarm
+        return $prewarm -ge 0 -and $readiness -ge 0 -and $prewarm -gt $readiness
     }
     Assert-True (& $hasHealthSamplerPrewarm $setupHealthSampler) `
-        'Setup health sampler initializes its listener provider before publishing readiness'
-    Assert-True ($setupHealthSampler -match '\$prewarmDeadline = \[DateTime\]::UtcNow\.AddSeconds\(20\)' -and
-        $setupHealthSampler -match '(?s)do \{.*?Get-NetTCPConnection.*?\$prewarmListeners\.Count -gt 0.*?Start-Sleep -Milliseconds 100.*?\} while \(\$true\)' -and
-        $setupHealthSampler -match '\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(30\)' -and
-        $setupHealthSampler -match "Setup health sampler readiness cleanup timed out") `
-        'Setup health sampler cold-provider retry, readiness polling, and cleanup remain bounded'
+        'Setup health sampler publishes its started record before its listener-provider prewarm'
+    Assert-True ($setupHealthSampler -notmatch 'prewarmDeadline' -and
+        $setupHealthSampler -match "stage = 'listener_prewarm'" -and
+        $setupHealthSampler -match '(?s)while \(-not \(Test-Path -LiteralPath \$outcome -PathType Leaf\)\).*?\$process\.HasExited' -and
+        $setupHealthSampler -notmatch '\$deadline = ' -and
+        $setupHealthSampler -match '\$process\.Kill\(\$true\)\s+\$process\.WaitForExit\(\)') `
+        'Setup health sampler has no wall clock; prewarm, readiness, and cleanup are event-ordered'
     Assert-True (-not (& $hasHealthSamplerPrewarm $setupHealthSampler.Replace(
                 "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
             ))) `
@@ -3875,10 +3876,10 @@ threading.Event().wait()
         "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
     ).Replace(
         "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')",
-        "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')`n`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)"
+        "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)`n`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')"
     )
     Assert-True (-not (& $hasHealthSamplerPrewarm $reorderedHealthSampler)) `
-        'Setup health sampler prewarm predicate rejects readiness published before preload'
+        'Setup health sampler prewarm predicate rejects a prewarm that delays the started record'
     Assert-True ($setupHealthSamplerContract -match '\$listener = \[Net\.Sockets\.TcpListener\]::new\(\[Net\.IPAddress\]::Loopback, 0\)' -and
         $setupHealthSamplerContract -match 'started_at = \$startedAt' -and
         $setupHealthSamplerContract -match 'uptime_ms = 1' -and
@@ -3896,18 +3897,19 @@ threading.Event().wait()
         '$sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath',
         [StringComparison]::Ordinal
     )
-    $sampleDeadlineStart = $setupHealthSamplerContract.IndexOf(
-        '$sampleDeadline = [DateTime]::UtcNow.AddSeconds(15)',
+    $sampleWaitStart = $setupHealthSamplerContract.IndexOf(
+        "`$sample = Wait-SetupAcceptanceHealthSamplerRecord `$sampler `$sampleOutcomePath 'sample'",
         [StringComparison]::Ordinal
     )
     Assert-True ($sampleSamplerStart -ge 0 -and
-        $sampleDeadlineStart -gt $sampleSamplerStart -and
+        $sampleWaitStart -gt $sampleSamplerStart -and
+        $setupHealthSamplerContract -notmatch 'AddSeconds\(' -and
         ([regex]::Matches(
             $setupHealthSamplerContract.Substring($sampleSamplerStart),
             'Start-SetupAcceptanceHealthSampler'
         )).Count -eq 1 -and
         $setupHealthSamplerContract -notmatch 'foreach \(\$attempt in 1\.\.2\)') `
-        'hosted-equivalent Setup health sampler uses one persistent sampler with a fresh post-readiness deadline'
+        'hosted-equivalent Setup health sampler uses one persistent sampler and waits for its sample or exit, not a deadline'
     Assert-True ($harnessText -match 'CLAUDE_CODE_USE_POWERSHELL_TOOL = ''1''' -and
         $harnessText -match 'https://claude\.ai/install\.ps1' -and
         $harnessText -match '\.local\\bin\\claude\.exe' -and

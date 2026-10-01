@@ -1340,7 +1340,6 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
             (
                 "engine",
                 "capture_elapsed_ms",
-                "capture_deadline_ms",
                 "helper_pid",
                 "helper_alive_after_capture",
                 "no_inherited_capture_handles",
@@ -1567,7 +1566,7 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
         assert report["concurrent_roots_unique"] is True
         assert report["concurrent_cleanup_verified"] is True
     if script == SELF_UNINSTALL_HELPER_CAPTURE_SMOKE:
-        assert 0 < int(report["capture_elapsed_ms"]) < int(report["capture_deadline_ms"])
+        assert int(report["capture_elapsed_ms"]) > 0
         assert int(report["helper_pid"]) > 0
         assert report["helper_alive_after_capture"] is True
         assert report["no_inherited_capture_handles"] is True
@@ -3110,7 +3109,6 @@ def test_certification_purges_through_installed_cli_without_retirement_leaks() -
     assert "[string]$Layout.SelfUninstallEnvironmentRoot" in module
 
     assert "Start-DefenseClawSelfUninstallHelper" in helper_capture_smoke
-    assert "[int]$WaitSeconds = 6" in helper_capture_smoke
     assert "$startInfo.RedirectStandardOutput = $true" in helper_capture_smoke
     assert "$startInfo.RedirectStandardError = $true" in helper_capture_smoke
     # Both pipes are now drained via ReadToEndAsync so the parent cannot
@@ -3124,10 +3122,16 @@ def test_certification_purges_through_installed_cli_without_retirement_leaks() -
     assert helper_capture_smoke.index("$nestedProcess.StandardOutput.ReadLine()") < helper_capture_smoke.index(
         "$stopwatch = [Diagnostics.Stopwatch]::StartNew()"
     )
-    assert "$captureDeadlineMilliseconds = [int64](" in helper_capture_smoke
-    assert "($WaitSeconds * 1000) -" in helper_capture_smoke
-    assert "$elapsedMilliseconds -ge $captureDeadlineMilliseconds" in helper_capture_smoke
-    assert "capture_deadline_ms = $captureDeadlineMilliseconds" in helper_capture_smoke
+    # The helper lives exactly as long as the owning smoke, so captured EOF
+    # while it is alive is a causal no-inheritance proof, and no failure path
+    # can orphan it.
+    assert "`$owner = [Diagnostics.Process]::GetProcessById($OwnerProcessId)" in helper_capture_smoke
+    assert "`$owner.StartTime.ToUniversalTime().Ticks -eq $OwnerStartTicks" in helper_capture_smoke
+    assert "`$owner.WaitForExit()" in helper_capture_smoke
+    assert "-OwnerProcessId $ownerProcessId -OwnerStartTicks $ownerStartTicks" in helper_capture_smoke
+    assert "Timeout]::Infinite" not in helper_capture_smoke
+    assert "WaitSeconds" not in helper_capture_smoke
+    assert "AddSeconds(" not in helper_capture_smoke
     assert "helper_alive_after_capture = $helperAlive" in helper_capture_smoke
     assert "no_inherited_capture_handles = $true" in helper_capture_smoke
     assert "protected_environment_pinned = $true" in helper_capture_smoke
