@@ -169,8 +169,12 @@ func hookSourceReason(resp agentHookResponse) string {
 }
 
 // agentHookDisconnectGrace bounds how long an accepted hook keeps working
-// after its client has gone away.
-const agentHookDisconnectGrace = 30 * time.Second
+// after its client has gone away. A var so tests can expire it.
+var agentHookDisconnectGrace = 30 * time.Second
+
+// agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
+// writes once the hook's own work has been cancelled.
+const agentHookPersistGrace = 10 * time.Second
 
 // agentHookCompletionContext keeps the request's values, but not its
 // cancellation: a hook client that hangs up after its own budget (while the
@@ -179,12 +183,25 @@ const agentHookDisconnectGrace = 30 * time.Second
 // hook_decision. The work is cancelled agentHookDisconnectGrace after the
 // disconnect, or when the handler returns.
 func agentHookCompletionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return contextWithCancelGrace(parent, agentHookDisconnectGrace)
+}
+
+// agentHookPersistenceContext carries the terminal persistence of a verdict.
+// It outlives the completion context by agentHookPersistGrace, so a hook whose
+// work the disconnect grace cut off still records the verdict it returned.
+func agentHookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return contextWithCancelGrace(ctx, agentHookPersistGrace)
+}
+
+// contextWithCancelGrace keeps parent's values and is cancelled grace after
+// parent is done, or when the returned cancel runs.
+func contextWithCancelGrace(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	stop := context.AfterFunc(parent, func() {
-		grace := time.NewTimer(agentHookDisconnectGrace)
-		defer grace.Stop()
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
 		select {
-		case <-grace.C:
+		case <-timer.C:
 			cancel()
 		case <-ctx.Done():
 		}
@@ -396,9 +413,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
-					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
+					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
+					defer cancelPersist()
+					persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
 					if persisted {
-						if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
+						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
 								connectorName, req.HookEventName, err)
 						}
@@ -549,13 +568,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
-		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
+		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
+		defer cancelPersist()
+		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
+		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
 		}
 		if persisted {
-			if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
+			if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}

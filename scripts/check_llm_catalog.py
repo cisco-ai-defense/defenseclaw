@@ -196,11 +196,13 @@ def main(argv: list[str] | None = None) -> int:
         except (ImportError, AttributeError):
             info = {}
         if info.get("source") == "local":
-            # The upstream fetch failed or was disabled; say so instead of
-            # passing quietly against the bundled snapshot.
+            # The upstream fetch failed or was disabled.
             reason = info.get("fallback_reason") or "LITELLM_LOCAL_MODEL_COST_MAP is set"
             source = f"bundled litellm registry as of {today.isoformat()}; upstream not used: {reason}"
-            print(f"check_llm_catalog: warning: {source}", file=sys.stderr)
+            # The radar exists to check upstream drift, so it fails rather
+            # than pass against the bundled snapshot.
+            print(f"check_llm_catalog: error: {source}", file=sys.stderr)
+            return 2
     else:
         model_cost = load_bundled_registry()
         today = GATE_AS_OF

@@ -4337,7 +4337,9 @@ namespace DefenseClaw
         public string[] Take(int count, DateTime deadlineUtc)
         {
             if (count < 0) { throw new ArgumentOutOfRangeException("count"); }
-            string[] result = new string[count];
+            // Grow with the lines actually read: the count comes from the
+            // projector, so it must not size an allocation up front.
+            var result = new System.Collections.Generic.List<string>(Math.Min(count, 4096));
             for (int index = 0; index < count; index++)
             {
                 double remaining = (deadlineUtc - DateTime.UtcNow).TotalMilliseconds;
@@ -4348,9 +4350,9 @@ namespace DefenseClaw
                     if (lines.IsCompleted) { throw new EndOfStreamException(); }
                     throw new TimeoutException();
                 }
-                result[index] = line;
+                result.Add(line);
             }
-            return result;
+            return result.ToArray();
         }
     }
 }
@@ -4530,7 +4532,8 @@ function Invoke-CanonicalAuditProjection([string]$AuditDb, [string]$OutputPath =
     }
     if (-not [string]::IsNullOrEmpty($OutputPath)) { return }
     $count = Get-JsonPropertyValue $response 'records'
-    if (($count -isnot [long] -and $count -isnot [int]) -or $count -lt 0) {
+    if (($count -isnot [long] -and $count -isnot [int]) -or $count -lt 0 -or
+        $count -gt [int]::MaxValue) {
         Stop-CanonicalAuditProjectorWithFailure 'returned a malformed projection response'
     }
     # The records share the request deadline: a projector that stalls part

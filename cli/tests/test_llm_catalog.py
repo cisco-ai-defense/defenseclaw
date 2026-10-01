@@ -177,3 +177,20 @@ def test_gate_is_pinned_to_gate_as_of_not_the_wall_clock(monkeypatch, tmp_path) 
     monkeypatch.setattr(mod, "load_bundled_registry", lambda: _FAKE_COST)
     monkeypatch.setattr(mod, "date", _AfterDeprecation)
     assert mod.main([]) == 0
+
+
+def test_live_mode_fails_when_litellm_used_its_bundled_fallback(monkeypatch, capsys) -> None:
+    """The radar must not pass against the bundled snapshot when upstream failed."""
+    import sys
+    import types
+
+    litellm = types.ModuleType("litellm")
+    litellm.model_cost = _FAKE_COST
+    core = types.ModuleType("litellm.litellm_core_utils")
+    cost_map = types.ModuleType("litellm.litellm_core_utils.get_model_cost_map")
+    cost_map.get_model_cost_map_source_info = lambda: {"source": "local", "fallback_reason": "fetch failed"}
+    monkeypatch.setitem(sys.modules, "litellm", litellm)
+    monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils", core)
+    monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils.get_model_cost_map", cost_map)
+    assert mod.main(["--live"]) == 2
+    assert "upstream not used: fetch failed" in capsys.readouterr().err

@@ -1491,6 +1491,11 @@ func TestManagedBytecodeWarmupCompilesCLIImportClosureWithoutRunningCLI(t *testi
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("bytecode warm-up ran the CLI entry point: %v", err)
 	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := warmManagedPythonBytecode(cancelled, t.TempDir()); !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("warm-up after setup cancellation = %v, want errSetupCancelled", err)
+	}
 }
 
 func TestPackagedTargetRuntimeEnvRejectsAmbientRuntimeAndConfigAuthority(t *testing.T) {

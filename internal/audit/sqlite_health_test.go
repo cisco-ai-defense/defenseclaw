@@ -6,6 +6,7 @@ package audit
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestCollectSQLiteHealthPinsReadyStoreAndReturnsBoundedValues(t *testing.T) {
@@ -55,8 +56,11 @@ func TestPassiveCheckpointDoesNotNeedWriterConnection(t *testing.T) {
 	}
 	defer release()
 	// With the writer connection held, this returns only if the checkpoint
-	// runs on its own connection.
-	if _, err := store.passiveCheckpoint(t.Context()); err != nil {
+	// runs on its own connection; the deadline turns a regression into a
+	// failure instead of a hang.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := store.passiveCheckpoint(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

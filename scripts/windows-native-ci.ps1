@@ -5112,6 +5112,7 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     $bridge = Get-AwaitedHookBridge $script
     if ($null -eq $bridge -or
         [IO.Path]::GetFileName($bridge.File) -cne 'defenseclaw-hook.exe' -or
+        @($bridge.Arguments).Count -lt 3 -or
         (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }

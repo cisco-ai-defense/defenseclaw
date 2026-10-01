@@ -169,4 +169,31 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 	if decisions != 1 || audited != 1 {
 		t.Fatalf("hook_decision rows = %d, connector-hook rows = %d, want 1 and 1", decisions, audited)
 	}
+
+	// Once the disconnect grace has run out the hook's remaining work is
+	// cancelled, but the verdict it returns still gets its audit row.
+	grace := agentHookDisconnectGrace
+	agentHookDisconnectGrace = 0
+	t.Cleanup(func() { agentHookDisconnectGrace = grace })
+	body, err = json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "session_id": "s-disconnect-expired", "cwd": t.TempDir(),
+		"tool_name": "Bash", "tool_use_id": "toolu-disconnect-expired", "tool_input": map[string]any{"command": "ls"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)).WithContext(gone)
+	api.handleAgentHook("claudecode").ServeHTTP(httptest.NewRecorder(), request)
+	if events, err = fixture.store.ListEvents(50); err != nil {
+		t.Fatal(err)
+	}
+	audited = 0
+	for _, ev := range events {
+		if ev.Action == string(audit.ActionConnectorHook) {
+			audited++
+		}
+	}
+	if audited != 2 {
+		t.Fatalf("connector-hook rows after the grace expired = %d, want 2", audited)
+	}
 }

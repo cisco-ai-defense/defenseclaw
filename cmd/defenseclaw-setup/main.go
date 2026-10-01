@@ -551,6 +551,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	}
 
 	if err := stageInstallTree(
+		ctx,
 		payload,
 		transaction.StagingPath,
 		installRoot,
@@ -1716,7 +1717,7 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 	return nil
 }
 
-func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, transaction setupTransaction, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
+func stageInstallTree(ctx context.Context, payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, transaction setupTransaction, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
 	if err := createExclusiveStagingRoot(staging); err != nil {
 		return err
 	}
@@ -1746,7 +1747,7 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.SitePackages), sitePackages); err != nil {
 		return fmt.Errorf("extract managed Python packages: %w", err)
 	}
-	if err := warmManagedPythonBytecode(filepath.Join(staging, "runtime", "python")); err != nil {
+	if err := warmManagedPythonBytecode(ctx, filepath.Join(staging, "runtime", "python")); err != nil {
 		return err
 	}
 	if err := extractGateway(payload, filepath.Join(staging, "bin")); err != nil {
@@ -1933,10 +1934,10 @@ func managedBytecodeWarmupArgs() []string {
 	return []string{"-I", "-c", managedBytecodeWarmupScript}
 }
 
-func warmManagedPythonBytecode(pythonDir string) error {
+func warmManagedPythonBytecode(ctx context.Context, pythonDir string) error {
 	python := filepath.Join(pythonDir, "python.exe")
 	output, err := runCapturedSetupCommandContext(
-		context.Background(),
+		ctx,
 		setupBytecodeWarmupTimeout,
 		false,
 		sanitizePythonEnv(os.Environ()),
@@ -1944,7 +1945,7 @@ func warmManagedPythonBytecode(pythonDir string) error {
 		managedBytecodeWarmupArgs()...,
 	)
 	if err != nil {
-		return fmt.Errorf("compile managed CLI bytecode: %w: %s", err, strings.TrimSpace(string(output)))
+		return setupOperationError(ctx, fmt.Errorf("compile managed CLI bytecode: %w: %s", err, strings.TrimSpace(string(output))))
 	}
 	return nil
 }

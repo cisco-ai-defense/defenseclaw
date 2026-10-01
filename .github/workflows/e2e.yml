@@ -103,9 +103,15 @@ jobs:
           fi
           # Only the workspace root itself (not its sibling install slots,
           # which have their own ownership checks) and the checkout tree.
+          # A scan error counts as an unowned entry: a runner-owned directory
+          # without read or search permission can hide root-owned entries.
           unowned() {
-            { [ -e "$base" ] && find "$base" -maxdepth 0 ! -user "$uid" -print 2>/dev/null; } || true
-            { [ -e "$ws" ] && find "$ws" ! -user "$uid" -print -quit 2>/dev/null; } || true
+            if [ -e "$base" ]; then
+              find "$base" -maxdepth 0 ! -user "$uid" -print || echo "$base (scan failed)"
+            fi
+            if [ -e "$ws" ]; then
+              find "$ws" ! -user "$uid" -print -quit || echo "$ws (scan failed)"
+            fi
           }
           if [ -z "$(unowned)" ]; then
             exit 0
@@ -803,9 +809,15 @@ jobs:
           fi
           # Only the workspace root itself (not its sibling install slots,
           # which have their own ownership checks) and the checkout tree.
+          # A scan error counts as an unowned entry: a runner-owned directory
+          # without read or search permission can hide root-owned entries.
           unowned() {
-            { [ -e "$base" ] && find "$base" -maxdepth 0 ! -user "$uid" -print 2>/dev/null; } || true
-            { [ -e "$ws" ] && find "$ws" ! -user "$uid" -print -quit 2>/dev/null; } || true
+            if [ -e "$base" ]; then
+              find "$base" -maxdepth 0 ! -user "$uid" -print || echo "$base (scan failed)"
+            fi
+            if [ -e "$ws" ]; then
+              find "$ws" ! -user "$uid" -print -quit || echo "$ws (scan failed)"
+            fi
           }
           if [ -z "$(unowned)" ]; then
             exit 0

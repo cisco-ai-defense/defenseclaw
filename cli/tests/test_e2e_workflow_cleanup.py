@@ -168,9 +168,11 @@ def test_workspace_repair_is_a_noop_when_owned_and_refuses_odd_layouts(tmp_path:
     workspace = runner_workspace / "defenseclaw"
     (workspace / "bundles").mkdir(parents=True)
 
-    def run(base: Path) -> subprocess.CompletedProcess[str]:
+    def run(base: Path, path: str | None = None) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update({"RUNNER_WORKSPACE": os.fspath(base), "GITHUB_WORKSPACE": os.fspath(workspace)})
+        if path is not None:
+            environment["PATH"] = path
         return subprocess.run(["bash", os.fspath(script)], capture_output=True, text=True, env=environment)
 
     healthy = run(runner_workspace)
@@ -178,6 +180,26 @@ def test_workspace_repair_is_a_noop_when_owned_and_refuses_odd_layouts(tmp_path:
     odd = run(tmp_path)
     assert odd.returncode == 1
     assert "Unexpected runner workspace layout" in odd.stdout
+
+    if os.geteuid() == 0:
+        return
+    # A runner-owned directory without search permission can hide root-owned
+    # entries, so the failed scan itself must trigger the repair. The stub
+    # sudo skips chown (everything is already owned) and runs the rest.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "sudo").write_text('#!/bin/sh\n[ "$1" = -n ] && shift\n[ "$1" = chown ] && exit 0\nexec "$@"\n')
+    (fake_bin / "sudo").chmod(0o755)
+    hidden = workspace / "bundles" / "hidden"
+    hidden.mkdir()
+    hidden.chmod(0)
+    try:
+        repaired = run(runner_workspace, f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    finally:
+        hidden.chmod(0o700)
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert "repairing before checkout" in repaired.stdout
+    assert f"{workspace} (scan failed)" in repaired.stdout
 
 
 def test_ci_splunk_compose_never_creates_missing_bind_sources() -> None:
