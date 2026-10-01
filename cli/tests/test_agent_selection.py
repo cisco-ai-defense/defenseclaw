@@ -1265,3 +1265,19 @@ def test_windows_hermes_managed_executable_matches_the_gateway_order(tmp_path: P
     venv.parent.mkdir(parents=True)
     venv.write_bytes(b"venv")
     assert pick(str(local)) == str(venv)
+
+
+def test_windows_opencode_npm_image_needs_the_opencode_ai_package(tmp_path: Path, monkeypatch) -> None:
+    # npm OpenCode is admitted like the gateway admits it: the exact native
+    # image under the user's npm root, whose package.json names opencode-ai.
+    roaming = tmp_path / "Roaming"
+    monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
+    image = Path(agent_selection._windows_opencode_npm_executable())
+    assert image == roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"native")
+    manifest = image.parent.parent / "package.json"
+    manifest.write_text('{"name": "opencode-lookalike"}', encoding="utf-8")
+    assert not agent_selection._opencode_npm_package_identity_verified(str(image))
+    manifest.write_text('{"name": "opencode-ai"}', encoding="utf-8")
+    assert agent_selection._opencode_npm_package_identity_verified(str(image))
