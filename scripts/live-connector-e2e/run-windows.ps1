@@ -4434,12 +4434,16 @@ function Test-BlockVerdict(
     return $false
 }
 
+# The default bound is agentHookDisconnectGrace (internal/gateway/agent_hook.go):
+# the gateway records an accepted hook's verdict for up to that long after the
+# hook client has gone away, so its evidence can land that long after the hook
+# exits. The wait returns as soon as the evidence is there.
 function Wait-GatewayEvidenceAfter(
     [string]$Path,
     [string]$Name,
     [int]$Since,
     [bool]$RequireBlock,
-	[int]$TimeoutMilliseconds = 5000,
+	[int]$TimeoutMilliseconds = 30000,
 	[string]$SessionID = '',
 	[string]$HookEvent = '',
 	[string]$ToolInvocationID = '',
@@ -5999,7 +6003,7 @@ function Invoke-Hook(
         -Path $script:AuditDb -Name $Connector -Since $before `
         -RequireBlock $requireBlockEvidence -SessionID $sessionID -HookEvent $hookEvent `
         -ToolInvocationID $toolInvocationID
-    if (-not $evidence.ConnectorEvent) { throw "$EventName did not reach the gateway" }
+    if (-not $evidence.ConnectorEvent) { throw "$EventName did not reach the gateway (hook exited $($result.ExitCode))" }
     if ($result.ExitCode -ne 0 -and $Expected -eq 'allow') { throw "$EventName should allow but exited $($result.ExitCode)" }
     if ($Connector -ne 'opencode' -and $Expected -eq 'block' -and
         $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') {
@@ -6193,7 +6197,7 @@ function Invoke-DangerousHook(
     }
     $evidence = Wait-GatewayEvidenceAfter `
         -Path $script:AuditDb -Name $Connector -Since $before `
-        -RequireBlock $false -TimeoutMilliseconds 10000 `
+        -RequireBlock $false `
         -SessionID $sessionID -HookEvent $hookEvent `
         -ToolInvocationID $toolInvocationID
     $decision = Get-LatestHookDecision `
@@ -6201,7 +6205,7 @@ function Invoke-DangerousHook(
         -SessionID $sessionID -HookEvent $hookEvent `
         -ToolInvocationID $toolInvocationID
     if (-not $evidence.ConnectorEvent -or $null -eq $decision) {
-        throw "$Name did not emit its exact connector hook_decision"
+        throw "$Name did not emit its exact connector hook_decision (hook exited $($result.ExitCode))"
     }
     $telemetryMode = if ($Mode -eq 'action') {
         'enforce'
@@ -6229,7 +6233,7 @@ function Invoke-DangerousHook(
     if ($Expected -eq 'block') {
         $evidence = Wait-GatewayEvidenceAfter `
             -Path $script:AuditDb -Name $Connector -Since $before `
-            -RequireBlock $true -TimeoutMilliseconds 10000 `
+            -RequireBlock $true `
             -SessionID $sessionID -HookEvent $hookEvent `
             -ToolInvocationID $toolInvocationID -ExpectedRequestID $requestID
         $hasBlockVerdict = [bool]$evidence.BlockVerdict
