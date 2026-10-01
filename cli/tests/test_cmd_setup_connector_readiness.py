@@ -865,7 +865,7 @@ class TestLockContractFailureDetail:
     def test_ungated_version_names_the_version_and_the_fix(self) -> None:
         entry = {
             "connector": "devin",
-            "raw_agent_version": "3000.0.1",
+            "raw_agent_version": "devin 3000.0.1 (9c803229faa4)",
             "normalized_agent_version": "3000.0.1",
             "compatibility_status": "unknown",
             "compatibility_reason": "no hook contract matches normalized agent version",
@@ -874,10 +874,9 @@ class TestLockContractFailureDetail:
         invariant = connector_lock_contract_invariant("devin", entry)
         assert invariant, "precondition: an ungated version must fail the invariant"
         detail = cmd_setup._lock_contract_failure_detail("devin", entry, invariant)
-        assert "3000.0.1" in detail
-        assert "no reviewed hook contract" in detail
-        assert "hook_contracts.json" in detail or "active roster" in detail
-        assert "invalid" not in detail
+        assert "covers devin 3000.0.1 (9c803229faa4)," in detail
+        assert "defenseclaw guardrail disable --connector devin" in detail
+        assert "hook_contracts.json" not in detail and "invalid" not in detail
         # A lock from before untested newer versions were accepted.
         newer = {**entry, "raw_agent_version": "9999.1.1", "normalized_agent_version": "9999.1.1"}
         detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)

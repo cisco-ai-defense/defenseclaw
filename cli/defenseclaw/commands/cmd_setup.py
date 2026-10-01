@@ -13162,6 +13162,9 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
     except Exception:  # noqa: BLE001 - diagnostics must not mask the gate result.
         return f"protected lock {invariant} is invalid"
     version = raw_version or "an unreported version"
+    if version.casefold().startswith(f"{connector} ".casefold()):
+        # Devin's banner starts with its own name ("devin 3000.11.3 (...)").
+        version = version[len(connector) + 1 :]
     if (
         compatibility.untested
         and isinstance(entry, dict)
@@ -13175,9 +13178,9 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
     if compatibility.status == STATUS_NOT_GATED or (compatibility.contract and compatibility.supported):
         return f"protected lock {invariant} is invalid"
     return (
-        f"no reviewed hook contract covers {connector} {version}; "
-        f"the protected lock records that correctly. Pin a contract for this version in "
-        f"hook_contracts.json, or remove {connector} from the active roster"
+        f"no reviewed hook contract covers {connector} {version}, so DefenseClaw does not guard it. "
+        f"Install a supported {connector} version, or remove it from the active roster with: "
+        f"defenseclaw guardrail disable --connector {connector}"
     )
 
 def _connector_runtime_snapshot_failure(
