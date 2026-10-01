@@ -406,6 +406,9 @@ namespace DefenseClaw.Windows.Tests
     $engine = Microsoft.PowerShell.Management\Join-Path `
         $script:System32 `
         'WindowsPowerShell\v1.0\powershell.exe'
+    # Capture cases use the production default bound: a cold Windows
+    # PowerShell start is slow, not a timeout. Only the sleep-5 case below
+    # tests the timeout, and it times out under any runner load.
     $success = Invoke-DefenseClawProcess `
         -File $engine `
         -Arguments @(
@@ -414,8 +417,7 @@ namespace DefenseClaw.Windows.Tests
             '-NonInteractive',
             '-Command',
             '[Console]::Out.Write("fresh-success"); exit 0'
-        ) `
-        -TimeoutSeconds 15
+        )
     if ([int]$success.exit_code -ne 0 -or
         [string]$success.stdout -cne 'fresh-success') {
         throw 'fresh native success result was not captured exactly'
@@ -428,8 +430,7 @@ namespace DefenseClaw.Windows.Tests
             '-NonInteractive',
             '-Command',
             '[Console]::Error.Write("fresh-stderr"); exit 23'
-        ) `
-        -TimeoutSeconds 15
+        )
     if ([int]$failure.exit_code -ne 23 -or
         [string]$failure.stderr -cne 'fresh-stderr') {
         throw 'fresh native nonzero/stderr result was not captured exactly'
@@ -900,9 +901,12 @@ if ($elevated) {
             -Label 'smoke lifecycle lock' `
             -RequiredBase $script:ProgramData
         try {
+            # The smoke's StateRoot is unique and Exit releases synchronously,
+            # so a contended open can only be a transient scanner handle. Use
+            # the production wait, not a short bound that a slow runner loses;
+            # a leaked handle still fails the second acquisition every time.
             $lock = Enter-DefenseClawLifecycleLock `
-                -Layout $lockLayout `
-                -TimeoutSeconds 2
+                -Layout $lockLayout
             try {
                 if ($null -eq $lock) {
                     throw 'protected lifecycle file lock was not returned'
@@ -928,8 +932,7 @@ if ($elevated) {
                 -Algorithm SHA256).Hash
 
             $lock = Enter-DefenseClawLifecycleLock `
-                -Layout $lockLayout `
-                -TimeoutSeconds 2
+                -Layout $lockLayout
             try {
                 if ($null -eq $lock) {
                     throw 'persistent lifecycle file lock was not reusable'

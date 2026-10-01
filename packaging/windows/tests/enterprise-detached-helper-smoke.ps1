@@ -6,9 +6,7 @@
 [CmdletBinding()]
 param(
     [switch]$Child,
-    [string]$Root,
-    [ValidateRange(4, 30)]
-    [int]$WaitSeconds = 6
+    [string]$Root
 )
 
 Set-StrictMode -Version Latest
@@ -65,14 +63,18 @@ Microsoft.PowerShell.Core\Import-Module -Name '$moduleLiteral' -Force
     )
 }
 [IO.File]::WriteAllText(
-    '$observationLiteral',
+    '$observationLiteral.tmp',
     (
         `$observation |
             Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
     ),
     [Text.UTF8Encoding]::new(`$false)
 )
-Microsoft.PowerShell.Utility\Start-Sleep -Seconds $WaitSeconds
+# Publish atomically, then stay alive until the smoke kills this helper. A
+# helper that outlives every parent wait makes "alive after captured EOF" a
+# causal no-inheritance proof instead of a race against a fixed sleep.
+[IO.File]::Move('$observationLiteral.tmp', '$observationLiteral')
+[Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
 "@
     [IO.File]::WriteAllText(
         $helperPath,
@@ -173,8 +175,7 @@ try {
     $startInfo.FileName = $enginePath
     $startInfo.Arguments = (
         '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-        "-File $quotedScript -Child -Root $quotedRoot " +
-        "-WaitSeconds $WaitSeconds"
+        "-File $quotedScript -Child -Root $quotedRoot"
     )
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
@@ -285,19 +286,9 @@ try {
             'returned'
         )
     }
-    # The still-live helper is the primary no-inheritance proof. Also require
-    # captured EOF comfortably before the synthetic helper's deadline without
-    # making engine JIT variance a false failure.
-    $captureDeadlineMilliseconds = [int64](
-        ($WaitSeconds * 1000) - 500
-    )
-    if ($elapsedMilliseconds -ge $captureDeadlineMilliseconds) {
-        throw (
-            'captured parent pipe EOF was retained for ' +
-            "$elapsedMilliseconds ms by the detached helper (deadline " +
-            "$captureDeadlineMilliseconds ms)"
-        )
-    }
+    # The helper never exits on its own, so both pipes reaching EOF while it
+    # is still alive proves it inherited no capture handle. That proof is
+    # causal; capture_elapsed_ms is reported for diagnostics only.
     $observationPath = [IO.Path]::GetFullPath(
         [string]$childResult.observation_path
     ).TrimEnd('\')
@@ -307,17 +298,18 @@ try {
         )) {
         throw 'helper environment observation escaped its protected root'
     }
-    $observationDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    # Wait for the helper's observation or its exit, never a wall clock: a
+    # cold Windows PowerShell import of the module is slow, not failed.
     while (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $observationPath `
-            -PathType Leaf) -and
-        [DateTime]::UtcNow -lt $observationDeadline) {
-        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 50
-    }
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $observationPath `
             -PathType Leaf)) {
-        throw 'detached helper did not publish its isolated environment'
+        if ($helperProcess.HasExited -and
+            -not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $observationPath `
+                -PathType Leaf)) {
+            throw 'detached helper did not publish its isolated environment'
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 50
     }
     $observation = Microsoft.PowerShell.Management\Get-Content `
         -LiteralPath $observationPath `
@@ -356,8 +348,10 @@ try {
     }
     if (-not $helperProcess.HasExited) {
         $helperProcess.Kill()
-        [void]$helperProcess.WaitForExit(5000)
     }
+    # The exit event, not a bound: the root below is removable only after
+    # the killed helper has released it.
+    $helperProcess.WaitForExit()
     $helperProcess.Dispose()
     $helperProcess = $null
     Microsoft.PowerShell.Management\Remove-Item `
@@ -376,7 +370,6 @@ try {
         ok = $true
         engine = $PSVersionTable.PSVersion.ToString()
         capture_elapsed_ms = $elapsedMilliseconds
-        capture_deadline_ms = $captureDeadlineMilliseconds
         helper_pid = $helperPID
         helper_alive_after_capture = $helperAlive
         no_inherited_capture_handles = $true
@@ -392,7 +385,7 @@ finally {
         try {
             if (-not $helperProcess.HasExited) {
                 $helperProcess.Kill()
-                [void]$helperProcess.WaitForExit(5000)
+                $helperProcess.WaitForExit()
             }
         }
         finally {
@@ -408,7 +401,7 @@ finally {
     if ($null -ne $nestedProcess) {
         if (-not $nestedProcess.HasExited) {
             $nestedProcess.Kill()
-            [void]$nestedProcess.WaitForExit(5000)
+            $nestedProcess.WaitForExit()
         }
         $nestedProcess.Dispose()
     }

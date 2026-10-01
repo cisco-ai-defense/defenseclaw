@@ -3781,9 +3781,10 @@ connection.close()
         'Setup health sampler initializes its listener provider before publishing readiness'
     Assert-True ($setupHealthSampler -match '\$prewarmDeadline = \[DateTime\]::UtcNow\.AddSeconds\(20\)' -and
         $setupHealthSampler -match '(?s)do \{.*?Get-NetTCPConnection.*?\$prewarmListeners\.Count -gt 0.*?Start-Sleep -Milliseconds 100.*?\} while \(\$true\)' -and
-        $setupHealthSampler -match '\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(30\)' -and
-        $setupHealthSampler -match "Setup health sampler readiness cleanup timed out") `
-        'Setup health sampler cold-provider retry, readiness polling, and cleanup remain bounded'
+        $setupHealthSampler -match '(?s)while \(-not \(Test-Path -LiteralPath \$outcome -PathType Leaf\)\).*?\$process\.HasExited' -and
+        $setupHealthSampler -notmatch '\$deadline = ' -and
+        $setupHealthSampler -match '\$process\.Kill\(\$true\)\s+\$process\.WaitForExit\(\)') `
+        'Setup health sampler bounds only its listener prewarm; readiness and cleanup wait on its started record or exit'
     Assert-True (-not (& $hasHealthSamplerPrewarm $setupHealthSampler.Replace(
                 "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
             ))) `
@@ -3813,18 +3814,19 @@ connection.close()
         '$sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath',
         [StringComparison]::Ordinal
     )
-    $sampleDeadlineStart = $setupHealthSamplerContract.IndexOf(
-        '$sampleDeadline = [DateTime]::UtcNow.AddSeconds(15)',
+    $sampleWaitStart = $setupHealthSamplerContract.IndexOf(
+        "`$sample = Wait-SetupAcceptanceHealthSamplerRecord `$sampler `$sampleOutcomePath 'sample'",
         [StringComparison]::Ordinal
     )
     Assert-True ($sampleSamplerStart -ge 0 -and
-        $sampleDeadlineStart -gt $sampleSamplerStart -and
+        $sampleWaitStart -gt $sampleSamplerStart -and
+        $setupHealthSamplerContract -notmatch 'AddSeconds\(' -and
         ([regex]::Matches(
             $setupHealthSamplerContract.Substring($sampleSamplerStart),
             'Start-SetupAcceptanceHealthSampler'
         )).Count -eq 1 -and
         $setupHealthSamplerContract -notmatch 'foreach \(\$attempt in 1\.\.2\)') `
-        'hosted-equivalent Setup health sampler uses one persistent sampler with a fresh post-readiness deadline'
+        'hosted-equivalent Setup health sampler uses one persistent sampler and waits for its sample or exit, not a deadline'
     Assert-True ($harnessText -match 'CLAUDE_CODE_USE_POWERSHELL_TOOL = ''1''' -and
         $harnessText -match 'https://claude\.ai/install\.ps1' -and
         $harnessText -match '\.local\\bin\\claude\.exe' -and
