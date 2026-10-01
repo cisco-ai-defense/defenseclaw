@@ -2013,7 +2013,7 @@ def test_cursor_windows_discovery_uses_official_token_bound_agent_root(
     assert signal.version == "2026.07.23-e383d2b"
 
 
-def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
+def test_timeout_keeps_a_slow_agent_installed_with_an_unknown_version(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/codex")
     # M-4: bypass the trusted-prefix file-existence check so we can
@@ -2030,7 +2030,7 @@ def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, t
 
     assert signal.binary_path == os.path.abspath("/usr/local/bin/codex")
     assert signal.config_path == ""
-    assert signal.installed is False
+    assert (signal.installed, signal.version) == (True, "")
     assert "timed out" in signal.error
 
 
@@ -2056,7 +2056,7 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     args, kwargs = calls[0]
     assert args == [os.path.abspath("/opt/bin/codex"), "--version"]
     assert kwargs["shell"] is False
-    assert kwargs["timeout"] == 2.0
+    assert kwargs["timeout"] == ad.VERSION_TIMEOUT_SECONDS
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is False
 
@@ -2086,7 +2086,7 @@ OpenHands CLI 1.16.0
     assert signal.version == "OpenHands CLI 1.16.0"
     args, kwargs = calls[0]
     assert args == [os.path.abspath("/opt/bin/openhands"), "--version"]
-    assert kwargs["timeout"] == 8.0
+    assert kwargs["timeout"] == 30.0
     assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
@@ -2228,7 +2228,7 @@ def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeyp
 
     assert error == ""
     assert version == "OpenHands CLI 1.16.0"
-    assert calls[0][1]["timeout"] == 8.0
+    assert calls[0][1]["timeout"] == 30.0
     assert calls[0][1]["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 

@@ -81,7 +81,11 @@ UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 CACHE_SCHEMA_VERSION = 6
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
-VERSION_TIMEOUT_SECONDS = 2.0
+# Node and Python CLIs take over a second for --version when idle, and
+# discovery probes four at a time, so a 2 s budget hid installed agents on a
+# busy host.
+VERSION_TIMEOUT_SECONDS = 8.0
+VERSION_PROBE_TIMED_OUT = "version probe timed out"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
@@ -1131,6 +1135,7 @@ def _scan_agent(
     version_ok = False
 
     probe_errors: list[str] = []
+    timed_out = ""
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
             name,
@@ -1151,10 +1156,16 @@ def _scan_agent(
             break
         if candidate_error:
             probe_errors.append(f"{candidate}: {candidate_error}")
+            if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
+                timed_out = candidate
     if not version_ok and probe_errors:
         error = "; ".join(probe_errors)
+    if not version_ok and timed_out:
+        # A trusted binary that is only slow is installed; its version stays
+        # unknown, so action mode still refuses it until a probe answers.
+        binary_path = timed_out
 
-    installed = bool(binary_path) and version_ok
+    installed = bool(binary_path) and (version_ok or bool(timed_out))
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1734,7 +1745,10 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"claude", "hermes", "omnigent", "openhands"} or (
+    if binary_name == "openhands":
+        # Its --version loads the whole Python agent stack: 15 s idle on Linux.
+        timeout = 30.0
+    elif binary_name in {"claude", "hermes", "omnigent"} or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -1758,7 +1772,7 @@ def _version_for_binary(
             env=env,
         )
     except subprocess.TimeoutExpired:
-        return "", "version probe timed out"
+        return "", VERSION_PROBE_TIMED_OUT
     except Exception as exc:
         return "", f"version probe failed: {exc}"
 
