@@ -543,7 +543,9 @@ def assess_connector_health(
                     status=HealthStatus.UNSUPPORTED,
                     reason_code="connector-version-outside-contract",
                     summary=(
-                        f"{public_name} agent version is below the supported floor or on the known-broken list"
+                        f"{public_name} agent version is on the known-broken list"
+                        if "known broken" in (compatibility.reason or "")
+                        else f"{public_name} agent version is not covered by a tested connector contract"
                     ),
                     installed_version=normalized,
                     supported_agent_ranges=ranges,

@@ -113,6 +113,13 @@ def test_devin_windows_version_probes_exact_cli_for_supported_version(monkeypatc
     ]
 
 
+def test_devin_version_probe_accepts_the_longer_linux_revision(monkeypatch) -> None:
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_version_for_binary", lambda *_a, **_k: ("devin 3000.11.3 (9c803229faa4)", ""))
+
+    assert ad._version_for_agent_binary("devin", "/opt/devin/bin/devin", ("--version",)) == ("3000.11.3", "")
+
+
 @pytest.mark.parametrize(
     "output",
     (

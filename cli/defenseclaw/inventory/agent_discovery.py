@@ -1830,7 +1830,8 @@ def _version_for_agent_binary(
 def _normalize_devin_cli_version_output(output: str) -> str:
     """Extract the version from Devin's exact canonical ``--version`` banner.
 
-    The native CLI reports ``devin <semver> (<8-char git revision>)``.  Keep
+    The native CLI reports ``devin <semver> (<git revision>)``; the revision
+    is an abbreviated hex hash (8 characters in 3000.4.x, 12 in 3000.11.x).  Keep
     this parser deliberately narrower than general version discovery: any
     extra field, non-canonical numeric component, or malformed revision is
     returned unchanged so the exact connector-contract gate rejects it.
@@ -1851,7 +1852,7 @@ def _normalize_devin_cli_version_output(output: str) -> str:
             return output
 
     revision = fields[2]
-    if len(revision) != 10 or not revision.startswith("(") or not revision.endswith(")"):
+    if not 9 <= len(revision) <= 42 or not revision.startswith("(") or not revision.endswith(")"):
         return output
     if any(character not in "0123456789abcdef" for character in revision[1:-1]):
         return output
