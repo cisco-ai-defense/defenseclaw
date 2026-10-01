@@ -460,10 +460,12 @@ func applyWindowsEnterpriseInstallerReport(
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if lifecycle {
+			original := message
 			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
 				result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
 				message = text
 			}
+			message += windowsEnterprisePerUserDataDirNextStep(original, message)
 		}
 		result.AddError(code, message)
 	}

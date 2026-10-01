@@ -538,8 +538,12 @@ to run:
 | Per-user gateway | Refuses to start on a managed computer |
 
 Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
-Add `--all` to also delete `%USERPROFILE%\.defenseclaw`. See
+each user remove their per-user install with
+`defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
+not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
+and refuses that profile until the folder is gone (move it aside to keep its
+data). A per-user gateway that still runs holds the gateway API port, and
+Setup names it in its `api_port_held` error. See
 [Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
 
 ## Remove

@@ -242,6 +242,34 @@ func windowsEnterpriseStandaloneErrorText(message string) (text string, internal
 	return text, true
 }
 
+// windowsEnterprisePerUserDataDirNextStep names the next step when Setup
+// refused a user's .defenseclaw folder it did not create: the data folder of
+// a per-user install, which `defenseclaw uninstall --binaries` keeps. Setup
+// never adopts it (that user controls it), so the folder has to go first.
+func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
+	if !strings.Contains(original, "reject noncanonical managed runtime baseline") {
+		return ""
+	}
+	folder := `that user's %USERPROFILE%\.defenseclaw`
+	if path := windowsEnterpriseFirstWindowsPath(text); path != "" {
+		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+			folder = path[:index+len(`\.defenseclaw`)]
+		}
+	}
+	return ". DefenseClaw's managed install did not create " + folder +
+		"; a per-user DefenseClaw install leaves it, also after `defenseclaw uninstall --binaries`." +
+		" Next step: have that user run `defenseclaw uninstall --all --binaries --yes`, or move " + folder +
+		" out of the profile, then run Setup again."
+}
+
+// windowsEnterprisePerUserGatewayImage reports a listener image that is a
+// DefenseClaw gateway binary (a per-user install's, since the managed
+// gateway's own process is skipped before this check).
+func windowsEnterprisePerUserGatewayImage(image string) bool {
+	base := image[strings.LastIndexAny(image, `\/`)+1:]
+	return strings.EqualFold(base, "defenseclaw-gateway.exe")
+}
+
 // windowsEnterpriseFirstWindowsPath returns the first drive-letter path in
 // text, ending at the first delimiter that cannot be part of it here.
 func windowsEnterpriseFirstWindowsPath(text string) string {

@@ -70,7 +70,7 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	if gatewayRunning && gatewayPID == 0 {
 		return
 	}
-	var names []string
+	var names, perUser []string
 	for _, listener := range listeners {
 		if listener.PID == gatewayPID {
 			continue
@@ -86,6 +86,9 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 			}
 		}
 		names = append(names, fmt.Sprintf("pid %d (%s) listening on %s", holder.PID, who, holder.Address))
+		if windowsEnterprisePerUserGatewayImage(holder.Image) {
+			perUser = append(perUser, fmt.Sprintf("pid %d", holder.PID))
+		}
 	}
 	if len(names) == 0 {
 		return
@@ -93,6 +96,18 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	stop := "Stop that process"
 	if len(names) > 1 {
 		stop = "Stop those processes"
+	}
+	if len(perUser) != 0 {
+		// A per-user install's gateway: stopping it by hand does not keep it
+		// stopped, and its data folder blocks the managed install next.
+		hint := fmt.Sprintf("%s is a per-user DefenseClaw gateway: have that user run "+
+			"`defenseclaw uninstall --all --binaries --yes`, which stops it and removes the per-user install",
+			strings.Join(perUser, ", "))
+		if len(perUser) == len(names) {
+			stop = hint
+		} else {
+			stop = hint + ". " + stop
+		}
 	}
 	if !inspection {
 		result.AddError("api_port_held", fmt.Sprintf(

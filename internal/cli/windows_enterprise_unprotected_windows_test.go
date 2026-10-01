@@ -302,3 +302,39 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 		t.Fatalf("failed ensure errors = %+v holders = %+v, want api_port_held naming every listener", ensure.Errors, ensure.APIPortHolders)
 	}
 }
+
+func TestWindowsStandaloneEnsureNamesPerUserInstallLeftovers(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousListeners, previousPID, previousIdentity, previousFailure := windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure
+	t.Cleanup(func() {
+		windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure = previousListeners, previousPID, previousIdentity, previousFailure
+	})
+	windowsEnterpriseGatewayStartFailure = func() (string, string) { return "", "" }
+	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) {
+		return []daemon.Listener{{Address: "127.0.0.1:18970", PID: 736}}, nil
+	}
+	windowsEnterpriseServicePID = func(string) int { return 0 }
+	windowsEnterpriseProcessIdentity = func(int) (string, string) {
+		return `C:\Users\alice\.local\bin\defenseclaw-gateway.exe`, `HOST\alice`
+	}
+	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(ensure, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Errors: []string{`target runtime planning failed with exit 1: Error: enterprise hooks: reject noncanonical managed runtime baseline: ` +
+			`enterprise hooks: managed Windows DACL on C:\Users\alice\.defenseclaw has 2 ACEs, expected 4`},
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1603})
+	var all []string
+	for _, e := range ensure.Errors {
+		all = append(all, e.Message)
+	}
+	message := strings.Join(all, "\n")
+	for _, want := range []string{
+		`the permissions on C:\Users\alice\.defenseclaw are not the ones DefenseClaw set`,
+		`move C:\Users\alice\.defenseclaw out of the profile`,
+		"pid 736 is a per-user DefenseClaw gateway",
+		"`defenseclaw uninstall --all --binaries --yes`",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("ensure errors %q do not contain %q", message, want)
+		}
+	}
+}

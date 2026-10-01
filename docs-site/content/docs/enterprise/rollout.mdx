@@ -175,7 +175,10 @@ managed install reaches a computer:
    defenseclaw uninstall --all --binaries --yes
    ```
 
-   The commands are the same in PowerShell on Windows.
+   The commands are the same in PowerShell on Windows. On Windows, use the
+   `--all` form: the standalone Setup does not adopt a
+   `%USERPROFILE%\.defenseclaw` folder that a per-user install left, and
+   refuses that profile until the folder is gone.
 3. Then deploy the managed install.
 
 A per-user gateway listens on the same loopback port as the managed gateway,
