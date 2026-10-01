@@ -280,7 +280,14 @@ upgrade_lane() {
     # After rolling back to 0.8.x the 1.x installer is only in previous/.
     local forward="${DC_HOME}/installer/install.sh"
     [[ -f "${forward}" ]] || forward="${DC_HOME}/previous/installer/install.sh"
-    must bash "${forward}" --rollback --yes || return 1
+    local fwd_out
+    fwd_out="$(bash "${forward}" --rollback --yes 2>&1)" || { printf "%s\n" "${fwd_out}"; fail "step failed: roll forward"; return 1; }
+    printf "%s\n" "${fwd_out}"
+    # previous/ now holds what the older install wrote, not data a roll forward
+    # brings back (checked when the installer under test ran the swap).
+    if [[ "${forward}" == "${DC_HOME}/previous/installer/install.sh" ]]; then
+        grep -q "comes back if you roll back again" <<<"${fwd_out}" || fail "roll forward misdescribed the data kept in previous/"
+    fi
     assert_versions "${TARGET}"
     assert_healthy
     if [[ "${name}" == upgrade-previous ]]; then
