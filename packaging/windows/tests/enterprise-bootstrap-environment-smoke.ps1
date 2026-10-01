@@ -13,6 +13,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Race workers must start the way this process was started. Below, the smoke
+# clears the profile variables and the production definitions pin
+# PSModulePath to the engine module directory. In that minimal environment a
+# fresh Windows PowerShell 5.1 resolves its first command (Join-Path) through
+# a full module analysis: 20-35 seconds of CPU per worker on a hosted runner,
+# which used up the race budget before the race began.
+$launchEnvironment = [Environment]::GetEnvironmentVariables('Process')
 
 $installerPath = [IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..\install-enterprise.ps1')
@@ -1774,11 +1781,11 @@ $raceRoot = [IO.Path]::Combine(
 $processes = [Collections.Generic.List[Diagnostics.Process]]::new()
 $resultPaths = [Collections.Generic.List[string]]::new()
 $raceStartSignalPath = [IO.Path]::Combine($raceRoot, 'start')
-# Worker startup (a cold engine start and script parse, slow and variable on
-# loaded hosted runners) is bounded separately from the race. The race
-# deadline starts at the shared start signal and is one deadline for all six
-# workers, not a fresh wait per worker.
-$raceStartupSeconds = 240
+# Worker startup (engine start, script parse and the production definition
+# load) is bounded separately from the race. The race deadline starts at the
+# shared start signal and is one deadline for all six workers, not a fresh
+# wait per worker.
+$raceStartupSeconds = 120
 $raceSeconds = 120
 function Get-BootstrapRaceWorkerDiagnostic {
     param([int]$Index)
@@ -1835,6 +1842,10 @@ try {
         $start.Arguments = $arguments
         $start.UseShellExecute = $false
         $start.CreateNoWindow = $true
+        $start.EnvironmentVariables.Clear()
+        foreach ($entry in $launchEnvironment.GetEnumerator()) {
+            $start.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+        }
         $process = [Diagnostics.Process]::Start($start)
         if ($null -eq $process) {
             throw "could not start bootstrap race worker $index"
