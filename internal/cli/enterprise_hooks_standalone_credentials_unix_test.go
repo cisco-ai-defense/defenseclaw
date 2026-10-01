@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -60,7 +61,8 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 			t.Fatal(err)
 		}
 		attestation, err := enterprisehooks.ParseCredentialAttestation(data)
-		if err != nil || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 {
+		if err != nil || !attestation.Current() || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 ||
+			attestation.OperationID != "" || attestation.Phase != "" {
 			t.Fatalf("pass %d: attestation = %+v %v", pass, attestation, err)
 		}
 		// It is bound to the authorization ledger the same run published,
@@ -72,7 +74,10 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 		}
 		previousID = attestation.ID
 		for _, target := range attestation.Targets {
-			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified {
+			// Each names the credential it was rendered with, so readiness
+			// and a rotation can check it against the key.
+			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified ||
+				target.CredentialID != connector.UserScopedCredentialKeyID("hook-"+target.Connector+"-"+strconv.Itoa(uid)) {
 				t.Fatalf("pass %d: target = %+v", pass, target)
 			}
 		}

@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -501,6 +502,9 @@ type enterpriseHookStandaloneSlot struct {
 	// verifiable: the worker verifies the target before repairing it (a
 	// target that was not protected before is installed without a verify).
 	verifiable bool
+	// credentialID fingerprints the hook credential rendered for the
+	// target (connector.UserScopedCredentialKeyID).
+	credentialID string
 }
 
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
@@ -722,7 +726,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 		index := len(rows)
 		rows = append(rows, row)
-		slot := enterpriseHookStandaloneSlot{key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected}
+		slot := enterpriseHookStandaloneSlot{
+			key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected,
+			credentialID: connector.UserScopedCredentialKeyID(token),
+		}
 		if hasBinding && bindingMatches {
 			slot.binding = &binding
 		}
@@ -876,6 +883,7 @@ func writeEnterpriseHookCredentialAttestation(
 				target.UID = slot.account.UID
 				target.Credentials = true
 				target.Verified = verified[index]
+				target.CredentialID = slot.credentialID
 			}
 		}
 		attestation.Targets = append(attestation.Targets, target)

@@ -66,8 +66,9 @@ import (
 //     credential.
 //  3. Prepare: the guardian renders every target from B, and a further
 //     reconcile verifies the installed hooks. Every target must be attested
-//     current, verified and on B in the same roster (manifest digest), and
-//     the gateway must prove B again for each user.
+//     current, verified and on B in the same roster (manifest digest), each
+//     with the credential B derives for its connector and uid, and the
+//     gateway must prove B again for each user.
 //  4. Commit: rename B over A under the reconcile lock, wait until /health
 //     names only B (A's credentials are refused from then on), clear the
 //     intent.
@@ -283,10 +284,13 @@ func (e *Env) readAttestation() (enterprisehooks.CredentialAttestation, error) {
 }
 
 // attestationProblem checks the guardian's credential attestation against
-// ledger, the authorization ledger bytes just read: it must be from the
-// reconcile that published them and name a key the gateway holds. torn is
-// set when it is from another reconcile, which a read between the guardian's
-// two writes also sees.
+// ledger, the authorization ledger bytes just read: it must be in the
+// current format, from the reconcile that published them, for the current
+// targets.yaml, list each target it enables exactly once, and bind every
+// credential-bearing target to the credential a key the gateway holds
+// derives for it. torn is set when it is from another reconcile or another
+// roster, which a read between the guardian's writes (or between the
+// enumerator's rewrite and the guardian's next reconcile) also sees.
 func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
 	if _, err := os.Lstat(e.attestationPath()); errors.Is(err, os.ErrNotExist) {
 		return "the hook guardian has not published its credential attestation yet", false
@@ -295,18 +299,79 @@ func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
 	if err != nil {
 		return "guardian credential attestation: " + err.Error(), false
 	}
+	if !attestation.Current() {
+		return fmt.Sprintf("the hook guardian's credential attestation is in the older format %d, which does not bind each target; the next guardian reconcile rewrites it", attestation.Version), false
+	}
 	if !attestation.BoundTo(ledger) {
 		return "the hook guardian's authorization ledger does not match its last credential attestation; the next guardian reconcile publishes both", true
+	}
+	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(e.P(e.Layout.ManifestPath))
+	if err != nil {
+		return "guardian targets: " + err.Error(), false
+	}
+	if attestation.ManifestSHA256 != manifestSHA256 {
+		return "the hook guardian has not reconciled the current targets.yaml yet; its next reconcile does", true
+	}
+	if problem := rosterProblem(manifest, attestation); problem != "" {
+		return problem, false
 	}
 	if attestation.KeyID == "" {
 		return "", false
 	}
 	for _, path := range []string{e.committedUserKeyPath(), e.stagedUserKeyPath()} {
-		if data, err := readBounded(path, userKeyMaxBytes); err == nil && connector.UserScopedTokenKeyFingerprint(strings.TrimSpace(string(data))) == attestation.KeyID {
+		data, err := readBounded(path, userKeyMaxBytes)
+		if key := strings.TrimSpace(string(data)); err == nil && connector.UserScopedTokenKeyFingerprint(key) == attestation.KeyID {
+			if unbound := unboundCredentials(attestation, key); len(unbound) > 0 {
+				return fmt.Sprintf("the hook guardian attested %d target(s) whose credentials are not the ones key %s derives for their account: %s; the next guardian reconcile renders them again",
+					len(unbound), shortKeyID(attestation.KeyID), listLabels(unbound)), false
+			}
 			return "", false
 		}
 	}
 	return fmt.Sprintf("the hook guardian's last reconcile rendered per-user credentials from key %s, which the gateway no longer holds; the next guardian reconcile renders them again", shortKeyID(attestation.KeyID)), false
+}
+
+// rosterProblem checks that attestation has exactly one row per target
+// manifest enables, in manifest order (the guardian writes one row per
+// enabled target), each naming that target's connector and account.
+func rosterProblem(manifest enterprisehooks.Manifest, attestation enterprisehooks.CredentialAttestation) string {
+	var enabled []enterprisehooks.ManifestTarget
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() {
+			enabled = append(enabled, target)
+		}
+	}
+	if len(enabled) != len(attestation.Targets) {
+		return fmt.Sprintf("the hook guardian's credential attestation lists %d target(s), but targets.yaml enables %d; the next guardian reconcile publishes it again", len(attestation.Targets), len(enabled))
+	}
+	for index, want := range enabled {
+		got := attestation.Targets[index]
+		sameHome := strings.TrimSpace(want.UserHome) == "" || filepath.Clean(strings.TrimSpace(want.UserHome)) == filepath.Clean(got.UserHome)
+		sameUID := want.UID == nil || got.UID < 0 || *want.UID == got.UID
+		if !strings.EqualFold(strings.TrimSpace(want.Connector), strings.TrimSpace(got.Connector)) ||
+			strings.TrimSpace(want.User) != got.User || !sameHome || !sameUID {
+			return fmt.Sprintf("the hook guardian's credential attestation names %s where targets.yaml enables another target; the next guardian reconcile publishes it again", got.Label())
+		}
+	}
+	return ""
+}
+
+// unboundCredentials lists the credential-bearing targets of attestation
+// whose credential fingerprint is not that of the hook credential key
+// derives for the target's connector and uid.
+func unboundCredentials(attestation enterprisehooks.CredentialAttestation, key string) []string {
+	var unbound []string
+	for _, target := range attestation.Targets {
+		if !target.Credentials {
+			continue
+		}
+		credential, err := connector.UserScopedHookAPIToken(key, strings.ToLower(strings.TrimSpace(target.Connector)), strconv.Itoa(target.UID))
+		if err != nil || connector.UserScopedCredentialKeyID(credential) != target.CredentialID {
+			unbound = append(unbound, target.Label())
+		}
+	}
+	slices.Sort(unbound)
+	return unbound
 }
 
 func (e *Env) attestationID() string {
@@ -460,18 +525,35 @@ func listLabels(labels []string) string {
 }
 
 // onKey reports whether attestation shows every target of want current and
-// verified on keyID, and every other credential-bearing target verified
-// too. fatal is set for a state no further reconcile fixes. A target
-// outside want that is not current held no credential when the rotation
-// began (targetsNotMoved), so it does not stop the rotation.
-func onKey(attestation enterprisehooks.CredentialAttestation, keyID, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (done bool, fatal string) {
+// verified on key, each with the credential key derives for its connector and uid, and
+// every other credential-bearing target verified too. fatal is set for a
+// state no further reconcile fixes. A target outside want that is not
+// current held no credential when the rotation began (targetsNotMoved), so
+// it does not stop the rotation.
+func onKey(attestation enterprisehooks.CredentialAttestation, key, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (done bool, fatal string) {
+	keyID := connector.UserScopedTokenKeyFingerprint(key)
 	switch {
+	case !attestation.Current():
+		return false, fmt.Sprintf("the hook guardian published a format %d credential attestation, which does not bind each target", attestation.Version)
 	case attestation.ManifestSHA256 != manifestSHA256:
 		return false, "the guardian's target roster changed during the rotation (targets.yaml was rewritten)"
 	case attestation.KeyID != keyID:
 		return false, fmt.Sprintf("the guardian rendered from key %s, not %s", shortKeyID(attestation.KeyID), shortKeyID(keyID))
 	}
+	if unbound := unboundCredentials(attestation, key); len(unbound) > 0 {
+		return false, fmt.Sprintf("the guardian attested %d target(s) whose credentials key %s does not derive for their account: %s", len(unbound), shortKeyID(keyID), listLabels(unbound))
+	}
 	have := credentialTargets(attestation)
+	var moved []string
+	for key, target := range want {
+		if got, ok := have[key]; ok && got.UID != target.UID {
+			moved = append(moved, target.Label())
+		}
+	}
+	if len(moved) > 0 {
+		slices.Sort(moved)
+		return false, fmt.Sprintf("%d target(s) resolved to another account during the rotation: %s", len(moved), listLabels(moved))
+	}
 	failed := map[string]bool{}
 	for _, target := range attestation.Targets {
 		failed[target.Key()] = target.State == enterprisehooks.CredentialTargetFailed
@@ -665,8 +747,14 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	if err != nil {
 		return refuse("%v", err)
 	}
-	if preflight.KeyID != idA {
+	switch {
+	case !preflight.Current():
+		return refuse("the hook guardian published a format %d credential attestation, which does not bind each target; run `enterprise %s repair`, then rotate again", preflight.Version, platformName(env.GOOS))
+	case preflight.KeyID != idA:
 		return refuse("the hook guardian rendered from key %s, not the committed key %s", shortKeyID(preflight.KeyID), shortKeyID(idA))
+	}
+	if unbound := unboundCredentials(preflight, keyA); len(unbound) > 0 {
+		return refuse("the hook guardian attested %d target(s) whose credentials the committed key does not derive for their account: %s", len(unbound), listLabels(unbound))
 	}
 	held, skipped, err := l.targetsNotMoved(ctx, preflight)
 	switch {
@@ -722,7 +810,7 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 				return err
 			}
 			lastID = attestation.ID
-			done, fatal := onKey(attestation, idB, preflight.ManifestSHA256, selected)
+			done, fatal := onKey(attestation, keyB, preflight.ManifestSHA256, selected)
 			switch {
 			case fatal != "":
 				return errors.New(fatal)
@@ -810,7 +898,7 @@ func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Dep
 			break
 		}
 		lastID = attestation.ID
-		done, fatal := onKey(attestation, idA, manifestSHA256, selected)
+		done, fatal := onKey(attestation, keyA, manifestSHA256, selected)
 		if fatal != "" {
 			problems = append(problems, fatal)
 			break

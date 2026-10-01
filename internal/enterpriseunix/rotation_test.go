@@ -166,9 +166,11 @@ func (h *rotationHost) reconcile() {
 	}
 	for index, user := range []string{"alice", "bob"} {
 		target := enterprisehooks.CredentialAttestationTarget{Connector: "codex", User: user, UID: 1001 + index, State: enterprisehooks.CredentialTargetCurrent}
+		credential, _ := connector.UserScopedHookAPIToken(strings.TrimSpace(string(key)), "codex", fmt.Sprint(target.UID))
+		target.CredentialID = connector.UserScopedCredentialKeyID(credential)
 		switch {
 		case user == "bob" && h.failStaged && exists(h.env.stagedUserKeyPath()):
-			target.State, target.UID = enterprisehooks.CredentialTargetFailed, -1
+			target.State, target.UID, target.CredentialID = enterprisehooks.CredentialTargetFailed, -1, ""
 		case h.rendered[user] == keyID:
 			target.Credentials, target.Verified = true, true
 		default:

@@ -22,6 +22,12 @@ import (
 // that one run left behind. rotate-credentials reads it to prove that every
 // user moved to a new key before it commits the key. The guardian writes it
 // root-only next to the ledger (managed.HookGuardianCredentialAttestationFile).
+//
+// Format 2 binds each target to the credential the run rendered for it
+// (CredentialID) and names the credential transaction the run acted under.
+// A format 1 record, written before an upgrade, still names failed targets,
+// but it is never current readiness or rotation evidence: the guardian's
+// next reconcile rewrites it in format 2.
 type CredentialAttestation struct {
 	Version int `json:"version"`
 	// ID is random per reconcile, so a reader can tell a new run from the
@@ -38,8 +44,13 @@ type CredentialAttestation struct {
 	// reconcile lock). A reader that needs both proves they are from one
 	// reconcile with BoundTo; a record without it (written before the field
 	// existed) is bound to no ledger.
-	AuthorizationSHA256 string                        `json:"authorization_sha256,omitempty"`
-	Targets             []CredentialAttestationTarget `json:"targets"`
+	AuthorizationSHA256 string `json:"authorization_sha256,omitempty"`
+	// OperationID and Phase name the credential transaction
+	// (CredentialTransaction) the run acted under; both are empty when
+	// none was in progress.
+	OperationID string                        `json:"operation_id,omitempty"`
+	Phase       string                        `json:"phase,omitempty"`
+	Targets     []CredentialAttestationTarget `json:"targets"`
 }
 
 // BoundTo reports whether the record was published with ledger, the exact
@@ -63,6 +74,12 @@ type CredentialAttestationTarget struct {
 	// Verified: the run re-read the target's installed hooks and found them
 	// rendered with those credentials, without repairing anything.
 	Verified bool `json:"verified,omitempty"`
+	// CredentialID is the non-secret fingerprint
+	// (connector.UserScopedCredentialKeyID) of the hook credential the run
+	// rendered for the target, set exactly when Credentials is. A reader
+	// that holds the key derives the credential for Connector and UID and
+	// compares, so the row proves which account and key it was bound to.
+	CredentialID string `json:"credential_id,omitempty"`
 }
 
 // Target states of a credential attestation row.
@@ -73,7 +90,12 @@ const (
 )
 
 const (
-	CredentialAttestationVersion = 1
+	// CredentialAttestationVersion is the format the guardian writes.
+	CredentialAttestationVersion = 2
+	// LegacyCredentialAttestationVersion is the format before per-target
+	// credential binding. It is parsed so failures it reports are still
+	// named, and never counts as current.
+	LegacyCredentialAttestationVersion = 1
 	// CredentialAttestationMaxBytes bounds the record like the ledger.
 	CredentialAttestationMaxBytes = 4 << 20
 )
@@ -89,7 +111,10 @@ func ParseCredentialAttestation(data []byte) (CredentialAttestation, error) {
 	if decoder.Decode(new(json.RawMessage)) != io.EOF {
 		return CredentialAttestation{}, errors.New("the guardian credential attestation has trailing content")
 	}
-	if attestation.Version != CredentialAttestationVersion ||
+	legacy := attestation.Version == LegacyCredentialAttestationVersion
+	if (attestation.Version != CredentialAttestationVersion && !legacy) ||
+		(legacy && (attestation.OperationID != "" || attestation.Phase != "")) ||
+		!validTransactionRef(attestation.OperationID, attestation.Phase) ||
 		!lowerHex(attestation.ID, 16) || !lowerHex(attestation.ManifestSHA256, 32) ||
 		(attestation.KeyID != "" && !lowerHex(attestation.KeyID, 32)) ||
 		(attestation.AuthorizationSHA256 != "" && !lowerHex(attestation.AuthorizationSHA256, 32)) || attestation.Targets == nil {
@@ -105,7 +130,9 @@ func ParseCredentialAttestation(data []byte) (CredentialAttestation, error) {
 			return CredentialAttestation{}, fmt.Errorf("the guardian credential attestation has target state %q", target.State)
 		case (target.Credentials || target.Verified) && target.State != CredentialTargetCurrent,
 			target.Verified && !target.Credentials,
-			target.Credentials && (target.UID < 0 || attestation.KeyID == ""):
+			target.Credentials && (target.UID < 0 || attestation.KeyID == ""),
+			legacy && target.CredentialID != "",
+			!legacy && target.Credentials != lowerHex(target.CredentialID, 32):
 			return CredentialAttestation{}, errors.New("the guardian credential attestation has an inconsistent target")
 		case seen[key]:
 			return CredentialAttestation{}, fmt.Errorf("the guardian credential attestation lists %s twice", target.Label())
@@ -113,6 +140,13 @@ func ParseCredentialAttestation(data []byte) (CredentialAttestation, error) {
 		seen[key] = true
 	}
 	return attestation, nil
+}
+
+// Current reports whether the record is in the format that binds each
+// target to its credential; only such a record is readiness or rotation
+// evidence.
+func (a CredentialAttestation) Current() bool {
+	return a.Version == CredentialAttestationVersion
 }
 
 // Key identifies the target within one attestation.
@@ -135,4 +169,19 @@ func lowerHex(value string, byteLength int) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+// Phases of a credential transaction.
+const (
+	CredentialPhasePrepare  = "prepare"
+	CredentialPhaseRollback = "rollback"
+)
+
+// validTransactionRef accepts no transaction (both empty) or an operation ID
+// with a known phase.
+func validTransactionRef(operationID, phase string) bool {
+	if operationID == "" && phase == "" {
+		return true
+	}
+	return lowerHex(operationID, 16) && (phase == CredentialPhasePrepare || phase == CredentialPhaseRollback)
 }
