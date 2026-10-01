@@ -4469,7 +4469,7 @@ func (c *hookOnlyConnector) ownedCursorHookContractPresent(opts SetupOpts) (bool
 	if !runtimeInfo.Mode().IsRegular() || runtimeInfo.Mode()&os.ModeSymlink != 0 || runtimeInfo.Size() > 512*1024 {
 		return false, nil
 	}
-	runtimeBody, err := os.ReadFile(runtimePath)
+	runtimeBody, err := readHookConfigFile(runtimePath)
 	if err != nil {
 		return false, err
 	}

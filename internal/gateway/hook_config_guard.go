@@ -52,6 +52,10 @@ const (
 	// that do not produce a filesystem event (notably Windows registry policy)
 	// and retries watches for policy directories created after startup.
 	defaultHookGuardPolicyAuditInterval = 30 * time.Second
+
+	// hookGuardBusyRearmMaxDelay caps the backoff between repairs re-armed
+	// after another process held a connector file open.
+	hookGuardBusyRearmMaxDelay = 30 * time.Second
 )
 
 var newHookConfigFSWatcher = fsnotify.NewWatcher
@@ -63,6 +67,16 @@ type hookRuntimePolicy struct {
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
+
+// hookGuardRepairOutcome is the terminal result of one Setup-backed repair.
+// rearmed reports that the repair failed only because another process held a
+// connector file open and the guard queued another attempt on its own.
+type hookGuardRepairOutcome struct {
+	connector string
+	changed   []string
+	err       error
+	rearmed   bool
+}
 
 // HookConfigGuard watches the active connector's agent config file(s) and
 // auto-heals (re-installs) the DefenseClaw hook block when a user deletes or
@@ -111,7 +125,14 @@ type HookConfigGuard struct {
 	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
 	// every audit tick while still reporting a changed failure immediately.
 	lastPolicyFailure string
-	done              chan struct{}
+	// busyRepairs counts consecutive repairs that failed on a busy connector
+	// file; it sets the re-arm backoff and resets after any other outcome.
+	busyRepairs int
+	// repairObserver receives every repair outcome after audit, telemetry and
+	// the heal notifier have run. Tests use it as the repair-completed /
+	// repair-failed event instead of polling the files Setup is replacing.
+	repairObserver func(hookGuardRepairOutcome)
+	done           chan struct{}
 }
 
 // NewHookConfigGuard constructs a guard. debounce <= 0 falls back to the
@@ -702,6 +723,7 @@ func (g *HookConfigGuard) repairCurrent(
 	if present && evidenceCurrent {
 		return nil
 	}
+	requested := append([]string(nil), changed...)
 	if present && !evidenceCurrent {
 		changed = append(changed, "stale runtime registration evidence")
 	}
@@ -711,7 +733,50 @@ func (g *HookConfigGuard) repairCurrent(
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	return g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	outcome := hookGuardRepairOutcome{
+		connector: conn.Name(),
+		changed:   changed,
+		err:       err,
+		rearmed:   g.rearmAfterBusyRepair(requested, err),
+	}
+	g.mu.Lock()
+	observe := g.repairObserver
+	g.mu.Unlock()
+	if observe != nil {
+		observe(outcome)
+	}
+	return err
+}
+
+// rearmAfterBusyRepair queues another repair when Setup failed only because
+// another process held a connector file open. Without it the hook block stays
+// missing until some unrelated edit produces a new file event, because the
+// failed attempt's own writes fall inside the self-write suppression window.
+// Consecutive busy failures back off from the debounce interval up to
+// hookGuardBusyRearmMaxDelay. Caller holds repairMu.
+func (g *HookConfigGuard) rearmAfterBusyRepair(requested []string, err error) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err == nil || !connector.FileBusyError(err) || !g.started || g.retiring || len(requested) == 0 {
+		g.busyRepairs = 0
+		return false
+	}
+	delay := g.debounce << min(g.busyRepairs, 6)
+	if delay <= 0 || delay > hookGuardBusyRearmMaxDelay {
+		delay = hookGuardBusyRearmMaxDelay
+	}
+	g.busyRepairs++
+	// Nothing was published, so there is no self-write to suppress. Replace
+	// queued events with the re-armed request: they came from the failed
+	// attempt and would otherwise bypass the backoff.
+	g.suppressUntil = time.Time{}
+	due := time.Now().Add(delay - g.debounce)
+	g.pending = make(map[string]time.Time, len(requested))
+	for _, item := range requested {
+		g.pending[item] = due
+	}
+	return true
 }
 
 // processPending evaluates debounced events: if any guarded config file no
