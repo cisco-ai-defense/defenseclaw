@@ -217,6 +217,53 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 	}
 }
 
+// Under unverified_versions: refuse a user whose only Antigravity install
+// is the IDE gets a refusal row at the default contract's version, and the
+// gateway refuses their calls (refused-surfaces entry, reported enforced).
+func TestEnumerateUnixRefusalRowForPerUserSurfaceOnlyUser(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+		listed:   []string{"alice"},
+	}
+	opts := UnixEnumerateOptions{
+		Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+		DiscoverSurfaces: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			return UnixDiscovery{Surfaces: map[string][]connector.AgentSurface{
+				"antigravity": {{Surface: connector.HostSurfaceDesktop, Host: "antigravity-ide", HostVersion: "2.0.1"}},
+			}}, nil
+		},
+	}
+	cfg := enumeratorConfig("antigravity")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := connector.ResolveHookContract("antigravity", "").Contract.MinAgentVersion
+	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != want || want == "" {
+		t.Fatalf("rows = %+v, want one antigravity refusal row at %q", manifest.Targets, want)
+	}
+	if len(report.RefusedSurfaces) != 1 || report.RefusedSurfaces[0].Connector != "antigravity" ||
+		len(report.Unprotected) != 1 || report.Unprotected[0].Refusal != RefusalEnforced {
+		t.Fatalf("refused = %+v, unprotected = %+v", report.RefusedSurfaces, report.Unprotected)
+	}
+	// A failed discovery keeps the refusal of the kept row.
+	opts.PreviousRefusedSurfaces = report.RefusedSurfaces
+	opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+		return UnixDiscovery{}, errors.New("worker failed")
+	}
+	if _, report, err = EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts); err != nil || len(report.RefusedSurfaces) != 1 {
+		t.Fatalf("after a failed discovery refused = %+v, err = %v", report.RefusedSurfaces, err)
+	}
+}
+
 func TestEnumerateUnixRefusesWorldWritableAncestorHomes(t *testing.T) {
 	root := trustedTestDir(t)
 	open := filepath.Join(root, "open")

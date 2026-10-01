@@ -126,6 +126,116 @@ func (r SurfaceResolution) Admitted(policy string) (bool, string) {
 	return false, "hook delivery on the " + r.Surface + " surface is not live-verified, and enterprise.enrollment.unverified_versions is refuse"
 }
 
+// A hook call names the surface it comes from (hookexec.AgentSurfaceHeader)
+// so the gateway can refuse an unverified app or extension of a user who is
+// enrolled through the agent's CLI: every surface of a machine-policy agent
+// runs the same hook command, so the command itself cannot tell them apart.
+// The hook classifies its caller from two signals, in this order:
+//   - the executable of the agent engine that runs the hook (the kernel's
+//     record of the process): an engine an editor extension bundles lives
+//     in that extension's folder, wherever the extensions folder is
+//     (VSCODE_EXTENSIONS and --extensions-dir included), and a desktop
+//     app's engine lives in the app's bundle or data folder;
+//   - the surface variable the vendor sets in the engine's environment
+//     (Claude Code's CLAUDE_CODE_ENTRYPOINT, the originator the Codex IDE
+//     extension and app set for their app-server). Neither variable is
+//     documented as an interface; their values are a live check.
+//
+// Both signals are the user's to influence: the classification enforces an
+// administrator's surface policy for honest callers, it is not an identity.
+// A caller neither signal names is unclassified ("") and never refused on
+// its surface.
+
+// agentSurfaceMarkers are lower-case, slash-separated path fragments of an
+// agent engine's executable, per connector and surface.
+var agentSurfaceMarkers = map[string]map[string][]string{
+	"claudecode": {
+		HostSurfaceExtension: {"/anthropic.claude-code-", "/jetbrains/"},
+		HostSurfaceDesktop: {
+			"/claude/claude-code/", "/claude.app/", "/windowsapps/claude_",
+			"/packages/claude_",
+		},
+	},
+	"codex": {
+		HostSurfaceExtension: {"/openai.chatgpt-", "/jetbrains/"},
+		HostSurfaceDesktop:   {"/codex.app/", "/windowsapps/openai.codex_", "/opt/chatgpt/", "/chatgpt.app/"},
+	},
+	"antigravity": {
+		HostSurfaceDesktop: {"/antigravity.app/", "/usr/share/antigravity/", "/opt/antigravity/", "/programs/antigravity/"},
+	},
+	"cursor": {
+		HostSurfaceDesktop: {"/cursor.app/", "/usr/share/cursor/", "/opt/cursor/", "/programs/cursor/"},
+	},
+}
+
+// agentSurfaceCLINames are engine executables that are always the CLI
+// surface, even where a desktop app's bundle carries them.
+var agentSurfaceCLINames = map[string]map[string]bool{
+	"antigravity": {"agy": true, "agy.exe": true},
+	"cursor":      {"cursor-agent": true, "cursor-agent.exe": true},
+}
+
+// agentSurfaceVariables maps a vendor surface variable's value (lower
+// case) to a surface, per connector.
+var agentSurfaceVariables = map[string]struct {
+	name   string
+	values map[string]string
+}{
+	"claudecode": {"CLAUDE_CODE_ENTRYPOINT", map[string]string{
+		"cli": HostSurfaceCLI, "claude-vscode": HostSurfaceExtension, "claude-desktop": HostSurfaceDesktop,
+	}},
+	"codex": {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE", map[string]string{
+		"codex_cli_rs": HostSurfaceCLI, "codex_vscode": HostSurfaceExtension, "codex desktop": HostSurfaceDesktop,
+		"codex_desktop": HostSurfaceDesktop,
+	}},
+}
+
+// ClassifyAgentSurface names the surface (HostSurfaceCLI, ...Desktop or
+// ...Extension) of a hook call of connectorName whose agent engine runs
+// executable with the environment getenv reads, or "" when neither names
+// one.
+func ClassifyAgentSurface(connectorName, executable string, getenv func(string) string) string {
+	name := normalizeConnectorName(connectorName)
+	if path := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(executable), `\`, "/")); path != "" {
+		if agentSurfaceCLINames[name][path[strings.LastIndex(path, "/")+1:]] {
+			return HostSurfaceCLI
+		}
+		for _, surface := range []string{HostSurfaceExtension, HostSurfaceDesktop} {
+			for _, marker := range agentSurfaceMarkers[name][surface] {
+				if strings.Contains(path, marker) {
+					return surface
+				}
+			}
+		}
+	}
+	if variable, ok := agentSurfaceVariables[name]; ok && getenv != nil {
+		if surface, ok := variable.values[strings.ToLower(strings.TrimSpace(getenv(variable.name)))]; ok {
+			return surface
+		}
+	}
+	return ""
+}
+
+// ValidHostSurface returns surface when it names a host surface, else "".
+func ValidHostSurface(surface string) string {
+	switch surface = strings.ToLower(strings.TrimSpace(surface)); surface {
+	case HostSurfaceCLI, HostSurfaceDesktop, HostSurfaceExtension:
+		return surface
+	}
+	return ""
+}
+
+// SurfaceRefused reports whether a hook call of connectorName from surface
+// is refused under policy: unverified_versions: refuse admits only
+// live-verified surfaces. An unclassified or CLI call never is.
+func SurfaceRefused(connectorName, surface, policy string) bool {
+	surface = ValidHostSurface(surface)
+	if surface == "" || surface == HostSurfaceCLI || !strings.EqualFold(strings.TrimSpace(policy), UnverifiedVersionsRefuse) {
+		return false
+	}
+	return !SurfaceLiveVerified(connectorName, surface)
+}
+
 // CompareAgentVersions orders two agent versions by their normalized
 // major.minor.patch.
 func CompareAgentVersions(a, b string) int { return compareVersion(a, b) }

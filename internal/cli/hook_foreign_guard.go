@@ -65,6 +65,10 @@ var hookForeignGuardAgentProcess = agentprocess.Identity
 // tests).
 var hookAgentHost = agentprocess.Host
 
+// hookAgentExecutable is the agent engine's executable path (replaceable
+// in tests).
+var hookAgentExecutable = agentprocess.Executable
+
 // hookForeignGuardExchange is replaceable in tests. Production reaches the
 // standalone gateway over its authenticated hook transport.
 var hookForeignGuardExchange = exchangeForeignHookSession
@@ -113,6 +117,10 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if opts.ManagedEnterprise {
 		opts.AgentHost = hookAgentHost()
 	}
+	// Every hook call names its surface so the gateway can refuse an
+	// unverified app or extension under unverified_versions: refuse, next
+	// to the same user's enrolled CLI.
+	opts.AgentSurface = connector.ClassifyAgentSurface(name, hookAgentExecutable(), os.Getenv)
 	policy, ok := summary.Connectors[name]
 	if !ok || !policy.Guard {
 		return

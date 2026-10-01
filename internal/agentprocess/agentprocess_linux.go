@@ -71,8 +71,8 @@ func lookupProc(pid int) (Process, error) {
 	if err != nil {
 		return Process{}, err
 	}
-	if exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
-		process.Name = filepath.Base(strings.TrimSuffix(exe, " (deleted)"))
+	if exe := executablePath(pid); exe != "" {
+		process.Name = filepath.Base(exe)
 	}
 	process.Boot = currentBootID()
 	return process, nil
@@ -81,6 +81,14 @@ func lookupProc(pid int) (Process, error) {
 // parseStat parses /proc/<pid>/stat: "pid (comm) state ppid ... starttime"
 // with starttime the 22nd field. comm may hold spaces and parentheses, so
 // the fields after it start at the last ')'.
+func executablePath(pid int) string {
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(exe, " (deleted)")
+}
+
 func parseStat(pid int, data []byte) (Process, error) {
 	open := bytes.IndexByte(data, '(')
 	closing := bytes.LastIndexByte(data, ')')

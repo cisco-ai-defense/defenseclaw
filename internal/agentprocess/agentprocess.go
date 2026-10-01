@@ -183,6 +183,22 @@ func Host() string {
 	return hostFrom(lookup, os.Getpid())
 }
 
+// Executable returns the full path of the agent process's executable (the
+// process Host's walk starts from), or "" when it cannot be resolved. An
+// engine an editor extension or a desktop app bundles runs from that
+// extension's or app's folder, so the path tells those surfaces apart from
+// the agent's CLI (connector.ClassifyAgentSurface). Like Host it is a hint
+// the user can influence, never an identity.
+func Executable() string {
+	lookup, done := newLookup()
+	defer done()
+	agent, ok := agentFrom(lookup, os.Getpid())
+	if !ok {
+		return ""
+	}
+	return executablePath(agent.PID)
+}
+
 func hostFrom(lookup func(int) (Process, error), self int) string {
 	child, ok := agentFrom(lookup, self)
 	if !ok {

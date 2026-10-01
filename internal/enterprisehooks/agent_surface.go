@@ -31,14 +31,14 @@ const UnprotectedCodeSurfaceUnverified = "surface_unverified"
 
 // Refusal states of a surface refused under unverified_versions: refuse.
 const (
-	// RefusalEnforced: the route refuses the surface's hook calls (a
-	// machine-policy connector whose unenrolled users the gateway or the
-	// machine hooks refuse).
+	// RefusalEnforced: the route refuses the surface's hook calls (the
+	// gateway refuses the calls that name the surface, the user's calls
+	// for the connector, or the machine hooks refuse an unenrolled user).
 	RefusalEnforced = "enforced"
 	// RefusalMissing: nothing refuses the surface (a per-user connector
-	// the surface runs without hooks, or a user enrolled through another
-	// surface of the same connector, whose hook calls look the same).
-	// verify fails on it.
+	// the surface runs without hooks, or a live-verified surface refused
+	// only for its engine version next to an enrolled install of the same
+	// connector). verify fails on it.
 	RefusalMissing = "missing"
 )
 
@@ -121,6 +121,18 @@ func (a surfaceAdmission) rowVersion(cliVersion string) string {
 		return a.version
 	}
 	return cliVersion
+}
+
+// surfaceRefusalConsequence is the consequence of a refused surface next
+// to an enrolled or admitted install of the same connector, which shares
+// its hooks: the gateway refuses the hook calls that name the surface
+// (connector.SurfaceRefused); a surface that is live-verified but was
+// refused for its engine version is not refused at hook time.
+func surfaceRefusalConsequence(conn string, rejected surfaceRejection) (string, string) {
+	if connector.SurfaceRefused(conn, rejected.surface.Surface, connector.UnverifiedVersionsRefuse) {
+		return "it shares the " + conn + " hooks of the user's enrolled install, and the gateway refuses the hook calls that name this surface (surface_unverified)", RefusalEnforced
+	}
+	return "it shares the " + conn + " hooks of the user's enrolled install and is live-verified, so its hook calls are not refused on their surface", RefusalMissing
 }
 
 // surfaceUnprotected is the unprotected-agent entry for a rejected

@@ -176,9 +176,11 @@ agent engine it runs:
 The editor folders searched are `.vscode`, `.vscode-insiders`,
 `.vscode-server` (Linux and macOS), `.vscode-oss`, `.cursor`, Devin Desktop's
 pre-rename folder ([Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors)),
-`.kiro` and `.antigravity` under the home, each with `extensions`. An
-extensions folder relocated with `VSCODE_EXTENSIONS` or `--extensions-dir`
-is not followed. A host version (the editor's or the app's own version)
+`.kiro` and `.antigravity` under the home, each with `extensions`. On
+Windows the folder the user's persistent `VSCODE_EXTENSIONS` variable names
+is searched too. Other relocated folders (`--extensions-dir`, a variable set
+for one shell) and JetBrains plugins are not found by discovery, but the
+hook still names their calls by the surface (below). A host version (the editor's or the app's own version)
 never selects a hook contract. The Devin Desktop app version is not a Devin
 CLI version, so Devin is still enrolled only from its CLI.
 
@@ -191,7 +193,17 @@ desktop are):
 | `unverified_versions` | Surface-only user | User with the CLI too |
 | --- | --- | --- |
 | `report` (default) | Enrolled at the surface's engine version. A surface with no engine version is reported as `surface_unverified`. | Enrolled at the older of the CLI and surface engine versions |
-| `refuse` | Not enrolled and reported as `surface_unverified`. For a machine-policy agent the gateway refuses that user's hook calls (`enterprise_managed_surface_unverified`) on Linux and macOS, and the unenrolled user is refused on Windows. For a per-user agent nothing refuses it, and `verify` fails. | Enrolled from the CLI. Hook calls do not say which surface sent them, so the surface cannot be refused: it is reported and `verify` fails. |
+| `refuse` | Not enrolled and reported as `surface_unverified`. For a machine-policy agent the gateway refuses that user's hook calls (`enterprise_managed_surface_unverified`) on Linux and macOS, and the unenrolled user is refused on Windows. A per-user agent (Antigravity) on Linux and macOS gets a refusal row: its hooks are installed and the gateway refuses the user's calls. | Enrolled from the CLI. The gateway refuses the hook calls that name the refused surface; the CLI keeps working. |
+
+On a standalone computer each hook call names the surface that sent it:
+the hook reads the path of the agent engine that runs it (an extension's
+bundled engine lives in the extension's folder, an app's in the app) and
+the surface variable the vendor sets for the engine. Under `refuse` the
+gateway refuses a call named as an app or extension that is not
+live-verified, and the agent shows a block that names the reason. A call
+neither signal names is not refused on its surface. The user can change
+both signals, so this enforces the policy for ordinary use; it is not a
+security boundary (see [Residual risks](/docs/enterprise/threat-model#residual-risks)).
 
 `unverified_versions_by_connector` sets the value for one agent, for
 example `{codex: refuse}`. Both keys are standalone-only; Secure Client
@@ -208,7 +220,7 @@ installed. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
 | `include_groups`, `exclude_groups` | Group filters | Group filters for local, Active Directory and Microsoft Entra ID groups; see [Windows](#windows) |
 | `exempt_users` | Not enrolled; their calls are allowed, inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
 | `unenrolled_users` | `inspect` or `deny` for machine-policy agents | Not applied: a user who is not enrolled fails closed |
-| `unverified_versions`, `unverified_versions_by_connector` | `report` or `refuse` for desktop apps and editor extensions | Same; the gateway refusal is the fail-closed refusal of an unenrolled user |
+| `unverified_versions`, `unverified_versions_by_connector` | `report` or `refuse` for desktop apps and editor extensions | Same; a surface-only user is refused as an unenrolled user, and a call that names a refused surface is refused. Discovery reads the profile under the user's token, so a signed-out user's apps are found after sign-in. |
 | `root` | `inspect`, `deny` or `exempt` | Not applied |
 | `uid_min`, `uid_max` | The interactive uid range | Not applied |
 | `home_roots`, `agent_prefixes` | Extra home parents; extra administrator install prefixes | Not applied, but still validated: an entry that is not an absolute `/` path makes the config invalid |

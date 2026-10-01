@@ -22,3 +22,5 @@ func newLookup() (func(int) (Process, error), func()) {
 }
 
 func currentClock() (string, int64, bool) { return "", 0, false }
+
+func executablePath(int) string { return "" }

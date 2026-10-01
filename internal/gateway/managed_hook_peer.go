@@ -25,6 +25,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -239,7 +241,14 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	return false
 }
 
-func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName string) managedHookDecision {
+// decide authorizes one hook call. surface is the caller's
+// hookexec.AgentSurfaceHeader: under unverified_versions: refuse a call
+// from an app or extension surface that is not live-verified is refused
+// (surface_unverified) whatever the user's enrollment, so an unverified
+// surface is refused next to the same user's enrolled CLI. A user whose
+// only installs are refused surfaces is in the refused list and is refused
+// for the connector.
+func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surface string) managedHookDecision {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if connectorName == "" {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
@@ -255,18 +264,22 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName strin
 		decision.Exempt = true
 		return decision
 	}
+	refuse := z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse
+	if refuse && connector.SurfaceRefused(connectorName, surface, config.EnterpriseUnverifiedRefuse) {
+		return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
+	}
+	if refuse && z.loadRefused != nil {
+		refused, err := z.loadRefused()
+		if err != nil {
+			return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
+		}
+		if refused.refused(peer, connectorName) {
+			return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
+		}
+	}
 	machine := z.machinePolicy[connectorName]
 	strict := strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
 	if machine && !strict {
-		if z.loadRefused != nil && z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse {
-			refused, err := z.loadRefused()
-			if err != nil {
-				return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
-			}
-			if refused.refused(peer, connectorName) {
-				return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
-			}
-		}
 		return allowManagedHook()
 	}
 	if z.loadLedger == nil {
@@ -459,7 +472,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		defer release()
 		connectorName, inspect := a.managedHookRouteScope(r)
-		decision := authorizer.decide(peer, connectorName)
+		decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader))
 		if !decision.Allow {
 			fmt.Fprintf(os.Stderr,
 				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s\n",
@@ -481,6 +494,24 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// refuseUnverifiedSurface refuses, on the standalone profile, a hook call
+// authenticated by a user-scoped credential (the TCP hook route Windows
+// uses) from a surface refused under unverified_versions: refuse, as
+// managedHookAuthorizer.decide does on the hook socket. It reports whether
+// it answered.
+func (a *APIServer) refuseUnverifiedSurface(w http.ResponseWriter, r *http.Request, route, connectorName string) bool {
+	if !a.userScopedCredentialsRequired() {
+		return false
+	}
+	policy := a.scannerCfg.Enterprise.Enrollment.UnverifiedVersionsFor(connectorName)
+	if !connector.SurfaceRefused(connectorName, r.Header.Get(hookexec.AgentSurfaceHeader), policy) {
+		return false
+	}
+	a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, managedHookReasonSurfaceUnverified, connectorName)
+	writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonSurfaceUnverified)
+	return true
 }
 
 func writeManagedHookRefusal(w http.ResponseWriter, status int, reason string) {

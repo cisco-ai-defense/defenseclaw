@@ -87,6 +87,30 @@ const HookDialectHeader = "X-DefenseClaw-Hook-Dialect"
 // terminal. The user can influence it: it is attribution, never policy.
 const AgentHostHeader = "X-DefenseClaw-Agent-Host"
 
+// AgentSurfaceHeader carries the surface (cli, desktop or extension) a
+// standalone enterprise hook classified its caller as
+// (connector.ClassifyAgentSurface). Under
+// enterprise.enrollment.unverified_versions: refuse the gateway refuses a
+// call from an app or extension surface whose hook delivery is not
+// live-verified (SurfaceUnverifiedReason). The user can influence it: it
+// enforces the administrator's surface policy for honest callers, and an
+// unclassified call omits it.
+const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
+
+// AgentSurfaceHeaderValue returns surface when it is cli, desktop or
+// extension, else "".
+func AgentSurfaceHeaderValue(surface string) string {
+	switch surface = strings.ToLower(strings.TrimSpace(surface)); surface {
+	case "cli", "desktop", "extension":
+		return surface
+	}
+	return ""
+}
+
+// SurfaceUnverifiedReason is the gateway's refusal reason for a hook call
+// from a surface refused under unverified_versions: refuse.
+const SurfaceUnverifiedReason = "enterprise_managed_surface_unverified"
+
 // maxAgentHostLength bounds AgentHostHeaderValue.
 const maxAgentHostLength = 64
 
@@ -208,6 +232,9 @@ type Options struct {
 	// AgentHost is the name of the process that started the agent; it is
 	// sent (AgentHostHeader) only with ManagedEnterprise.
 	AgentHost string
+	// AgentSurface is the surface the hook classified its caller as
+	// (AgentSurfaceHeader); "" when unclassified.
+	AgentSurface string
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
@@ -607,11 +634,44 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	switch {
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+	case resp.StatusCode == http.StatusForbidden && refusalReason(body) == SurfaceUnverifiedReason:
+		// A policy decision, not a failure: block in every fail mode (a stop
+		// event keeps its neutral allow).
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", payload)
+		}
+		return failForeignHookBlocked(opts, sp, surfaceUnverifiedText(opts))
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
 	return sp.decide(opts, body)
+}
+
+// refusalReason is the reason of a gateway refusal body
+// ({"error":"forbidden","reason":...}), or "".
+func refusalReason(body []byte) string {
+	var refusal struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(body, &refusal) != nil {
+		return ""
+	}
+	return strings.TrimSpace(refusal.Reason)
+}
+
+// surfaceUnverifiedText is the block message of a call the gateway refused
+// on its surface.
+func surfaceUnverifiedText(opts Options) string {
+	where := "this app or extension"
+	switch AgentSurfaceHeaderValue(opts.AgentSurface) {
+	case "desktop":
+		where = "this desktop app"
+	case "extension":
+		where = "this editor extension"
+	}
+	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": your organization allows this agent only where DefenseClaw has verified its protection, and " +
+		where + " is not verified. Use the agent's command-line tool, or contact your administrator. (" + SurfaceUnverifiedReason + ")"
 }
 
 func sendHookRequest(
@@ -658,6 +718,9 @@ func sendHookRequest(
 		if host := AgentHostHeaderValue(opts.AgentHost); host != "" {
 			req.Header.Set(AgentHostHeader, host)
 		}
+	}
+	if surface := AgentSurfaceHeaderValue(opts.AgentSurface); surface != "" {
+		req.Header.Set(AgentSurfaceHeader, surface)
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -1165,7 +1228,9 @@ const ForeignHookBlockedReasonPrefix = "enterprise_foreign_hook_blocked:"
 // failForeignHookBlocked delivers the enterprise foreign-hook guard's
 // denial as the connector's native block with the guard's reason as the
 // message, so the user sees which file to remove and which allowlist key an
-// administrator would use. Only the standalone guard sets this reason. A
+// administrator would use. Only the standalone guard sets this reason; the
+// gateway's surface refusal (SurfaceUnverifiedReason) is delivered the
+// same way. A
 // stop or session-end event (foreignHookStopEvent) gets the connector's
 // neutral allow instead, because a block there would keep the agent running;
 // the block is still logged. Every other event gets a block. Commands that do
