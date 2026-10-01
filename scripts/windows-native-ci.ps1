@@ -3838,13 +3838,49 @@ function Assert-PackagedAntigravitySupportedAvailability(
     }
 }
 
+function New-WizardFixtureExecutable([string]$AssemblyName, [string]$Source, [string]$OutputPath) {
+    # Fixture executables are test setup, not code under test. Compile them
+    # in-process with the Roslyn compiler that ships with PowerShell 7 instead
+    # of launching the legacy .NET Framework compiler executable: a cold start
+    # loads dozens of default references and, on a saturated hosted runner,
+    # repeatedly crossed a fatal per-process deadline. An in-process emit has
+    # no child process, pipes, or deadline to race. The fixtures reference only
+    # mscorlib, so the output is the same .NET Framework console executable.
+    $frameworkCore = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll'
+    if (-not (Test-Path -LiteralPath $frameworkCore -PathType Leaf)) {
+        throw "Windows .NET Framework reference assembly is unavailable: $frameworkCore"
+    }
+    Add-Type -AssemblyName Microsoft.CodeAnalysis, Microsoft.CodeAnalysis.CSharp -ErrorAction Stop
+    $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source)
+    $options = [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new(
+        [Microsoft.CodeAnalysis.OutputKind]::ConsoleApplication
+    )
+    $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create(
+        $AssemblyName,
+        [Microsoft.CodeAnalysis.SyntaxTree[]]@($tree),
+        [Microsoft.CodeAnalysis.MetadataReference[]]@(
+            [Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile($frameworkCore)
+        ),
+        $options
+    )
+    $stream = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $result = $compilation.Emit($stream)
+    } finally {
+        $stream.Dispose()
+    }
+    if (-not $result.Success) {
+        Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
+        $errors = @($result.Diagnostics | Where-Object {
+                $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error
+            } | ForEach-Object { $_.ToString() })
+        throw "connector fixture $AssemblyName failed to compile:`n$($errors -join "`n")"
+    }
+}
+
 function New-WizardAgentFixtures([string]$Root) {
     $sourceBin = Join-Path $Root 'wizard-agent-fixture-sources'
     Protect-TestDirectory $sourceBin
-    $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
-        throw "Windows .NET Framework compiler is unavailable: $compiler"
-    }
     $useNativeOpenCodeFixture = $env:CONNECTOR -ceq 'opencode'
     $goCompiler = if ($useNativeOpenCodeFixture) { @(
             Get-Command go.exe -CommandType Application -ErrorAction SilentlyContinue |
@@ -4004,9 +4040,7 @@ public static class OpenCodeVersionFixture {
                         else { $env:CGO_ENABLED = $previousCGO }
                     }
                 } else {
-                    Invoke-WindowsNativeProcess $compiler @(
-                        '/nologo', '/target:exe', "/out:$($fixture.Path)", $sourcePath
-                    ) -TimeoutSeconds 60 | Out-Null
+                    New-WizardFixtureExecutable $fixture.ClassName $fixture.Source $fixture.Path
                 }
             } finally {
                 Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue

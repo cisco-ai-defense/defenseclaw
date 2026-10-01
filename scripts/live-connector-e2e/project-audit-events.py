@@ -198,8 +198,13 @@ def _replace_jsonl(output: Path, records: list[str]) -> None:
             for record in records:
                 stream.write(record)
                 stream.write("\n")
+            # The snapshot is a private, transient file that the harness
+            # reads and deletes immediately; it has no durability need.
+            # Forcing it to the device (fsync) can stall in an
+            # uncancellable kernel flush on a saturated runner disk,
+            # leaving an unkillable process that outlives the bounded
+            # caller. os.replace below still makes publication atomic.
             stream.flush()
-            os.fsync(stream.fileno())
         os.replace(temporary, output)
     finally:
         try:

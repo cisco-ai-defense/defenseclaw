@@ -3376,6 +3376,10 @@ connection.close()
         $nativeHarnessText,
         '(?s)function New-WizardAgentFixtures\b.*?(?=\r?\nfunction Remove-WizardAgentFixtures)'
     ).Value
+    $fixtureCompiler = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function New-WizardFixtureExecutable\b.*?(?=\r?\nfunction New-WizardAgentFixtures)'
+    ).Value
     $agentFixtureCleanupFunction = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Remove-WizardAgentFixtures\b.*?(?=\r?\nfunction )'
@@ -3404,6 +3408,12 @@ connection.close()
         $agentFixtureFunction -match 'opencode 1\.18\.11' -and
         $agentFixtureFunction -match "(?s)foreach \(\`$attempt in 1\.\.3\).*?\`$openCodePath @\('--version'\) -TimeoutSeconds 2" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
+        $agentFixtureFunction -match 'New-WizardFixtureExecutable \$fixture\.ClassName \$fixture\.Source \$fixture\.Path' -and
+        $agentFixtureFunction -notmatch 'csc\.exe' -and
+        $fixtureCompiler -match 'CSharpCompilation\]::Create' -and
+        $fixtureCompiler -match 'Framework64\\v4\.0\.30319\\mscorlib\.dll' -and
+        $fixtureCompiler -match 'FileMode\]::CreateNew' -and
+        $fixtureCompiler -notmatch 'Invoke-WindowsNativeProcess|Start-Process|csc\.exe' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesPath' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesBin' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.OpenCodePath' -and
@@ -4883,6 +4893,7 @@ connection.close()
         $auditProjectorText -match 'ORDER BY rowid' -and
         $auditProjectorText -match 'record_schema_version != 1' -and
         $auditProjectorText -match 'os\.replace\(temporary, output\)' -and
+        $auditProjectorText -notmatch 'os\.fsync\(' -and
         $auditProjectorText -match 'output must differ from the audit database') `
         'canonical SQLite projection is read-only, ordered, schema-bound, and atomically published'
     Assert-True ($openCodeAssertionText.Contains('const probeID = basename(scratchPath, ".mjs");') -and
