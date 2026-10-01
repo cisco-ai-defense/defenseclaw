@@ -2394,6 +2394,10 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             r=r,
         )
         r.gateway_down = "stopped"
+    elif holder := _foreign_gateway_port_holder(cfg):
+        # Something else answers on the port without a gateway /health.
+        _emit("fail", "Sidecar API", _foreign_gateway_port_detail(cfg, holder), r=r)
+        r.gateway_down = "foreign"
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
     return None
@@ -10360,7 +10364,8 @@ def _check_hook_contract_lock(
 
     status = str(entry.get("compatibility_status") or "")
     contract = str(entry.get("contract_id") or "")
-    raw_version = str(entry.get("raw_agent_version") or "")
+    # Amp appends a release age ("3d ago") that goes stale in the lock.
+    raw_version = stable_agent_version(connector, str(entry.get("raw_agent_version") or ""))
     normalized = str(entry.get("normalized_agent_version") or "")
     script_version = str(entry.get("hook_script_version") or "")
     detail = f"contract={contract or '?'} status={status or '?'}"
@@ -11933,7 +11938,8 @@ def _fix_gateway_service(
     reason = ""
     process_trust: _GatewayTrust | None = None
     inspected_fingerprint: tuple[int, int, int, int, bytes] | None = None
-    foreign_holder = _foreign_gateway_port_holder(cfg) if code == 200 else ""
+    port_refused = code == 0 and "refused" in body.lower()
+    foreign_holder = "" if port_refused else _foreign_gateway_port_holder(cfg)
     if foreign_holder:
         return ("fail", _foreign_gateway_port_detail(cfg, foreign_holder))
     if code == 200:

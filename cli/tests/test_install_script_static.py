@@ -173,7 +173,8 @@ def test_handoff_runs_the_verified_installer_with_yes(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert f"installer args: --yes --local {release}" in result.stdout
     assert "fresh=unset" in result.stdout
-    assert "ignoring unsupported option: --recover-corrupt-audit" in result.stderr
+    assert "corrupt audit store is moved aside" in result.stderr
+    assert "ignoring unsupported option" not in result.stderr
 
 
 def test_handoff_refuses_an_installer_that_does_not_match(tmp_path: Path) -> None:

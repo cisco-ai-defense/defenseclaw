@@ -565,6 +565,16 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("held by PID 4242 (defenseclaw-gateway), not by this account's gateway", result.checks[0]["detail"])
         self.assertEqual(result.gateway_down, "foreign")
 
+        # A holder that is not a gateway at all answers /health with an error.
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=(404, "not found")),
+            patch.object(cmd_doctor, "_foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            _check_sidecar(self._sidecar_alignment_cfg(), result)
+        self.assertIn("held by PID 4343 (python3), not by this account's gateway", result.checks[0]["detail"])
+        self.assertEqual(result.gateway_down, "foreign")
+
     def test_refused_token_send_is_not_a_transport_failure(self):
         from defenseclaw.commands import cmd_doctor
 
