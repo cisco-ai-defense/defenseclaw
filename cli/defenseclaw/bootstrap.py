@@ -33,6 +33,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -782,6 +783,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if any(step.status == "fail" for step in readiness):
             rollback_first_run_transaction = True
 
+        _defer_hooks_to_gateway_start(setup, readiness)
         next_commands = _next_commands(setup, readiness, cfg, profile)
         status = _rollup_status(setup, readiness)
         report = FirstRunReport(
@@ -1512,7 +1514,10 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "started")
     detail = (result.stderr or result.stdout or "start failed").strip().splitlines()
-    return StepResult("Sidecar", "warn", detail[0] if detail else "start failed", "defenseclaw-gateway status")
+    first = detail[0] if detail else "start failed"
+    # A port held by another account names its own fix; lead with it.
+    port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
+    return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
 
 
 def _pid_file_running(pid_file: str) -> bool:
@@ -1783,6 +1788,30 @@ def _rollup_status(setup: list[StepResult], readiness: list[StepResult]) -> str:
     if any(s.status == "warn" for s in all_steps):
         return "partial"
     return "ready"
+
+
+_PLAIN_SETUP_HINT = re.compile(r"defenseclaw setup [a-z][a-z-]*")
+
+
+def _defer_hooks_to_gateway_start(setup: list[StepResult], readiness: list[StepResult]) -> None:
+    """Point missing connector hooks at the gateway when it did not start.
+
+    The sidecar writes every connector's hooks, plugin or policy when it
+    starts, so with the start failed they are missing for that reason alone
+    and ``defenseclaw setup <connector>`` would hit the same wall. Rows whose
+    hint asks for more than the plain setup command (a workspace, a mode
+    fix) keep it.
+    """
+    if not any(step.name == "Sidecar" and step.status in ("warn", "fail") for step in setup):
+        return
+    for step in readiness:
+        if (
+            step.name == "Connector"
+            and step.status == "warn"
+            and _PLAIN_SETUP_HINT.fullmatch(step.next_command or "")
+        ):
+            step.detail += " — written when the gateway starts"
+            step.next_command = "defenseclaw-gateway start"
 
 
 def _next_commands(
