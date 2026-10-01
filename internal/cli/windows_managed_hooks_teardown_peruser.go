@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -140,10 +142,33 @@ func purgeWindowsManagedHooksUnrecordedClaudeFloor() error {
 	if err != nil {
 		return err
 	}
-	_, err = enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
+	if _, err := enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
 		enterprisepolicy.LayoutOptions(layout, programFiles, programData),
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
+	return nil
+}
+
+// removeEmptyWindowsClaudeManagedSettingsFolders removes Claude Code's
+// managed-settings.d, and then its ClaudeCode folder, under programFiles when
+// the purge left them empty. Setup creates them for its drop-ins. A folder
+// that holds anything, or is not a plain directory, stays.
+func removeEmptyWindowsClaudeManagedSettingsFolders(programFiles string) {
+	root := filepath.Join(programFiles, "ClaudeCode")
+	for _, dir := range []string{filepath.Join(root, "managed-settings.d"), root} {
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeType != os.ModeDir {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			return
+		}
+	}
 }
 
 func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManagedHooksTeardownJournal) error {

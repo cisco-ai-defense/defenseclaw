@@ -322,9 +322,12 @@ func releaseWindowsEnterpriseSelfUpdatePolicy() error {
 		}
 	}
 	policy.Close()
-	// The lifecycle created the key for the value it owned; with nothing
-	// else in it, it goes too.
-	return removeEmptyWindowsRegistryKey(windowsEnterprisePolicyKey)
+	// The lifecycle created the key, and its Cisco parent, for the value it
+	// owned; with nothing else in them, they go too.
+	if err := removeEmptyWindowsRegistryKey(windowsEnterprisePolicyKey); err != nil {
+		return err
+	}
+	return removeEmptyWindowsRegistryKey(filepath.Dir(windowsEnterprisePolicyKey))
 }
 
 // ensureWindowsEnterpriseEventLog registers the DefenseClaw event log and
@@ -399,9 +402,11 @@ func removeWindowsEnterpriseRegistration() error {
 			failures = append(failures, fmt.Errorf("remove %s: %w", key, err))
 		}
 	}
-	// The marker's parent, created with the marker, goes once empty.
-	if err := removeEmptyWindowsRegistryKey(filepath.Dir(WindowsEnterpriseMarkerKey)); err != nil {
-		failures = append(failures, err)
+	// The marker's parents, created with the marker, go once empty.
+	for _, key := range []string{filepath.Dir(WindowsEnterpriseMarkerKey), filepath.Dir(filepath.Dir(WindowsEnterpriseMarkerKey))} {
+		if err := removeEmptyWindowsRegistryKey(key); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	return errors.Join(failures...)
 }
