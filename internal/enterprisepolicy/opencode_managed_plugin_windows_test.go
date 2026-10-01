@@ -279,3 +279,25 @@ func TestPublishWindowsGoOwnedKeepsTheOpenCodeSummaryPerUserWithOwnershipOff(t *
 		t.Fatalf("once the managed config names the plugin the summary must report machine policy, got %s", route)
 	}
 }
+
+// A standard account can mark the plugin read-only alone. OpenCode still
+// loads it, but no later release can replace it, so the guardian's heal
+// rewrites it and clears the attribute.
+func TestInstallOpenCodeManagedPluginClearsAReadOnlyAttribute(t *testing.T) {
+	opts := windowsOpenCodeTestOptions(t)
+	if _, err := InstallOpenCodeManagedPlugin(opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(opts.OpenCodePluginPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if wrote, err := InstallOpenCodeManagedPlugin(opts); err != nil || !wrote {
+		t.Fatalf("the heal must rewrite a read-only plugin: wrote=%v err=%v", wrote, err)
+	}
+	if openCodePluginReadOnly(opts.OpenCodePluginPath) {
+		t.Fatal("the rewritten plugin is still read-only")
+	}
+	if wrote, err := InstallOpenCodeManagedPlugin(opts); err != nil || wrote {
+		t.Fatalf("a healed plugin must be left alone: wrote=%v err=%v", wrote, err)
+	}
+}
