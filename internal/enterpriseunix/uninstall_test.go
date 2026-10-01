@@ -93,8 +93,10 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				if h.services.isActive(unit.Name) {
 					t.Fatalf("%s still running after uninstall", unit.Name)
 				}
-				if unit.Activate && h.services.enabled[unit.Name] {
-					t.Fatalf("%s still enabled after uninstall", unit.Name)
+				// A removed launchd label goes back to launchd's default,
+				// enabled, instead of staying listed as disabled (MAC-R1-23).
+				if unit.Activate && h.services.enabled[unit.Name] != (goos == "darwin") {
+					t.Fatalf("%s enabled=%v after uninstall", unit.Name, h.services.enabled[unit.Name])
 				}
 			}
 		})
