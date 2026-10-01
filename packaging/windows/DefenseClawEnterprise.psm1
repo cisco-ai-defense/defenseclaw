@@ -2702,7 +2702,10 @@ function Assert-DefenseClawRegularSource {
         elseif ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -and -not $AllowUnsigned) {
             throw "$Label Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for controlled test builds"
         }
-        if (-not $AllowUnsigned) {
+        # Standalone has already admitted the source through its configured
+        # Authenticode or manifest hash policy. The Cisco signer pin belongs
+        # to the Secure Client payload contract.
+        if (-not $AllowUnsigned -and -not (Test-DefenseClawStandaloneProfile)) {
             Assert-DefenseClawPayloadSigner `
                 -SignerCertificate $signature.SignerCertificate `
                 -Label $Label `

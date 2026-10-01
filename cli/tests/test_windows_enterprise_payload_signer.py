@@ -51,9 +51,9 @@ def test_every_authenticode_source_check_pins_the_publisher() -> None:
     assert "not the DefenseClaw publisher" in signer
 
     regular = function_body(module, "Assert-DefenseClawRegularSource")
-    # The publisher check runs for every production Authenticode source and is
-    # skipped only by the certification-only -AllowUnsigned relaxation.
-    assert "if (-not $AllowUnsigned) {" in regular
+    # Standalone sources have their own Authenticode or manifest hash policy;
+    # the Cisco publisher pin applies to Secure Client sources.
+    assert "if (-not $AllowUnsigned -and -not (Test-DefenseClawStandaloneProfile)) {" in regular
     assert regular.index("SignatureStatus]::Valid") < regular.index(
         "Assert-DefenseClawPayloadSigner"
     )
@@ -112,7 +112,7 @@ def test_installer_pins_module_signer_before_import() -> None:
     main = installer[installer.index("$bootstrapEnvironment = $null") :]
     assert "cannot be combined with -AllowUnsigned" in main
     assert main.index("ConvertTo-DefenseClawBootstrapTrustedSignerSet") < main.index(
-        "Assert-DefenseClawBootstrapModuleTrust"
+        "$modulePath = Assert-DefenseClawBootstrapModuleTrust"
     )
     assert main.index("-AdditionalTrustedSignerSha256 $trustedSigners") < main.index(
         "Import-Module"
