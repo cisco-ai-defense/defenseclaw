@@ -4768,6 +4768,32 @@ function Get-DefenseClawGatewayServiceDependencies {
     return '/'
 }
 
+# Set-DefenseClawStandaloneEnumeratorEnvironment rewrites the enumerator's
+# environment pins from the layout, as the lifecycle rewrites the gateway's
+# and the guardian's. A replaced manifest retires the Claude Code
+# attestation, and the service assertion compares all three services
+# against the layout, so a stale enumerator pin failed the change with
+# "environment pin drift". The Secure Client profile is unchanged.
+function Set-DefenseClawStandaloneEnumeratorEnvironment {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    Set-DefenseClawServiceEnvironment `
+        -Name (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName) `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -ConfigPath $Layout.ConfigPath `
+        -AuthorizationDirectory $Layout.AuthorizationDirectory `
+        -GatewayServiceName $GatewayServiceName `
+        -LogPath $Layout.GuardianLogPath `
+        -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
+        -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
+}
+
 function Set-DefenseClawManagedServices {
     param(
         [Parameter(Mandatory)][string]$GatewayServiceName,
@@ -22649,6 +22675,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -LogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
+        Set-DefenseClawStandaloneEnumeratorEnvironment `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
         if ([bool]$Layout.CodexTargetEnabled) {
             if (-not $priorCodexTargetEnabled) {
                 Add-DefenseClawCodexTransactionSnapshot `
