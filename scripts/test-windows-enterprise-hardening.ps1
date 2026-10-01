@@ -8631,14 +8631,20 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         throw "$Label machine requirements report omitted the exact ten events"
     }
 
+    # The gateway edits requirements.toml in place: keys it adds to an
+    # existing table carry a trailing "# managed by DefenseClaw" comment and
+    # strings are TOML literals ('...'), so the value checks accept a
+    # trailing comment and either quote style.
+    # TestWindowsHardeningHarnessAcceptsRenderedCodexRequirements
+    # (internal/gateway/connector) runs these patterns against the renderer.
     $raw = [IO.File]::ReadAllText($script:CodexRequirementsPath)
     if ([regex]::Matches(
         $raw,
-        '(?m)^allow_managed_hooks_only\s*=\s*true\s*$'
+        '(?m)^allow_managed_hooks_only\s*=\s*true[ \t]*(?:#[^\r\n]*)?\r?$'
     ).Count -ne 1 -or
         [regex]::Matches(
             $raw,
-            '(?ms)^\[features\]\s*\r?\n(?:[^\[]*\r?\n)*?hooks\s*=\s*true\s*$'
+            '(?ms)^\[features\][ \t]*(?:#[^\r\n]*)?\s*\r?\n(?:[^\[]*\r?\n)*?hooks\s*=\s*true[ \t]*(?:#[^\r\n]*)?\r?$'
         ).Count -ne 1 -or
         $raw -match '(?m)^\s*state\s*=' -or
         $raw -match '(?m)^\s*\[hooks\.state\]') {
@@ -8654,7 +8660,10 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
     }
     if ([regex]::Matches($raw, '(?m)^command\s*=').Count -ne 10 -or
         [regex]::Matches($raw, '(?m)^command_windows\s*=').Count -ne 10 -or
-        [regex]::Matches($raw, '(?m)^type\s*=\s*"command"\s*$').Count -ne 10 -or
+        [regex]::Matches(
+            $raw,
+            '(?m)^type\s*=\s*(?:"command"|''command'')[ \t]*(?:#[^\r\n]*)?\r?$'
+        ).Count -ne 10 -or
         [regex]::Matches($raw, '(?m)^timeout\s*=').Count -ne 10) {
         throw "$Label requirements.toml does not have ten exact command handlers"
     }
