@@ -352,3 +352,11 @@ def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     assert "claudecode's agent changed (2.1.276 (Claude Code) -> 2.1.286 (Claude Code))" in out
     assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start" in out
     assert "an older failure" not in out
+
+
+def test_windows_installer_leaves_unset_variables_unset() -> None:
+    # pwsh 7 turns SetEnvironmentVariable(name, $null) into an empty value (WIN2-U2-08).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    restore = text[text.index("foreach ($name in $savedEnv.Keys)") :][:400]
+    assert 'if ($null -eq $savedEnv[$name]) { Remove-Item -LiteralPath "Env:$name"' in restore
+

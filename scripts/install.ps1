@@ -1564,7 +1564,13 @@ try {
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
     if ($Run.Lock) { Invoke-Quietly { Remove-Tree $LockDir } }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
-    foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], "Process") }
+    # A variable that was unset stays unset. PowerShell 7 passes $null to
+    # SetEnvironmentVariable as "", which leaves an empty variable behind
+    # (an empty CLAUDE_CONFIG_DIR signs Claude Code out).
+    foreach ($name in $savedEnv.Keys) {
+        if ($null -eq $savedEnv[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], "Process") }
+    }
     # `defenseclaw upgrade` and `rollback` run a copy of this installer from a
     # temporary directory of their own (with it as the working directory),
     # holding only the installer and checksums.txt.
