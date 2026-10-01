@@ -34,3 +34,29 @@ func TestCollectSQLiteHealthRejectsInvalidLifecycle(t *testing.T) {
 		t.Fatal("closed store accepted")
 	}
 }
+
+// A checkpoint copies WAL frames and syncs the database, which takes seconds
+// on slow storage. It must not wait for, or hold, the single writer connection
+// that mandatory appends use.
+func TestPassiveCheckpointDoesNotNeedWriterConnection(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	writer, err := store.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.Exec(`CREATE TABLE checkpoint_writer_probe (id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	release, err := store.acquireReady()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// With the writer connection held, this returns only if the checkpoint
+	// runs on its own connection.
+	if _, err := store.passiveCheckpoint(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}

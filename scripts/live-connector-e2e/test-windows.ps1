@@ -3090,46 +3090,22 @@ threading.Event().wait()
         $contractFunction.IndexOf('$env:APPDATA =', [StringComparison]::Ordinal) -gt
             $contractFunction.IndexOf("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D", [StringComparison]::Ordinal)) `
         'connector contract binds Profile, LocalAppData, and RoamingAppData to the current process token before hostile environment isolation'
-    Assert-True ($connectorContractJob -match '(?s)Required connector contract with one bounded telemetry retry.*?Invoke-ConnectorContractAttempt.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$attemptDiagnostics' -and
+    Assert-True ($connectorContractJob -match '(?s)Required connector contract\r?\n.*?Invoke-WindowsNativeProcess.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$contractDiagnostics' -and
         $connectorContractJob -match "timeout-minutes: \$\{\{ matrix\.connector == 'devin' && 50 \|\| 35 \}\}" -and
         $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
         'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
-    $connectorRetryStep = [regex]::Match(
+    $connectorContractStep = [regex]::Match(
         $connectorContractJob,
-        '(?ms)^      - name: Required connector contract with one bounded telemetry retry.*?(?=^      - name:)'
+        '(?ms)^      - name: Required connector contract\r?\n.*?(?=^      - name:)'
     ).Value
-    $retryCaptureIndex = $connectorRetryStep.IndexOf("'-Operation', 'capture'", [StringComparison]::Ordinal)
-    $retryCleanupIndex = $connectorRetryStep.IndexOf("'-Operation', 'cleanup'", [StringComparison]::Ordinal)
-    $retrySecondAttemptIndex = $connectorRetryStep.IndexOf(
-        '$second = Invoke-ConnectorContractAttempt 2', [StringComparison]::Ordinal
-    )
-    $retryCleanupFailurePrefixes = @(
-        'disposable execution boundary:',
-        'interactive desktop ACL restore:',
-        'ancestor ACL lease restore:',
-        'diagnostic handoff:',
-        'account/profile cleanup:',
-        'sandbox cleanup:',
-        'parent-only sibling cleanup:'
-    )
-    Assert-True ($connectorRetryStep -match '\. \$nativeHarness -NoRun' -and
-        $connectorRetryStep -match '\$first = Invoke-ConnectorContractAttempt 1' -and
-        $connectorRetryStep -match '\$retrySignal = ''event_history=sqlite_write_failed''' -and
-        $connectorRetryStep -notmatch 'rollback was incomplete' -and
-        @($retryCleanupFailurePrefixes | Where-Object {
-            -not $connectorRetryStep.Contains("'$_'", [StringComparison]::Ordinal)
-        }).Count -eq 0 -and
-        $connectorRetryStep -match '\$firstOutput\.Contains\(\$_, \[StringComparison\]::Ordinal\)' -and
-        $connectorRetryStep -match '\$cleanupFailure\.Count -ne 0' -and
-        $connectorRetryStep -match '-AllowedExitCodes @\(0, 1\)' -and
-        $retryCaptureIndex -ge 0 -and $retryCleanupIndex -gt $retryCaptureIndex -and
-        $retrySecondAttemptIndex -gt $retryCleanupIndex -and
-        $connectorRetryStep -match 'Test-Path -LiteralPath \$contractStateRoot' -and
-        $connectorRetryStep -match 'Get-StateProcesses \$contractStateRoot' -and
-        $connectorRetryStep -match 'attempt-\$Attempt-child' -and
-        $connectorRetryStep -match 'Write-BoundedText.*?\$env:CONNECTOR-event-history-retry\.txt' -and
-        $connectorContractJob -match 'steps\.connector_contract\.outputs\.retried == ''true''') `
-        'every connector retries only the exact SQLite telemetry transient after bounded capture and complete isolated cleanup'
+    Assert-True ($connectorContractStep -match '\. \$nativeHarness -NoRun' -and
+        $connectorContractStep -match '-AllowedExitCodes @\(0, 1\)' -and
+        $connectorContractStep -match '\$contract\.ExitCode -ne 0' -and
+        $connectorContractStep -notmatch 'Attempt' -and
+        $connectorContractStep -notmatch 'sqlite_write_failed' -and
+        $connectorContractJob -notmatch 'retried' -and
+        $connectorContractJob -match 'Upload diagnostics on failure\r?\n        if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}') `
+        'every connector contract runs once; a telemetry failure fails the job instead of being retried'
     Assert-True ($omniGentJob -match '(?s)invoke-windows-setup-standard-user-ci\.ps1.*?-Mode omnigent-native-degraded.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
         $standardUserCIText -match "'omnigent-native-degraded'" -and
         $standardUserCIText -match 'test-omnigent-windows-native\.ps1' -and
