@@ -310,10 +310,11 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             legacy_tmp = Path(tmp).resolve() / "tmp"
             (legacy_tmp / ".defenseclaw-install-custody-1-abc" / "retired-x").mkdir(parents=True)
             (legacy_tmp / "unrelated").mkdir()
+            gateway = "defenseclaw-gateway.exe" if sys.platform == "win32" else "defenseclaw-gateway"
             plan = cmd_uninstall.UninstallPlan(
                 platform_name=sys.platform,
                 install_root=str(root),
-                gateway_path=str(root / "defenseclaw-gateway"),
+                gateway_path=str(root / gateway),
                 binary_targets=(),
                 remove_binaries=True,
             )
