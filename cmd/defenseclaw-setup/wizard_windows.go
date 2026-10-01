@@ -39,6 +39,7 @@ const (
 	dcHasDefID        = 0x534B
 	wmDone            = wmApp + 1
 	wmTerminalDone    = wmApp + 2
+	wmProgress        = wmApp + 3
 
 	wsOverlapped  = 0x00000000
 	wsCaption     = 0x00C00000
@@ -199,6 +200,7 @@ type setupWizard struct {
 	code              int
 	err               error
 	terminalErr       error
+	step              string
 	mu                sync.Mutex
 }
 
@@ -391,6 +393,11 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 	case wmTerminalDone:
 		if wiz != nil {
 			wiz.completeTerminalLaunch()
+			return 0
+		}
+	case wmProgress:
+		if wiz != nil {
+			wiz.showProgress()
 			return 0
 		}
 	case wmDestroy:
@@ -624,6 +631,12 @@ func (w *setupWizard) startAction() {
 	procEnableWindow.Call(w.cancel, 1)
 	w.show(w.progress, true)
 	procSendMessage.Call(w.progress, pbmSetMarquee, 1, 30)
+	setupProgress = func(step string) {
+		w.mu.Lock()
+		w.step = step
+		w.mu.Unlock()
+		procPostMessage.Call(w.hwnd, wmProgress, 0, 0)
+	}
 	go func(ctx context.Context, cancel context.CancelFunc, opts options) {
 		defer cancel()
 		var code int
@@ -674,6 +687,20 @@ func (w *setupWizard) requestCancellationWithPrompt(confirm func() bool) {
 	procEnableWindow.Call(w.cancel, 0)
 	if w.operationCancel != nil {
 		w.operationCancel()
+	}
+}
+
+// showProgress shows the install step the worker reported last, unless the
+// action is cancelling or done.
+func (w *setupWizard) showProgress() {
+	if !w.running || w.cancelRequested {
+		return
+	}
+	w.mu.Lock()
+	step := w.step
+	w.mu.Unlock()
+	if step != "" {
+		setText(w.description, step)
 	}
 }
 

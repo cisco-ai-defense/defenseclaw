@@ -408,6 +408,10 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	return runInstallContext(context.Background(), opts, installRoot, dataRoot)
 }
 
+// setupProgress receives the name of each install step as it starts; the
+// wizard shows it, so a slow install does not look hung. It must not block.
+var setupProgress = func(string) {}
+
 func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot string) (int, error) {
 	if err := checkSetupContext(ctx); err != nil {
 		return userExitCode, err
@@ -474,6 +478,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
 	pathValueCreated := oldState != nil && oldState.PathValueCreated
 
+	setupProgress("Unpacking the installer payload...")
 	payload, err := loadPayload(payloadTempRoot)
 	if err != nil {
 		return 1, err
@@ -551,6 +556,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return tryAbort(err)
 	}
 
+	setupProgress("Extracting the Python runtime, packages and gateway...")
 	if err := stageInstallTree(
 		payload,
 		transaction.StagingPath,
@@ -569,6 +575,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return tryAbort(err)
 	}
 	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
+		setupProgress("Checking the data migrations...")
 		if err := runPackagedMigrationPreflightWithEnv(
 			transaction.StagingPath,
 			transaction.DataRoot,
@@ -595,6 +602,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return rollbackQuiescingSetup(transaction, cause)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+	setupProgress("Stopping DefenseClaw for the update...")
 	err = quiesceSetupRuntimeForMutation(
 		transaction,
 		gatewayPath,
@@ -638,6 +646,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return tryRestore(err)
 	}
+	setupProgress("Publishing the new install...")
 	if err := renameInstallTree(transaction.StagingPath, installRoot); err != nil {
 		return tryRestore(fmt.Errorf("publish staged install: %w", err))
 	}
@@ -669,6 +678,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	tryRestorePublished := func(cause error) (int, error) {
 		return rollbackPublishedSetup(transaction, cause)
 	}
+	setupProgress("Migrating data and updating user registration...")
 	if err := activatePublishedSetupTransaction(transaction); err != nil {
 		if errors.Is(err, errPublishedActivationStateChanged) {
 			return retryRequiredCode, fmt.Errorf("activate published setup transaction; target runtime retained for recovery: %w", err)
