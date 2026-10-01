@@ -36,7 +36,10 @@ function Get-ProductionBootstrapDefinitions {
 }
 
 function Invoke-ProtectedEnvironmentProbe {
-    param([int]$Hold = 0)
+    param(
+        [int]$Hold = 0,
+        [switch]$SkipNativeInterop
+    )
 
     $probeToken = [Guid]::NewGuid().ToString('N')
     $originalEnvironment = @{}
@@ -144,82 +147,83 @@ function Invoke-ProtectedEnvironmentProbe {
                 throw 'home drive/path or PowerShell module-analysis cache was not pinned'
             }
 
-            # Compile and execute the production WTS interop while the one-shot
-            # compiler/cache environment is still protected. The synthetic
-            # target-rendering probe below pins selection semantics; this call
-            # independently catches PS 5.1 Add-Type, struct-layout, entry-point,
-            # and native buffer-management regressions on a real Windows host.
-            $nativePath = Initialize-DefenseClawBootstrapNativePath
-            foreach ($case in @(
-                [pscustomobject]@{
-                    Name = 'local/domain user'
-                    SID = 'S-1-5-21-1000-2000-3000-1001'
-                    Accepted = $true
-                },
-                [pscustomobject]@{
-                    Name = 'Microsoft Entra ID user'
-                    SID = 'S-1-12-1-1111111111-2222222222-3333333333-4000000000'
-                    Accepted = $true
-                },
-                [pscustomobject]@{
-                    Name = 'truncated Microsoft Entra ID user'
-                    SID = 'S-1-12-1-1111111111-2222222222-3333333333'
-                    Accepted = $false
-                },
-                [pscustomobject]@{
-                    Name = 'LocalSystem'
-                    SID = 'S-1-5-18'
-                    Accepted = $false
-                },
-                [pscustomobject]@{
-                    Name = 'LocalService'
-                    SID = 'S-1-5-19'
-                    Accepted = $false
-                },
-                [pscustomobject]@{
-                    Name = 'NetworkService'
-                    SID = 'S-1-5-20'
-                    Accepted = $false
-                },
-                [pscustomobject]@{
-                    Name = 'NT SERVICE'
-                    SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
-                    Accepted = $false
-                }
-            )) {
-                $parsed = [Security.Principal.SecurityIdentifier]::new($case.SID)
-                $nativeAccepted = [bool]$nativePath::IsInteractiveUserSID($parsed)
-                $scriptAccepted = [bool](
-                    Test-DefenseClawInteractiveUserSID -SID $parsed
-                )
-                if ($nativeAccepted -ne [bool]$case.Accepted -or
-                    $scriptAccepted -ne [bool]$case.Accepted) {
-                    throw (
-                        "interactive SID classification mismatch for $($case.Name): " +
-                        "native=$nativeAccepted script=$scriptAccepted " +
-                        "expected=$($case.Accepted)"
-                    )
-                }
-            }
-            $activeSessionSIDs = @($nativePath::GetActiveSessionSIDs())
-            $canonicalActiveSessionSIDs = @(
-                foreach ($activeSessionSID in $activeSessionSIDs) {
-                    $parsed = [Security.Principal.SecurityIdentifier]::new(
-                        [string]$activeSessionSID
-                    )
-                    if (-not $nativePath::IsInteractiveUserSID($parsed)) {
-                        throw "native WTS discovery returned a non-user SID: $($parsed.Value)"
+            if (-not $SkipNativeInterop) {
+                # The single probe certifies native interop. Race workers only
+                # need to exercise simultaneous root creation and cleanup.
+                # Compiling the same Add-Type source in six PowerShell 5.1
+                # processes can stall under concurrent Defender scans.
+                $nativePath = Initialize-DefenseClawBootstrapNativePath
+                foreach ($case in @(
+                    [pscustomobject]@{
+                        Name = 'local/domain user'
+                        SID = 'S-1-5-21-1000-2000-3000-1001'
+                        Accepted = $true
+                    },
+                    [pscustomobject]@{
+                        Name = 'Microsoft Entra ID user'
+                        SID = 'S-1-12-1-1111111111-2222222222-3333333333-4000000000'
+                        Accepted = $true
+                    },
+                    [pscustomobject]@{
+                        Name = 'truncated Microsoft Entra ID user'
+                        SID = 'S-1-12-1-1111111111-2222222222-3333333333'
+                        Accepted = $false
+                    },
+                    [pscustomobject]@{
+                        Name = 'LocalSystem'
+                        SID = 'S-1-5-18'
+                        Accepted = $false
+                    },
+                    [pscustomobject]@{
+                        Name = 'LocalService'
+                        SID = 'S-1-5-19'
+                        Accepted = $false
+                    },
+                    [pscustomobject]@{
+                        Name = 'NetworkService'
+                        SID = 'S-1-5-20'
+                        Accepted = $false
+                    },
+                    [pscustomobject]@{
+                        Name = 'NT SERVICE'
+                        SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+                        Accepted = $false
                     }
-                    $parsed.Value
+                )) {
+                    $parsed = [Security.Principal.SecurityIdentifier]::new($case.SID)
+                    $nativeAccepted = [bool]$nativePath::IsInteractiveUserSID($parsed)
+                    $scriptAccepted = [bool](
+                        Test-DefenseClawInteractiveUserSID -SID $parsed
+                    )
+                    if ($nativeAccepted -ne [bool]$case.Accepted -or
+                        $scriptAccepted -ne [bool]$case.Accepted) {
+                        throw (
+                            "interactive SID classification mismatch for $($case.Name): " +
+                            "native=$nativeAccepted script=$scriptAccepted " +
+                            "expected=$($case.Accepted)"
+                        )
+                    }
                 }
-            )
-            $orderedUniqueActiveSessionSIDs = @(
-                $canonicalActiveSessionSIDs |
-                    Sort-Object -Unique
-            )
-            if (($canonicalActiveSessionSIDs -join ',') -cne
-                ($orderedUniqueActiveSessionSIDs -join ',')) {
-                throw 'native WTS discovery did not return a canonical sorted unique SID set'
+                $activeSessionSIDs = @($nativePath::GetActiveSessionSIDs())
+                $canonicalActiveSessionSIDs = @(
+                    foreach ($activeSessionSID in $activeSessionSIDs) {
+                        $parsed = [Security.Principal.SecurityIdentifier]::new(
+                            [string]$activeSessionSID
+                        )
+                        if (-not $nativePath::IsInteractiveUserSID($parsed)) {
+                            throw "native WTS discovery returned a non-user SID: $($parsed.Value)"
+                        }
+                        $parsed.Value
+                    }
+                )
+                $orderedUniqueActiveSessionSIDs = @(
+                    $canonicalActiveSessionSIDs |
+                        Sort-Object -Unique
+                )
+                if (($canonicalActiveSessionSIDs -join ',') -cne
+                    ($orderedUniqueActiveSessionSIDs -join ',')) {
+                    throw 'native WTS discovery did not return a canonical sorted unique SID set'
+                }
             }
 
             $sections = [Security.AccessControl.AccessControlSections]::Owner `
@@ -315,7 +319,7 @@ function Invoke-ProtectedEnvironmentProbe {
             exact_acl = $true
             all_environment_paths_pinned = $true
             module_analysis_cache_disabled = $true
-            native_active_session_discovery_verified = $true
+            native_active_session_discovery_verified = -not [bool]$SkipNativeInterop
             nested_cleanup_verified = $true
             environment_restore_verified = $true
             hostile_fixture_cleanup_verified = $true
@@ -1949,7 +1953,8 @@ if ($Worker) {
     }
     try {
         $workerResult = Invoke-ProtectedEnvironmentProbe `
-            -Hold $HoldMilliseconds
+            -Hold $HoldMilliseconds `
+            -SkipNativeInterop
         [IO.File]::WriteAllText(
             [IO.Path]::GetFullPath($ResultPath),
             ($workerResult | ConvertTo-Json -Compress)

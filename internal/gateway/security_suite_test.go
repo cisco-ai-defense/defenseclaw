@@ -336,7 +336,9 @@ func TestSecuritySuiteE2E(t *testing.T) {
 		authHeader = strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN"))
 		t.Logf("e2e: targeting external gateway at %s", base)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	// The inspect handler completes audit and telemetry writes before responding;
+	// allow busy CI hosts time to finish while still bounding a stalled request.
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	for _, c := range cases {
 		c := c
