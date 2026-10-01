@@ -22495,6 +22495,171 @@ function Complete-DefenseClawStatePurge {
     return $result
 }
 
+# A production enterprise deployment owns the machine policy
+# HKLM\SOFTWARE\Policies\Cisco\DefenseClaw DisableSelfUpdate=1, so the
+# per-user product defers updates to the managed deployment channel. A value
+# that already exists was set by Group Policy, MDM, or another administrator
+# and is never changed. Ownership is recorded by a marker value that is written
+# before DisableSelfUpdate and removed after it, so an interrupted lifecycle
+# never leaves an unowned value behind.
+$script:DefenseClawSelfUpdatePolicyKeyPath = 'SOFTWARE\Policies\Cisco\DefenseClaw'
+$script:DefenseClawSelfUpdatePolicyValueName = 'DisableSelfUpdate'
+$script:DefenseClawSelfUpdatePolicyOwnerValueName = 'DisableSelfUpdateOwner'
+$script:DefenseClawSelfUpdatePolicyOwner = 'DefenseClaw managed_enterprise lifecycle'
+
+function Test-DefenseClawProductionGatewayService {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return [string]::Equals(
+        $GatewayServiceName,
+        'DefenseClawGateway',
+        [StringComparison]::Ordinal
+    )
+}
+
+function Open-DefenseClawMachinePolicyRoot {
+    return [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64
+    )
+}
+
+function Test-DefenseClawRegistryValue {
+    param(
+        [Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$Key,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][Microsoft.Win32.RegistryValueKind]$Kind,
+        [Parameter(Mandatory)]$Expected
+    )
+    if (@($Key.GetValueNames()) -notcontains $Name) {
+        return $false
+    }
+    if ($Key.GetValueKind($Name) -ne $Kind) {
+        return $false
+    }
+    $actual = $Key.GetValue(
+        $Name,
+        $null,
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    )
+    if ($Kind -eq [Microsoft.Win32.RegistryValueKind]::String) {
+        return [string]::Equals([string]$actual, [string]$Expected, [StringComparison]::Ordinal)
+    }
+    return [int64]$actual -eq [int64]$Expected
+}
+
+function Test-DefenseClawOwnedSelfUpdateMarker {
+    param([Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$Key)
+    return Test-DefenseClawRegistryValue `
+        -Key $Key `
+        -Name $script:DefenseClawSelfUpdatePolicyOwnerValueName `
+        -Kind ([Microsoft.Win32.RegistryValueKind]::String) `
+        -Expected $script:DefenseClawSelfUpdatePolicyOwner
+}
+
+function Test-DefenseClawSelfUpdateDisabledValue {
+    param([Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$Key)
+    return Test-DefenseClawRegistryValue `
+        -Key $Key `
+        -Name $script:DefenseClawSelfUpdatePolicyValueName `
+        -Kind ([Microsoft.Win32.RegistryValueKind]::DWord) `
+        -Expected 1
+}
+
+# Returns created, owned, relinquished, or foreign.
+function Set-DefenseClawOwnedSelfUpdatePolicy {
+    param(
+        [Microsoft.Win32.RegistryKey]$Root,
+        [string]$KeyPath = $script:DefenseClawSelfUpdatePolicyKeyPath
+    )
+    $openedRoot = $null
+    if ($null -eq $Root) {
+        $openedRoot = Open-DefenseClawMachinePolicyRoot
+        $Root = $openedRoot
+    }
+    try {
+        $key = $Root.CreateSubKey($KeyPath, $true)
+        if ($null -eq $key) {
+            throw "machine policy key could not be opened: $KeyPath"
+        }
+        try {
+            $owned = Test-DefenseClawOwnedSelfUpdateMarker -Key $key
+            if (@($key.GetValueNames()) -contains $script:DefenseClawSelfUpdatePolicyValueName) {
+                if (-not $owned) {
+                    return 'foreign'
+                }
+                if (Test-DefenseClawSelfUpdateDisabledValue -Key $key) {
+                    return 'owned'
+                }
+                # Someone else changed the value this lifecycle set; that
+                # decision stands and the value is no longer ours.
+                $key.DeleteValue($script:DefenseClawSelfUpdatePolicyOwnerValueName, $false)
+                return 'relinquished'
+            }
+            $key.SetValue(
+                $script:DefenseClawSelfUpdatePolicyOwnerValueName,
+                $script:DefenseClawSelfUpdatePolicyOwner,
+                [Microsoft.Win32.RegistryValueKind]::String
+            )
+            $key.SetValue(
+                $script:DefenseClawSelfUpdatePolicyValueName,
+                1,
+                [Microsoft.Win32.RegistryValueKind]::DWord
+            )
+            return 'created'
+        }
+        finally {
+            $key.Dispose()
+        }
+    }
+    finally {
+        if ($null -ne $openedRoot) {
+            $openedRoot.Dispose()
+        }
+    }
+}
+
+# Returns removed, foreign, or absent.
+function Remove-DefenseClawOwnedSelfUpdatePolicy {
+    param(
+        [Microsoft.Win32.RegistryKey]$Root,
+        [string]$KeyPath = $script:DefenseClawSelfUpdatePolicyKeyPath
+    )
+    $openedRoot = $null
+    if ($null -eq $Root) {
+        $openedRoot = Open-DefenseClawMachinePolicyRoot
+        $Root = $openedRoot
+    }
+    try {
+        $key = $Root.OpenSubKey($KeyPath, $true)
+        if ($null -eq $key) {
+            return 'absent'
+        }
+        $empty = $false
+        try {
+            if (-not (Test-DefenseClawOwnedSelfUpdateMarker -Key $key)) {
+                return 'foreign'
+            }
+            if (Test-DefenseClawSelfUpdateDisabledValue -Key $key) {
+                $key.DeleteValue($script:DefenseClawSelfUpdatePolicyValueName, $false)
+            }
+            $key.DeleteValue($script:DefenseClawSelfUpdatePolicyOwnerValueName, $false)
+            $empty = $key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0
+        }
+        finally {
+            $key.Dispose()
+        }
+        if ($empty) {
+            $Root.DeleteSubKey($KeyPath, $false)
+        }
+        return 'removed'
+    }
+    finally {
+        if ($null -ne $openedRoot) {
+            $openedRoot.Dispose()
+        }
+    }
+}
+
 function Invoke-DefenseClawCommittedUninstallCleanup {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22520,6 +22685,19 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "committed-uninstall cleanup refused while service exists: $name"
+        }
+    }
+    # Every managed service is gone, so the deployment no longer owns the
+    # per-user self-update policy.
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        try {
+            [void](Remove-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                'Uninstall committed, but the owned DisableSelfUpdate machine ' +
+                "policy could not be removed; retry Uninstall: $($_.Exception.Message)"
+            )
         }
     }
     $cleanupGatewaySID = Resolve-DefenseClawRetiredGatewayServiceSID `
@@ -23118,6 +23296,26 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
             -Role $role
         $name = [string]$roleServiceNames[$role]
         Remove-DefenseClawService -Name $name
+    }
+    # Every exact managed service is gone, so this scope no longer owns the
+    # per-user self-update policy. Only a value that still carries the
+    # deployment's owner marker is removed; a Group Policy or MDM value stays.
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        foreach ($name in $expectedServiceNames) {
+            if (Test-DefenseClawServiceExists -Name ([string]$name)) {
+                throw "exact-scope purge refused to release the self-update policy while service exists: $name"
+            }
+        }
+        try {
+            [void](Remove-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                'Uninstall -Purge removed the managed services, but the owned ' +
+                'DisableSelfUpdate machine policy could not be removed; retry ' +
+                "Uninstall -Purge: $($_.Exception.Message)"
+            )
+        }
     }
     foreach ($path in @($requestPath, $reportPath)) {
         if (Microsoft.PowerShell.Management\Test-Path `
@@ -24305,6 +24503,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             "$Action committed, but its protected managed-hook lifecycle " +
             "journal could not be retired: $($_.Exception.Message)"
         )
+    }
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        try {
+            [void](Set-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                "$Action committed, but the DisableSelfUpdate machine policy " +
+                "could not be applied; run Repair: $($_.Exception.Message)"
+            )
+        }
     }
     $result = Get-DefenseClawLifecycleStatus `
         -Action $Action `

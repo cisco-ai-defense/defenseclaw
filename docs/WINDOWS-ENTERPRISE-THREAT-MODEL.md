@@ -750,7 +750,32 @@ authority.
    never authenticates hook, inspect or management routes or another
    connector ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)). Target-owned
    file reads and comparisons are bounded, and an authorized oversized
-   runtime leaf is quarantined for repair, but disk-full,
+   runtime leaf is quarantined for repair. Per-user releases with the
+   enterprise coexistence check refuse to run beside an enterprise deployment:
+   while the `DefenseClawGateway` service exists, their `install.ps1`, Setup
+   install, upgrade, and repair actions, and gateway `start`, `restart`, and
+   foreground run all refuse. A per-user gateway already running from
+   such a release checks every five seconds and stops itself. Setup rollback
+   and interrupted-operation recovery leave it stopped and disable logon
+   auto-start. A production deployment also owns
+   `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
+   changes a value that Group Policy or another administrator already set, and
+   Uninstall, including the `Uninstall -Purge` exact-scope recovery that runs
+   when StateRoot is gone, removes the value only if it still carries the
+   deployment's owner marker. An earlier enterprise release that predates the
+   policy cannot remove it, so returning to such a release means uninstalling
+   with the current release first. Two availability residuals remain. A per-user install from an
+   earlier release has no coexistence check: its logon helper (the
+   `DefenseClawGateway` value under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and its hook
+   cold-start recovery still start a per-user gateway, which can take the port
+   while the SCM gateway restarts. The enterprise lifecycle does not detect,
+   report, or remove such an install, and the owned self-update policy keeps it
+   on its release. Administrators must uninstall pre-existing per-user copies
+   for every user before or after deploying; while one holds the port, managed
+   hooks fail closed with `enterprise_managed_gateway_peer_unverified`. A
+   deliberate listener from any other standard-user program also remains an
+   availability residual. Disk-full,
    handle exhaustion, continuously generated new data, and broader endpoint
    resource starvation remain availability residuals. SCM recovery, monitoring,
    and endpoint resource controls reduce but do not eliminate them.

@@ -92,6 +92,15 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if versionJSON {
 		return nil
 	}
+	// The bare root command runs the gateway in the foreground. Refuse it
+	// beside an enterprise deployment before the bootstrap below registers a
+	// PID, loads the per-user config, or opens the audit store. The check is
+	// a read-only SCM query, and the enterprise gateway service is exempt.
+	if cmd != nil && !cmd.HasParent() {
+		if err := refusePerUserGatewayBesideEnterprise(); err != nil {
+			return err
+		}
+	}
 	// Skip the full-daemon bootstrap (config load + audit store + PID
 	// registration + telemetry) for lifecycle utilities that operate on
 	// operator-supplied paths and do not touch DefenseClaw state. These
