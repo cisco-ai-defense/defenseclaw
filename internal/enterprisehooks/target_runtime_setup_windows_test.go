@@ -365,7 +365,10 @@ func TestWindowsManagedRuntimeFinalizeNeverReplacesCollision(t *testing.T) {
 	}
 }
 
-func TestWindowsManagedRuntimeCleanupRejectsUnexpectedContent(t *testing.T) {
+// Content cleanup did not write is never deleted, and it no longer leaves the
+// rollback pending: the root holding it is kept aside under
+// .defenseclaw.rollback-<random> (WIN-R1-20).
+func TestWindowsManagedRuntimeCleanupKeepsUnexpectedContentAside(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -386,17 +389,22 @@ func TestWindowsManagedRuntimeCleanupRejectsUnexpectedContent(t *testing.T) {
 	if err := os.WriteFile(unexpected, []byte("preserve"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
-		t.Fatal("cleanup deleted or accepted unexpected target content")
+	claims, err = CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
+	if err != nil {
+		t.Fatalf("cleanup with unexpected target content stayed pending: %v", err)
 	}
-	if data, err := os.ReadFile(unexpected); err != nil || string(data) != "preserve" {
+	if len(claims) != 1 || claims[0].State != windowsManagedRuntimeStateAbsent {
+		t.Fatalf("cleanup claims = %+v, want the managed root absent", claims)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("managed root still in place: %v", err)
+	}
+	kept, err := filepath.Glob(filepath.Join(home, windowsManagedRuntimeRollbackPrefix+"*", "user-owned.txt"))
+	if err != nil || len(kept) != 1 {
+		t.Fatalf("kept content = %v (err=%v), want one root kept aside", kept, err)
+	}
+	if data, err := os.ReadFile(kept[0]); err != nil || string(data) != "preserve" {
 		t.Fatalf("unexpected target content changed: data=%q err=%v", data, err)
-	}
-	if err := os.Remove(unexpected); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
-		t.Fatalf("cleanup after removing unexpected content: %v", err)
 	}
 }
 
@@ -511,14 +519,26 @@ func TestWindowsManagedRuntimeCleanupReportsPartialMultiRootFailureConservativel
 		t.Fatal(err)
 	}
 	request.Claims = final
-	unexpected := filepath.Join(plan.Roots[1].DataDir, "preserve-me.txt")
-	if err := os.WriteFile(unexpected, []byte("user evidence"), 0o600); err != nil {
+	// A live handle on the second root makes its cleanup fail and retry.
+	extendedRoot, err := winpath.Extended(plan.Roots[1].DataDir)
+	if err != nil {
 		t.Fatal(err)
+	}
+	rootPtr, err := windows.UTF16PtrFromString(extendedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootWriter, err := windows.CreateFile(rootPtr, windows.FILE_WRITE_DATA|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatalf("open live second-root handle: %v", err)
 	}
 
 	partial, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
 	if err == nil {
-		t.Fatal("multi-root cleanup accepted unexpected content")
+		_ = windows.CloseHandle(rootWriter)
+		t.Fatal("multi-root cleanup proceeded past a live root handle")
 	}
 	if len(partial) != 2 || partial[0].State != windowsManagedRuntimeStateAbsent {
 		t.Fatalf("partial cleanup report = %+v, want first root verified absent", partial)
@@ -526,17 +546,17 @@ func TestWindowsManagedRuntimeCleanupReportsPartialMultiRootFailureConservativel
 	if partial[1].State != windowsManagedRuntimeStateCanonical || partial[1].Identity != final[1].Identity || !partial[1].Created {
 		t.Fatalf("failed root was falsely reported absent: got %+v want canonical identity %s", partial[1], final[1].Identity)
 	}
-	if data, readErr := os.ReadFile(unexpected); readErr != nil || string(data) != "user evidence" {
-		t.Fatalf("unexpected content changed: data=%q err=%v", data, readErr)
+	if _, statErr := os.Lstat(plan.Roots[1].DataDir); statErr != nil {
+		t.Fatalf("second root changed by its failed cleanup: %v", statErr)
 	}
 	if _, statErr := os.Lstat(plan.Roots[0].DataDir); !os.IsNotExist(statErr) {
 		t.Fatalf("first root was not removed before second-root failure: %v", statErr)
 	}
-	if err := os.Remove(unexpected); err != nil {
+	if err := windows.CloseHandle(rootWriter); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
-		t.Fatalf("finish multi-root cleanup after preserving evidence: %v", err)
+		t.Fatalf("finish multi-root cleanup after the handle closed: %v", err)
 	}
 }
 
@@ -968,20 +988,14 @@ func TestWindowsManagedRuntimeCleanupRejectsHardlinkedReservedFile(t *testing.T)
 	if err := os.Link(outside, linked); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
-		t.Fatal("cleanup accepted a hardlinked reserved inventory name")
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
+		t.Fatalf("cleanup with a hardlinked reserved name stayed pending: %v", err)
 	}
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "outside" {
 		t.Fatalf("outside hardlink target changed: data=%q err=%v", data, err)
 	}
-	if _, err := os.Lstat(linked); err != nil {
-		t.Fatalf("hardlinked evidence was deleted: %v", err)
-	}
-	if err := os.Remove(linked); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
-		t.Fatalf("cleanup after hardlink evidence removal: %v", err)
+	if kept, err := filepath.Glob(filepath.Join(home, windowsManagedRuntimeRollbackPrefix+"*", "inventory.db")); err != nil || len(kept) != 1 {
+		t.Fatalf("hardlinked evidence was not kept aside: %v (err=%v)", kept, err)
 	}
 }
 

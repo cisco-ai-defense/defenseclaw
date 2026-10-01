@@ -42,7 +42,10 @@ const (
 	// whole lifecycle. Only validation plans carry it.
 	windowsManagedRuntimeBaselinePending = "pending"
 
-	windowsManagedRuntimeStagePrefix       = ".defenseclaw.setup-"
+	windowsManagedRuntimeStagePrefix = ".defenseclaw.setup-"
+	// windowsManagedRuntimeRollbackPrefix names a transaction-created root
+	// the rollback kept aside because it holds content cleanup did not write.
+	windowsManagedRuntimeRollbackPrefix    = ".defenseclaw.rollback-"
 	windowsManagedRuntimeStageRandomBytes  = 16
 	windowsManagedRuntimeMarkerSubAuths    = 8
 	windowsManagedRuntimeMaxRoots          = 128
@@ -378,8 +381,12 @@ func FinalizeWindowsManagedRuntimeRoots(
 // CleanupWindowsManagedRuntimeRoots removes only roots created by this plan.
 // A marker-staged root may be removed without a journaled identity because the
 // target cannot read or forge its protected random marker. Any root carrying
-// the canonical target DACL requires an exact journaled identity. Unexpected
-// content or substitutions fail closed and leave recovery authority intact.
+// the canonical target DACL requires an exact journaled identity.
+// Substitutions fail closed and leave recovery authority intact. Content the
+// preflight cannot prove DefenseClaw wrote (an unexpected entry, a changed
+// owner or DACL, a hard link) is never deleted: the journaled root holding it
+// is renamed aside (windowsManagedRuntimeRollbackPrefix) so the rollback
+// still completes instead of staying pending.
 func CleanupWindowsManagedRuntimeRoots(
 	request WindowsManagedRuntimeRequest,
 	manifest Manifest,
@@ -984,6 +991,14 @@ func cleanupWindowsManagedRuntimeRoot(
 			}
 		} else {
 			err = removeWindowsManagedRuntimeRootContents(final, target, marker, spec, staging)
+			var refused *windowsManagedRuntimeCleanupRefusal
+			if errors.As(err, &refused) {
+				if detachErr := detachWindowsManagedRuntimeRoot(final, parent, target, staging); detachErr != nil {
+					err = errors.Join(err, detachErr)
+				} else {
+					err = nil
+				}
+			}
 		}
 		if err != nil {
 			claim = refreshWindowsManagedRuntimeFailedCleanupClaim(claim, final, target, marker)
@@ -1792,7 +1807,10 @@ func removeWindowsManagedRuntimeRootContents(
 	}
 	tree, err := pinWindowsManagedRuntimeCleanupTree(root, target, spec)
 	if err != nil {
-		return err
+		if windowsManagedRuntimeCleanupTransient(err) {
+			return err
+		}
+		return &windowsManagedRuntimeCleanupRefusal{err: err}
 	}
 	defer tree.close()
 
@@ -1894,6 +1912,42 @@ func removeWindowsManagedRuntimeRootContents(
 		return err
 	}
 	return markWindowsQuarantineHandleForDeletion(root, attributes)
+}
+
+// windowsManagedRuntimeCleanupRefusal is a cleanup preflight that refused the
+// root's content before anything was changed. Nothing in the root is deleted;
+// cleanupWindowsManagedRuntimeRoot keeps the root aside instead.
+type windowsManagedRuntimeCleanupRefusal struct{ err error }
+
+func (r *windowsManagedRuntimeCleanupRefusal) Error() string { return r.err.Error() }
+func (r *windowsManagedRuntimeCleanupRefusal) Unwrap() error { return r.err }
+
+// windowsManagedRuntimeCleanupTransient reports a preflight failure a retry
+// can clear: a live handle on the root's content, or an entry that went away
+// while it was pinned. Those keep the transaction pending as before.
+func windowsManagedRuntimeCleanupTransient(err error) bool {
+	return errors.Is(err, windows.STATUS_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) || windowsManagedRuntimeRootMissing(err)
+}
+
+// detachWindowsManagedRuntimeRoot renames a journaled root whose content the
+// preflight refused to .defenseclaw.rollback-<random> beside it, so neither
+// managed name remains and the rollback completes without deleting anything
+// it could not authenticate. A marker-quarantined root goes back to the
+// account's own owner and DACL, best effort, so the account can review it.
+func detachWindowsManagedRuntimeRoot(root, parent windows.Handle, target windowsManagedRuntimeTarget, markerOwned bool) error {
+	random := make([]byte, windowsManagedRuntimeStageRandomBytes)
+	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, random); err != nil {
+		return fmt.Errorf("enterprise hooks: name the kept managed runtime root: %w", err)
+	}
+	leaf := windowsManagedRuntimeRollbackPrefix + hex.EncodeToString(random)
+	if err := renameWindowsManagedRuntimeHandle(root, parent, leaf); err != nil {
+		return fmt.Errorf("enterprise hooks: keep the refused managed runtime root aside as %s: %w", leaf, err)
+	}
+	if markerOwned {
+		_ = setWindowsManagedRuntimeFinalSecurity(root, target.sid)
+	}
+	return nil
 }
 
 func pinWindowsManagedRuntimeCleanupTree(

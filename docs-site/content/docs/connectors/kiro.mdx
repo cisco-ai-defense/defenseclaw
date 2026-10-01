@@ -237,12 +237,15 @@ and `kiro-ide-windows-managed-hooks-v1` for Kiro IDE 1.0.182 and later (a
 DefenseClaw blocks on `UserPromptSubmit` and `PreToolUse` (kiro-cli `--v3`
 records a prompt block without vetoing the prompt), and the CLI 2.x agent,
 where only `preToolUse` can block; `PostToolUse` and `Stop` are audit only. Every
-hook command runs the standalone `defenseclaw-hook.exe`, which serves the
-enterprise-managed runtime. No earlier release enrolled Kiro on managed
+hook command runs the standalone `defenseclaw-hook.exe` with
+`--enterprise-managed`. No earlier release enrolled Kiro on managed
 Windows, so a version below either floor is always refused there. Kiro hooks
 cannot rewrite tool input, so the foreign-hook guard does not apply. If an
-enrolment fails, the rollback removes DefenseClaw's hook files even when their
-permissions were changed after they were written.
+enrolment fails, the rollback removes DefenseClaw's hook files when their
+owner is the account, LocalSystem or Administrators, even if their
+permissions were changed after they were written. Anything else it finds in
+`%USERPROFILE%\.defenseclaw` it does not delete; it moves that folder aside
+(see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction)).
 
 `defenseclaw-gateway enterprise acp` and the [ACP guard](/docs/acp-guard)
 stay available on every OS for editors that start Kiro over ACP:
