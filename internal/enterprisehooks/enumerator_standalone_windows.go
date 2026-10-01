@@ -157,6 +157,9 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	if row == nil {
 		return false
 	}
+	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; !known || prev.IsEnabled() {
+		rowContext.reportKiroIDEBelowFloor(row)
+	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
 		// A disabled row is an administrator decision the guardian never
 		// installs; keep it so rediscovery cannot re-enable it.
@@ -216,7 +219,11 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	version = windowsStandaloneSurfaceVersion(row, logf, rowContext, version)
 	if version == "" {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
-		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path != "" {
+		path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector)
+		if path == "" && strings.EqualFold(row.Connector, "kiro") {
+			path = windowsKiroInstalled(row.UserHome)
+		}
+		if path != "" {
 			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read, so no hook contract can be selected", path))
 		}
 		return false

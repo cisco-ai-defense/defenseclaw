@@ -26,6 +26,7 @@ const (
 	kiroManagedAgentName        = "defenseclaw"
 	kiroBuiltInDefaultAgentName = "kiro_default"
 	kiroV3HooksLogicalName      = "hooks"
+	kiroGlobalHooksLogicalName  = "hooks-global"
 	kiroV2AgentLogicalName      = "agent-defenseclaw"
 	kiroSettingsLogicalName     = "settings-cli"
 	kiroDefaultAgentSettingKey  = "chat.defaultAgent"
@@ -60,6 +61,9 @@ func (*KiroConnector) HookScriptNames(SetupOpts) []string     { return []string{
 
 func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	_ = ctx
+	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
+		return fmt.Errorf("kiro migrate hook backup: %w", err)
+	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("kiro hook script: %w", err)
@@ -119,6 +123,9 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	command := c.hookCommand(opts)
 	var errs []error
+	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
+		errs = append(errs, fmt.Errorf("kiro migrate hook backup: %w", err))
+	}
 	for _, path := range c.hookCleanupPaths(opts) {
 		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
 			errs = append(errs, err)
@@ -549,9 +556,9 @@ func (c *KiroConnector) hookCommandForV3Surface(opts SetupOpts) string {
 }
 
 // kiroManaged reports whether opts render the administrator-managed Kiro
-// footprint. Only the standalone enterprise guardian on Linux and macOS
-// manages Kiro: the Secure Client profiles do not list it and the Windows
-// guardian refuses it, so a managed Kiro install is a standalone one.
+// footprint. Only the standalone enterprise guardian manages Kiro: the
+// Secure Client profiles do not list it, so a managed Kiro install is a
+// standalone one.
 func kiroManaged(opts SetupOpts) bool {
 	return opts.ManagedEnterprise
 }
@@ -708,9 +715,33 @@ func kiroHomeDir() string {
 	return homePath(".kiro")
 }
 
+// kiroBackupLogicalName names a v3 hook file's backup record. On Windows the
+// global ~/.kiro/hooks/defenseclaw.json has the fixed name
+// kiroGlobalHooksLogicalName, so the guardian's managed-runtime cleanup,
+// which accepts only fixed file names, can remove its record; every other
+// file keeps its path-derived name.
 func kiroBackupLogicalName(path string) string {
 	cleaned := filepath.Clean(path)
-	return kiroV3HooksLogicalName + "-" + strings.ReplaceAll(cleaned, string(filepath.Separator), "_")
+	if runtime.GOOS == "windows" && cleaned == filepath.Clean(kiroHooksPath(SetupOpts{})) {
+		return kiroGlobalHooksLogicalName
+	}
+	return kiroPathBackupLogicalName(cleaned)
+}
+
+func kiroPathBackupLogicalName(path string) string {
+	return kiroV3HooksLogicalName + "-" + strings.ReplaceAll(filepath.Clean(path), string(filepath.Separator), "_")
+}
+
+// migrateKiroGlobalHooksBackup moves a Windows backup record an earlier
+// release kept under the global hook file's path-derived name to
+// kiroGlobalHooksLogicalName, so Setup keeps the original preimage and
+// Teardown still restores it.
+func migrateKiroGlobalHooksBackup(opts SetupOpts) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	path := kiroHooksPath(opts)
+	return migrateManagedFileBackupLogicalName(opts.DataDir, "kiro", kiroPathBackupLogicalName(path), kiroBackupLogicalName(path))
 }
 
 // ownedHookContractPresent proves Kiro's effective hook registration for the

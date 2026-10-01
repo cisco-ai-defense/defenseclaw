@@ -1526,7 +1526,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "opencode"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "kiro", "opencode"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue
@@ -1740,7 +1740,7 @@ func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, err
 			return "", err
 		}
 		directory = filepath.Dir(requirementsPath)
-	case "copilot", "antigravity", "devin", "hermes", "opencode", "amp":
+	case "copilot", "antigravity", "devin", "hermes", "kiro", "opencode", "amp":
 		directory, err = windowsPerUserManagedRuntimeDir(name)
 		if err != nil {
 			return "", err

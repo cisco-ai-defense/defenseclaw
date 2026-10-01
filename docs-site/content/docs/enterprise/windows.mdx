@@ -562,8 +562,8 @@ uninstall succeeds and changes nothing.
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
 it removes DefenseClaw's own hook registrations and plugins (Amp,
-Antigravity, Devin, Hermes, OpenCode, and a DefenseClaw Copilot user hook
-file) from the agent configuration of every signed-in user, running as that
+Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
+hook file) from the agent configuration of every signed-in user, running as that
 user. Only DefenseClaw's entries are removed; the user's own hooks and
 settings stay. Cleanups the guardian still owed to revoked users are
 included.
@@ -598,7 +598,7 @@ what it names as LocalSystem.
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The
-Devin, Hermes and Antigravity hooks point at the removed
+Devin, Hermes, Antigravity and Kiro hooks point at the removed
 `defenseclaw-hook.exe`, so each hook call fails to start. None of these
 agents blocks on that: Devin blocks only on exit code 2 (a missing command
 exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
@@ -756,7 +756,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | ACP | Managed through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard). The guardian does not enroll Kiro on Windows: `kiro-cli.exe` records its version nowhere DefenseClaw can read without running it. |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent. A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

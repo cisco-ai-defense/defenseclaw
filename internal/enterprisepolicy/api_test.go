@@ -74,13 +74,13 @@ func TestPublishVerifyRemoveAll(t *testing.T) {
 // Kiro's route must say what the guardian does with it. The Linux and macOS
 // guardians enroll Kiro per user (the hook goes into each user's global
 // ~/.kiro/hooks), so reporting ACP there told administrators Kiro was
-// protected only through the ACP guard. The Windows guardian refuses Kiro,
-// so it stays on ACP there.
+// protected only through the ACP guard. The Windows guardian enrolls Kiro
+// per user too.
 func TestKiroRouteFollowsItsEnrollment(t *testing.T) {
 	for goos, want := range map[string]string{
 		"linux":   RoutePerUser,
 		"darwin":  RoutePerUser,
-		"windows": RouteACP,
+		"windows": RoutePerUser,
 	} {
 		if got := RouteFor("kiro", goos); got != want {
 			t.Errorf("RouteFor(kiro, %s) = %q, want %q", goos, got, want)

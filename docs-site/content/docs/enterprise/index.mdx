@@ -191,8 +191,8 @@ DefenseClaw protects each agent in one of three ways:
 | How | Agents | Notes |
 | --- | --- | --- |
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Codex, Claude Code, Cursor, GitHub Copilot, and OpenCode through DefenseClaw's managed OpenCode plugin | DefenseClaw's hooks sit in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp. On Linux and macOS also OpenHands, OmniGent and Kiro | The guardian writes DefenseClaw's hook, or plugin, into each enrolled user's own agent config and repairs it |
-| [Through the ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro on Windows | Run it through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard) |
+| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp, Kiro. On Linux and macOS also OpenHands and OmniGent | The guardian writes DefenseClaw's hook, or plugin, into each enrolled user's own agent config and repairs it |
+| [Through the ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro in an editor that starts it over ACP | Run it through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard) |
 
 OpenClaw and ZeptoClaw are not supported in enterprise deployments.
 OpenHands and OmniGent are refused on Windows. The per-OS details, including

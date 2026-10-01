@@ -73,7 +73,7 @@ func ResolveWindowsManagedHookRuntime(
 		return resolveWindowsCodexManagedHookRuntime(hookExecutable)
 	case "cursor":
 		return resolveWindowsCursorManagedHookRuntime(hookExecutable)
-	case "copilot", "antigravity", "devin", "hermes", "opencode":
+	case "copilot", "antigravity", "devin", "hermes", "kiro", "opencode":
 		return resolveWindowsPerUserManagedHookRuntime(hookExecutable, name)
 	default:
 		return WindowsManagedHookRuntime{}, fmt.Errorf(

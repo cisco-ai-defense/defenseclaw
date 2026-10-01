@@ -11797,7 +11797,7 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Target {
     # connectors exactly.
     $teardownConnectors = @('claudecode', 'codex', 'cursor')
     if (Test-DefenseClawStandaloneProfile) {
-        $teardownConnectors += @('amp', 'antigravity', 'copilot', 'devin', 'hermes', 'opencode')
+        $teardownConnectors += @('amp', 'antigravity', 'copilot', 'devin', 'hermes', 'kiro', 'opencode')
     }
     if ($connector -cnotin $teardownConnectors -or
         $sid -cne $canonicalSID -or
