@@ -143,8 +143,8 @@ type CopilotVSCodeUserRequest struct {
 // EnsureCopilotVSCodeUser writes or removes DefenseClaw's Local hook file
 // and plugin under Home. The Local hook file's name is DefenseClaw's own,
 // so on a managed computer the guardian owns it outright: whatever a user
-// leaves there (deleted, emptied or edited) is rewritten, and removed on
-// uninstall. A plugin file that holds anything DefenseClaw did not render
+// leaves at that name (deleted, emptied or edited, or a link, directory or
+// other entry in its place) is rewritten, and removed on uninstall. A plugin file that holds anything DefenseClaw did not render
 // is left alone and reported in Kept: it is the user's, and the
 // foreign-hook guard judges it.
 func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserResult, error) {
@@ -163,10 +163,9 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	}
 	owned := GuardRequest{GOOS: goos, HookBinary: req.HookBinary}
 	ownedHooks := func(data []byte) bool { return owned.ownedHooksDocument(data) || inertHooksDocument(data) }
-	guardianOwned := func([]byte) bool { return true }
 	var errs []error
 	result.HookFile = CopilotVSCodeLocalHookFilePath(home)
-	if ok, err := ensureOwnedUserFile(&result, result.HookFile, hooks, guardianOwned, req.HookFile, req.DryRun); err != nil {
+	if ok, err := ensureOwnedUserFile(&result, result.HookFile, hooks, true, nil, req.HookFile, req.DryRun); err != nil {
 		errs = append(errs, err)
 	} else {
 		result.HookFileOK = ok
@@ -178,11 +177,11 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	}
 	pluginHooks := filepath.Join(result.PluginDir, "hooks", "hooks.json")
 	pluginManifest := filepath.Join(result.PluginDir, "plugin.json")
-	hooksOK, err := ensureOwnedUserFile(&result, pluginHooks, hooks, ownedHooks, req.Plugin, req.DryRun)
+	hooksOK, err := ensureOwnedUserFile(&result, pluginHooks, hooks, false, ownedHooks, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	manifestOK, err := ensureOwnedUserFile(&result, pluginManifest, manifest, nil, req.Plugin, req.DryRun)
+	manifestOK, err := ensureOwnedUserFile(&result, pluginManifest, manifest, false, nil, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -196,24 +195,29 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	return result, errors.Join(errs...)
 }
 
-// ensureOwnedUserFile makes path hold want (keep) or not exist (!keep),
-// touching it only when it is absent, holds want, or mine (nil: never)
-// claims its other content as DefenseClaw's. It reports whether path now
-// holds want.
-func ensureOwnedUserFile(result *CopilotVSCodeUserResult, path string, want []byte, mine func([]byte) bool, keep, dryRun bool) (bool, error) {
-	info, err := os.Lstat(path)
-	exists := err == nil
-	if err != nil && !os.IsNotExist(err) {
+// ensureOwnedUserFile makes path hold want (keep) or not exist (!keep). An
+// outright path is DefenseClaw's own name: whatever is there (edited
+// content, or a link, directory or other entry) is replaced or removed.
+// Any other path is touched only when it is absent, holds want, or mine
+// (nil: never) claims its other content as DefenseClaw's. It reports
+// whether path now holds want.
+func ensureOwnedUserFile(result *CopilotVSCodeUserResult, path string, want []byte, outright bool, mine func([]byte) bool, keep, dryRun bool) (bool, error) {
+	limit := int64(policyFileLimit)
+	if outright {
+		limit = int64(len(want))
+	}
+	current, exists, regular, err := readUserFile(path, limit)
+	var tooLarge *readLimitError
+	if outright && errors.As(err, &tooLarge) {
+		err = nil // larger than want, so not current
+	}
+	if err != nil {
 		return false, err
 	}
-	var current []byte
-	if exists {
-		if !info.Mode().IsRegular() {
+	if exists && !outright {
+		if !regular {
 			result.Kept = append(result.Kept, path)
 			return false, fmt.Errorf("%s is not a regular file", path)
-		}
-		if current, err = os.ReadFile(path); err != nil {
-			return false, err
 		}
 		if !bytes.Equal(current, want) && (mine == nil || !mine(current)) {
 			result.Kept = append(result.Kept, path)
@@ -223,7 +227,7 @@ func ensureOwnedUserFile(result *CopilotVSCodeUserResult, path string, want []by
 	if !keep {
 		if exists {
 			if !dryRun {
-				if err := os.Remove(path); err != nil {
+				if err := os.RemoveAll(path); err != nil {
 					return false, err
 				}
 			}
@@ -231,18 +235,51 @@ func ensureOwnedUserFile(result *CopilotVSCodeUserResult, path string, want []by
 		}
 		return false, nil
 	}
-	if exists && bytes.Equal(current, want) {
+	if exists && regular && bytes.Equal(current, want) {
 		return true, nil
 	}
 	if dryRun {
 		result.Changed = append(result.Changed, path)
 		return false, nil
 	}
+	if exists && !regular {
+		if err := os.RemoveAll(path); err != nil {
+			return false, err
+		}
+	}
 	if err := writePrivateUserFile(path, want); err != nil {
 		return false, err
 	}
 	result.Changed = append(result.Changed, path)
 	return true, nil
+}
+
+// readUserFile reads a file a user controls without following a final
+// link, blocking on a FIFO or reading past limit: the guardian runs as root
+// (SYSTEM on Windows) over these paths. exists reports an entry at path;
+// regular reports that it is a regular file (data is read only then).
+func readUserFile(path string, limit int64) (data []byte, exists, regular bool, err error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, false, false, nil
+	}
+	if err != nil {
+		return nil, false, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, true, false, nil
+	}
+	file, err := openGuardFile(path)
+	if err != nil {
+		// Swapped for a link or another entry since the Lstat.
+		return nil, true, false, err
+	}
+	defer file.Close()
+	if info, err = file.Stat(); err != nil || !info.Mode().IsRegular() {
+		return nil, true, false, err
+	}
+	data, err = readBounded(file, limit)
+	return data, true, true, err
 }
 
 // ownedHooksDocument reports a flat hook document whose every handler is
@@ -322,14 +359,8 @@ func CopilotVSCodeUserState(home, goos, hookBinary string) (hookFile, plugin boo
 	}
 	manifest, _ := renderCopilotPluginManifest()
 	same := func(path string, want []byte) bool {
-		info, err := os.Lstat(path)
-		// The size check keeps the read to want's length: the guardian
-		// runs this as root over files a user controls.
-		if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(want)) {
-			return false
-		}
-		data, err := os.ReadFile(path)
-		return err == nil && bytes.Equal(data, want)
+		data, _, regular, err := readUserFile(path, int64(len(want)))
+		return err == nil && regular && bytes.Equal(data, want)
 	}
 	dir := CopilotPluginDir(home)
 	return same(CopilotVSCodeLocalHookFilePath(home), hooks),

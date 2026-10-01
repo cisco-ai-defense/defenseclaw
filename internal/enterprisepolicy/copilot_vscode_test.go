@@ -91,7 +91,7 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 
 // The Local hook file is the guardian's (WIN-R1-25): verify reports a
 // deleted or edited copy as drift, setup rewrites it and uninstall removes
-// it, whatever the user left there.
+// it, whatever the user left at its name.
 func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	home := t.TempDir()
 	run := func(keep, dryRun bool) CopilotVSCodeUserResult {
@@ -122,11 +122,24 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	if result := run(true, false); !result.HookFileOK {
 		t.Fatalf("setup must repair the edited hook file: %+v", result)
 	}
-	if err := os.WriteFile(hookFile, edited, 0o600); err != nil {
+	// A directory (or link) a user puts at the name is replaced too.
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(hookFile, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(true, false); !result.HookFileOK || readFile(t, hookFile) == "" {
+		t.Fatalf("setup must replace a directory at the hook file: %+v", result)
+	}
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(hookFile, "nested"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if result := run(false, false); len(result.Removed) != 1 {
-		t.Fatalf("uninstall must remove the edited hook file: %+v", result)
+		t.Fatalf("uninstall must remove whatever is at the hook file: %+v", result)
 	}
 	if _, err := os.Stat(hookFile); !os.IsNotExist(err) {
 		t.Fatalf("hook file left behind: %v", err)

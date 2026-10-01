@@ -40,7 +40,7 @@ func init() {
 // config. The install and remove calls run under the target user's
 // impersonation.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
-	opts, _, standalone, err := windowsStandaloneGuardianOptions()
+	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
 		return nil
 	}

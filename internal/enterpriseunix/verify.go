@@ -82,6 +82,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// account (an unverified hook contract, an agent it could not enroll)
 		// stays a warning for that account: the rest of the host is
 		// compliant, as on Windows.
+		// Machine-policy gaps (a removed vendor policy, a missing or
+		// edited guardian-owned per-user hook file) fail verify only;
+		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected {
 				problems = append(problems, warning.Message)

@@ -373,7 +373,10 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 	}
 	// A per-user file the guardian owns (Copilot's VS Code Local hook file)
 	// that a user deleted or edited leaves that agent surface unguarded
-	// until the guardian's next pass rewrites it.
+	// until the guardian's next pass rewrites it. Like every machine-policy
+	// gap, verify fails on it and status reports it (security_complete
+	// false) without failing: status stays the health view the guardian's
+	// own repair window must not flip.
 	for _, state := range result.States {
 		if len(state.UserFileDrift) == 0 {
 			continue

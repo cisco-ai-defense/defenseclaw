@@ -60,6 +60,10 @@ var enterpriseHookForeignCleanupState struct {
 	// leftover registration, so a pass with nothing but leftovers to check
 	// runs again only when the accounts or routes change.
 	leftoversClean bool
+	// unrepaired names the accounts whose Copilot VS Code Local hook file
+	// the last pass could not rewrite: they wait for the interval, so only
+	// a newly drifted account makes the next pass due.
+	unrepaired map[string]bool
 }
 
 // enterpriseHookForeignCleanupConnectors resolves the connectors whose
@@ -156,14 +160,31 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	// A governed Local harness is re-checked every interval; a removal runs
 	// once per change. The Local hook file is the guardian's own, so one a
 	// user deleted or edited is rewritten on the next pass, like a per-user
-	// registration, not after the interval.
+	// registration, not after the interval. One the last pass could not
+	// rewrite waits for the interval.
 	governed := vscode != nil && (vscode.HookFile || vscode.Plugin)
 	for _, account := range accounts {
 		fingerprint += account.User + "=" + strings.Join(leftovers(account.User), ",") + ";"
 	}
-	drifted := vscode != nil && vscode.HookFile && enterpriseHookCopilotVSCodeHookFileDrift(accounts, vscode.HookBinary)
+	hookFileDrift := func() map[string]bool {
+		if vscode == nil || !vscode.HookFile {
+			return nil
+		}
+		return enterpriseHookCopilotVSCodeHookFileDrift(accounts, vscode.HookBinary)
+	}
+	drifted := hookFileDrift()
 	enterpriseHookForeignCleanupState.Lock()
-	due := drifted || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
+	newDrift := false
+	stillUnrepaired := map[string]bool{}
+	for user := range drifted {
+		if enterpriseHookForeignCleanupState.unrepaired[user] {
+			stillUnrepaired[user] = true
+		} else {
+			newDrift = true
+		}
+	}
+	enterpriseHookForeignCleanupState.unrepaired = stillUnrepaired
+	due := newDrift || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
 		((len(cleanups) > 0 || governed || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
@@ -286,8 +307,10 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 	}
+	unrepaired := hookFileDrift()
 	enterpriseHookForeignCleanupState.Lock()
 	enterpriseHookForeignCleanupState.leftoversClean = clean
+	enterpriseHookForeignCleanupState.unrepaired = unrepaired
 	enterpriseHookForeignCleanupState.Unlock()
 	return removed
 }
@@ -338,20 +361,21 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 	return out
 }
 
-// enterpriseHookCopilotVSCodeHookFileDrift reports whether an available
-// account's home lacks DefenseClaw's current VS Code Local hook file. It
-// only compares the file's bytes (CopilotVSCodeUserState); the worker,
-// running as the user, writes it.
-func enterpriseHookCopilotVSCodeHookFileDrift(accounts []enterprisehooks.UnixEligibleAccount, hookBinary string) bool {
+// enterpriseHookCopilotVSCodeHookFileDrift names the available accounts
+// whose home lacks DefenseClaw's current VS Code Local hook file. It only
+// compares the file's bytes (CopilotVSCodeUserState, a bounded no-follow
+// read); the worker, running as the user, writes it.
+func enterpriseHookCopilotVSCodeHookFileDrift(accounts []enterprisehooks.UnixEligibleAccount, hookBinary string) map[string]bool {
+	drifted := map[string]bool{}
 	for _, account := range accounts {
 		if enterpriseHookCheckHome(account.Home, account.UID).State != enterprisehooks.HomeAvailable {
 			continue
 		}
 		if file, _ := enterprisepolicy.CopilotVSCodeUserState(account.Home, runtime.GOOS, hookBinary); !file {
-			return true
+			drifted[account.User] = true
 		}
 	}
-	return false
+	return drifted
 }
 
 // runEnterpriseHookWorkerCopilotVSCode runs inside the worker as the user.
