@@ -550,7 +550,16 @@ function Start-Gateway {
 }
 
 function Get-ProcessesUnder([string[]]$Prefixes) {
-    return @(Get-CimInstance Win32_Process | Where-Object {
+    # Win32_Process names every process's image, but WMI refuses a standard
+    # user signed in over the network (an SSH session). Get-Process then still
+    # reads the image of this account's own processes, the only ones that can
+    # run from this install.
+    $all = try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        @(Get-Process | ForEach-Object {
+            [pscustomobject]@{ ProcessId = $_.Id; Name = "$($_.ProcessName).exe"; ExecutablePath = $_.Path }
+        })
+    }
+    return @($all | Where-Object {
         $image = $_.ExecutablePath
         $image -and @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count
     })
@@ -764,9 +773,12 @@ function New-Venv([string]$Path) {
         if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", ">=3.11,<3.14")) -ne 0) { return $false }
     }
     # The requirements file is the complete hashed lock, so nothing resolves.
-    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--python", $python, "--require-hashes", "--no-deps",
+    # Compile the bytecode now: uv skips it by default, and the first start of
+    # the CLI and the scanners would otherwise compile thousands of modules
+    # (over a minute on a Windows host while the files are also first scanned).
+    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
             "-r", (Join-Path $Staging $Requirements))) -ne 0) { return $false }
-    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
+    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
 }
 
 function Save-Snapshot {
@@ -856,6 +868,12 @@ function Install-New {
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
         if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $migrateArgs) -ne 0) { return $false }
+        # The previous version's agent discovery is absent or stale. Refresh
+        # it (bounded --version probes, no telemetry) before the gateway
+        # starts, so the gateway records each agent's version in the hook
+        # contract lock and doctor can check compatibility. Best effort.
+        Write-Info "Refreshing agent discovery"
+        Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("agent", "discover", "--refresh", "--no-emit-otel") -Quiet | Out-Null
     }
     return $true
 }

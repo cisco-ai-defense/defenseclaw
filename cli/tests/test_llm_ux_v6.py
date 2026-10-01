@@ -727,6 +727,15 @@ class TestLLMPing(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("boom", msg.lower())
 
+    def test_ping_and_bridge_let_litellm_drop_refused_params(self) -> None:
+        """RHEL-U2-09: a model that takes temperature 1 only must not fail on 0.0."""
+        from defenseclaw import llm as llm_mod
+
+        with mock.patch("litellm.completion", side_effect=RuntimeError("boom")) as completion:
+            llm_mod.ping(LLMConfig(provider="anthropic", model="claude-opus-4-8"))
+            llm_mod.call_llm({"model": "anthropic/claude-opus-4-8", "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual([c.kwargs.get("drop_params") for c in completion.call_args_list], [True, True])
+
 
 class _LocalModelHandler(BaseHTTPRequestHandler):
     routes: dict[str, tuple[int, bytes]] = {}

@@ -773,7 +773,7 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	fmt.Println()
 
 	if h.LastError != "" {
-		fmt.Printf("             %s %s\n", Dim("last error:"), h.LastError)
+		fmt.Printf("             %s %s\n", Dim("last error:"), asciiText(h.LastError))
 	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
@@ -789,7 +789,7 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			if !ok {
 				continue
 			}
-			fmt.Printf("             %s %s\n", Dim(k+":"), line)
+			fmt.Printf("             %s %s\n", Dim(k+":"), asciiText(line))
 		}
 	}
 	fmt.Println()

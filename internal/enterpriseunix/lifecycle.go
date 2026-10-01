@@ -1823,7 +1823,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// A purge deletes data an account created before the install; say so,
 	// instead of a bare "done".
 	for _, user := range report.Purged {
-		r.Changes = append(r.Changes, fmt.Sprintf("removed the DefenseClaw per-user data of user %s (~/.defenseclaw); the account's own hooks moved aside by the foreign-hook policy stay in its foreign-hooks-backup folder", user))
+		r.Changes = append(r.Changes, fmt.Sprintf("removed the DefenseClaw per-user data of user %s (~/.defenseclaw) except ~/.defenseclaw/hooks, where DefenseClaw's hook scripts stay as disabled stubs that exit 0 for agents still running with the old path (delete them once those agents have restarted); the account's own hooks moved aside by the foreign-hook policy stay in its foreign-hooks-backup folder", user))
 	}
 	return left
 }

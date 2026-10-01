@@ -1994,12 +1994,13 @@ def _scanner_repair_hint() -> str:
     On macOS and Linux the release upgrade resolver reconciles the launcher
     with the managed virtualenv, at the installed version too (the built-in
     ``defenseclaw upgrade`` stops early when the version is already current);
-    on Windows, DefenseClaw Setup's repair does.
+    on Windows, running the install command again does (from 1.0 the 0.8.x
+    Setup package and its ``/repair`` are retired).
     """
 
     if os.name == "nt":
         return (
-            "repair the install with `DefenseClawSetup-x64.exe /repair` "
+            "repair the install by running the install command again "
             f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
         )
     return (
@@ -2049,11 +2050,15 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
                 check=False,
             )
         except subprocess.TimeoutExpired:
+            # Slow is not broken: a first start after an install or upgrade
+            # (files scanned on first use, modules cached) or a busy machine
+            # can exceed the budget. A scanner that cannot start fails below.
             _emit(
-                "fail",
+                "warn",
                 f"Scanner: {name}",
-                f"{probe_path} did not answer --version within 30 s; a busy machine can cause this, so run "
-                f"`defenseclaw doctor` again, and if it keeps failing, {_scanner_repair_hint()}",
+                f"{probe_path} did not answer --version within 30 s; the first start after an install or "
+                f"upgrade, or a busy machine, can take longer, so run `defenseclaw doctor` again, and if it "
+                f"keeps timing out, {_scanner_repair_hint()}",
                 r=r,
             )
             continue

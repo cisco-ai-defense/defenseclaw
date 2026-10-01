@@ -9893,7 +9893,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _active_filter_label(self) -> str:
         if self.active_panel == "alerts":
-            return self.alerts_model.active_filter_label()
+            alerts = self.alerts_model
+            if not (alerts.filter_text or alerts.severity_filter or alerts.show_all_severities):
+                # The default actionable queue is not a filter to clear.
+                return ""
+            return alerts.active_filter_label()
         if self.active_panel == "audit":
             return self.audit_model.active_filter_label()
         if self.active_panel == "logs":
