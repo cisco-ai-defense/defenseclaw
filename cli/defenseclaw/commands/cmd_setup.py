@@ -272,7 +272,7 @@ def _log_setup_action(
             ) from exc
         click.echo(
             "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
-            "event was not recorded. Start defenseclaw-gateway before the next change.",
+            "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change.",
             err=True,
         )
 
@@ -4084,6 +4084,7 @@ def setup_gateway(
     optionally fetched from AWS SSM Parameter Store.
     """
     gw = app.cfg.gateway
+    previous_api_port = gw.api_port
 
     data_dir = app.cfg.data_dir
 
@@ -4122,14 +4123,22 @@ def setup_gateway(
         _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir)
 
     app.cfg.save()
-    _print_gateway_summary(gw)
+    uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
+    # A new API port takes effect only when the gateway (re)starts, so nothing
+    # listens on it yet: the connectivity check and the audit event cannot
+    # succeed until then, and the gateway may be down precisely because the
+    # old port was taken.
+    api_port_changed = gw.api_port != previous_api_port
+    _print_gateway_summary(gw, openclaw=uses_openclaw, api_port_changed=api_port_changed)
 
-    if verify:
+    if verify and not api_port_changed:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
         r = _DoctorResult()
-        _check_openclaw_gateway(app.cfg, r)
+        # Hook-only installs have no OpenClaw gateway to reach.
+        if uses_openclaw:
+            _check_openclaw_gateway(app.cfg, r)
         _check_sidecar(app.cfg, r)
         click.echo()
         if r.failed:
@@ -4145,7 +4154,7 @@ def setup_gateway(
         # the sidecar has started. Suppress only definite runtime
         # unavailability; server rejections and every other admission failure
         # remain fatal through _log_setup_action.
-        allow_offline=not verify,
+        allow_offline=not verify or api_port_changed,
     )
 
 
@@ -14532,7 +14541,7 @@ def _prompt_env_var_name(default: str) -> str:
         return val
 
 
-def _print_gateway_summary(gw) -> None:
+def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool = False) -> None:
     click.echo()
     ux.ok("Saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -14550,12 +14559,13 @@ def _print_gateway_summary(gw) -> None:
         click.echo(f"    {ux._style(label, fg='bright_black', bold=True)} {val}")
     click.echo()
 
-    if resolved:
-        ux.subhead("Start the sidecar with:")
-        ux.subhead("  defenseclaw-gateway")
+    if api_port_changed:
+        ux.subhead("The new API port takes effect when the gateway starts:")
+        ux.subhead("  defenseclaw-gateway start    (or 'defenseclaw-gateway restart' if it is running)")
     else:
-        ux.subhead("Start the sidecar with:")
-        ux.subhead("  defenseclaw-gateway")
+        ux.subhead("Start the gateway with:")
+        ux.subhead("  defenseclaw-gateway start")
+    if openclaw and not resolved:
         ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()
 
