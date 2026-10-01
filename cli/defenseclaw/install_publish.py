@@ -13,9 +13,13 @@ import hashlib
 import json
 import ntpath
 import os
+import re
+import shlex
+import signal
 import stat
 import struct
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -39,6 +43,11 @@ MAX_CUSTODY_ENTRIES = 128
 RETIRED_KEEP_PER_TARGET = 1
 _PUBLISH_STAGE_MARKERS = (".source-install-", ".source-symlink-", ".managed-console-")
 _HEX_DIGITS = frozenset("0123456789abcdef")
+# Private stage files a source install writes beside its targets. A stage
+# outlives its install only when the process was killed outright, or it was
+# written by an older installer, so the next install prunes ones a day old.
+_SOURCE_INSTALL_STAGE = re.compile(r"\.defenseclaw[A-Za-z0-9._-]*\.source-install-[0-9a-f]{32}")
+STALE_STAGE_SECONDS = 24 * 60 * 60
 CUSTODY_MARKER = b"DefenseClaw deterministic retirement custody v1\n"
 
 
@@ -2347,6 +2356,57 @@ def unlink_exact(
         os.close(parent_fd)
 
 
+def _prune_stale_stages(
+    parent_fd: int,
+    directory: Path,
+    custody_root: Path,
+    *,
+    uid: int | None = None,
+    now: float | None = None,
+) -> list[str]:
+    """Remove this account's day-old source-install stage files in directory.
+
+    Only regular files owned by this account are removed, through exact
+    custody retirement. Any other leftover is reported with the command that
+    removes it. Never raises; returns the reported paths.
+    """
+
+    owner = os.geteuid() if uid is None else uid
+    cutoff = (time.time() if now is None else now) - STALE_STAGE_SECONDS
+    reported: list[str] = []
+    try:
+        with os.scandir(parent_fd) as entries:
+            names = sorted(entry.name for entry in entries if _SOURCE_INSTALL_STAGE.fullmatch(entry.name))
+    except OSError:
+        return reported
+    for name in names:
+        path = directory / name
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if metadata.st_mtime > cutoff:
+                continue
+            if metadata.st_uid == owner and stat.S_ISREG(metadata.st_mode):
+                identity = _entry_strong_identity(parent_fd, name)
+                if identity is not None and unlink_exact(
+                    path, identity, custody_root=custody_root, reclaim_completed=True
+                ):
+                    continue
+                if identity is None:
+                    continue
+        except FileNotFoundError:
+            continue
+        except (OSError, PublishError):
+            metadata = None
+        prefix = "" if metadata is not None and metadata.st_uid == owner else "sudo "
+        print(
+            f"source-install: left a temporary file from an earlier install: {path}; "
+            f"remove it with: {prefix}rm -f {shlex.quote(str(path))}",
+            file=sys.stderr,
+        )
+        reported.append(str(path))
+    return reported
+
+
 def publish_regular(
     source: Path,
     destination: Path,
@@ -2374,6 +2434,7 @@ def publish_regular(
         source_stat = os.fstat(source_fd)
         parent_fd = _open_directory(destination.parent, create=False)
         try:
+            _prune_stale_stages(parent_fd, destination.parent, retirement_root)
             stage = f".{destination.name}.source-install-{uuid.uuid4().hex}"
             stage_fd = os.open(
                 stage,
@@ -2666,6 +2727,11 @@ def main() -> int:
     compare_regular.add_argument("second", type=Path)
     compare_regular.add_argument("--require-executable", action="store_true")
     args = parser.parse_args()
+    if os.name != "nt":
+        # A terminated install unwinds like an interrupted one, so every
+        # publication's finally block removes its stage file.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, _interrupt)
     try:
         if args.command in {"ensure-directory", "ensure-real-directory"}:
             ensure_directory(args.path)
@@ -2759,7 +2825,14 @@ def main() -> int:
     except (OSError, PublishError) as exc:
         print(f"source-install publication refused: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("source-install publication interrupted", file=sys.stderr)
+        return 130
     return 0
+
+
+def _interrupt(_signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt
 
 
 if __name__ == "__main__":
