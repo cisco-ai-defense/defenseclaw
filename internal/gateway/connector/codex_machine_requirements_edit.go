@@ -432,13 +432,16 @@ func renderWindowsCodexRequirementsGroup(group codexHookGroup, opts WindowsCodex
 }
 
 // windowsCodexRequirementsMergePlan lists the DefenseClaw-owned entries the
-// map-based merge added or normalized.
+// map-based merge added, normalized, or replaced. legacyGroups identifies
+// exact unbound groups to remove before inserting their replacements.
 type windowsCodexRequirementsMergePlan struct {
 	addManagedHooksOnly bool
 	addFeatureHooks     bool
 	addManagedDir       bool
 	replaceManagedDir   bool
 	missingGroups       []codexHookGroup
+	legacyGroups        map[string][]int
+	legacyGroupCounts   map[string]int
 }
 
 func (p windowsCodexRequirementsMergePlan) empty() bool {
@@ -462,6 +465,13 @@ func renderWindowsCodexRequirementsMerge(
 	plan windowsCodexRequirementsMergePlan,
 	opts WindowsCodexMachineRequirementsOptions,
 ) ([]byte, error) {
+	if len(plan.legacyGroups) > 0 {
+		stripped, err := removeWindowsCodexRequirementsLegacyGroups(raw, plan)
+		if err != nil {
+			return nil, err
+		}
+		raw = stripped
+	}
 	if plan.empty() {
 		return append([]byte(nil), raw...), nil
 	}
@@ -540,6 +550,53 @@ func renderWindowsCodexRequirementsMerge(
 		return rendered, nil
 	}
 	return appendWindowsCodexRequirementsRegion(rendered, strings.Join(tailBlocks, newline+newline), newline)
+}
+
+// removeWindowsCodexRequirementsLegacyGroups deletes only the exact unbound
+// groups named by the merge plan and verifies the remaining document.
+func removeWindowsCodexRequirementsLegacyGroups(
+	raw []byte,
+	plan windowsCodexRequirementsMergePlan,
+) ([]byte, error) {
+	want, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return nil, err
+	}
+	hooks, _ := want["hooks"].(map[string]interface{})
+	for event, indices := range plan.legacyGroups {
+		groups, _ := hooks[event].([]interface{})
+		if len(groups) != plan.legacyGroupCounts[event] {
+			return nil, windowsCodexRequirementsUneditableError("hooks." + event)
+		}
+		drop := make(map[int]bool, len(indices))
+		for _, index := range indices {
+			drop[index] = true
+		}
+		kept := make([]interface{}, 0, len(groups)-len(indices))
+		for index, group := range groups {
+			if !drop[index] {
+				kept = append(kept, group)
+			}
+		}
+		if len(kept) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = kept
+		}
+	}
+	if len(hooks) == 0 {
+		doc, err := parseCodexTOMLDocument(raw)
+		if err != nil {
+			return nil, err
+		}
+		if doc.tableForm("hooks") != codexTOMLTableHeader {
+			delete(want, "hooks")
+		}
+	}
+	return renderWindowsCodexRequirementsRemoval(raw, windowsCodexRequirementsRemovalPlan{
+		removedGroups: plan.legacyGroups,
+		groupCounts:   plan.legacyGroupCounts,
+	}, want)
 }
 
 // appendWindowsCodexRequirementsRegion adds content to the final DefenseClaw

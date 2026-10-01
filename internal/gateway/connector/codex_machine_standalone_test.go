@@ -78,9 +78,10 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 		}
 		script := decodeTestEncodedCommand(t, command)
 		for _, want := range []string{
-			"Start-Process -FilePath '" + opts.HookBinary + "'",
-			"'--enterprise-managed','--event','" + group.eventType + "','--hook-contract','" + opts.HookContractID + "'",
-			"-NoNewWindow -Wait -PassThru",
+			"[System.Diagnostics.ProcessStartInfo]::new('" + opts.HookBinary + "'",
+			"'--enterprise-managed' '--event' '" + group.eventType + "' '--hook-contract' '" + opts.HookContractID + "'",
+			"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+			"$hookProcess.WaitForExit()",
 			"exit $hookProcess.ExitCode",
 		} {
 			if !strings.Contains(script, want) {
@@ -89,18 +90,18 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 		}
 	}
 
-	// The Secure Client options keep the certified unbound command.
+	// Secure Client binds the default machine contract when no explicit
+	// standalone contract was supplied.
 	secureClient := testWindowsCodexMachineOptions()
 	scRendered, _, err := reconcileWindowsCodexRequirements(nil, secureClient)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(scRendered), windowsCodexBoundManagedHookCommand(secureClient.HookBinary, "PreToolUse", opts.HookContractID)) ||
-		!strings.Contains(string(scRendered), windowsCodexManagedHookCommand(secureClient.HookBinary)) {
-		t.Fatal("Secure Client requirements must keep the unbound command")
+	if !strings.Contains(string(scRendered), windowsCodexManagedHookCommand(secureClient.HookBinary, "PreToolUse")) {
+		t.Fatal("Secure Client requirements must bind the default machine contract")
 	}
-	if err := verifyWindowsCodexRequirementsBytes(rendered, secureClient); err == nil {
-		t.Fatal("Secure Client verification must not accept the standalone command")
+	if err := verifyWindowsCodexRequirementsBytes(scRendered, secureClient); err != nil {
+		t.Fatalf("Secure Client requirements verification: %v", err)
 	}
 }
 

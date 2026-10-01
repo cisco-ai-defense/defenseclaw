@@ -174,6 +174,35 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _encoded_codex_process_start_command(runtime: Path, event: str, contract: str) -> str:
+        literal = str(runtime).replace("'", "''")
+        script = (
+            "$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; "
+            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') "
+            "{ $ErrorActionPreference='Continue'; & '"
+            + literal
+            + "' 'hook' '--connector' 'codex' '--enterprise-managed' '--event' '"
+            + event
+            + "' '--hook-contract' '"
+            + contract
+            + "' | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }; "
+            "$hookStart=[System.Diagnostics.ProcessStartInfo]::new('"
+            + literal
+            + "','hook --connector codex --enterprise-managed --event "
+            + event
+            + " --hook-contract "
+            + contract
+            + "'); $hookStart.UseShellExecute=$false; "
+            "$hookProcess=[System.Diagnostics.Process]::Start($hookStart); "
+            "$hookProcess.WaitForExit(); exit $hookProcess.ExitCode"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            f" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        )
+
+    @staticmethod
     def _bind_codex_fixture_command(command: str, event: str, contract: str) -> str:
         """Bind a current fixture while preserving legacy/malformed shapes."""
 
@@ -1481,6 +1510,20 @@ class WindowsHookDoctorTests(unittest.TestCase):
                         str(config),
                         contract,
                     )
+
+    def test_codex_doctor_recognizes_fast_exit_safe_machine_command(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_codex_process_start_command(
+            runtime, "PreToolUse", "codex-hooks-v4"
+        )
+        target, args, kind = doctor_hooks._command_target(command, "codex")
+        self.assertEqual(target, str(runtime))
+        self.assertEqual(kind, "direct")
+        self.assertEqual(
+            args,
+            ["hook", "--connector", "codex", "--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"],
+        )
+        self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
 
     def test_codex_doctor_accepts_exact_event_contract_binding_for_all_tiers(self) -> None:
         runtime = self._runtime()

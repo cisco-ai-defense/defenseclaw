@@ -130,11 +130,35 @@ timeout = 90
 
 func codexRequirementsGolden(t *testing.T, template string, opts WindowsCodexMachineRequirementsOptions) []byte {
 	t.Helper()
-	command := windowsCodexManagedHookCommand(opts.HookBinary)
-	if strings.ContainsAny(command, "'\r\n") {
-		t.Fatalf("managed command %q cannot be a TOML literal string", command)
+	return codexRequirementsGoldenWith(t, template, func(event string) string {
+		return windowsCodexManagedHookCommand(opts.HookBinary, event)
+	})
+}
+
+// codexRequirementsGoldenWith fills each {{CMD}} with command(event) for the
+// [[hooks.<event>.hooks]] handler it belongs to.
+func codexRequirementsGoldenWith(t *testing.T, template string, command func(event string) string) []byte {
+	t.Helper()
+	handler := regexp.MustCompile(`^\[\[hooks\.([A-Za-z]+)\.hooks\]\]`)
+	lines := strings.SplitAfter(template, "\n")
+	event := ""
+	for index, line := range lines {
+		if match := handler.FindStringSubmatch(line); match != nil {
+			event = match[1]
+		}
+		if !strings.Contains(line, "{{CMD}}") {
+			continue
+		}
+		if event == "" {
+			t.Fatalf("{{CMD}} outside a hook handler: %q", line)
+		}
+		value := command(event)
+		if strings.ContainsAny(value, "'\r\n") {
+			t.Fatalf("managed command %q cannot be a TOML literal string", value)
+		}
+		lines[index] = strings.ReplaceAll(line, "{{CMD}}", "'"+value+"'")
 	}
-	return []byte(strings.ReplaceAll(template, "{{CMD}}", "'"+command+"'"))
+	return []byte(strings.Join(lines, ""))
 }
 
 func reconcileCodexRequirementsForTest(
@@ -412,6 +436,117 @@ func TestReconcileWindowsCodexRequirementsLegacyMarshaledDocumentIsUntouched(t *
 	requireCodexRequirementsBytes(t, "legacy uninstall semantics", gotCanonical, wantCanonical)
 }
 
+// codexRequirementsWithUnboundCommands rewrites every managed command in
+// rendered into the unbound command earlier releases published.
+func codexRequirementsWithUnboundCommands(t *testing.T, rendered []byte, opts WindowsCodexMachineRequirementsOptions) []byte {
+	t.Helper()
+	legacy := []byte(codexTOMLString(windowsCodexLegacyManagedHookCommand(opts.HookBinary)))
+	out := append([]byte(nil), rendered...)
+	for _, group := range codexHookGroups {
+		current := []byte(codexTOMLString(windowsCodexManagedHookCommand(opts.HookBinary, group.eventType)))
+		if count := bytes.Count(out, current); count != 2 {
+			t.Fatalf("%s command appears %d times, want 2:\n%s", group.eventType, count, rendered)
+		}
+		out = bytes.ReplaceAll(out, current, legacy)
+	}
+	return out
+}
+
+// An install by an earlier release carries the unbound command in every
+// DefenseClaw group. Reconcile replaces exactly those groups: the upgraded
+// file is what a fresh install of the same administrator document writes,
+// and uninstall before or after the upgrade restores that document.
+func TestReconcileWindowsCodexRequirementsReplacesUnboundGroupsOfEarlierRelease(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	adminHooks := "# Contoso audit hooks.\n[hooks] # administrator-owned\n[[hooks.SessionStart]]\n" +
+		"matcher = \"startup\"\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\n" +
+		"command = 'C:\\Contoso\\audit.exe'\ncommand_windows = 'C:\\Contoso\\audit.exe'\ntimeout = 9\n"
+	for name, admin := range map[string][]byte{
+		"created":              nil,
+		"commented admin":      []byte(commentedAdminCodexRequirements),
+		"commented admin CRLF": []byte(strings.ReplaceAll(commentedAdminCodexRequirements, "\n", "\r\n")),
+		"admin hooks table":    []byte(adminHooks),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fresh := reconcileCodexRequirementsForTest(t, admin, opts)
+			earlier := codexRequirementsWithUnboundCommands(t, fresh, opts)
+			if err := verifyWindowsCodexRequirementsBytes(earlier, opts); err == nil {
+				t.Fatal("an earlier release's unbound policy must not verify")
+			}
+			if contains, err := windowsCodexRequirementsContainExactManagedHook(earlier, opts); err != nil || !contains {
+				t.Fatalf("unbound groups are not recognized as DefenseClaw's (contains=%v, err=%v)", contains, err)
+			}
+			upgraded, changed, err := reconcileWindowsCodexRequirements(earlier, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatal("upgrade must report a change")
+			}
+			requireCodexRequirementsBytes(t, "upgrade", upgraded, fresh)
+			requireCodexRequirementsBytes(t, "uninstall without upgrade",
+				removeCodexRequirementsForTest(t, earlier, admin, opts), removeCodexRequirementsForTest(t, fresh, admin, opts))
+		})
+	}
+
+	// A leftover unbound group beside the bound one (for example in a later
+	// region) is dropped, together with the region it leaves empty.
+	fresh := reconcileCodexRequirementsForTest(t, []byte(commentedAdminCodexRequirements), opts)
+	unbound := codexRequirementsWithUnboundCommands(t, fresh, opts)
+	stop := bytes.Index(unbound, []byte("[[hooks.Stop]]\n"))
+	end := bytes.Index(unbound, []byte(windowsCodexRequirementsRegionEnd))
+	if stop < 0 || end < stop {
+		t.Fatalf("golden layout changed:\n%s", unbound)
+	}
+	mixed := append(append([]byte(nil), fresh...), []byte("\n"+windowsCodexRequirementsRegionBegin+"\n"+
+		string(unbound[stop:end])+windowsCodexRequirementsRegionEnd+"\n")...)
+	if err := verifyWindowsCodexRequirementsBytes(mixed, opts); err == nil ||
+		!strings.Contains(err.Error(), "unbound DefenseClaw managed groups") {
+		t.Fatalf("verify of a leftover unbound group = %v, want an unbound-group error", err)
+	}
+	requireCodexRequirementsBytes(t, "leftover unbound group", reconcileCodexRequirementsForTest(t, mixed, opts), fresh)
+}
+
+// Releases before the in-place editor re-marshaled the whole document with
+// the unbound command. Reconcile must still replace those groups in place.
+func TestReconcileWindowsCodexRequirementsReplacesUnboundGroupsInMarshaledDocument(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	admin := []byte(commentedAdminCodexRequirements)
+	cfg, err := parseWindowsCodexRequirements(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mergeWindowsCodexRequirementsModel(cfg, opts); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := codexRequirementsWithUnboundCommands(t, bound, opts)
+
+	upgraded := reconcileCodexRequirementsForTest(t, legacy, opts)
+	upgradedCfg, err := parseWindowsCodexRequirements(upgraded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCanonical, _ := toml.Marshal(upgradedCfg)
+	requireCodexRequirementsBytes(t, "marshaled upgrade semantics", gotCanonical, bound)
+
+	cleaned := removeCodexRequirementsForTest(t, upgraded, admin, opts)
+	cleanedCfg, err := parseWindowsCodexRequirements(cleaned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminCfg, err := parseWindowsCodexRequirements(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCanonical, _ = toml.Marshal(cleanedCfg)
+	wantCanonical, _ := toml.Marshal(adminCfg)
+	requireCodexRequirementsBytes(t, "marshaled upgrade uninstall semantics", gotCanonical, wantCanonical)
+}
+
 func TestWindowsCodexRequirementsDottedRootTablesRoundTrip(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	admin := []byte("# dotted form\nfeatures.web_search_request = false\nhooks.SessionStart = []\n")
@@ -500,7 +635,7 @@ func TestRemoveWindowsCodexRequirementsRefusesUneditableManagedGroups(t *testing
 	if start < 0 || end < start {
 		t.Fatalf("golden layout changed:\n%s", installed)
 	}
-	command := windowsCodexManagedHookCommand(opts.HookBinary)
+	command := windowsCodexManagedHookCommand(opts.HookBinary, "Stop")
 	rewritten := append(append([]byte(nil), installed[:start]...), installed[end:]...)
 	rewritten = bytes.Replace(rewritten,
 		[]byte("[hooks]\n"),

@@ -1766,6 +1766,32 @@ def _resolve_claude_effective_document(
     return document, f"managed_source={managed_detail}; workspace={workspace_detail}; cli_settings={cli_detail}"
 
 
+def _codex_process_start_script(script: str) -> tuple[str, str, str] | None:
+    """Recognize only the exact, event-bound Codex machine launcher."""
+    event_pattern = "|".join(re.escape(event) for event in sorted(_CODEX_KNOWN_HOOK_EVENTS))
+    contract_pattern = "|".join(re.escape(contract) for contract in sorted(_CODEX_CONTRACT_EVENTS))
+    match = re.fullmatch(
+        r"\$ErrorActionPreference='Stop'; "
+        r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+        r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) "
+        r"\{ \$ErrorActionPreference='Continue'; & '(?P<target>(?:[^']|'')+)' "
+        r"'hook' '--connector' 'codex' '--enterprise-managed' '--event' '(?P<event>"
+        + event_pattern
+        + r")' '--hook-contract' '(?P<contract>"
+        + contract_pattern
+        + r")' \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; "
+        r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)',"
+        r"'hook --connector codex --enterprise-managed --event (?P=event) --hook-contract (?P=contract)'\); "
+        r"\$hookStart\.UseShellExecute=\$false; "
+        r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
+        r"\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode",
+        script,
+    )
+    if not match:
+        return None
+    return match.group("target").replace("''", "'"), match.group("event"), match.group("contract")
+
+
 def _managed_hook_command(command: str, connector: str) -> bool:
     """Report whether a command is a current or recognized legacy launcher."""
     try:
@@ -1825,8 +1851,11 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                     encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
                     if len(encoded) <= 16 * 1024 and len(encoded) % 2 == 0:
                         script = encoded.decode("utf-16-le")
+                        current = _codex_process_start_script(script) if connector == "codex" else None
+                        if current:
+                            owned_target = current[0]
                         event_suffix = ""
-                        if connector == "codex":
+                        if connector == "codex" and not owned_target:
                             event_pattern = "|".join(
                                 re.escape(event) for event in sorted(_CODEX_KNOWN_HOOK_EVENTS)
                             )
@@ -1860,7 +1889,7 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                                 + r"; exit \$LASTEXITCODE",
                                 script,
                             )
-                        if match:
+                        if match and not owned_target:
                             owned_target = match.group(1).replace("''", "'")
                 except (binascii.Error, UnicodeError, ValueError):
                     pass
@@ -2955,6 +2984,16 @@ def _command_target(
                 script = encoded.decode("utf-16-le")
             except (binascii.Error, UnicodeError, ValueError) as exc:
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
+            current = _codex_process_start_script(script) if connector == "codex" else None
+            if current:
+                target, event, contract_id = current
+                if (event, contract_id) not in _CODEX_BOUND_HOOK_PAIRS:
+                    raise _InspectionError(
+                        "malformed",
+                        "Codex hook command contains an unsupported event/contract pair",
+                    )
+                args = ["hook", "--connector", "codex", "--event", event, "--hook-contract", contract_id]
+                return target, args, "direct"
             event_suffix = ""
             if connector == "antigravity":
                 event_suffix = (

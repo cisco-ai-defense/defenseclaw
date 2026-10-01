@@ -6,8 +6,12 @@
 package connector
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +20,81 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+const codexMachineHookHelperMode = "TEST_CODEX_MACHINE_HOOK_MODE"
+
+const codexMachineHookHelperDecision = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"codex machine hook helper"}}`
+
+// runCodexMachineHookHelper stands in for the hook launcher (TestMain runs it
+// when codexMachineHookHelperMode is "block"). It exits 2 with a deny
+// decision only for the exact bound PreToolUse invocation and payload.
+func runCodexMachineHookHelper() {
+	payload, err := io.ReadAll(os.Stdin)
+	if err != nil || !bytes.Contains(payload, []byte(`"hook_event_name":"PreToolUse"`)) {
+		fmt.Fprintf(os.Stderr, "Codex machine hook helper received wrong stdin: %q\n", payload)
+		os.Exit(11)
+	}
+	want := "hook|--connector|codex|--enterprise-managed|--event|PreToolUse|--hook-contract|" +
+		windowsCodexMachineHookContract()
+	if got := strings.Join(os.Args[1:], "|"); got != want {
+		fmt.Fprintf(os.Stderr, "Codex machine hook helper received %q, want %q\n", got, want)
+		os.Exit(10)
+	}
+	fmt.Print(codexMachineHookHelperDecision)
+	os.Exit(2)
+}
+
+// TestWindowsCodexManagedHookCommandReturnsTheHookDecision runs the exact
+// PreToolUse machine-requirements command through the system Windows
+// PowerShell the way Codex does, with a piped payload. The hook must receive
+// its bound event and contract and the payload, and its exit code and
+// decision must reach the caller.
+func TestWindowsCodexManagedHookCommandReturnsTheHookDecision(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(windowsCodexManagedHookCommand(executable, "PreToolUse"))
+	if len(fields) != 6 || fields[4] != "-EncodedCommand" {
+		t.Fatalf("unexpected managed command shape %q", fields)
+	}
+	cmd := exec.Command(fields[0], fields[1:]...)
+	cmd.Env = append(os.Environ(), codexMachineHookHelperMode+"=block")
+	cmd.Stdin = strings.NewReader(`{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo marker"}}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("managed command = %v, want the hook's exit 2\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != codexMachineHookHelperDecision {
+		t.Fatalf("managed command stdout = %q, want the hook decision\nstderr: %s", got, stderr.String())
+	}
+}
+
+func TestWindowsCodexManagedHookCommandPropagatesHookError(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(windowsCodexManagedHookCommand(executable, "PreToolUse"))
+	cmd := exec.Command(fields[0], fields[1:]...)
+	cmd.Env = append(os.Environ(), codexMachineHookHelperMode+"=block")
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"WrongEvent"}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 11 {
+		t.Fatalf("managed command = %v, want the hook's exit 11\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "wrong stdin") {
+		t.Fatalf("managed command did not forward hook stderr: %s", stderr.String())
+	}
+}
 
 func TestResolveWindowsCodexManagedRuntimeRegistryCleanAbsenceIsNoop(t *testing.T) {
 	programData := t.TempDir()
