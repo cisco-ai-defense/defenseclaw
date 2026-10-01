@@ -835,6 +835,22 @@ func ensureLegacyAlertBaseline(ctx context.Context, tx *sql.Tx, alertID string) 
 	return nil
 }
 
+// legacyACKScanQuery selects the legacy ACK rows that become acknowledgement
+// baselines. It runs on every startup, so it must not scan audit_events: on a
+// legacy database every row has a NULL bucket, and a multi-GB file read
+// through the bucket index kept the gateway from becoming ready. Listing the
+// case spellings of "ACK" (SQLite's upper() folds ASCII only, so this matches
+// exactly what UPPER(severity) = 'ACK' matched) lets SQLite seek
+// idx_audit_severity_timestamp; the unary + keeps it off the bucket and action
+// indexes.
+func legacyACKScanQuery(actionPlaceholders string) string {
+	return fmt.Sprintf(`SELECT id, 1, 'acknowledged', COALESCE(NULLIF(actor,''), 'unknown'), timestamp,
+			id, 'ACK', 'unknown', 'legacy_occurrence_timestamp_unreliable', CURRENT_TIMESTAMP
+		FROM audit_events
+		WHERE severity IN ('ACK','ACk','AcK','Ack','aCK','aCk','acK','ack')
+		  AND +bucket IS NULL AND +action IN (%s)`, actionPlaceholders)
+}
+
 // materializeLegacyAlertAcknowledgementBaselines is intentionally replayed on
 // every current startup. A rollback binary can write a new legacy ACK after the
 // one-time schema migration, and v8 must capture it before normal retention can
@@ -860,11 +876,7 @@ func materializeLegacyAlertAcknowledgementBaselines(ex dbExecer) error {
 			legacy_event_id, raw_legacy_severity, legacy_original_severity,
 			timestamp_provenance, created_at
 		)
-		SELECT id, 1, 'acknowledged', COALESCE(NULLIF(actor,''), 'unknown'), timestamp,
-			id, 'ACK', 'unknown', 'legacy_occurrence_timestamp_unreliable', CURRENT_TIMESTAMP
-		FROM audit_events
-		WHERE bucket IS NULL AND UPPER(COALESCE(severity,'')) = 'ACK'
-		  AND action IN (%s);
+		%s;
 
 		INSERT OR IGNORE INTO alert_acknowledgement_projection (
 			alert_id, disposition, actor, disposition_at, projection_version,
@@ -873,7 +885,7 @@ func materializeLegacyAlertAcknowledgementBaselines(ex dbExecer) error {
 		SELECT alert_id, disposition, actor, disposition_at, baseline_version,
 			'legacy_ack', legacy_event_id, CURRENT_TIMESTAMP
 		FROM alert_acknowledgement_baselines;
-	`, placeholders), arguments...)
+	`, legacyACKScanQuery(placeholders)), arguments...)
 	if err != nil {
 		return fmt.Errorf("audit: materialize legacy alert acknowledgement baselines: %w", err)
 	}
