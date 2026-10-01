@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -879,5 +880,16 @@ func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
 	packErr = requireRulePackError(t, err, "semantic_catalog_cost_limit")
 	if !strings.Contains(packErr.Reason, fmt.Sprintf("%d", semantic.MaxEnabledCatalogStaticCost)) {
 		t.Errorf("catalog reason = %q, want the limit", packErr.Reason)
+	}
+}
+
+func TestRulePackDirectoryUnreadableNamesTheReason(t *testing.T) {
+	denied := rulePackDirectoryUnreadable(&fs.PathError{Op: "lstat", Path: `C:\packs`, Err: fs.ErrPermission})
+	if denied.Code != "directory_unreadable" || !strings.Contains(denied.Reason, "access denied") ||
+		!strings.Contains(denied.Reason, "parent folders") || strings.Contains(denied.Reason, `C:\packs`) {
+		t.Fatalf("permission error = %+v", denied)
+	}
+	if other := rulePackDirectoryUnreadable(errors.New("boom")); other.Reason != "rule-pack directory cannot be inspected" {
+		t.Fatalf("unknown error = %+v", other)
 	}
 }

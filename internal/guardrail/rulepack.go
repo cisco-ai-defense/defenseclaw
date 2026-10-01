@@ -34,6 +34,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"gopkg.in/yaml.v3"
@@ -411,20 +412,36 @@ func decodeEmbeddedYAML[T any](rel string) (*T, error) {
 	return &out, nil
 }
 
+// rulePackDirectoryUnreadable names why the rule-pack directory could not be
+// inspected. It carries the operating system's reason, never a path: the
+// caller already names the directory.
+func rulePackDirectoryUnreadable(err error) *RulePackError {
+	const reason = "rule-pack directory cannot be inspected"
+	if errors.Is(err, fs.ErrPermission) {
+		return rulePackErr(".", "directory_unreadable", reason+
+			" (access denied): the account the gateway runs as needs read and list access to the directory and to each of its parent folders")
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return rulePackErr(".", "directory_unreadable", reason+" ("+errno.Error()+")")
+	}
+	return rulePackErr(".", "directory_unreadable", reason)
+}
+
 func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, rulePackErr(".", "directory_not_found", "rule-pack directory does not exist")
 		}
-		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+		return nil, rulePackDirectoryUnreadable(err)
 	}
 	if !info.IsDir() {
 		return nil, rulePackErr(".", "not_directory", "rule-pack path is not a directory")
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+		return nil, rulePackDirectoryUnreadable(err)
 	}
 
 	inventory := &rulePackInventory{files: make(map[string]diskRulePackFile)}
