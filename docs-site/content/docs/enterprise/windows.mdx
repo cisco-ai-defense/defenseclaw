@@ -160,10 +160,21 @@ Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name must exist, be
 writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
-`Users` read and execute entry in place). Setup's checks run as SYSTEM, so
-they pass for a folder that only SYSTEM and Administrators can read. The
-gateway then cannot start, and Setup reports only that the service failed to
-start and rolls back. Setup checks the config with the
+`Users` read and execute entry in place). Every parent folder of it needs
+Read & execute for that account too, because the gateway reads each
+parent's permissions and lists it. So do not put the rule pack inside the
+locked staging folder below; give it its own folder:
+
+```powershell
+$Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
+New-Item -ItemType Directory -Path $Packs -Force | Out-Null
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+Copy-Item -Recurse .\my-pack "$Packs\my-pack"
+```
+
+Setup checks these permissions for the service account before it changes
+anything, and stops with exit code `1639` naming the folder and the
+`icacls` grant that fixes it. Setup checks the config with the
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
