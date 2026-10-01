@@ -145,11 +145,12 @@ type nodeHarnessSession struct {
 
 // nodeHarnessStartTimeout bounds an interactive harness's start: node's
 // launch, the plugin's load and its load heartbeat. That wait is mostly the
-// operating system's: a node.exe launch that pays an antivirus image scan
-// has taken over a minute on a Windows host whose real-time scanning was
-// backed up. So the bound is the time left before the test's deadline, less
-// nodeHarnessTimeout to report and clean up, and never less than
-// nodeHarnessTimeout.
+// operating system's: the first node process on a fresh Windows runner pages
+// node.exe in from a cold disk, and its first module load and fetch have
+// taken over 14s there (later launches take milliseconds); a launch that also
+// pays a backed-up antivirus scan has taken over a minute. So the bound is the
+// time left before the test's deadline, less nodeHarnessTimeout to report and
+// clean up, and never less than nodeHarnessTimeout.
 func nodeHarnessStartTimeout(t *testing.T) time.Duration {
 	if deadline, ok := t.Deadline(); ok {
 		if left := time.Until(deadline) - nodeHarnessTimeout; left > nodeHarnessTimeout {

@@ -290,8 +290,8 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 	}
 	// The harness applies the config hook before it is ready, as OpenCode
 	// does at startup: its load heartbeat pays the process's first gateway
-	// request (fetch's first use and connection), which on a busy Windows
-	// runner can outlast the plugin's own 10s gateway timeout, and an
+	// request (fetch's first use and connection), which on a fresh or busy
+	// Windows runner can outlast the plugin's own 10s gateway timeout, and an
 	// evaluation that timed out would fail open without reaching the stub.
 	harness := `
 import { pathToFileURL } from "node:url";
