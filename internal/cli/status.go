@@ -72,7 +72,7 @@ func printGatewayStatusBanner() {
 	fmt.Println()
 	title := "DefenseClaw Gateway Status"
 	fmt.Println("  " + Style(title, "fg=cyan", "bold"))
-	under := strings.Repeat("═", utf8.RuneCountInString(title))
+	under := strings.Repeat(glyph("═", "="), utf8.RuneCountInString(title))
 	fmt.Println("  " + Style(under, "fg=cyan"))
 }
 
@@ -80,7 +80,7 @@ func printGatewayKV(key, value string) {
 	label := fmt.Sprintf("%-*s", gatewayStatusLabelWidth, key+":")
 	rendered := value
 	if rendered == "" {
-		rendered = Dim("—")
+		rendered = Dim(glyph("—", "-"))
 	}
 	fmt.Printf("  %s%s\n", Style(label, "fg=bright_black", "bold"), rendered)
 }
@@ -104,9 +104,9 @@ func styledConnectorStateVerb(state string) string {
 	}
 	switch u {
 	case "RUNNING", "ACTIVE", "READY", "UP":
-		return " — " + Style(u, "fg=green")
+		return " " + glyph("—", "-") + " " + Style(u, "fg=green")
 	default:
-		return " — " + Style(u, "fg=yellow")
+		return " " + glyph("—", "-") + " " + Style(u, "fg=yellow")
 	}
 }
 
@@ -525,13 +525,13 @@ func printHookGuardianStatus() {
 			label += " for " + home
 		}
 		if row.OK {
-			fmt.Printf("                  %s — ok\n", label)
+			fmt.Printf("                  %s %s ok\n", label, glyph("—", "-"))
 		} else {
 			errText := row.Error
 			if errText == "" {
 				errText = "failed"
 			}
-			fmt.Printf("                  %s — %s\n", label, Style(errText, "fg=yellow"))
+			fmt.Printf("                  %s %s %s\n", label, glyph("—", "-"), Style(errText, "fg=yellow"))
 		}
 	}
 	fmt.Println()

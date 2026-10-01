@@ -2185,9 +2185,11 @@ func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
 		switch strings.ToLower(state) {
 		case "running", "healthy":
 			parts = append(parts, sub.name+":ok")
-		case "disabled", "stopped":
+		case "stopped":
 			parts = append(parts, sub.name+":off")
-		case "":
+		case "", "disabled":
+			// A subsystem this install does not use (the OpenClaw gateway
+			// client without OpenClaw) read as a failure right after "OK".
 			continue
 		default:
 			parts = append(parts, sub.name+":"+state)

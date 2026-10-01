@@ -13,6 +13,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 
@@ -87,6 +88,22 @@ func Style(text string, attrs ...string) string {
 	return b.String()
 }
 
+// asciiGlyphs reports whether presentation glyphs need ASCII stand-ins.
+// PowerShell decodes a native command's piped output with the console code
+// page, which turns UTF-8 glyphs into mojibake, so redirected Windows output
+// uses ASCII, as cli/defenseclaw/ux.py does for redirected output.
+var asciiGlyphs = func() bool {
+	return runtime.GOOS == "windows" && !term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// glyph returns a presentation glyph, or its ASCII stand-in.
+func glyph(unicode, ascii string) string {
+	if asciiGlyphs() {
+		return ascii
+	}
+	return unicode
+}
+
 // Bold wraps text in bold SGR (no color change).
 func Bold(text string) string {
 	return Style(text, "bold")
@@ -107,7 +124,7 @@ func Section(title string) {
 	fmt.Println()
 	fmt.Println("  " + Style(title, "fg=cyan", "bold"))
 	w := utf8.RuneCountInString(title)
-	fmt.Println("  " + Style(strings.Repeat("─", w), "fg=cyan"))
+	fmt.Println("  " + Style(strings.Repeat(glyph("─", "-"), w), "fg=cyan"))
 }
 
 // Banner prints a full-width "── Title ──…──" line (~54 cols) plus a trailing blank line.
@@ -117,8 +134,8 @@ func Banner(title string) {
 	const indent = "  "
 	label := fmt.Sprintf(" %s ", title)
 	side := max(2, (width-len(label))/2)
-	left := strings.Repeat("─", side)
-	right := strings.Repeat("─", width-side-len(label))
+	left := strings.Repeat(glyph("─", "-"), side)
+	right := strings.Repeat(glyph("─", "-"), width-side-len(label))
 	if ColorEnabled() {
 		fmt.Printf("%s%s %s %s\n", indent, Dim(left), Style(title, "fg=cyan", "bold"), Dim(right))
 	} else {
@@ -134,17 +151,17 @@ func Subhead(text string) {
 
 // OK prints a green success marker line.
 func OK(text string) {
-	fmt.Printf("  %s %s\n", Style("✓", "fg=green", "bold"), text)
+	fmt.Printf("  %s %s\n", Style(glyph("✓", "OK"), "fg=green", "bold"), text)
 }
 
 // Warn prints a yellow warning marker line.
 func Warn(text string) {
-	fmt.Printf("  %s %s\n", Style("⚠", "fg=yellow", "bold"), Style(text, "fg=yellow"))
+	fmt.Printf("  %s %s\n", Style(glyph("⚠", "!"), "fg=yellow", "bold"), Style(text, "fg=yellow"))
 }
 
 // Err prints a red error marker line (stdout; matches Python ux.err convention).
 func Err(text string) {
-	fmt.Printf("  %s %s\n", Style("✗", "fg=red", "bold"), Style(text, "fg=red"))
+	fmt.Printf("  %s %s\n", Style(glyph("✗", "X"), "fg=red", "bold"), Style(text, "fg=red"))
 }
 
 // KV prints a dim bold key column and a plain value (30-char label column, 4-space indent).
@@ -157,7 +174,7 @@ func KV(key string, value any) {
 	}
 	rendered := textValue
 	if rendered == "" {
-		rendered = Dim("—")
+		rendered = Dim(glyph("—", "-"))
 	}
 	label := fmt.Sprintf("%-*s", keyWidth, key+":")
 	fmt.Printf("%s%s %s\n", indent, Style(label, "fg=bright_black", "bold"), rendered)

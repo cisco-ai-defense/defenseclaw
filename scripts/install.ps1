@@ -665,10 +665,16 @@ function Remove-SetupInstall {
         if ($location -and (Test-SamePath $location $Setup.Root)) { Remove-Item -LiteralPath $SetupUninstallKey -Recurse -Force }
     }
     Invoke-Quietly { Remove-Tree $SetupCache }
-    foreach ($setting in @(@("CODEX_HOME", $Setup.CodexHome), @("CLAUDE_CONFIG_DIR", $Setup.ClaudeConfigDir))) {
-        if ($setting[1]) {
-            Write-Warn "DefenseClaw Setup set $($setting[0])=$($setting[1]) for DefenseClaw; set it for your user account to keep that location guarded"
-        }
+    foreach ($setting in @(@("CODEX_HOME", "Codex", ".codex", $Setup.CodexHome),
+            @("CLAUDE_CONFIG_DIR", "Claude Code", ".claude", $Setup.ClaudeConfigDir))) {
+        $name, $agent, $folder, $value = $setting
+        # The agent's default folder needs no variable, and neither does a
+        # value the account already has.
+        if (-not $value -or (Test-SamePath $value (Join-Path $env:USERPROFILE $folder)) -or
+            (Test-SamePath ([string][Environment]::GetEnvironmentVariable($name, "User")) $value)) { continue }
+        Write-Warn "DefenseClaw guards $agent in $value, but only DefenseClaw Setup had $name set to it"
+        Write-Host "  Set it for your account so $agent keeps using that folder, then open a new terminal:"
+        Write-Host "    [Environment]::SetEnvironmentVariable('$name', '$value', 'User')" -ForegroundColor Cyan
     }
 }
 
