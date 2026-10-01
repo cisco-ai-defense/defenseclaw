@@ -476,7 +476,6 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
-	addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
 		purge := false
@@ -517,6 +516,11 @@ func applyWindowsEnterpriseInstallerReport(
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	// Only when nothing above explains it, and never for a committed
+	// uninstall, which leaves nothing to secure.
+	if result.Action != "uninstall" || report.Installed {
+		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
 }
 
 // addWindowsEnterpriseUserStateWarning names each enrolled account's
