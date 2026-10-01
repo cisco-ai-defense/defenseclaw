@@ -44,6 +44,13 @@ UNINSTALL_ACL_RECOVERY_SMOKE = (
     / "tests"
     / "enterprise-uninstall-acl-recovery-smoke.ps1"
 )
+UNINSTALL_NATIVE_CONTRACT_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-native-contract-smoke.ps1"
+)
 SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     ROOT
     / "packaging"
@@ -1458,7 +1465,18 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "metadata_bytes_preserved",
                 "hashed_attestation_repaired",
                 "changed_attestation_rejected",
+                "trusted_admin_deny_repaired",
+                "purge_skipped_denied_state_child",
+                "non_purge_rejected_denied_state_child",
                 "foreign_writer_rejected",
+            ),
+        ),
+        (
+            UNINSTALL_NATIVE_CONTRACT_SMOKE,
+            (
+                "seal_and_delete_bound",
+                "internal_helper_rejected",
+                "absent_delete_idempotent",
             ),
         ),
         (
