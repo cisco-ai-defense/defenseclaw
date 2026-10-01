@@ -10,11 +10,13 @@
 
 """Tests for ``scripts/check_llm_catalog.py``.
 
-Two layers:
+Two layers, both hermetic (no network, no wall clock):
 
-* A live gate that runs the real catalog against the installed LiteLLM
-  registry — this is the same assertion ``make check-llm-catalog``
-  enforces, surfaced in the Python test suite so drift fails fast.
+* The PR gate: the real catalog against the LiteLLM registry snapshot
+  bundled in the locked ``litellm`` wheel, as of ``GATE_AS_OF`` — the same
+  assertion ``make check-llm-catalog`` enforces. Live drift against the
+  upstream registry and today's date is the scheduled radar's job
+  (``make check-llm-catalog-live``), never a PR's.
 * Deterministic unit tests for the resolver / deprecation logic using a
   synthetic ``model_cost`` so behaviour is pinned regardless of which
   LiteLLM version happens to be installed.
@@ -46,14 +48,16 @@ mod = _load_module()
 
 
 # ---------------------------------------------------------------------------
-# Live gate: the shipped catalog must be current against installed LiteLLM.
+# PR gate: the shipped catalog must be current in the pinned registry.
 # ---------------------------------------------------------------------------
 
 
 def test_shipped_catalog_has_no_stale_ids() -> None:
-    litellm = pytest.importorskip("litellm")
+    registry = mod.load_bundled_registry()
+    if registry is None:
+        pytest.skip("litellm is not installed")
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-    problems = mod.check_catalog(catalog, litellm.model_cost, date.today())
+    problems = mod.check_catalog(catalog, registry, mod.GATE_AS_OF)
     assert problems == [], "stale model ids in model_catalog.json: " + "; ".join(
         f"[{p}] {m} — {why}" for p, m, why in problems
     )
@@ -154,3 +158,22 @@ def test_unmapped_provider_is_skipped_not_failed() -> None:
         ]
     }
     assert mod.check_catalog(catalog, _FAKE_COST, _TODAY) == []
+
+
+def test_gate_is_pinned_to_gate_as_of_not_the_wall_clock(monkeypatch, tmp_path) -> None:
+    """A deprecation date passing must not fail the PR gate on unrelated PRs."""
+    catalog = tmp_path / "model_catalog.json"
+    catalog.write_text(
+        json.dumps({"providers": [{"name": "gemini", "kind": "cloud", "models": ["gemini-9-flash"]}]}),
+        encoding="utf-8",
+    )
+
+    class _AfterDeprecation(date):
+        @classmethod
+        def today(cls) -> date:
+            return date(2100, 1, 1)  # past gemini-9-flash's 2099-01-01
+
+    monkeypatch.setattr(mod, "CATALOG", catalog)
+    monkeypatch.setattr(mod, "load_bundled_registry", lambda: _FAKE_COST)
+    monkeypatch.setattr(mod, "date", _AfterDeprecation)
+    assert mod.main([]) == 0
