@@ -49,7 +49,7 @@ def test_evidence_is_bound_to_the_claude_policy_identity_not_the_manifest() -> N
     writer = _slice(
         module,
         "function Write-DefenseClawAgentApplicationControlAttestation",
-        "function Initialize-DefenseClawCodexMachinePolicyParent",
+        "function Get-DefenseClawAgentApplicationControlAttestationSchemaVersion",
     )
     assert "claude_effective_policy_managed_policy_sha256 = $claudePolicyHash" in writer
     assert "claude_effective_policy_hook_sha256 = $claudeHookHash" in writer
