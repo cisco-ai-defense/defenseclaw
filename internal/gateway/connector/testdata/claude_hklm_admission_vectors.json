@@ -1,0 +1,513 @@
+{
+ "comment": [
+  "Shared HKLM\\SOFTWARE\\Policies\\ClaudeCode\\Settings admission vectors.",
+  "connector.ClaudeCodeOSAdminPolicyAdmitsManagedHooks (TestClaudeHKLMAdmissionVectorsOnWindows) and the",
+  "lifecycle module's Get-DefenseClawClaudeHKLMPolicyVerdict (enterprise-claude-hklm-policy-smoke.ps1)",
+  "must both give each case its want: inactive (no policy), carry (the policy carries the DefenseClaw hooks),",
+  "merge (admitted through managedSourcesBehavior merge) or refuse. Tokens expand in order, first to last.",
+  "installed is the drop-in the gateway renders for contract_id; installed_opt_out is it under",
+  "claude_code.allow_unmanaged_hooks (opt_out cases).",
+  "Both read the value as strict JSON (RFC 8259) with case-sensitive keys, a repeated key keeping its last value, as",
+  "Claude Code and encoding/json do, and refuse any DefenseClaw handler outside the rendered entry: Claude Code runs one",
+  "copy of a repeated command hook, keyed without its timeout or async flag."
+ ],
+ "contract_id": "claudecode-hklm-admission-vectors",
+ "events": [
+  "PreToolUse",
+  "Stop",
+  "MessageDisplay"
+ ],
+ "hook_executable": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+ "tokens": [
+  [
+   "@MATRIX@",
+   "\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@],\"Stop\":[@STOP@]"
+  ],
+  [
+   "@PRE@",
+   "{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}"
+  ],
+  [
+   "@STOP@",
+   "{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":90,\"type\":\"command\"}]}"
+  ],
+  [
+   "@MSG@",
+   "{\"hooks\":[{\"args\":@ARGS@,\"async\":true,\"command\":\"@HOOK@\",\"timeout\":10,\"type\":\"command\"}]}"
+  ],
+  [
+   "@PRE_SHORT@",
+   "{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":1,\"type\":\"command\"}],\"matcher\":\"*\"}"
+  ],
+  [
+   "@PRE_ASYNC@",
+   "{\"hooks\":[{\"args\":@ARGS@,\"async\":true,\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}"
+  ],
+  [
+   "@ARGS@",
+   "[\"hook\",\"--connector\",\"claudecode\",\"--enterprise-managed\"]"
+  ],
+  [
+   "@HOOK_LOWER@",
+   "c:\\\\program files\\\\cisco\\\\cisco secure client\\\\defenseclaw\\\\bin\\\\defenseclaw-hook.exe"
+  ],
+  [
+   "@HOOK@",
+   "C:\\\\Program Files\\\\Cisco\\\\Cisco Secure Client\\\\DefenseClaw\\\\bin\\\\defenseclaw-hook.exe"
+  ]
+ ],
+ "installed": "{\"allowManagedHooksOnly\":true,\"hooks\":{@MATRIX@}}",
+ "installed_opt_out": "{\"hooks\":{@MATRIX@}}",
+ "cases": [
+  {
+   "name": "blank value",
+   "settings": "   ",
+   "want": "inactive"
+  },
+  {
+   "name": "empty object",
+   "settings": "{}",
+   "want": "inactive"
+  },
+  {
+   "name": "JSON null",
+   "settings": "null",
+   "want": "inactive"
+  },
+  {
+   "name": "unrelated policy",
+   "settings": "{\"model\":\"managed-by-mdm\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks and lock",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{@MATRIX@}}",
+   "want": "carry"
+  },
+  {
+   "name": "exported hooks beside other administrator hooks",
+   "settings": "{\"model\":\"managed-by-mdm\",\"hooks\":{\"Stop\":[@STOP@],\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"C:\\\\audit.exe\"}]},@PRE@],\"MessageDisplay\":[@MSG@],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"C:\\\\audit.exe\"}]}]},\"allowManagedHooksOnly\":true}",
+   "want": "carry"
+  },
+  {
+   "name": "hook path in another case",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[{\"hooks\":[{\"args\":@ARGS@,\"async\":true,\"command\":\"@HOOK_LOWER@\",\"timeout\":10,\"type\":\"command\"}]}],\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK_LOWER@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK_LOWER@\",\"timeout\":90,\"type\":\"command\"}]}]}}",
+   "want": "carry"
+  },
+  {
+   "name": "timeout written as a decimal",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":30.0,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[@STOP@]}}",
+   "want": "carry"
+  },
+  {
+   "name": "hooks without the lock",
+   "settings": "{\"hooks\":{@MATRIX@}}",
+   "want": "refuse"
+  },
+  {
+   "name": "hooks without the lock under the opt-out",
+   "settings": "{\"hooks\":{@MATRIX@}}",
+   "want": "carry",
+   "opt_out": true
+  },
+  {
+   "name": "hooks that unlock",
+   "settings": "{\"allowManagedHooksOnly\":false,\"hooks\":{@MATRIX@}}",
+   "want": "refuse"
+  },
+  {
+   "name": "hooks that unlock under the opt-out",
+   "settings": "{\"allowManagedHooksOnly\":false,\"hooks\":{@MATRIX@}}",
+   "want": "carry",
+   "opt_out": true
+  },
+  {
+   "name": "lock of the wrong type",
+   "settings": "{\"allowManagedHooksOnly\":\"true\",\"hooks\":{@MATRIX@}}",
+   "want": "refuse"
+  },
+  {
+   "name": "lock of the wrong type under the opt-out",
+   "settings": "{\"allowManagedHooksOnly\":\"true\",\"hooks\":{@MATRIX@}}",
+   "want": "refuse",
+   "opt_out": true
+  },
+  {
+   "name": "shorter PreToolUse timeout",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":1,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "longer Stop timeout",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@],\"Stop\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":600,\"type\":\"command\"}]}]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "no timeout",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "wider PreToolUse matcher",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}]}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "missing event",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"PreToolUse\":[@PRE@],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "argv without the enterprise flag",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[{\"hooks\":[{\"args\":[\"hook\",\"--connector\",\"claudecode\"],\"async\":true,\"command\":\"@HOOK@\",\"timeout\":10,\"type\":\"command\"}]}],\"PreToolUse\":[{\"hooks\":[{\"args\":[\"hook\",\"--connector\",\"claudecode\"],\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[{\"hooks\":[{\"args\":[\"hook\",\"--connector\",\"claudecode\"],\"command\":\"@HOOK@\",\"timeout\":90,\"type\":\"command\"}]}]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "DefenseClaw hook outside the contract",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{@MATRIX@,\"DirectoryAdded\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "event key in another case",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"pretooluse\":[@PRE@],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "hooks key in another case",
+   "settings": "{\"allowManagedHooksOnly\":true,\"Hooks\":{@MATRIX@}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks and lock that also merge",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"allowManagedHooksOnly\":true,\"hooks\":{@MATRIX@}}",
+   "want": "carry",
+   "managed_sources_merge": true
+  },
+  {
+   "name": "exported hooks that merge without the lock",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{@MATRIX@}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"model\":\"managed-by-mdm\"}",
+   "want": "merge"
+  },
+  {
+   "name": "merge that keeps the lock",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"allowManagedHooksOnly\":true}",
+   "want": "merge"
+  },
+  {
+   "name": "merge that unlocks",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"allowManagedHooksOnly\":false}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge that unlocks under the opt-out",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"allowManagedHooksOnly\":false}",
+   "want": "merge",
+   "opt_out": true
+  },
+  {
+   "name": "merge beside another administrator hook",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"C:\\\\audit.exe\"}]}]}}",
+   "want": "merge"
+  },
+  {
+   "name": "merge with a shorter DefenseClaw copy",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":1,\"type\":\"command\"}],\"matcher\":\"*\"}]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with a shorter PreToolUse copy after them",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,@PRE_SHORT@],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with an async PreToolUse copy after them",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,@PRE_ASYNC@],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with a shorter PreToolUse copy under a narrower matcher",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":1,\"type\":\"command\"}],\"matcher\":\"Bash\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with the PreToolUse entry twice",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,@PRE@],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with a PreToolUse copy in another path case",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK_LOWER@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with a DefenseClaw handler beside an administrator handler",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,{\"hooks\":[{\"type\":\"command\",\"command\":\"C:\\\\audit.exe\"},{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks with a key in another case inside an entry",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[{\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\",\"Matcher\":\"Bash\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "exported hooks, lock and merge with a shorter PreToolUse copy",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[@PRE@,@PRE_SHORT@],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with the exported PreToolUse entry",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[@PRE@]}}",
+   "want": "merge"
+  },
+  {
+   "name": "merge with the exported PreToolUse entry twice",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[@PRE@,@PRE@]}}",
+   "want": "merge"
+  },
+  {
+   "name": "merge with a shorter PreToolUse copy after the exported one",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[@PRE@,@PRE_SHORT@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with an async PreToolUse copy after the exported one",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[@PRE@,@PRE_ASYNC@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with an async DefenseClaw copy",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[@PRE_ASYNC@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with a DefenseClaw hook outside the contract",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"DirectoryAdded\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with another hook outside the contract",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"DirectoryAdded\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"C:\\\\audit.exe\"}]}]}}",
+   "want": "merge"
+  },
+  {
+   "name": "merge key in another case",
+   "settings": "{\"ManagedSourcesBehavior\":\"merge\",\"model\":\"managed-by-mdm\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge as a list",
+   "settings": "{\"managedSourcesBehavior\":[\"merge\"]}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge value in another case",
+   "settings": "{\"managedSourcesBehavior\":\"Merge\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "first-wins",
+   "settings": "{\"managedSourcesBehavior\":\"first-wins\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with non-object hooks",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":\"none\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with null hooks",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":null}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with a non-list event",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":{}}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge that disables hooks",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"disableAllHooks\":true}",
+   "want": "refuse"
+  },
+  {
+   "name": "hooks and lock that disable hooks",
+   "settings": "{\"allowManagedHooksOnly\":true,\"disableAllHooks\":true,\"hooks\":{@MATRIX@}}",
+   "want": "refuse"
+  },
+  {
+   "name": "malformed hook gate",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"disableAllHooks\":\"yes\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "hook gate key in another case",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"DisableAllHooks\":true}",
+   "want": "merge"
+  },
+  {
+   "name": "merge that keeps hooks enabled",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"disableAllHooks\":false}",
+   "want": "merge"
+  },
+  {
+   "name": "merge with a policy helper",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"policyHelper\":{\"path\":\"C:\\\\helper.exe\"}}",
+   "want": "refuse"
+  },
+  {
+   "name": "hooks and lock with a policy helper",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{@MATRIX@},\"policyHelper\":{\"path\":\"C:\\\\helper.exe\"}}",
+   "want": "refuse"
+  },
+  {
+   "name": "merge with a null policy helper",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"policyHelper\":null}",
+   "want": "merge"
+  },
+  {
+   "name": "merge restricted to plugin hooks",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"strictPluginOnlyCustomization\":true}",
+   "want": "merge"
+  },
+  {
+   "name": "merge restricted by list",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"strictPluginOnlyCustomization\":[\"hooks\"]}",
+   "want": "merge"
+  },
+  {
+   "name": "malformed customization restriction",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"strictPluginOnlyCustomization\":\"hooks\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "single-quoted JSON",
+   "settings": "{'managedSourcesBehavior':'merge'}",
+   "want": "refuse"
+  },
+  {
+   "name": "block comment inside the object",
+   "settings": "{\"managedSourcesBehavior\":\"merge\"/* note */}",
+   "want": "refuse"
+  },
+  {
+   "name": "line comment inside the object",
+   "settings": "{\"managedSourcesBehavior\":\"merge\"// note\n}",
+   "want": "refuse"
+  },
+  {
+   "name": "trailing comma in the object",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",}",
+   "want": "refuse"
+  },
+  {
+   "name": "trailing comma in a list",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"strictPluginOnlyCustomization\":[\"hooks\",]}",
+   "want": "refuse"
+  },
+  {
+   "name": "keys that differ only in case",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"ManagedSourcesBehavior\":\"first-wins\"}",
+   "want": "merge"
+  },
+  {
+   "name": "event keys that differ only in case",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"hooks\":{\"PreToolUse\":[],\"pretooluse\":[]}}",
+   "want": "merge"
+  },
+  {
+   "name": "repeated key that ends in merge",
+   "settings": "{\"managedSourcesBehavior\":\"first-wins\",\"managedSourcesBehavior\":\"merge\"}",
+   "want": "merge"
+  },
+  {
+   "name": "repeated key that ends in first-wins",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"managedSourcesBehavior\":\"first-wins\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "escaped key",
+   "settings": "{\"managedSources\\u0042ehavior\":\"merge\"}",
+   "want": "merge"
+  },
+  {
+   "name": "escaped value",
+   "settings": "{\"managedSourcesBehavior\":\"m\\u0065rge\"}",
+   "want": "merge"
+  },
+  {
+   "name": "text after the object",
+   "settings": "{\"managedSourcesBehavior\":\"merge\"} x",
+   "want": "refuse"
+  },
+  {
+   "name": "two JSON values",
+   "settings": "{\"managedSourcesBehavior\":\"merge\"}{}",
+   "want": "refuse"
+  },
+  {
+   "name": "vertical tab after the object",
+   "settings": "{\"managedSourcesBehavior\":\"merge\"}\u000b",
+   "want": "refuse"
+  },
+  {
+   "name": "byte order mark",
+   "settings": "\ufeff{\"managedSourcesBehavior\":\"merge\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "raw tab inside a string",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"model\":\"a\tb\"}",
+   "want": "refuse"
+  },
+  {
+   "name": "number with a leading zero",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"cleanupPeriodDays\":07}",
+   "want": "refuse"
+  },
+  {
+   "name": "NaN",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"cleanupPeriodDays\":NaN}",
+   "want": "refuse"
+  },
+  {
+   "name": "deeply nested unrelated setting",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+   "want": "merge"
+  },
+  {
+   "name": "whitespace around the object",
+   "settings": " \r\n\t{\"managedSourcesBehavior\":\"merge\"}\r\n ",
+   "want": "merge"
+  },
+  {
+   "name": "merge with an empty key",
+   "settings": "{\"managedSourcesBehavior\":\"merge\",\"\":{\"\":1}}",
+   "want": "merge"
+  },
+  {
+   "name": "exported hooks with an empty key inside an entry",
+   "settings": "{\"allowManagedHooksOnly\":true,\"hooks\":{\"MessageDisplay\":[@MSG@],\"PreToolUse\":[{\"\":1,\"hooks\":[{\"args\":@ARGS@,\"command\":\"@HOOK@\",\"timeout\":30,\"type\":\"command\"}],\"matcher\":\"*\"}],\"Stop\":[@STOP@]}}",
+   "want": "refuse"
+  },
+  {
+   "name": "malformed JSON",
+   "settings": "{not json",
+   "want": "refuse"
+  },
+  {
+   "name": "top-level list",
+   "settings": "[]",
+   "want": "refuse"
+  },
+  {
+   "name": "top-level string",
+   "settings": "\"merge\"",
+   "want": "refuse"
+  }
+ ]
+}
