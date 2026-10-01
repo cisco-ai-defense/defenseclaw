@@ -1636,6 +1636,46 @@ def _configured_local_retention_days(cfg) -> int:
 
 
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
+    _check_audit_db_store(cfg, r)
+    _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+
+
+def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
+    """Report audit stores the gateway moved aside as corrupt.
+
+    The gateway renames a corrupt store to ``<db>.corrupt-<UTC time>`` and
+    starts a new one; only its log said so, so the reset audit history went
+    unnoticed.
+    """
+    if not db_path:
+        return
+    try:
+        moved = sorted(
+            path
+            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
+            if not path.name.endswith(("-wal", "-shm", "-journal")) and path.is_file()
+        )
+    except OSError:
+        return
+    if not moved:
+        return
+    newest = moved[-1]
+    size_mib = sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()) // (1024 * 1024)
+    count = f"{len(moved)} corrupt audit stores were" if len(moved) > 1 else "the audit store was corrupt and was"
+    _emit(
+        "warn",
+        "Audit store moved aside",
+        f"{count} moved aside by the gateway, which started a new store and kept the block/allow lists; "
+        f"older audit records stay in {newest} ({size_mib} MiB). Recover them with: sqlite3 {newest} .recover; "
+        f"delete {newest} and its -wal/-shm files when they are no longer needed",
+        r=r,
+        check_id="doctor.state.audit-db-moved-aside",
+        reason_code="audit-db-moved-aside",
+        remediation=f"sqlite3 {newest} .recover",
+    )
+
+
+def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_FULL_INTEGRITY_MAX_BYTES,
         AuditDBHealthStatus,
