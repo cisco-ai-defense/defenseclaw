@@ -353,6 +353,28 @@ def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start" in out
     assert "an older failure" not in out
 
+    # MAC-U3-02: with a large audit database the restored gateway was still
+    # starting when its start command timed out, and logged the drift later.
+    (tmp_path / "gateway.log").write_text("", encoding="utf-8")
+    pid_file = tmp_path / "gateway.pid"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = start ] || exit 1\n'
+        "(sleep 4; echo '[sidecar] guardrail exited with error: connector codex hook contract drift detected'"
+        f" >> '{tmp_path}/gateway.log') &\n"
+        f"echo $! > '{pid_file}'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    stub = f"gateway_pid() {{ kill -0 \"$(cat '{pid_file}')\" 2>/dev/null && cat '{pid_file}'; }}\n"
+    script.write_text(script.read_text(encoding="utf-8").replace("rc=0; start_gateway", stub + "rc=0; start_gateway"))
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out, out
+    assert "still starting" in out
+    assert "The gateway refused to start: codex's agent changed" in out
+
 
 def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:
     # RHEL-U3-02: the low-disk refusal named no sizes, no culprit and no next step.
