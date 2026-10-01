@@ -77,6 +77,8 @@ func correlationContractSources(name string) []CorrelationContractSource {
 	case "cursor":
 		return source("cursor-hooks-doc-d13a6fc6",
 			"https://cursor.com/docs/hooks", "sha256:d13a6fc6c1cc3fbe1abccf8bbd9044781a24ebb6cb8ed4870574c3bd4b9694d4")
+	case "deepseek":
+		return source("deepseek-source-639ed015", deepseekSource, "639ed015397290b3745d163aafe02ffee4aa3f84")
 	case "devin":
 		return []CorrelationContractSource{{
 			ID:          "devin-hooks-doc-d420df73",

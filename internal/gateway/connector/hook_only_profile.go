@@ -77,6 +77,8 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	reason := connectorReasonForProfile(in.Req.ConnectorName, in.Action, in.Req.ToolName, in.Reason)
 	var output map[string]interface{}
 	switch in.Req.ConnectorName {
+	case "deepseek":
+		output = DeepSeekHookOutput(in.Req.HookEventName, in.Action, reason)
 	case "hermes":
 		// Hermes v0.19 shell-hook lifecycle (config.yaml `hooks:` block):
 		//

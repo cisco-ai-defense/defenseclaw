@@ -90,8 +90,9 @@ $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
-# Connectors supported on Windows (cli/defenseclaw/platform_support.py).
-$ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
+# Recognized Windows choices; setup enforces platform_support.py certification
+# (DeepSeek is listed for an explicit not-certified refusal).
+$ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "deepseek", "devin", "copilot", "antigravity",
     "opencode", "amp", "omnigent", "kiro", "none")
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.

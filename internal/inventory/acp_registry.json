@@ -173,6 +173,11 @@
     {
       "connector_id": "zeptoclaw",
       "acp_support": "none"
+    },
+    {
+      "connector_id": "deepseek",
+      "acp_support": "none",
+      "reason": "Preview command-hook bridge only; no reviewed ACP integration."
     }
   ]
 }

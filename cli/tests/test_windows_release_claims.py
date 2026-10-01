@@ -59,7 +59,7 @@ def test_windows_release_metadata_is_exact() -> None:
         "antigravity",
     }
     assert WINDOWS_PREVIEW_CONNECTORS == set()
-    assert WINDOWS_NOT_CERTIFIED_CONNECTORS == set()
+    assert WINDOWS_NOT_CERTIFIED_CONNECTORS == {"deepseek"}
     assert WINDOWS_UNSUPPORTED_CONNECTORS == {
         "openhands",
         "openclaw",
@@ -115,7 +115,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
     for connector_id, page in connector_docs.items():
         text = page.read_text(encoding="utf-8")
         assert text.count("## Platform support") == 1, page
-        assert _platform_status(text, "macOS and Linux") == "Supported", page
+        assert _platform_status(text, "macOS and Linux") == ("Preview" if connector_id == "deepseek" else "Supported"), page
 
         source_support = WINDOWS_CONNECTOR_SUPPORT[connector_id]
         expected_status = status_labels[source_support.status]
@@ -141,7 +141,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
             connectors_index,
             re.MULTILINE,
         )
-        assert row == [("Supported", expected_windows_status)], connector_id
+        assert row == [("Preview" if connector_id == "deepseek" else "Supported", expected_windows_status)], connector_id
 
     docs_content = ROOT / "docs-site/content"
     public_docs = "\n".join(

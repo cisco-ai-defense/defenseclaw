@@ -4263,6 +4263,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "codex",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",
@@ -4361,6 +4362,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "cursor": {
         "label": "Cursor",
         "description": "user hooks with event-scoped deny + bounded local inventory",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "deepseek": {
+        "label": "DeepSeek Harness",
+        "description": "Preview Cordis command-hook bridge; upstream errors fail open",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -4490,6 +4497,11 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "~/.defenseclaw/hooks/cursor-hook.ps1 on Windows; "
             "~/.defenseclaw/hooks/cursor-hook.sh on non-Windows"
         ),
+    ),
+    "deepseek": (
+        "$DSH_HOME/cordis.patch.yml (default ~/.dsh)",
+        "Dedicated defenseclaw-hooks.json; restart dsh after setup",
+        "Preview: no enterprise, native OTLP, or asset-management coverage",
     ),
     "devin": (
         "<workspace>/.devin/hooks.v1.json project hooks",
@@ -7886,6 +7898,7 @@ def _restored_inactive_connector_bindings(
         "codex",
         "copilot",
         "cursor",
+        "deepseek",
         "devin",
         "hermes",
         "kiro",
@@ -11167,6 +11180,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
 for _observability_connector in (
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",
@@ -11206,6 +11220,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "claudecode",
         "hermes",
         "cursor",
+        "deepseek",
         "devin",
         "copilot",
         "openhands",
@@ -12844,7 +12859,12 @@ def _restart_services(
         # No proxy listener binds for hook-only connectors — the agent
         # talks directly to its native upstream and DefenseClaw
         # observes/enforces via the hook bus on the sidecar API port.
-        if connector == "omnigent":
+        if connector == "deepseek":
+            ux.subhead(
+                "DeepSeek Harness preview: restart dsh to load the bridge. "
+                "Upstream errors fail open; live runtime state is unverified."
+            )
+        elif connector == "omnigent":
             registration_state = (
                 "DefenseClaw gateway registration is ready"
                 if connector_registration_verified

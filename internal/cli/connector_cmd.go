@@ -319,6 +319,8 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		variable = "CODEX_HOME"
 	case "claudecode":
 		variable = "CLAUDE_CONFIG_DIR"
+	case "deepseek":
+		return func() {}, nil // ConfigHome binds DSH_HOME without changing the process environment.
 	case "amp":
 		// Amp has no config-home environment override. SetupOpts.ConfigHome
 		// carries the validated lifecycle path without mutating USERPROFILE.
@@ -521,8 +523,8 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	if name != "amp" && name != "antigravity" && name != "claudecode" && name != "codex" &&
 		name != "copilot" && name != "cursor" && name != "hermes" && name != "omnigent" &&
-		name != "opencode" && name != "devin" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, hermes, omnigent, and opencode")
+		name != "opencode" && name != "devin" && name != "deepseek" {
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, deepseek, devin, hermes, omnigent, and opencode")
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)

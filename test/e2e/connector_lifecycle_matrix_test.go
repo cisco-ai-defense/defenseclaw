@@ -91,6 +91,12 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			if !connector.ConnectorSupportedOnHostOS(fx.Name) {
 				t.Skipf("[%s] has no native lifecycle on this host; platform rejection is covered by connector support tests", fx.Name)
 			}
+			if runtime.GOOS == "windows" && fx.Name == "deepseek" {
+				if err := c.Setup(context.Background(), opts); err == nil {
+					t.Fatal("DeepSeek preview must refuse uncertified native Windows enrollment")
+				}
+				return
+			}
 			if runtime.GOOS == "darwin" && fx.Name == "openhands" {
 				t.Skip("[openhands] Darwin Setup requires a private setup-selected executable receipt; protected admission and lifecycle are covered in package connector")
 			}

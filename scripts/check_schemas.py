@@ -76,6 +76,7 @@ EXPECTED_CLAW_MODE_ENUM = {
     "codex",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",

@@ -208,6 +208,7 @@ def test_real_doctor_dispatch_exercises_exact_eleven(monkeypatch, tmp_path: Path
     cfg = _config(tmp_path)
     assert set(TEN_CONNECTORS) <= set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS)
     assert set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS) - set(TEN_CONNECTORS) == {
+        "deepseek",
         "kiro",
         "openhands",
     }

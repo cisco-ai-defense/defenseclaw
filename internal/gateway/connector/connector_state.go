@@ -1395,6 +1395,9 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
 	}
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
+	if conn.Name() == "deepseek" {
+		loc.HookConfigPaths = append(loc.HookConfigPaths, deepseekPatchPath(opts))
+	}
 
 	cp, ok := conn.(ConnectorCapabilityProvider)
 	if !ok {

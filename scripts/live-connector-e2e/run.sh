@@ -46,7 +46,7 @@ done
 [ -n "${CONNECTOR}" ] || dc_die "--connector <name|all> is required"
 
 # Executable shell-hook connectors (Layer B covers the subset with drivers).
-ALL_CONNECTORS=(codex claudecode amp cursor copilot openhands hermes devin antigravity)
+ALL_CONNECTORS=(codex claudecode amp cursor copilot openhands hermes deepseek devin antigravity)
 
 resolve_connectors() {
   if [ "${CONNECTOR}" = "all" ]; then

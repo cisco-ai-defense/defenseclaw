@@ -68,6 +68,7 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 	}
 
 	shapes := []wireShape{
+		{connector: "deepseek", event: "PreToolUse", toolName: "bash", topLevelOutput: "hook_output", expectAction: "block"},
 		{
 			connector:      "claudecode",
 			event:          "PreToolUse",

@@ -730,6 +730,9 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetChildAgent, ns, "subagent", "subagent_id", "subagentId"),
 		)
 		return makeSpec(CorrelationProfileCursorV1, "cursor-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "no documented native OTLP surface"))
+	case "deepseek":
+		bindings := appendBindings(base, reported(CorrelationTargetSession, ns, "session", "session_id"), reported(CorrelationTargetTool, ns, "tool_invocation", "tool_use_id"))
+		return makeSpec("deepseek-correlation-v1", "deepseek-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, nil, complete(CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "No turn, provider or native OTLP identity; tool outcomes omit success status"))
 	case "devin":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "session_id", "sessionId"),

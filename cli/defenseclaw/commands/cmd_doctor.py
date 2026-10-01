@@ -4250,6 +4250,10 @@ def _check_devin_hooks(
 # so the check stays format-agnostic: hermes is YAML, cursor/devin
 # are JSON, opencode is a flat ``.js`` plugin (existence + substring).
 _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "deepseek": (
+        (os.path.join(".dsh", "defenseclaw-hooks.json"), os.path.join(".dsh", "cordis.patch.yml")),
+        ("deepseek-hook.sh", "defenseclaw-deepseek"),
+    ),
     "hermes": (
         (os.path.join(".hermes", "config.yaml"),),
         ("hermes-hook.sh", "hook --connector hermes", "defenseclaw"),
@@ -4283,6 +4287,7 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 _HOOK_HEALTH_LABELS = {
     "hermes": "Hermes hooks (fail-open)",
     "cursor": "Cursor hooks",
+    "deepseek": "DeepSeek Harness",
     "devin": "Devin hooks",
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
@@ -5630,6 +5635,8 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     if not candidates:
         if connector == "hermes":
             candidates = [hermes_config_path()]
+        elif connector == "deepseek":
+            candidates = connector_config_files("deepseek")
         elif connector == "opencode":
             # The official custom config directory is also a plugin search
             # root. Match Setup/discovery instead of silently inspecting the
@@ -5659,6 +5666,16 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             )
             return
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
+        return
+    if connector == "deepseek":
+        if len(present) != 2 or not all(_file_references_marker(path, markers) for path in present):
+            _emit("fail", label, "both the Cordis patch and hook registration must reference DefenseClaw", r=r)
+        else:
+            _emit(
+                "pass", label,
+                "on-disk preview registration present; restart dsh to load it; live runtime unverified; failures open",
+                r=r,
+            )
         return
     for path in present:
         if _file_references_marker(path, markers):
@@ -5853,6 +5870,7 @@ _SETUP_READINESS_PRIMARY_LABELS = {
     "codex": "Codex hooks",
     "claudecode": "Claude Code hooks",
     "cursor": "Cursor hooks",
+    "deepseek": "DeepSeek Harness",
     "devin": "Devin hooks",
     "copilot": "Copilot hooks",
     "antigravity": "Antigravity hooks",
@@ -5912,7 +5930,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     # explain observe-mode compatibility, but that raw value is not lock
     # authority.  Upstream fail-open connectors are the exception: their lock
     # records configured policy while the host remains effectively open.
-    if name not in {"antigravity", "copilot", "hermes"}:
+    if name not in {"antigravity", "copilot", "deepseek", "hermes"}:
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
     if name == "cursor":
         configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
@@ -6405,6 +6423,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "claudecode",
         "hermes",
         "cursor",
+        "deepseek",
         "devin",
         "copilot",
         "openhands",
@@ -9732,6 +9751,7 @@ _CONNECTOR_LABELS = {
     "zeptoclaw": "ZeptoClaw",
     "hermes": "Hermes",
     "cursor": "Cursor",
+    "deepseek": "DeepSeek Harness",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",

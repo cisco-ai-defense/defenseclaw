@@ -39,6 +39,7 @@ CONNECTORS: tuple[str, ...] = (
     "claudecode",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",

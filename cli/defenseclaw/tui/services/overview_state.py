@@ -1460,7 +1460,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 policy events after {formatted} - "
                 "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
             )
-        case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
+        case "hermes" | "cursor" | "deepseek" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -1486,6 +1486,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Hermes"
         case "cursor":
             return "Cursor"
+        case "deepseek":
+            return "DeepSeek Harness"
         case "devin":
             return "Devin"
         case "copilot":

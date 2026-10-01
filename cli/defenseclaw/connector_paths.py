@@ -102,6 +102,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "zeptoclaw",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",
@@ -153,6 +154,7 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
     {
         "hermes",
         "cursor",
+        "deepseek",
         "devin",
         "copilot",
         "openhands",
@@ -1499,6 +1501,8 @@ def connector_home(
     to whatever per-component path it already has — the worst-case is
     a missing label, never a wrong one.
     """
+    if normalize(connector) == "deepseek":
+        return _connector_env_home("DSH_HOME", ".dsh")
     name = normalize(connector)
     home = str(Path.home())
     if name == "claudecode":
@@ -1561,6 +1565,10 @@ def connector_config_files(
     now". Order is most-canonical first; deduplicated. Returns an
     empty list for unknown connectors.
     """
+    if normalize(connector) == "deepseek":
+        return [
+            os.path.join(connector_home("deepseek"), name) for name in ("defenseclaw-hooks.json", "cordis.patch.yml")
+        ]
     name = normalize(connector)
     home = str(Path.home())
     paths: list[str] = []
@@ -1674,6 +1682,8 @@ def rule_paths(
     guidance/checks. Unknown connectors return an empty list instead of
     borrowing another connector's policy files.
     """
+    if normalize(connector) == "deepseek":
+        return []
 
     if normalize(connector) != "amp":
         return []
@@ -1784,6 +1794,8 @@ def connector_policy_settings(
     and user values. Returned values are deep-copied so read-only inventory
     callers cannot mutate parsed documents accidentally.
     """
+    if normalize(connector) == "deepseek":
+        return {}
 
     if normalize(connector) != "amp":
         return {}
@@ -1818,6 +1830,8 @@ def skill_dirs(
     OpenClaw defaults (``~/.openclaw`` and
     ``~/.openclaw/openclaw.json``).
     """
+    if normalize(connector) == "deepseek":
+        return []
     name = normalize(connector)
     if name == "claudecode":
         return _claudecode_skill_dirs(workspace_dir)
@@ -1866,6 +1880,8 @@ def skill_write_dirs(
     user-global. Other connectors retain their historical first-discovery-root
     install behavior.
     """
+    if normalize(connector) == "deepseek":
+        return []
 
     if normalize(connector) == "amp":
         workspace = _workspace_dir(workspace_dir)
@@ -1907,6 +1923,8 @@ def plugin_dirs(
     * ZeptoClaw:   ``~/.zeptoclaw/plugins`` (+ ``cache`` subdir)
     * OpenClaw:    ``<home_dir>/extensions``
     """
+    if normalize(connector) == "deepseek":
+        return []
     name = normalize(connector)
     if name == "claudecode":
         return _claudecode_plugin_dirs(workspace_dir)
@@ -1951,6 +1969,8 @@ def plugin_inventory_dirs(
     otherwise claim custody of Cursor plugins. Write paths must continue to use
     :func:`plugin_dirs`, which returns no Cursor target.
     """
+    if normalize(connector) == "deepseek":
+        return []
 
     if normalize(connector) == "cursor":
         return [os.path.join(str(Path.home()), ".cursor", "plugins", "local")]
@@ -1976,6 +1996,8 @@ def agent_dirs(
     client's private trust decision. Other connector agent layouts remain
     owned by their existing inventory adapters.
     """
+    if normalize(connector) == "deepseek":
+        return []
     name = normalize(connector)
     if name == "codex":
         return _dedup(
@@ -2025,6 +2047,8 @@ def rule_dirs(
     combine and the most restrictive decision wins. The Unix system layer is
     omitted on native Windows.
     """
+    if normalize(connector) == "deepseek":
+        return []
     name = normalize(connector)
     if name == "copilot":
         return copilot_instruction_paths(workspace_dir)
@@ -2090,6 +2114,8 @@ def mcp_servers(
     *openclaw_bin_resolver* lets callers inject a test double; when
     omitted, the lookup goes through ``shutil.which``.
     """
+    if normalize(connector) == "deepseek":
+        return []
     name = normalize(connector)
     infer = infer_workspace_from_cwd
     if name == "claudecode":
@@ -2194,6 +2220,8 @@ def mcp_source_locations(
     where the tool looked, and "checked here, nothing there" is the
     finding.
     """
+    if normalize(connector) == "deepseek":
+        return []
 
     name = normalize(connector)
     infer = infer_workspace_from_cwd
@@ -4899,6 +4927,10 @@ def set_mcp_server(
                      (for example OpenHands writes ``~/.openhands/mcp.json``).
     """
     name_n = normalize(connector)
+    if name_n == "deepseek":
+        raise MCPWriteUnsupportedError(
+            "deepseek: profile-dependent Cordis MCP configuration is not writable by this connector"
+        )
     if name_n == "openclaw":
         if openclaw_config_setter is None:
             raise RuntimeError(
@@ -5002,6 +5034,10 @@ def unset_mcp_server(
     :class:`MCPWriteUnsupportedError`.
     """
     name_n = normalize(connector)
+    if name_n == "deepseek":
+        raise MCPWriteUnsupportedError(
+            "deepseek: profile-dependent Cordis MCP configuration is not writable by this connector"
+        )
     if name_n == "openclaw":
         if openclaw_config_unsetter is None:
             raise RuntimeError(

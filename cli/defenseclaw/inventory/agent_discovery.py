@@ -775,6 +775,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "zeptoclaw",
     "hermes",
     "cursor",
+    "deepseek",
     "devin",
     "copilot",
     "openhands",
@@ -842,6 +843,8 @@ _SPECS: dict[str, _AgentSpec] = {
         ("agent", "cursor-agent"),
         ("Cursor.app/Contents/Resources/app/bin/cursor",),
     ),
+    # DeepSeek honors DSH_HOME dynamically in _scan_agent.
+    "deepseek": _AgentSpec((), "dsh", ("--version",)),
     # Devin configuration candidates are resolved dynamically so native
     # Windows uses %APPDATA% while macOS/Linux use ~/.config/devin.
     "devin": _AgentSpec((), "devin", ("--version",)),
@@ -1087,6 +1090,8 @@ def _scan_agent(
             if include_workspace_config and not explicit_config_home
             else (settings_paths[0],)
         )
+    elif name == "deepseek":
+        config_candidates = tuple(connector_config_files("deepseek"))
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
     elif name == "antigravity":

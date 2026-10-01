@@ -1498,6 +1498,11 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Cursor hooks found")
         return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
+    if connector == "deepseek":
+        paths = connector_config_files("deepseek")
+        if all(os.path.isfile(path) for path in paths):
+            return StepResult("Connector", "pass", "DeepSeek bridge files found; restart dsh to load them")
+        return StepResult("Connector", "warn", "DeepSeek bridge not configured", "defenseclaw setup deepseek")
     if connector == "devin":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()

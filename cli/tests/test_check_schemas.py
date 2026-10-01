@@ -63,6 +63,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "codex",
                 "hermes",
                 "cursor",
+                "deepseek",
                 "devin",
                 "copilot",
                 "openhands",

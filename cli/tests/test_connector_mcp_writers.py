@@ -2414,7 +2414,7 @@ class TestCoverage:
                 # Requires injected setter — assert it raises without one.
                 with pytest.raises(RuntimeError):
                     set_mcp_server(name, "x", {"command": "y"})
-            elif name in {"zeptoclaw", "amp", "omnigent", "kiro"}:
+            elif name in {"zeptoclaw", "amp", "omnigent", "kiro", "deepseek"}:
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
             elif name == "antigravity":

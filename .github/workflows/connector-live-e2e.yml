@@ -73,6 +73,7 @@ on:
           - copilot
           - openhands
           - hermes
+          - deepseek
           - devin
           - antigravity
       os:
@@ -187,7 +188,7 @@ jobs:
           # The Unix harness covers connectors with executable shell-hook
           # contracts. Plugin/policy transports have their own focused gates.
           # Native Windows contract validation is a separate, explicit x64 matrix.
-          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","amp","cursor","copilot","openhands","hermes","devin","antigravity"]}'
+          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","amp","cursor","copilot","openhands","hermes","deepseek","devin","antigravity"]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
           # chosen because windows-native.yml separately checks the native
           # Windows hook contract on every PR. This adds the missing native macOS
@@ -526,7 +527,7 @@ jobs:
               write_key OPENAI_API_KEY "${OPENAI_API_KEY:-}"
               write_key LLM_API_KEY "${LLM_API_KEY:-}"
               ;;
-            copilot|hermes|devin|antigravity)
+            copilot|hermes|deepseek|devin|antigravity)
               :
               ;;
             *)

@@ -39,6 +39,9 @@ func HookConfigPathsForConnector(conn Connector, opts SetupOpts) []string {
 	if !OwnsManagedHookRuntime(conn) {
 		return nil
 	}
+	if conn.Name() == "deepseek" {
+		return []string{deepseekHooksPath(opts), deepseekPatchPath(opts)}
+	}
 	return uniqueNonEmptyStrings(ResolvedConnectorLocations(opts, conn).HookConfigPaths)
 }
 
@@ -128,6 +131,8 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 	if len(scriptNames) != 0 {
 		hookScript := filepath.Join(opts.DataDir, "hooks", scriptNames[0])
 		switch conn.Name() {
+		case "deepseek":
+			return []string{shellSingleQuote(hookScript)}
 		case "copilot":
 			events := copilotCurrentHookEvents
 			if provider, profileOK := conn.(HookProfileProvider); profileOK {

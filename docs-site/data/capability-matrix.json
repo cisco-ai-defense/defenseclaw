@@ -306,6 +306,34 @@
       "sandbox": { "status": "pending" },
       "hilt": "ZeptoClaw has no native ask surface; confirm uses its explicit fallback with raw_action preserved for TUI/audit review. There is no resumable approval.",
       "notes": "api_base redirect into the DefenseClaw proxy plus response-scan."
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek Harness",
+      "windowsSupport": "not_certified",
+      "windowsNote": "Native Windows transport is not certified.",
+      "summary": "Preview command hooks through the shipped DeepSeek Harness Claude-compatible bridge.",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": [
+          "PreToolUse"
+        ],
+        "blockEvents": [
+          "UserPromptSubmit",
+          "PreToolUse"
+        ],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "PreToolUse can request the native one-shot approval.",
+      "notes": "Missing config, bridge errors and timeouts fail open. PostToolUse is observation only; managed enterprise, ACP, native OTLP and asset management are not supported. Restart dsh after setup.",
+      "sandbox": {
+        "status": "pending"
+      }
     }
   ]
 }

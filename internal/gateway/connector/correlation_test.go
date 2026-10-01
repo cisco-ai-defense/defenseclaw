@@ -17,8 +17,8 @@ import (
 
 func TestBuiltinCorrelationProfilesAreVersionedAndValid(t *testing.T) {
 	reg := NewDefaultRegistry()
-	if got := len(reg.Names()); got != 14 {
-		t.Fatalf("builtin count=%d want 14", got)
+	if got := len(reg.Names()); got != 15 {
+		t.Fatalf("builtin count=%d want 15", got)
 	}
 	for _, name := range reg.Names() {
 		name := name
@@ -140,7 +140,7 @@ func TestCorrelationAuthorityRequiresExactFieldEvidence(t *testing.T) {
 
 func TestHookProfilesCarryResolvedCorrelationVersion(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "deepseek", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, _ := reg.Get(name)
 		profile := conn.(HookProfileProvider).HookProfile(SetupOpts{})
 		if profile.Correlation.ProfileVersion == "" || profile.Correlation.ProfileVersion == CorrelationProfileExplicitV1 {
@@ -549,7 +549,7 @@ func TestCorrelationRegistryRetainsAllTypedNativeIdentifiers(t *testing.T) {
 
 func TestHookLifecycleBindingsUseOnlyReviewedContractEvents(t *testing.T) {
 	for _, name := range []string{
-		"codex", "claudecode", "hermes", "cursor", "devin",
+		"codex", "claudecode", "hermes", "cursor", "deepseek", "devin",
 		"copilot", "openhands", "antigravity", "opencode", "omnigent", "amp",
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -772,7 +772,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "kiro"} {
+		for _, name := range []string{"hermes", "cursor", "deepseek", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "kiro"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -1613,7 +1613,7 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot", "openhands",
+	case "hermes", "cursor", "deepseek", "devin", "copilot", "openhands",
 		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
 	case "omnigent":

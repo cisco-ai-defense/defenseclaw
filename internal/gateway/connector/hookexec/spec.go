@@ -169,6 +169,9 @@ var specs = map[string]spec{
 		subject: "hermes tool", endpoint: "/api/v1/hermes/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
+	"deepseek": {
+		connector: "deepseek", hookName: "deepseek-hook", errLabel: "deepseek", subject: "DeepSeek Harness tool", endpoint: "/api/v1/deepseek/hook", outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
+	},
 	"devin": {
 		connector: "devin", hookName: "devin-hook", errLabel: "devin",
 		subject: "devin hook", endpoint: "/api/v1/devin/hook",

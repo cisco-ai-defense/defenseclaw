@@ -2571,6 +2571,8 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		}
 	case "cursor":
 		return connector.CursorHookOutput(req.HookEventName, action, reason, additional)
+	case "deepseek":
+		return connector.DeepSeekHookOutput(req.HookEventName, action, reason)
 	case "devin":
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}

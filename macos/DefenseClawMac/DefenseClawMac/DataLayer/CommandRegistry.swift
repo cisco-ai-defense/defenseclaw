@@ -196,7 +196,7 @@ enum CommandInvocationError: LocalizedError, Equatable {
 }
 
 enum CommandRegistry {
-    static let sourceCount = 225
+    static let sourceCount = 226
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
@@ -212,6 +212,7 @@ enum CommandRegistry {
         CommandDefinition(id: 11, title: "setup claude-code", binary: "defenseclaw", arguments: ["setup", "claude-code", "--yes"], summary: "Configure Claude Code observability hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 12, title: "setup hermes", binary: "defenseclaw", arguments: ["setup", "hermes", "--yes"], summary: "Configure supported Hermes hooks (JSON block; failures open)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 13, title: "setup cursor", binary: "defenseclaw", arguments: ["setup", "cursor", "--yes"], summary: "Configure supported Cursor action or observe hooks", category: "setup", requiresInput: false, usage: ""),
+        CommandDefinition(id: 235, title: "setup deepseek", binary: "defenseclaw", arguments: ["setup", "deepseek", "--yes"], summary: "Configure DeepSeek Harness preview hooks (failures open)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 14, title: "setup devin", binary: "defenseclaw", arguments: ["setup", "devin", "--yes"], summary: "Configure Devin project hooks and local catalogs", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 15, title: "setup copilot", binary: "defenseclaw", arguments: ["setup", "copilot", "--yes"], summary: "Configure supported Copilot CLI hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 16, title: "setup openhands", binary: "defenseclaw", arguments: ["setup", "openhands", "--yes"], summary: "Configure OpenHands observability hooks", category: "setup", requiresInput: false, usage: ""),

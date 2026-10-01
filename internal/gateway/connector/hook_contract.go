@@ -689,6 +689,13 @@ var builtinHookContracts = map[string][]HookContract{
 			"Every command-hook invocation returns a JSON object. The event roster includes subagentStart; event-native response shapes remain registered for direct adapter compatibility while unsupported output events return {}.",
 		},
 	}},
+	"deepseek": {{
+		Connector: "deepseek", ContractID: "deepseek-hooks-v1", ExactAgentVersions: []string{"0.2.0-rc.2"}, DefaultForUnversioned: true, HookScriptVersion: "v1",
+		HookConfigPathTemplates: []string{"~/.dsh/defenseclaw-hooks.json", "~/.dsh/cordis.patch.yml"}, ResponseFieldName: "hook_output", Events: deepseekEvents,
+		AIDSurfaces:  []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{CanBlock: true, CanAskNative: true, AskEvents: []string{"PreToolUse"}, BlockEvents: deepseekBlockEvents, SupportsFailClosed: false, Scope: "user"}, SupportsTraceparent: true, ToolCallLifecycle: deepseekToolCallLifecycle(),
+		Notes: []string{deepseekSource, "Preview: shipped Claude-compatible bridge; missing config, crashes and timeouts fail open. Restart dsh after setup. PostToolUse is observation only; no enterprise or native OTLP coverage."},
+	}},
 	"devin": {{
 		Connector:               "devin",
 		ContractID:              "devin-hooks-v1",

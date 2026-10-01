@@ -115,6 +115,7 @@ import click
             "codex",
             "hermes",
             "cursor",
+            "deepseek",
             "devin",
             "copilot",
             "openhands",
