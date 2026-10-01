@@ -1925,7 +1925,7 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     if failures:
         raise OSError("; ".join(failures))
 
-    _remove_install_bookkeeping(plan.install_root)
+    _remove_install_bookkeeping(plan.install_root, plan.data_dir)
 
     # A pip-installed CLI is outside this plan; we don't shell out to pip
     # because we can't be sure which environment was used. Mention it only
@@ -1950,8 +1950,21 @@ def _legacy_custody_parents() -> list[str]:
     return sorted({tempfile.gettempdir(), "/tmp"})
 
 
-def _remove_install_bookkeeping(install_root: str) -> None:
+def _legacy_home_custody_dirs(data_dir: str) -> list[str]:
+    """Custody folders pre-1.0 installers left beside DEFENSECLAW_HOME.
+
+    install.sh removes the same folders after a 1.0 install, but a source
+    install never runs it, so they pile up with each 0.8.x install.
+    """
+    if sys.platform == "win32" or not data_dir:
+        return []
+    parents = {os.path.expanduser("~"), os.path.dirname(os.path.abspath(os.path.expanduser(data_dir)))}
+    return [os.path.join(parent, ".defenseclaw-install-custody") for parent in sorted(parents)]
+
+
+def _remove_install_bookkeeping(install_root: str, data_dir: str = "") -> None:
     paths = [os.path.join(install_root, name) for name in _INSTALL_BOOKKEEPING]
+    paths.extend(_legacy_home_custody_dirs(data_dir))
     for parent in _legacy_custody_parents():
         try:
             names = os.listdir(parent)

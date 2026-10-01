@@ -149,9 +149,10 @@ type enterpriseHookWorkerRequest struct {
 	// AIDiscovery carries the settings and signature catalog of the
 	// ai_discovery operation; the worker cannot read the managed config.
 	AIDiscovery *enterpriseHookWorkerAIDiscovery `json:"ai_discovery,omitempty"`
-	// CopilotVSCode asks the foreign_cleanup worker to place or remove
-	// DefenseClaw's VS Code Local hook file and Copilot plugin in the
-	// user's own home.
+	// CopilotVSCode asks the worker to place or remove DefenseClaw's VS
+	// Code Local hook file and Copilot plugin in the user's own home (the
+	// foreign_cleanup worker does either; remove-all's apply worker only
+	// removes).
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
 }
 
@@ -294,7 +295,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	enterprisehooks.SetStandaloneUnix(request.Standalone)
 	switch request.Operation {
 	case enterpriseHookWorkerOpApply:
-		return respond(runEnterpriseHookWorkerApply(ctx, request), 0)
+		response := runEnterpriseHookWorkerApply(ctx, request)
+		if request.CopilotVSCode != nil {
+			// remove-all: the VS Code Local file and plugin go with the
+			// registrations.
+			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
+		return respond(response, 0)
 	case enterpriseHookWorkerOpDiscover:
 		versions := map[string]string{}
 		reasons := map[string]string{}

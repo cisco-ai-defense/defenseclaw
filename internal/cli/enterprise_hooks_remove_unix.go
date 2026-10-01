@@ -40,7 +40,9 @@ import (
 // cleanups (targets the manifest stopped enrolling) are finished. With
 // --purge (uninstall --purge) each enrolled user's worker then removes that
 // user's DefenseClaw per-user state, once every removal for the user
-// succeeded.
+// succeeded. Every account also loses DefenseClaw's VS Code Local hook
+// file and Copilot plugin: both run the administrator's hook binary, and
+// the Copilot CLI denies every tool call once that binary is gone.
 
 var (
 	enterpriseHooksRemoveAllManifest string
@@ -119,6 +121,11 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		report.Failed = append(report.Failed, "eligible accounts: "+boundedString(err.Error(), 256))
 	}
 	addEnterpriseHookLeftoverRemovals(jobs, manifest, accounts)
+	if vscode, err := enterpriseHookCopilotVSCodeRemoval(); err != nil {
+		report.Failed = append(report.Failed, "copilot vscode hooks: "+boundedString(err.Error(), 256))
+	} else {
+		addEnterpriseHookCopilotVSCodeRemovals(jobs, accounts, vscode)
+	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
 		addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)
@@ -160,6 +167,14 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 			default:
 				report.Removed++
 			}
+		}
+		if vscode := run.Response.CopilotVSCode; vscode != nil {
+			report.Removed += len(vscode.Removed)
+			if vscode.Error != "" {
+				report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(vscode.Error))
+			}
+		} else if run.Job.Request.CopilotVSCode != nil && run.Err != nil && len(run.Job.Request.Targets) == 0 {
+			report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(run.Err.Error()))
 		}
 	}
 	sort.Strings(report.Pending)
@@ -273,6 +288,50 @@ func addEnterpriseHookLeftoverRemovals(jobs map[int]*enterpriseHookWorkerJob, ma
 			})
 			index++
 		}
+	}
+}
+
+// enterpriseHookCopilotVSCodeRemoval is the worker request that removes
+// DefenseClaw's VS Code Local hook file and Copilot plugin, recognized by
+// the administrator's hook binary.
+func enterpriseHookCopilotVSCodeRemoval() (*enterpriseHookWorkerCopilotVSCode, error) {
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return nil, err
+	}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(opts.HookBinary) == "" {
+		return nil, errors.New("the hook binary is not configured")
+	}
+	return &enterpriseHookWorkerCopilotVSCode{HookBinary: opts.HookBinary}, nil
+}
+
+// addEnterpriseHookCopilotVSCodeRemovals asks the worker of every account
+// in jobs, and of every eligible account with an available home, to remove
+// DefenseClaw's VS Code Local hook file and Copilot plugin. They are
+// rendered for eligible accounts whether or not a manifest row names them,
+// and only DefenseClaw's exact renders are removed.
+func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJob, accounts []enterprisehooks.UnixEligibleAccount, vscode *enterpriseHookWorkerCopilotVSCode) {
+	if vscode == nil {
+		return
+	}
+	for _, account := range accounts {
+		home := filepath.Clean(account.Home)
+		if account.UID <= 0 || jobs[account.UID] != nil || enterpriseHookCheckHome(home, account.UID).State != enterprisehooks.HomeAvailable {
+			continue
+		}
+		jobs[account.UID] = &enterpriseHookWorkerJob{
+			Account: enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home},
+			Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
+		}
+	}
+	for _, job := range jobs {
+		removal := *vscode
+		removal.HookFile, removal.Plugin = false, false
+		job.Request.CopilotVSCode = &removal
 	}
 }
 

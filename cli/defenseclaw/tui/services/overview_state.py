@@ -561,9 +561,12 @@ class OverviewPanelModel:
         topology.
         """
 
-        if self.gateway_probe is not None:
-            return self.gateway_probe
-        return gateway_availability_from_health(self.health)
+        availability = self.gateway_probe or gateway_availability_from_health(self.health)
+        if availability.state == "running" and self._fleet_uplink_unused():
+            # The probe's detail is the unused fleet uplink's summary; leave it
+            # out so callers show the sidecar's own detail (uptime) instead.
+            return SubsystemHealth(state="running")
+        return availability
 
     def set_doctor_cache(self, cache: DoctorCache | None) -> None:
         self.doctor = cache
