@@ -17,15 +17,20 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
 
 // TestHookCorrelationSurvivesConcurrentSessionHooks pins that concurrent
@@ -110,5 +115,58 @@ func TestHookVerdictKeepsItsAuditRowWhenCorrelationFails(t *testing.T) {
 	}
 	if n := rows(); n != 1 {
 		t.Fatalf("connector-hook rows after the replay = %d, want 1", n)
+	}
+}
+
+// A hook client that gives up (its budget ran out while the gateway waited on
+// the local store) has its verdict enforced all the same, so the verdict keeps
+// its correlation, its hook_decision and its audit row: they used to be
+// written with the request context, which the disconnect had cancelled.
+func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	bindHookLifecycleV8(t, api, fixture.runtime)
+
+	body, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "session_id": "s-disconnect", "cwd": t.TempDir(),
+		"tool_name": "Bash", "tool_use_id": "toolu-disconnect", "tool_input": map[string]any{"command": "ls"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, hangUp := context.WithCancel(t.Context())
+	hangUp()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)).WithContext(gone)
+	api.handleAgentHook("claudecode").ServeHTTP(httptest.NewRecorder(), request)
+
+	decisions := 0
+	for _, row := range readClaudeCodeReplayRows(t, fixture.path) {
+		if row.event == "hook_decision" {
+			decisions++
+		}
+	}
+	events, err := fixture.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audited := 0
+	for _, ev := range events {
+		if ev.Action == string(audit.ActionConnectorHook) {
+			audited++
+		}
+	}
+	if decisions != 1 || audited != 1 {
+		t.Fatalf("hook_decision rows = %d, connector-hook rows = %d, want 1 and 1", decisions, audited)
 	}
 }
