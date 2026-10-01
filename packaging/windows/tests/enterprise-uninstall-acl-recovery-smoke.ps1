@@ -313,8 +313,8 @@ try {
         }
         $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $metadataPath
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            'BUILTIN\Users',
-            [Security.AccessControl.FileSystemRights]::Write,
+            [Security.Principal.WindowsIdentity]::GetCurrent().User,
+            [Security.AccessControl.FileSystemRights]::FullControl,
             [Security.AccessControl.AccessControlType]::Allow
         ))
         Microsoft.PowerShell.Security\Set-Acl `
@@ -331,7 +331,7 @@ try {
                 'untrusted principal'
         }
         if (-not $foreignWriterRejected) {
-            throw 'uninstall ACL recovery accepted a foreign writer'
+            throw 'uninstall ACL recovery accepted an Explorer-style user Full Control grant'
         }
         [pscustomobject]@{
             schema_version = 1
@@ -345,6 +345,7 @@ try {
             purge_skipped_denied_state_child = $true
             non_purge_rejected_denied_state_child = $true
             foreign_writer_rejected = $true
+            explorer_full_control_rejected = $true
         }
     } $fixtureRoot
     $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress

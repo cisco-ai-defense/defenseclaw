@@ -1469,6 +1469,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "purge_skipped_denied_state_child",
                 "non_purge_rejected_denied_state_child",
                 "foreign_writer_rejected",
+                "explorer_full_control_rejected",
             ),
         ),
         (
