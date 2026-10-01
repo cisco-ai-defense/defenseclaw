@@ -668,9 +668,10 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 // ResponsesStreamRaw sends a raw Responses API request body through Bifrost
 // and streams SSE chunks back to the caller. Bifrost internally bridges to
 // chat/completions for providers that don't support the Responses API natively.
-func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byte, chunkCb func([]byte)) error {
+// ResponsesStreamRaw returns the full assistant content for post-call inspection.
+func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byte, chunkCb func([]byte)) (string, error) {
 	if _, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders); err != nil {
-		return err
+		return "", err
 	}
 
 	// Parse the Responses API request body into Bifrost's types
@@ -678,7 +679,7 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 		Input json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(rawBody, &parsed); err != nil {
-		return fmt.Errorf("parse responses request: %w", err)
+		return "", fmt.Errorf("parse responses request: %w", err)
 	}
 
 	var input []schemas.ResponsesMessage
@@ -696,7 +697,7 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 				},
 			}}
 		} else {
-			return fmt.Errorf("parse responses input: %w", err)
+			return "", fmt.Errorf("parse responses input: %w", err)
 		}
 	}
 
@@ -814,7 +815,7 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 	})
 
 	if streamErr != nil {
-		return streamErr
+		return fullContent.String(), streamErr
 	}
 
 	// Emit completed event with full response
@@ -852,7 +853,7 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 	}
 	data, _ := json.Marshal(completed)
 	chunkCb(data)
-	return nil
+	return fullContent.String(), nil
 }
 
 // ---------- Type conversion helpers ----------

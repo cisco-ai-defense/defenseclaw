@@ -2399,6 +2399,27 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		body, _ = json.Marshal(bodyMap)
 	}
 
+	// Guardrail pre-call inspection on the user's input
+	userText := lastUserText(messages)
+	if userText != "" && p.inspector != nil {
+		p.rtMu.RLock()
+		mode := p.mode
+		customBlockMsg := p.blockMessage
+		p.rtMu.RUnlock()
+		label := decision.Provider + "/responses"
+		t0 := time.Now()
+		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, messages, label, mode)
+		elapsed := time.Since(t0)
+		p.logPreCall(label, messages, verdict, elapsed)
+		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
+			verdict.Action == "block" && mode == "action")
+		if verdict.Action == "block" && mode == "action" {
+			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			writeOpenAIError(w, http.StatusForbidden, msg)
+			return
+		}
+	}
+
 	respID := fmt.Sprintf("resp_%x", time.Now().UnixNano())
 	msgID := fmt.Sprintf("msg_%x", time.Now().UnixNano())
 
@@ -2440,11 +2461,30 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	writeSSE(partEvt)
 
 	// Stream through Bifrost
-	err = bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
+	responseContent, streamErr := bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
 		writeSSE(chunk)
 	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", err)
+	if streamErr != nil {
+		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", streamErr)
+	}
+
+	// Post-call inspection on the response content
+	if responseContent != "" && p.inspector != nil {
+		p.rtMu.RLock()
+		mode := p.mode
+		p.rtMu.RUnlock()
+		label := decision.Provider + "/responses"
+		respMessages := []ChatMessage{{Role: "assistant", Content: responseContent}}
+		postCtx, postCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		verdict := p.inspector.Inspect(postCtx, "completion", responseContent, respMessages, label, mode)
+		postCancel()
+		if verdict != nil {
+			p.recordTelemetry(r.Context(), "completion", label, verdict, 0, mode,
+				verdict.Action == "block" && mode == "action")
+			if verdict.Action == "block" && mode == "action" {
+				fmt.Fprintf(os.Stderr, "[responses-api] post-call BLOCKED: %s\n", verdict.Reason)
+			}
+		}
 	}
 }
 
