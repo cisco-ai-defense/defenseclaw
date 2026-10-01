@@ -1278,6 +1278,13 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 			return err
 		}
 	}
+	if c.name == "copilot" {
+		// Pinning a workspace (for example `setup devin --workspace`) moves
+		// Copilot's hooks between ~/.copilot/hooks and <workspace>/.github/hooks.
+		if err := c.migrateConfigTarget(opts, c.configPath(opts), "Copilot"); err != nil {
+			return err
+		}
+	}
 	if err := c.migrateManagedBackup(opts); err != nil {
 		return fmt.Errorf("%s managed backup migration: %w", c.name, err)
 	}
