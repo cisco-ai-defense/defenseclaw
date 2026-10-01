@@ -23,6 +23,9 @@ type auditDBPathHooks struct {
 	chmodPath          func(string, os.FileMode) error
 	securePlatformFile func(*os.File, bool) error
 	beforeSQLiteOpen   func(string) error
+	// reopenSidecarForHardening reopens a pinned SQLite sidecar with the
+	// ACL-changing capability.
+	reopenSidecarForHardening func(string, *os.File) (*os.File, error)
 }
 
 func (hooks auditDBPathHooks) withDefaults() auditDBPathHooks {
@@ -34,6 +37,11 @@ func (hooks auditDBPathHooks) withDefaults() auditDBPathHooks {
 	}
 	if hooks.securePlatformFile == nil {
 		hooks.securePlatformFile = secureAuditDBPlatformFile
+	}
+	if hooks.reopenSidecarForHardening == nil {
+		hooks.reopenSidecarForHardening = func(path string, pinned *os.File) (*os.File, error) {
+			return reopenPinnedAuditDBLeaf(path, pinned, true)
+		}
 	}
 	return hooks
 }
@@ -424,8 +432,12 @@ func pinAndSecureAuditDBSQLiteSidecars(
 			hardening := pinned
 			closeHardening := false
 			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				hardening, err = reopenPinnedAuditDBLeaf(path, pinned, true)
+				hardening, err = hooks.reopenSidecarForHardening(path, pinned)
 				if err != nil {
+					if errors.Is(err, os.ErrPermission) && discardIdleAuditDBSidecar(path, suffix, pinned) {
+						delete(retained, suffix)
+						continue
+					}
 					return retained, retired, fmt.Errorf("audit: reopen SQLite sidecar %s for ACL hardening: %w", suffix, err)
 				}
 				closeHardening = true
@@ -475,6 +487,31 @@ func pinAndSecureAuditDBSQLiteSidecars(
 		}
 	}
 	return retained, retired, nil
+}
+
+// discardIdleAuditDBSidecar removes a sidecar this process may not harden
+// because another account created it: a read-only reader that opens the
+// database while the gateway is stopped leaves an empty -wal and a -shm
+// that it cannot delete on close. Such a -wal holds no pages and a -shm is
+// rebuilt by SQLite, so removing them loses nothing. A -wal with pages or a
+// -journal is kept. This path runs only on Windows, where a sidecar another
+// process still has open cannot be deleted, so a live connection keeps it.
+func discardIdleAuditDBSidecar(path, suffix string, pinned *os.File) bool {
+	switch suffix {
+	case "-shm":
+	case "-wal":
+		info, err := pinned.Stat()
+		if err != nil || info.Size() != 0 {
+			return false
+		}
+	default:
+		return false
+	}
+	if err := os.Remove(path); err != nil {
+		return false
+	}
+	_ = pinned.Close()
+	return true
 }
 
 func openPinnedAuditDBLeaf(path string) (*os.File, bool, error) {
