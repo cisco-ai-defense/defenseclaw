@@ -627,26 +627,8 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 		known = append(known, path)
 	}
 
-	// An unknown nested file must reject the entire tree before even one exact
-	// root/lock/token/script artifact is deleted.
-	unexpected := filepath.Join(plan.Roots[0].DataDir, "hooks", "user-evidence.txt")
-	if err := os.WriteFile(unexpected, []byte("preserve"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
-		t.Fatal("cleanup accepted an unknown post-reconcile hook file")
-	}
-	for _, path := range known {
-		if _, err := os.Lstat(path); err != nil {
-			t.Fatalf("full-tree preflight deleted %s before rejecting unknown content: %v", path, err)
-		}
-	}
-	if data, err := os.ReadFile(unexpected); err != nil || string(data) != "preserve" {
-		t.Fatalf("unknown nested evidence changed: data=%q err=%v", data, err)
-	}
-	if err := os.Remove(unexpected); err != nil {
-		t.Fatal(err)
-	}
+	// Unknown content is kept aside instead; see
+	// TestWindowsManagedRuntimeCleanupKeepsUnexpectedContentAside.
 	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
 		t.Fatalf("cleanup exact multi-connector fresh footprint: %v", err)
 	}
