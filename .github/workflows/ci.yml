@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, wip/kiro-win]
   # Run CI on every pull request regardless of base branch so PRs that
   # target an integration branch (not just main) are gated too — otherwise
   # their checks (incl. the Windows hook path) never execute until the
