@@ -3776,10 +3776,10 @@ func TestCodex_Setup(t *testing.T) {
 	}
 }
 
+// codexHookConfigPathForTest returns where per-user Setup registers the
+// matrix: config.toml on every platform (current Codex ignores
+// CODEX_HOME/managed_config.toml on Windows).
 func codexHookConfigPathForTest(configPath string) string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
-	}
 	return configPath
 }
 
@@ -3798,11 +3798,7 @@ func readCodexHookDocumentForTest(t *testing.T, configPath string) (string, []by
 }
 
 func verifyInstalledCodexHooksForTest(hooks map[string]interface{}, configPath, hooksDir string) error {
-	opts := SetupOpts{}
-	if runtime.GOOS == "windows" {
-		return verifyManagedCodexHookMatrix(hooks, configPath, hooksDir, opts)
-	}
-	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir, opts)
+	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir, SetupOpts{})
 }
 
 // TestCodex_Setup_DoesNotRewriteProvidersToProxy verifies hook-only Setup
@@ -3897,11 +3893,9 @@ env_key = "OPENAI_API_KEY"
 	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("config.toml mode = %#o, want 0o600", mode)
 	}
-	if runtime.GOOS == "windows" {
-		managedInfo, err := os.Stat(codexHookConfigPathForTest(configPath))
-		if err != nil || managedInfo.IsDir() {
-			t.Fatalf("managed_config.toml private file missing: info=%v err=%v", managedInfo, err)
-		}
+	managedPath := filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
+	if _, err := os.Lstat(managedPath); !os.IsNotExist(err) {
+		t.Fatalf("per-user Setup created managed_config.toml, which current Codex ignores on Windows: %v", err)
 	}
 }
 
@@ -4762,25 +4756,11 @@ func TestCodexSetupPreservesUnrelatedStateAndUsesMergedPositions(t *testing.T) {
 		t.Fatalf("unrelated user state changed: got %#v want %#v", got, userState)
 	}
 	defenseClawKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
-	if runtime.GOOS == "windows" {
-		if _, ok := state[defenseClawKey]; ok {
-			t.Fatalf("Windows setup synthesized unsupported user trust state %q: %v", defenseClawKey, state)
-		}
-		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
-		managedHooks := managedDocument["hooks"].(map[string]interface{})
-		if _, exists := managedHooks["state"]; exists {
-			t.Fatalf("managed source contains private hooks.state: %#v", managedHooks["state"])
-		}
-		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("configured managed hooks are incomplete: %v", err)
-		}
-	} else {
-		if _, ok := state[defenseClawKey]; !ok {
-			t.Fatalf("merged position state key %q missing: %v", defenseClawKey, state)
-		}
-		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("configured hooks are not fully trusted: %v", err)
-		}
+	if _, ok := state[defenseClawKey]; !ok {
+		t.Fatalf("merged position state key %q missing: %v", defenseClawKey, state)
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
+		t.Fatalf("configured hooks are not fully trusted: %v", err)
 	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
@@ -4848,10 +4828,8 @@ func TestCodexRepairPreservesOwnedPositionBeforeLaterTrustedUserHook(t *testing.
 	}
 	userKey := codexHookStateKey(codexHookStateKeySource(registrationPath), "pre_tool_use", 1, 0)
 	userState := map[string]interface{}{"trusted_hash": userHash, "enabled": true, "note": "preserve"}
-	if runtime.GOOS != "windows" {
-		state := hooks["state"].(map[string]interface{})
-		state[userKey] = userState
-	}
+	state := hooks["state"].(map[string]interface{})
+	state[userKey] = userState
 	edited, err := toml.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("marshal user edit: %v", err)
@@ -4884,13 +4862,9 @@ func TestCodexRepairPreservesOwnedPositionBeforeLaterTrustedUserHook(t *testing.
 	if got := secondHandlers[0].(map[string]interface{})["command"]; got != "user-policy.exe" {
 		t.Fatalf("trusted user hook moved or changed: got %#v", got)
 	}
-	if runtime.GOOS != "windows" {
-		repairedState := repairedHooks["state"].(map[string]interface{})
-		if got := repairedState[userKey]; !codexValueMatches(got, userState) {
-			t.Fatalf("trusted user state changed: got %#v want %#v", got, userState)
-		}
-	} else if _, exists := repairedHooks["state"]; exists {
-		t.Fatalf("managed repair synthesized hooks.state: %#v", repairedHooks["state"])
+	repairedState := repairedHooks["state"].(map[string]interface{})
+	if got := repairedState[userKey]; !codexValueMatches(got, userState) {
+		t.Fatalf("trusted user state changed: got %#v want %#v", got, userState)
 	}
 	if err := verifyInstalledCodexHooksForTest(repairedHooks, registrationPath, filepath.Join(dir, "hooks")); err != nil {
 		t.Fatalf("repaired DefenseClaw matrix is not source-trusted: %v", err)
@@ -5051,29 +5025,15 @@ func TestCodexSetupRefusesUnownedStateCollision(t *testing.T) {
 	t.Cleanup(func() { CodexConfigPathOverride = "" })
 
 	err = NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"})
-	if runtime.GOOS == "windows" {
-		if err != nil {
-			t.Fatalf("managed-source Setup was blocked by unrelated user trust state: %v", err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), "belongs to another hook") {
+	if err == nil || !strings.Contains(err.Error(), "belongs to another hook") {
 		t.Fatalf("Setup error = %v, want state-collision refusal", err)
 	}
 	after, readErr := os.ReadFile(configPath)
 	if readErr != nil {
 		t.Fatalf("read config after refusal: %v", readErr)
 	}
-	if runtime.GOOS != "windows" && string(after) != string(raw) {
+	if string(after) != string(raw) {
 		t.Fatalf("Setup rewrote config despite state collision\nbefore:\n%s\nafter:\n%s", raw, after)
-	}
-	if runtime.GOOS == "windows" {
-		parsed := map[string]interface{}{}
-		if err := toml.Unmarshal(after, &parsed); err != nil {
-			t.Fatal(err)
-		}
-		preserved := parsed["hooks"].(map[string]interface{})["state"].(map[string]interface{})
-		if _, exists := preserved[collisionKey]; !exists {
-			t.Fatalf("unrelated user state collision was not preserved: %#v", preserved)
-		}
 	}
 }
 
@@ -5114,15 +5074,6 @@ func TestVerifyTrustedCodexHookMatrixRejectsIncompleteOrModifiedRegistration(t *
 
 	t.Run("modified trust", func(t *testing.T) {
 		hooks := parseHooks(t)
-		if runtime.GOOS == "windows" {
-			if _, exists := hooks["state"]; exists {
-				t.Fatalf("managed hook config contains synthesized hooks.state: %#v", hooks["state"])
-			}
-			if err := verifyManagedCodexHookMatrix(hooks, registrationPath, hooksDir, opts); err != nil {
-				t.Fatalf("managed hook matrix is not source-trusted: %v", err)
-			}
-			return
-		}
 		state := hooks["state"].(map[string]interface{})
 		key := codexHookStateKey(codexHookStateKeySource(registrationPath), "stop", 0, 0)
 		state[key].(map[string]interface{})["trusted_hash"] = "sha256:modified"
@@ -5188,30 +5139,16 @@ timeout = 7
 		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
 	}
 	preToolUse, _ := hooks["PreToolUse"].([]interface{})
-	if runtime.GOOS == "windows" {
-		if len(preToolUse) != 1 {
-			t.Fatalf("Setup changed existing user hook table; got %d entries\n%s", len(preToolUse), raw)
-		}
-		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
-		managedHooks := managedDocument["hooks"].(map[string]interface{})
-		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("Setup managed hooks are incomplete: %v", err)
-		}
-		if _, exists := managedHooks["state"]; exists {
-			t.Fatalf("Setup manufactured trust state in managed config: %#v", managedHooks["state"])
-		}
-	} else {
-		if len(preToolUse) != 2 {
-			t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
-		}
-		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("Setup hooks are not fully trusted: %v", err)
-		}
-		state := hooks["state"].(map[string]interface{})
-		ownedKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
-		if _, ok := state[ownedKey]; !ok {
-			t.Fatalf("position-aware DefenseClaw state key %q missing: %v", ownedKey, state)
-		}
+	if len(preToolUse) != 2 {
+		t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
+		t.Fatalf("Setup hooks are not fully trusted: %v", err)
+	}
+	state := hooks["state"].(map[string]interface{})
+	ownedKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
+	if _, ok := state[ownedKey]; !ok {
+		t.Fatalf("position-aware DefenseClaw state key %q missing: %v", ownedKey, state)
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {

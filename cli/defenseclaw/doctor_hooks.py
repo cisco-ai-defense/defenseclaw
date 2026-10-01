@@ -3421,8 +3421,12 @@ def validate_windows_hook_registration(
     claude_cli_settings: str | None = None,
     claude_remote_settings_path: str | None = None,
     managed_enterprise: bool = False,
+    codex_per_user: bool = False,
 ) -> WindowsHookCheck:
     """Return a classified Windows registration and effective-policy result.
+
+    ``codex_per_user`` marks a per-user install, where current Codex ignores
+    CODEX_HOME/managed_config.toml, so a registration there is reported stale.
 
     Registered hook commands are never executed. Codex validation may start the
     independently trusted Codex app-server for the bounded policy RPC described
@@ -3457,6 +3461,12 @@ def validate_windows_hook_registration(
                 claude_managed_settings_paths=claude_managed_settings_paths,
             )
         command = commands[0]
+        if connector == "codex" and codex_per_user and _is_codex_managed_hook_config(config_path):
+            raise _InspectionError(
+                "stale",
+                "Codex ignores CODEX_HOME\\managed_config.toml on Windows, so these hooks never run; "
+                "run 'defenseclaw setup codex' to register them in config.toml",
+            )
         if connector == "codex":
             if inspect_effective_policy:
                 policy_detail = _validate_codex_effective_hook_policy(data_dir, config_path)
