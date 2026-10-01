@@ -1370,8 +1370,16 @@ An administrator can add a digest to
 registration, event, scope, and matcher. It does not cover the contents of a
 script that the command runs. Approve only absolute commands whose executable
 and script cannot be modified by standard users. Existing per-user DefenseClaw
-hook entries require the cleanup tracked in #917 and #918 before enabling this
-guard on an enrolled profile.
+hook entries require the cleanup in #917 and #918 before enabling this guard
+on an enrolled profile.
+
+During a managed Cursor install or repair, the guardian removes only the
+exact per-user DefenseClaw registrations it recognizes in that target user's
+`.cursor/hooks.json`. It keeps a backup and logs the removals. It leaves other
+hooks and unrelated file content in place, and skips a file it cannot edit
+safely; the managed hook still denies any unsafe entry left behind. Uninstall
+does not restore these per-user registrations. The related Claude Code
+settings cleanup is tracked in #918.
 
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other

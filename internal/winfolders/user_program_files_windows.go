@@ -30,6 +30,13 @@ func UserProgramFiles() (string, error) {
 	return userProgramFiles(winpath.CurrentUserKnownFolderPathWithFlags)
 }
 
+// UserProgramFilesForToken is UserProgramFiles for the user whose token is
+// given, with the same fallback. A LocalSystem service acting for a user
+// passes that user's token, opened with TOKEN_QUERY and TOKEN_IMPERSONATE.
+func UserProgramFilesForToken(token windows.Token) (string, error) {
+	return userProgramFiles(token.KnownFolderPath)
+}
+
 func userProgramFiles(resolve resolver) (string, error) {
 	programs, programsErr := resolve(windows.FOLDERID_UserProgramFiles, windows.KF_FLAG_DONT_VERIFY)
 	if programsErr == nil && strings.TrimSpace(programs) != "" {
