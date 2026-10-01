@@ -818,14 +818,29 @@ function Remove-DisposableProfileAndAccount([string]$Name, [string]$Sid) {
     if ([string]::IsNullOrWhiteSpace($Sid)) { return }
 
     $escapedSid = $Sid.Replace("'", "''")
-    for ($attempt = 0; $attempt -lt 40; $attempt++) {
-        $profiles = @(Get-CimInstance Win32_UserProfile -Filter "SID = '$escapedSid'" -ErrorAction Stop)
-        if ($profiles.Count -eq 0) { return }
-        $loaded = @($profiles | Where-Object { $_.Loaded })
-        if ($loaded.Count -eq 0) {
-            foreach ($profile in $profiles) { Remove-CimInstance -InputObject $profile -ErrorAction Stop }
+    # The User Profile Service unloads the hive asynchronously after the last
+    # process of the logon exits, then records the unload in the account's
+    # ProfileList entry. Arm that entry's change notification before every
+    # check, so an unload between the check and the wait still wakes us, and
+    # delete once the profile is no longer loaded. The step timeout bounds a
+    # profile that never unloads.
+    $watch = [DefenseClaw.DisposableStandardUserLauncher]::WatchProfileList($Sid)
+    try {
+        while ($true) {
+            if ($null -ne $watch) { $watch.Arm() }
+            $profiles = @(Get-CimInstance Win32_UserProfile -Filter "SID = '$escapedSid'" -ErrorAction Stop)
+            if ($profiles.Count -eq 0) { return }
+            if (@($profiles | Where-Object { $_.Loaded }).Count -eq 0) {
+                foreach ($profile in $profiles) { Remove-CimInstance -InputObject $profile -ErrorAction Stop }
+                break
+            }
+            if ($null -eq $watch) {
+                throw "disposable standard-user profile is loaded without a ProfileList entry: $Sid"
+            }
+            $watch.WaitForChange()
         }
-        Start-Sleep -Milliseconds 250
+    } finally {
+        if ($null -ne $watch) { $watch.Dispose() }
     }
     $remaining = @(Get-CimInstance Win32_UserProfile -Filter "SID = '$escapedSid'" -ErrorAction Stop)
     if ($remaining.Count -ne 0) {

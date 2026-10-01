@@ -8445,9 +8445,12 @@ function Invoke-SelfTest {
         [IO.Directory]::CreateDirectory($path) | Out-Null
     }
     $unrelated = Start-Process -FilePath $pwsh -ArgumentList @(
-        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $unrelatedRoot
+        '-NoProfile', '-File', $mock, '-Action', 'hold', '-StateRoot', $unrelatedRoot
     ) -PassThru -WindowStyle Hidden
     $drainChild = $null
+    $tree = $null
+    $readyName = 'Local\dc-native-timeout-' + [guid]::NewGuid().ToString('N')
+    $ready = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $readyName)
     try {
         $unrelatedStarted = $unrelated.StartTime.ToUniversalTime()
         # The root exits 0 while a descendant still holds its inherited
@@ -8464,22 +8467,28 @@ function Invoke-SelfTest {
             throw 'native process helper waited for an output-inheriting descendant instead of the root'
         }
 
-        $timedOut = $false
-        try {
-            Invoke-WindowsNativeProcess $pwsh @(
-                '-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $timeoutRoot
-            ) -TimeoutSeconds 2 | Out-Null
-        } catch {
-            $timedOut = $_.Exception.Message -match 'timed out after 2s'
+        # Tree kill, ordered by events: the root sets the ready event once its
+        # child exists and then never exits, so the child is a job member
+        # when TerminateTree runs.
+        $treeStart = [Diagnostics.ProcessStartInfo]::new()
+        $treeStart.FileName = $pwsh
+        $treeStart.UseShellExecute = $false
+        foreach ($argument in @(
+            '-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $timeoutRoot, '-ReadyEvent', $readyName
+        )) { [void]$treeStart.ArgumentList.Add($argument) }
+        $tree = [DefenseClaw.ContainedProcess]::Start($treeStart, $null)
+        if (-not $tree.WaitForReadyOrExit($ready)) {
+            throw "native process tree root exited before starting its child: $($tree.ExitCode)"
         }
-        if (-not $timedOut) { throw 'native process helper did not report its timeout' }
-        $childPidPath = Join-Path $timeoutRoot 'child.pid'
-        if (-not (Test-Path -LiteralPath $childPidPath -PathType Leaf)) {
-            throw 'native process helper timeout child did not start'
+        $childPid = [int][IO.File]::ReadAllText((Join-Path $timeoutRoot 'child.pid'))
+        if (@($tree.GetActiveProcessIds()) -notcontains $childPid) {
+            throw "native process tree child is not a job member: $childPid"
         }
-        # TerminateTree returns only once the job is empty, so the descendant
-        # is already gone here.
-        $childPid = [int][IO.File]::ReadAllText($childPidPath)
+        $tree.TerminateTree()
+        $survivors = @($tree.GetActiveProcessIds())
+        if ($survivors.Count -ne 0) {
+            throw "native process tree kept job members after TerminateTree: $($survivors -join ',')"
+        }
         if ($null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {
             throw "native process helper left its job descendant running: $childPid"
         }
@@ -8488,7 +8497,22 @@ function Invoke-SelfTest {
             [Math]::Abs(($unrelatedLive.StartTime.ToUniversalTime() - $unrelatedStarted).TotalMilliseconds) -ge 1) {
             throw 'native process helper stopped an unrelated same-image process'
         }
+
+        # Timeout wiring: a root that never exits must come back as the
+        # helper's bounded timeout failure.
+        $timedOut = $false
+        try {
+            Invoke-WindowsNativeProcess $pwsh @(
+                '-NoProfile', '-File', $mock, '-Action', 'hold', '-StateRoot', $timeoutRoot
+            ) -TimeoutSeconds 5 | Out-Null
+        } catch {
+            $timedOut = $_.Exception.Message -match 'timed out after 5s'
+            if (-not $timedOut) { throw }
+        }
+        if (-not $timedOut) { throw 'native process helper did not report its timeout' }
     } finally {
+        if ($null -ne $tree) { $tree.Dispose() }
+        $ready.Dispose()
         if ($null -ne $drainChild) {
             try { $drainChild.Kill() } catch {}
             $drainChild.WaitForExit()

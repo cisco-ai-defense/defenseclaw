@@ -38,8 +38,19 @@ namespace DefenseClaw
         private const uint WAIT_FAILED = 0xFFFFFFFF;
         private const int ERROR_INSUFFICIENT_BUFFER = 122;
         private const int ERROR_INVALID_PARAMETER = 87;
-        private const int ERROR_MORE_DATA = 234;
-        private const int JobObjectBasicProcessIdList = 3;
+        private const int ERROR_NOT_ALL_ASSIGNED = 1300;
+        private const int ERROR_FILE_NOT_FOUND = 2;
+        private const int KEY_QUERY_VALUE = 0x0001;
+        private const int KEY_NOTIFY = 0x0010;
+        private const int REG_NOTIFY_CHANGE_NAME = 0x00000001;
+        private const int REG_NOTIFY_CHANGE_LAST_SET = 0x00000004;
+        private const int REG_NOTIFY_THREAD_AGNOSTIC = 0x10000000;
+        private const string ProfileListPath =
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList";
+        private static readonly IntPtr HKEY_LOCAL_MACHINE = new IntPtr(unchecked((int)0x80000002));
+        private const int JobObjectAssociateCompletionPortInformation = 7;
+        private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+        private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
         private const uint SYNCHRONIZE = 0x00100000;
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
         private const uint INFINITE = 0xFFFFFFFF;
@@ -236,21 +247,81 @@ namespace DefenseClaw
             uint informationLength,
             out uint returnLength);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool QueryInformationJobObject(
-            IntPtr job,
-            int informationClass,
-            IntPtr information,
-            uint informationLength,
-            out uint returnLength);
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_ASSOCIATE_COMPLETION_PORT
+        {
+            public IntPtr CompletionKey;
+            public IntPtr CompletionPort;
+        }
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool IsProcessInJob(
-            IntPtr process,
+        private static extern bool SetInformationJobObject(
             IntPtr job,
-            [MarshalAs(UnmanagedType.Bool)] out bool result);
+            int informationClass,
+            ref JOBOBJECT_ASSOCIATE_COMPLETION_PORT information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateIoCompletionPort(
+            IntPtr fileHandle,
+            IntPtr existingPort,
+            UIntPtr completionKey,
+            uint concurrentThreads);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetQueuedCompletionStatus(
+            IntPtr port,
+            out uint bytesTransferred,
+            out IntPtr completionKey,
+            out IntPtr overlapped,
+            uint milliseconds);
+
+        // LUID is two DWORDs natively, so it sits at offset 4, not 8.
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
+        private struct TOKEN_PRIVILEGES
+        {
+            public int PrivilegeCount;
+            public long Luid;
+            public uint Attributes;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupPrivilegeValueW(string systemName, string name, out long luid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustTokenPrivileges(
+            IntPtr token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAll,
+            ref TOKEN_PRIVILEGES newState,
+            int bufferLength,
+            IntPtr previousState,
+            IntPtr returnLength);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegOpenKeyExW(
+            IntPtr key,
+            string subKey,
+            int options,
+            int desired,
+            out IntPtr result);
+
+        [DllImport("advapi32.dll")]
+        private static extern int RegNotifyChangeKeyValue(
+            IntPtr key,
+            [MarshalAs(UnmanagedType.Bool)] bool watchSubtree,
+            int filter,
+            IntPtr eventHandle,
+            [MarshalAs(UnmanagedType.Bool)] bool asynchronous);
+
+        [DllImport("advapi32.dll")]
+        private static extern int RegCloseKey(IntPtr key);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr OpenProcess(
@@ -397,6 +468,7 @@ namespace DefenseClaw
             IntPtr passwordBuffer = IntPtr.Zero;
             IntPtr token = IntPtr.Zero;
             IntPtr job = IntPtr.Zero;
+            IntPtr port = IntPtr.Zero;
             Process process = null;
             bool resumed = false;
             try
@@ -444,7 +516,7 @@ namespace DefenseClaw
 
                 token = OpenToken(processInfo.hProcess);
                 ValidateChildToken(token, processInfo.dwProcessId, expectedSid);
-                job = CreateKillOnCloseJob();
+                job = CreateKillOnCloseJob(out port);
                 if (!AssignProcessToJobObject(job, processInfo.hProcess))
                 {
                     throw new Win32Exception(
@@ -469,10 +541,12 @@ namespace DefenseClaw
                         process,
                         processInfo.hProcess,
                         job,
+                        port,
                         previousSuspendCount);
                 process = null;
                 processInfo.hProcess = IntPtr.Zero;
                 job = IntPtr.Zero;
+                port = IntPtr.Zero;
                 return result;
             }
             finally
@@ -485,6 +559,7 @@ namespace DefenseClaw
                 if (processInfo.hThread != IntPtr.Zero) CloseHandle(processInfo.hThread);
                 if (processInfo.hProcess != IntPtr.Zero) CloseHandle(processInfo.hProcess);
                 if (job != IntPtr.Zero) CloseHandle(job);
+                if (port != IntPtr.Zero) CloseHandle(port);
                 if (process != null) process.Dispose();
                 if (passwordBuffer != IntPtr.Zero)
                 {
@@ -605,8 +680,11 @@ namespace DefenseClaw
             }
         }
 
-        private static IntPtr CreateKillOnCloseJob()
+        // The completion port is attached before any process joins, so it
+        // sees every member's exit (see WaitForJobMembersToExit).
+        private static IntPtr CreateKillOnCloseJob(out IntPtr port)
         {
+            port = IntPtr.Zero;
             IntPtr job = CreateJobObject(IntPtr.Zero, null);
             if (job == IntPtr.Zero)
             {
@@ -628,13 +706,37 @@ namespace DefenseClaw
                         Marshal.GetLastWin32Error(),
                         "SetInformationJobObject failed");
                 }
+                IntPtr created = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+                if (created == IntPtr.Zero)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateIoCompletionPort failed");
+                }
+                port = created;
+                JOBOBJECT_ASSOCIATE_COMPLETION_PORT association = new JOBOBJECT_ASSOCIATE_COMPLETION_PORT();
+                association.CompletionKey = job;
+                association.CompletionPort = port;
+                if (!SetInformationJobObject(
+                    job,
+                    JobObjectAssociateCompletionPortInformation,
+                    ref association,
+                    (uint)Marshal.SizeOf(typeof(JOBOBJECT_ASSOCIATE_COMPLETION_PORT))))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "SetInformationJobObject(completion port) failed");
+                }
                 IntPtr result = job;
                 job = IntPtr.Zero;
                 return result;
             }
             finally
             {
-                if (job != IntPtr.Zero) CloseHandle(job);
+                if (job != IntPtr.Zero)
+                {
+                    CloseHandle(job);
+                    if (port != IntPtr.Zero) CloseHandle(port);
+                    port = IntPtr.Zero;
+                }
             }
         }
 
@@ -661,90 +763,56 @@ namespace DefenseClaw
             return information.ActiveProcesses;
         }
 
-        private static int[] GetJobProcessIds(IntPtr job)
+        // Returns once ActiveProcesses reaches zero. The completion port was
+        // attached before the root resumed, so every member exit, including
+        // the ACTIVE_PROCESS_ZERO packet for the last one, is queued there:
+        // while the count is nonzero another packet is still to come, and
+        // once it is zero no process can join the job again.
+        private static void WaitForJobMembersToExit(IntPtr job, IntPtr port)
         {
-            int capacity = 64;
-            while (true)
+            while (GetActiveJobProcessCount(job) != 0)
             {
-                int bytes = 8 + IntPtr.Size * capacity;
-                IntPtr buffer = Marshal.AllocHGlobal(bytes);
-                try
+                uint message;
+                IntPtr key;
+                IntPtr overlapped;
+                if (!GetQueuedCompletionStatus(port, out message, out key, out overlapped, INFINITE))
                 {
-                    uint returned;
-                    if (!QueryInformationJobObject(
-                        job,
-                        JobObjectBasicProcessIdList,
-                        buffer,
-                        (uint)bytes,
-                        out returned))
-                    {
-                        int error = Marshal.GetLastWin32Error();
-                        if (error != ERROR_MORE_DATA)
-                        {
-                            throw new Win32Exception(
-                                error,
-                                "QueryInformationJobObject(process list) failed");
-                        }
-                    }
-                    int assigned = Marshal.ReadInt32(buffer, 0);
-                    int listed = Marshal.ReadInt32(buffer, 4);
-                    if (listed < assigned)
-                    {
-                        capacity = Math.Max(capacity * 2, assigned + 16);
-                        continue;
-                    }
-                    int[] ids = new int[listed];
-                    for (int i = 0; i < listed; i++)
-                    {
-                        ids[i] = unchecked((int)Marshal.ReadIntPtr(buffer, 8 + IntPtr.Size * i).ToInt64());
-                    }
-                    return ids;
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(buffer);
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "GetQueuedCompletionStatus failed for disposable standard-user job");
                 }
             }
         }
 
-        // Returns once ActiveProcesses reaches zero, waiting on each member's
-        // own exit event instead of polling the count against a clock.
-        private static void WaitForJobMembersToExit(IntPtr job)
+        // The disposable user's processes grant the runner's administrator
+        // token nothing in their default DACL, so opening one for its exit
+        // event needs SeDebugPrivilege enabled, not merely present.
+        private static void EnableDebugPrivilege()
         {
-            while (GetActiveJobProcessCount(job) != 0)
+            IntPtr token;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token))
             {
-                bool waited = false;
-                foreach (int id in GetJobProcessIds(job))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken(adjust) failed");
+            }
+            try
+            {
+                TOKEN_PRIVILEGES privileges = new TOKEN_PRIVILEGES();
+                privileges.PrivilegeCount = 1;
+                privileges.Attributes = SE_PRIVILEGE_ENABLED;
+                if (!LookupPrivilegeValueW(null, "SeDebugPrivilege", out privileges.Luid))
                 {
-                    IntPtr member = OpenProcess(
-                        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                        false,
-                        id);
-                    if (member == IntPtr.Zero)
-                    {
-                        int error = Marshal.GetLastWin32Error();
-                        if (error == ERROR_INVALID_PARAMETER) continue;
-                        throw new Win32Exception(
-                            error,
-                            "OpenProcess failed for disposable standard-user job member " + id);
-                    }
-                    try
-                    {
-                        bool inJob;
-                        if (IsProcessInJob(member, job, out inJob) && inJob)
-                        {
-                            WaitForSingleObject(member, INFINITE);
-                            waited = true;
-                        }
-                    }
-                    finally
-                    {
-                        CloseHandle(member);
-                    }
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "LookupPrivilegeValueW failed");
                 }
-                // A member is signaled a moment before the job's active
-                // count drops; yield across that transition.
-                if (!waited) System.Threading.Thread.Yield();
+                bool adjusted = AdjustTokenPrivileges(token, false, ref privileges, 0, IntPtr.Zero, IntPtr.Zero);
+                int error = Marshal.GetLastWin32Error();
+                if (!adjusted || error == ERROR_NOT_ALL_ASSIGNED)
+                {
+                    throw new Win32Exception(error, "SeDebugPrivilege could not be enabled");
+                }
+            }
+            finally
+            {
+                CloseHandle(token);
             }
         }
 
@@ -753,6 +821,7 @@ namespace DefenseClaw
         // original already exited.
         public static void WaitForExactProcessExit(int processId, DateTime creationUtc)
         {
+            EnableDebugPrivilege();
             IntPtr process = OpenProcess(
                 SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
                 false,
@@ -926,6 +995,78 @@ namespace DefenseClaw
             return quoted.ToString();
         }
 
+        // Change notification on the account's ProfileList entry. The User
+        // Profile Service records the unload there once it has released the
+        // hive, so a caller arms the watch, checks Win32_UserProfile, and
+        // waits for the next change instead of polling against a clock.
+        // Returns null when no ProfileList entry exists.
+        public static ProfileListWatch WatchProfileList(string accountSid)
+        {
+            SecurityIdentifier sid = new SecurityIdentifier(accountSid);
+            IntPtr key;
+            int status = RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                ProfileListPath + "\\" + sid.Value,
+                0,
+                KEY_QUERY_VALUE | KEY_NOTIFY,
+                out key);
+            if (status == ERROR_FILE_NOT_FOUND) return null;
+            if (status != 0)
+            {
+                throw new Win32Exception(status, "RegOpenKeyExW failed for the disposable profile entry");
+            }
+            return new ProfileListWatch(key);
+        }
+
+        public sealed class ProfileListWatch : IDisposable
+        {
+            private IntPtr key;
+            private readonly System.Threading.AutoResetEvent changed =
+                new System.Threading.AutoResetEvent(false);
+
+            internal ProfileListWatch(IntPtr key) { this.key = key; }
+
+            // Arm before reading the state the change would invalidate.
+            public void Arm()
+            {
+                if (key == IntPtr.Zero) throw new ObjectDisposedException("ProfileListWatch");
+                int status = RegNotifyChangeKeyValue(
+                    key,
+                    true,
+                    REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_THREAD_AGNOSTIC,
+                    changed.SafeWaitHandle.DangerousGetHandle(),
+                    true);
+                if (status != 0)
+                {
+                    throw new Win32Exception(status, "RegNotifyChangeKeyValue failed for the disposable profile entry");
+                }
+            }
+
+            // No wall-clock bound: the enclosing step timeout reports a
+            // profile that never unloads.
+            public void WaitForChange()
+            {
+                if (key == IntPtr.Zero) throw new ObjectDisposedException("ProfileListWatch");
+                uint result = WaitForSingleObject(changed.SafeWaitHandle.DangerousGetHandle(), INFINITE);
+                if (result != WAIT_OBJECT_0)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "WaitForSingleObject failed for the disposable profile entry");
+                }
+            }
+
+            public void Dispose()
+            {
+                if (key != IntPtr.Zero)
+                {
+                    RegCloseKey(key);
+                    key = IntPtr.Zero;
+                }
+                changed.Dispose();
+            }
+        }
+
         public sealed class InteractiveDesktopGrant : IDisposable
         {
             private readonly IntPtr station;
@@ -983,17 +1124,20 @@ namespace DefenseClaw
             private readonly uint initialSuspendCount;
             private IntPtr processHandle;
             private IntPtr job;
+            private IntPtr port;
             private bool disposed;
 
             internal DisposableStandardUserProcess(
                 Process process,
                 IntPtr processHandle,
                 IntPtr job,
+                IntPtr port,
                 uint initialSuspendCount)
             {
                 this.process = process;
                 this.processHandle = processHandle;
                 this.job = job;
+                this.port = port;
                 this.initialSuspendCount = initialSuspendCount;
             }
 
@@ -1117,8 +1261,8 @@ namespace DefenseClaw
 
             // Closing a kill-on-close handle is not enough evidence for a
             // privileged caller to begin traversing child-writable paths. CI
-            // explicitly terminates the job, waits for every member's exit
-            // event until ActiveProcesses is zero, and only then releases the
+            // explicitly terminates the job, waits on the job's completion
+            // port until ActiveProcesses is zero, and only then releases the
             // handle. The enclosing step timeout bounds a host that cannot
             // kill its own job.
             public void TerminateAndDrain()
@@ -1132,9 +1276,11 @@ namespace DefenseClaw
                             Marshal.GetLastWin32Error(),
                             "TerminateJobObject failed for disposable standard-user harness");
                     }
-                    WaitForJobMembersToExit(job);
+                    WaitForJobMembersToExit(job, port);
                     CloseHandle(job);
                     job = IntPtr.Zero;
+                    CloseHandle(port);
+                    port = IntPtr.Zero;
                 }
                 if (!WaitForNativeExit(-1))
                 {
@@ -1161,6 +1307,11 @@ namespace DefenseClaw
                     {
                         CloseHandle(job);
                         job = IntPtr.Zero;
+                    }
+                    if (port != IntPtr.Zero)
+                    {
+                        CloseHandle(port);
+                        port = IntPtr.Zero;
                     }
                     try
                     {

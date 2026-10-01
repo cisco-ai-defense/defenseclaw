@@ -20,11 +20,15 @@ namespace DefenseClaw
     // therefore cannot keep a pipe open, and output is complete as soon as
     // the root exits. Root exit (the process handle) and job empty (every
     // process handle in the job signaled after TerminateJobObject) are
-    // separate events, so callers never infer either from a wall clock.
+    // separate events, so callers never infer either from a wall clock:
+    // job empty is the JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO completion packet
+    // from a port attached before the root runs.
     //
-    // The job mirrors the caller's breakaway allowance: product daemons
-    // request CREATE_BREAKAWAY_FROM_JOB only when their current job allows
-    // it, so they behave exactly as they would without this wrapper.
+    // Product daemons request CREATE_BREAKAWAY_FROM_JOB only when their
+    // current job allows it. The job therefore allows breakaway only when
+    // the caller's own job would kill an escaped daemon on close; otherwise
+    // the daemon stays a member, TerminateTree kills it on a timeout, and
+    // Release leaves it running after a normal exit.
     public sealed class ContainedProcess : IDisposable
     {
         private const uint CREATE_SUSPENDED = 0x00000004;
@@ -47,13 +51,12 @@ namespace DefenseClaw
         private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
         private const int JobObjectBasicAccountingInformation = 1;
         private const int JobObjectBasicProcessIdList = 3;
+        private const int JobObjectAssociateCompletionPortInformation = 7;
         private const int JobObjectExtendedLimitInformation = 9;
-        private const uint SYNCHRONIZE = 0x00100000;
-        private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
+        private const uint JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO = 4;
         private const uint INFINITE = 0xFFFFFFFF;
         private const uint WAIT_OBJECT_0 = 0x00000000;
         private const uint WAIT_TIMEOUT = 0x00000102;
-        private const int ERROR_INVALID_PARAMETER = 87;
         private const int ERROR_MORE_DATA = 234;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -140,6 +143,13 @@ namespace DefenseClaw
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_ASSOCIATE_COMPLETION_PORT
+        {
+            public IntPtr CompletionKey;
+            public IntPtr CompletionPort;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
         {
             public long TotalUserTime;
@@ -197,6 +207,26 @@ namespace DefenseClaw
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job, int informationClass,
+            ref JOBOBJECT_ASSOCIATE_COMPLETION_PORT information, uint length);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateIoCompletionPort(
+            IntPtr fileHandle, IntPtr existingPort, UIntPtr completionKey, uint concurrentThreads);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetQueuedCompletionStatus(
+            IntPtr port, out uint bytesTransferred, out IntPtr completionKey,
+            out IntPtr overlapped, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForMultipleObjects(
+            uint count, IntPtr[] handles, [MarshalAs(UnmanagedType.Bool)] bool waitAll, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool QueryInformationJobObject(
             IntPtr job, int informationClass,
             out JOBOBJECT_EXTENDED_LIMIT_INFORMATION information, uint length, out uint returned);
@@ -233,9 +263,6 @@ namespace DefenseClaw
         private static extern uint ResumeThread(IntPtr thread);
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, int processId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -255,6 +282,7 @@ namespace DefenseClaw
         private static extern bool CloseHandle(IntPtr handle);
 
         private IntPtr job;
+        private IntPtr port;
         private IntPtr processHandle;
         private uint jobBreakawayFlags;
         private FileStream stdoutReader;
@@ -325,6 +353,7 @@ namespace DefenseClaw
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
                 }
                 SetJobLimits(result.job, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | result.jobBreakawayFlags);
+                result.port = AttachCompletionPort(result.job);
 
                 IntPtr size = IntPtr.Zero;
                 InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
@@ -377,7 +406,13 @@ namespace DefenseClaw
                     {
                         result.StartTimeUtc = DateTime.FromFileTimeUtc(creation);
                     }
-                    try { result.process = Process.GetProcessById(result.Id); }
+                    try
+                    {
+                        result.process = Process.GetProcessById(result.Id);
+                        // Open its handle while the root is still suspended,
+                        // so Process.Handle stays valid after the root exits.
+                        IntPtr opened = result.process.Handle;
+                    }
                     catch (ArgumentException) { result.process = null; }
                     if (ResumeThread(information.hThread) == UInt32.MaxValue)
                     {
@@ -502,9 +537,38 @@ namespace DefenseClaw
             }
         }
 
-        // Kills every job member and returns only once each one has exited
-        // (job-empty event). No wall-clock bound: an unkillable member is a
-        // host fault the enclosing step timeout reports.
+        // Returns true when the ready handle is signaled, or false when the
+        // root exits first. No wall-clock bound: the caller's step timeout
+        // reports a root that neither signals nor exits.
+        public bool WaitForReadyOrExit(System.Threading.WaitHandle ready)
+        {
+            ThrowIfDisposed();
+            if (ready == null) throw new ArgumentNullException("ready");
+            return WaitForReadyOrExit(ready.SafeWaitHandle.DangerousGetHandle(), processHandle);
+        }
+
+        // The same wait for a root the caller holds only as a Process.
+        public static bool WaitForReadyOrExit(System.Threading.WaitHandle ready, Process root)
+        {
+            if (ready == null) throw new ArgumentNullException("ready");
+            if (root == null) throw new ArgumentNullException("root");
+            return WaitForReadyOrExit(ready.SafeWaitHandle.DangerousGetHandle(), root.Handle);
+        }
+
+        private static bool WaitForReadyOrExit(IntPtr ready, IntPtr root)
+        {
+            // Index 0 wins when both are signaled, so a root that signals and
+            // then exits still counts as ready.
+            uint wait = WaitForMultipleObjects(2, new IntPtr[] { ready, root }, false, INFINITE);
+            if (wait == WAIT_OBJECT_0) return true;
+            if (wait == WAIT_OBJECT_0 + 1) return false;
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForMultipleObjects failed for contained process readiness");
+        }
+
+        // Kills every job member and returns only once the job reports no
+        // active process (the ACTIVE_PROCESS_ZERO packet) and the root has
+        // exited. No wall-clock bound: an unkillable member is a host fault
+        // the enclosing step timeout reports.
         public void TerminateTree()
         {
             ThrowIfDisposed();
@@ -513,37 +577,26 @@ namespace DefenseClaw
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "TerminateJobObject failed");
             }
+            WaitForJobEmpty();
+            WaitForExit(-1);
+        }
+
+        private void WaitForJobEmpty()
+        {
+            // Every packet wakes the loop to re-read the count. Once the count
+            // is zero no process can join again, and while it is nonzero the
+            // ACTIVE_PROCESS_ZERO packet for the last exit is still to come or
+            // already queued.
             while (ActiveProcessCount != 0)
             {
-                bool waited = false;
-                foreach (int id in GetActiveProcessIds())
+                uint message;
+                IntPtr key;
+                IntPtr overlapped;
+                if (!GetQueuedCompletionStatus(port, out message, out key, out overlapped, INFINITE))
                 {
-                    IntPtr member = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, id);
-                    if (member == IntPtr.Zero)
-                    {
-                        int error = Marshal.GetLastWin32Error();
-                        if (error == ERROR_INVALID_PARAMETER) continue;
-                        throw new Win32Exception(error, "OpenProcess failed for job member " + id);
-                    }
-                    try
-                    {
-                        bool inJob;
-                        if (IsProcessInJob(member, job, out inJob) && inJob)
-                        {
-                            WaitForSingleObject(member, INFINITE);
-                            waited = true;
-                        }
-                    }
-                    finally
-                    {
-                        CloseHandle(member);
-                    }
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetQueuedCompletionStatus failed for contained job");
                 }
-                // A member can be signaled a moment before the job's active
-                // count drops; yield instead of spinning on that transition.
-                if (!waited) System.Threading.Thread.Yield();
             }
-            WaitForExit(-1);
         }
 
         // Leaves any surviving descendants running outside our control, the
@@ -555,6 +608,7 @@ namespace DefenseClaw
             SetJobLimits(job, jobBreakawayFlags);
             CloseHandle(job);
             job = IntPtr.Zero;
+            ClosePort();
         }
 
         public string ReadStandardOutput() { return ReadAll(stdoutReader); }
@@ -576,6 +630,7 @@ namespace DefenseClaw
             }
             finally
             {
+                ClosePort();
                 if (stdoutReader != null) stdoutReader.Dispose();
                 if (stderrReader != null) stderrReader.Dispose();
                 if (process != null) process.Dispose();
@@ -586,6 +641,33 @@ namespace DefenseClaw
                 }
                 disposed = true;
             }
+        }
+
+        private void ClosePort()
+        {
+            if (port == IntPtr.Zero) return;
+            CloseHandle(port);
+            port = IntPtr.Zero;
+        }
+
+        private static IntPtr AttachCompletionPort(IntPtr target)
+        {
+            IntPtr created = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+            if (created == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateIoCompletionPort failed");
+            }
+            JOBOBJECT_ASSOCIATE_COMPLETION_PORT association = new JOBOBJECT_ASSOCIATE_COMPLETION_PORT();
+            association.CompletionKey = target;
+            association.CompletionPort = created;
+            if (!SetInformationJobObject(target, JobObjectAssociateCompletionPortInformation, ref association,
+                (uint)Marshal.SizeOf(typeof(JOBOBJECT_ASSOCIATE_COMPLETION_PORT))))
+            {
+                int error = Marshal.GetLastWin32Error();
+                CloseHandle(created);
+                throw new Win32Exception(error, "SetInformationJobObject(completion port) failed");
+            }
+            return created;
         }
 
         private void ThrowIfDisposed()
@@ -640,6 +722,11 @@ namespace DefenseClaw
             try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
 
+        // BREAKAWAY_OK only when the caller's job allows breakaway and kills
+        // its members on close: an escaped daemon is then still reaped with
+        // the caller's job, exactly as without this wrapper. Outside a job,
+        // or under a job that would let it run on, the daemon stays in this
+        // job so a timeout's TerminateTree reaches it.
         private static uint GetInheritedBreakawayFlags()
         {
             bool inJob;
@@ -647,7 +734,7 @@ namespace DefenseClaw
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "IsProcessInJob failed");
             }
-            if (!inJob) return JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            if (!inJob) return 0;
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION current;
             uint returned;
             if (!QueryInformationJobObject(IntPtr.Zero, JobObjectExtendedLimitInformation, out current,
@@ -656,9 +743,10 @@ namespace DefenseClaw
                 return 0;
             }
             uint flags = current.BasicLimitInformation.LimitFlags;
-            return (flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) != 0
-                ? JOB_OBJECT_LIMIT_BREAKAWAY_OK
-                : 0;
+            bool allowsBreakaway =
+                (flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) != 0;
+            bool killsOnClose = (flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) != 0;
+            return allowsBreakaway && killsOnClose ? JOB_OBJECT_LIMIT_BREAKAWAY_OK : 0;
         }
 
         private static void SetJobLimits(IntPtr target, uint limitFlags)

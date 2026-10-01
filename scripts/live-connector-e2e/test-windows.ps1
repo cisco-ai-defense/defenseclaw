@@ -1679,19 +1679,32 @@ private-secret-name = "DefenseClaw must remain redacted"
     [IO.Directory]::CreateDirectory($unrelatedRoot) | Out-Null
     [IO.Directory]::CreateDirectory($drainRoot) | Out-Null
     $unrelated = Start-Process -FilePath $pwsh -ArgumentList @(
-        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $unrelatedRoot
+        '-NoProfile', '-File', $mock, '-Action', 'hold', '-StateRoot', $unrelatedRoot
     ) -PassThru -WindowStyle Hidden
     $drainChild = $null
+    $readyName = 'Local\dc-test-timeout-' + [guid]::NewGuid().ToString('N')
+    $ready = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $readyName)
     try {
         $unrelatedStarted = $unrelated.StartTime.ToUniversalTime()
+        # The root never exits and sets the event once its child exists, so
+        # the timeout fires only after the child is a job member.
+        $whenChildStarted = {
+            param([Diagnostics.Process]$Root)
+            if (-not [DefenseClaw.ContainedProcess]::WaitForReadyOrExit($ready, $Root)) {
+                throw "mock timeout root exited before starting its child: $($Root.ExitCode)"
+            }
+        }.GetNewClosure()
         $timedOut = $false
         try {
-            Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $temp) -TimeoutSeconds 8 | Out-Null
-        } catch { $timedOut = $_.Exception.Message -match 'timed out' }
+            Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+                '-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $temp, '-ReadyEvent', $readyName
+            ) -TimeoutSeconds 8 -WhileRunning $whenChildStarted | Out-Null
+        } catch {
+            $timedOut = $_.Exception.Message -match 'timed out after 8s'
+            if (-not $timedOut) { throw }
+        }
         Assert-True $timedOut 'bounded timeout returns failure'
-        $childPidPath = Join-Path $temp 'child.pid'
-        Assert-True (Test-Path -LiteralPath $childPidPath) 'mock timeout child started'
-        $childPid = [int][IO.File]::ReadAllText($childPidPath)
+        $childPid = [int][IO.File]::ReadAllText((Join-Path $temp 'child.pid'))
         # The timeout returns only after the job is empty.
         Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
         $unrelatedLive = Get-Process -Id $unrelated.Id -ErrorAction SilentlyContinue
@@ -1716,6 +1729,7 @@ private-secret-name = "DefenseClaw must remain redacted"
             $drainChild.WaitForExit()
             $drainChild.Dispose()
         }
+        $ready.Dispose()
         Stop-Process -Id $unrelated.Id -Force -ErrorAction SilentlyContinue
         $unrelated.WaitForExit()
         $unrelated.Dispose()
@@ -3059,6 +3073,14 @@ connection.close()
     Assert-True ($contractHarnessFiles -match '''prepare-windows-contract-v8\.py''' -and
         $contractHarnessFiles -match '''live-connector-e2e\\project-audit-events\.py''') `
         'disposable standard-user contracts carry the canonical v8 configuration and audit projection helpers'
+    $profileRemovalFunction = [regex]::Match(
+        $standardUserCIText,
+        '(?s)function Remove-DisposableProfileAndAccount\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($profileRemovalFunction -match '(?s)WatchProfileList\(\$Sid\).*?\.Arm\(\).*?Get-CimInstance Win32_UserProfile.*?\.WaitForChange\(\)' -and
+        $profileRemovalFunction -match 'profile remained after cleanup' -and
+        $profileRemovalFunction -notmatch 'Start-Sleep|\$attempt') `
+        'disposable profile removal re-checks on ProfileList change notifications instead of a sleep poll'
     Assert-True ($standardUserCIText -match 'New-LocalUser' -and
         $standardUserCIText -match 'Remove-DisposableProfileAndAccount' -and
         $standardUserCIText -match 'DefenseClaw disposable Setup CI account' -and

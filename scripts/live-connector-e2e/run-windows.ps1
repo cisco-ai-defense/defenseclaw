@@ -8932,26 +8932,40 @@ function Assert-TimeoutHandling {
     [IO.Directory]::CreateDirectory($timeoutRoot) | Out-Null
     $mock = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\testdata\windows-mock.ps1'
     $pwsh = (Get-Process -Id $PID).Path
-    $timedOut = $false
+    $readyName = 'Local\dc-timeout-contract-' + [guid]::NewGuid().ToString('N')
+    $ready = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $readyName)
     try {
-        Invoke-NativeProcess -FilePath $pwsh `
-            -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $timeoutRoot) `
-            -TimeoutSeconds 3 | Out-Null
-    } catch {
-        $timedOut = $_.Exception.Message -match 'timed out'
+        # The root sets the event after its child exists and then never exits,
+        # so the timeout fires only after the child is a job member.
+        $whenChildStarted = {
+            param([Diagnostics.Process]$Root)
+            if (-not [DefenseClaw.ContainedProcess]::WaitForReadyOrExit($ready, $Root)) {
+                throw "timeout contract root exited before starting its child: $($Root.ExitCode)"
+            }
+        }.GetNewClosure()
+        $timedOut = $false
+        try {
+            Invoke-NativeProcess -FilePath $pwsh `
+                -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $timeoutRoot, '-ReadyEvent', $readyName) `
+                -TimeoutSeconds 3 -WhileRunning $whenChildStarted | Out-Null
+        } catch {
+            $timedOut = $_.Exception.Message -match 'timed out after 3s'
+            if (-not $timedOut) { throw }
+        }
+        if (-not $timedOut) { throw 'timeout contract did not return a bounded failure' }
+    } finally {
+        $ready.Dispose()
     }
-    if (-not $timedOut) { throw 'timeout contract did not return a bounded failure' }
-    Start-Sleep -Milliseconds 500
-    $childPidPath = Join-Path $timeoutRoot 'child.pid'
-    if (-not (Test-Path -LiteralPath $childPidPath -PathType Leaf)) { throw 'timeout contract child did not start' }
-    $childPid = [int][IO.File]::ReadAllText($childPidPath)
+    # TerminateTree returned only after the job was empty, so the child is
+    # already gone here.
+    $childPid = [int][IO.File]::ReadAllText((Join-Path $timeoutRoot 'child.pid'))
     $child = Get-CimInstance Win32_Process -Filter "ProcessId = $childPid" -ErrorAction SilentlyContinue
     if ($null -ne $child) {
         $commandLine = if ($child.CommandLine) { $child.CommandLine } else { '' }
         $isTimeoutChild = $commandLine.IndexOf($mock, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $commandLine.IndexOf($timeoutRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $commandLine.IndexOf('-Action', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-            $commandLine.IndexOf('child', [StringComparison]::OrdinalIgnoreCase) -ge 0
+            $commandLine.IndexOf('hold', [StringComparison]::OrdinalIgnoreCase) -ge 0
         if ($isTimeoutChild) {
             throw ("timeout contract left its child process running: pid={0} parent={1} image={2} started={3}" -f
                 $child.ProcessId,
