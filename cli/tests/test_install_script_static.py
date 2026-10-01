@@ -318,6 +318,25 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
 
 
+def test_a_carriage_return_answer_takes_the_default(tmp_path: Path) -> None:
+    # MAC-U3-01: a terminal left in -icrnl sends Enter as a bare CR, which
+    # used to read as "no" and cancel the install.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("read_tty_line() {")
+    funcs = text[start : text.index("\n}\n", text.index("ask_yes_no() {")) + 3]
+    tty = tmp_path / "tty"
+    tty.write_bytes(b"\r\n")
+    script = tmp_path / "ask.sh"
+    script.write_text(
+        "set -euo pipefail\nYES=false\n"
+        + funcs.replace("/dev/tty", str(tty))
+        + 'if ask_yes_no "Reinstall?"; then echo yes; else echo no; fi\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, check=False)
+    assert proc.stdout.strip() == "yes", proc.stdout + proc.stderr
+
+
 def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     # MAC-U2-01: after a rollback, the restored 0.8.x gateway refused to start
     # on hook contract drift, and the installer only relayed a readiness timeout.
