@@ -179,14 +179,36 @@ def test_audit_db_inspection_distinguishes_missing_invalid_and_valid_state(
     assert valid.integrity_scanned is True
 
 
-def test_audit_db_inspection_skips_full_quick_check_on_large_files(
+def test_audit_db_inspection_checks_large_files_within_the_time_budget(tmp_path: Path) -> None:
+    # SWEEP-10: a size cap (64 MiB) skipped the check on healthy long-lived
+    # installs; the check now runs on any size and is bounded by time.
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "audit.db"
+    plan = plan_missing_audit_db(target, data_dir=data_dir)
+    apply_audit_db_recovery(plan, approved=True, unattended=True)
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("CREATE TABLE bulk (payload BLOB)")
+        connection.executemany(
+            "INSERT INTO bulk VALUES (zeroblob(?))", [(1024 * 1024,)] * 70
+        )
+        connection.commit()
+
+    health = inspect_audit_db(target, data_dir=data_dir)
+
+    assert health.file_bytes > 64 * 1024 * 1024
+    assert health.status is AuditDBHealthStatus.VALID
+    assert health.integrity_scanned is True
+
+
+def test_audit_db_inspection_reports_unverified_when_the_time_budget_runs_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     data_dir = _private_data_dir(tmp_path)
     target = data_dir / "audit.db"
     plan = plan_missing_audit_db(target, data_dir=data_dir)
     apply_audit_db_recovery(plan, approved=True, unattended=True)
-    monkeypatch.setattr(recovery, "_AUDIT_FULL_INTEGRITY_MAX_BYTES", 0)
+    monkeypatch.setattr(recovery, "_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS", 0.0)
+    monkeypatch.setattr(recovery, "_AUDIT_INTEGRITY_PROGRESS_OPCODES", 1)
 
     health = inspect_audit_db(target, data_dir=data_dir)
 

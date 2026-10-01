@@ -33,6 +33,7 @@ import os
 import sqlite3
 import stat
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
@@ -42,8 +43,11 @@ _DEVICE_PROVENANCE_PREFIX = b"defenseclaw-device-provenance-v1:"
 _DEVICE_PROVENANCE_SECRET = "device.provenance.secret"
 _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
 # PRAGMA quick_check(N) still walks the whole file; N is only the error limit.
-# Skip that btree walk once the database is larger than a local diagnostic.
-_AUDIT_FULL_INTEGRITY_MAX_BYTES = 64 * 1024 * 1024
+# Bound the walk by time rather than by file size: a few hundred MiB finish in
+# well under a second, so a size cap flagged healthy long-running installs.
+# A walk that runs past the budget is interrupted and reported as unverified.
+_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS = 5.0
+_AUDIT_INTEGRITY_PROGRESS_OPCODES = 10_000
 
 
 class RecoveryKind(str, Enum):
@@ -154,6 +158,36 @@ class RecoveryPublicationError(OSError):
         super().__init__(code)
 
 
+def _bounded_quick_check(connection: sqlite3.Connection) -> tuple[tuple[object, ...], bool]:
+    """Run PRAGMA quick_check(1) within the time budget.
+
+    Returns the first result row and whether the walk finished. A walk stopped
+    by the budget returns ``(("ok",), False)``: nothing was found, but the file
+    was not fully checked.
+    """
+
+    deadline = time.monotonic() + _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS
+    stopped = False
+
+    def _progress() -> int:
+        nonlocal stopped
+        if time.monotonic() >= deadline:
+            stopped = True
+            return 1
+        return 0
+
+    connection.set_progress_handler(_progress, _AUDIT_INTEGRITY_PROGRESS_OPCODES)
+    try:
+        row = connection.execute("PRAGMA quick_check(1)").fetchone()
+    except sqlite3.OperationalError:
+        if not stopped:
+            raise
+        return ("ok",), False
+    finally:
+        connection.set_progress_handler(None, 0)
+    return tuple(row or ()), True
+
+
 def inspect_audit_db(
     target: str | os.PathLike[str],
     *,
@@ -188,10 +222,7 @@ def inspect_audit_db(
             freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
             file_bytes = page_count * page_size
             freelist_bytes = freelist * page_size
-            integrity_scanned = file_bytes <= _AUDIT_FULL_INTEGRITY_MAX_BYTES
-            quick_check = ("ok",)
-            if integrity_scanned:
-                quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
+            quick_check, integrity_scanned = _bounded_quick_check(connection)
             tables = {
                 str(row[0])
                 for row in connection.execute(
