@@ -987,6 +987,16 @@ func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 	return d.Start(args)
 }
 
+// RecordedExecutable returns the executable path recorded for the running
+// sidecar, or "" when no identity is recorded.
+func (d *Daemon) RecordedExecutable() string {
+	info, err := d.readPIDInfo()
+	if err != nil {
+		return ""
+	}
+	return info.Executable
+}
+
 func (d *Daemon) readPIDInfo() (pidInfo, error) {
 	data, err := readManagedIdentityFile(d.pidFile, maxProcessIdentityBytes)
 	if err != nil {
