@@ -455,12 +455,16 @@ try {
     $closeJob = $launcherType.GetMethod('CloseHandle', $privateStatic)
     Assert-True ($null -ne $createEmptyJob -and $null -ne $readActiveCount -and
         $null -ne $closeJob) 'disposable-user launcher exposes its compiled job accounting implementation'
-    $emptyJob = [IntPtr]$createEmptyJob.Invoke($null, @())
+    $createJobArguments = [object[]]@([IntPtr]::Zero)
+    $emptyJob = [IntPtr]$createEmptyJob.Invoke($null, $createJobArguments)
+    $emptyJobPort = [IntPtr]$createJobArguments[0]
     try {
-        Assert-True ([uint32]$readActiveCount.Invoke($null, @($emptyJob)) -eq 0) `
-            'new disposable-user job reports ActiveProcesses=0'
+        Assert-True ([uint32]$readActiveCount.Invoke($null, @($emptyJob)) -eq 0 -and
+            $emptyJobPort -ne [IntPtr]::Zero) `
+            'new disposable-user job reports ActiveProcesses=0 and has its completion port attached'
     } finally {
         [void]$closeJob.Invoke($null, @($emptyJob))
+        [void]$closeJob.Invoke($null, @($emptyJobPort))
     }
     . $harness -NoRun
     . $workflowRunPathHelper
