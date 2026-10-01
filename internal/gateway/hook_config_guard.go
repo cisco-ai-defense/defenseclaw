@@ -73,7 +73,6 @@ type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, fu
 // connector file open and the guard queued another attempt on its own.
 type hookGuardRepairOutcome struct {
 	connector string
-	changed   []string
 	err       error
 	rearmed   bool
 }
@@ -736,7 +735,6 @@ func (g *HookConfigGuard) repairCurrent(
 	err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
 	outcome := hookGuardRepairOutcome{
 		connector: conn.Name(),
-		changed:   changed,
 		err:       err,
 		rearmed:   g.rearmAfterBusyRepair(requested, err),
 	}
