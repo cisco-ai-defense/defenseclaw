@@ -546,6 +546,13 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	opts.OpenCodeConfigDir = transaction.OpenCodeConfigDir
 	opts.OmnigentConfigHome = transaction.OmnigentConfigHome
 	opts.HermesHome = transaction.HermesHome
+	stagingNeed, err := stagingSpaceNeeded(payload)
+	if err != nil {
+		return 1, fmt.Errorf("measure the installer payload: %w", err)
+	}
+	if err := requireFreeSpace(filepath.Dir(transaction.StagingPath), stagingNeed, "stage the install"); err != nil {
+		return 1, err
+	}
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
@@ -2454,6 +2461,9 @@ func loadPayload(tempParent string) (loadedPayload, error) {
 		return loadedPayload{}, err
 	}
 	if err := rejectReparseAncestors(tempParent); err != nil {
+		return loadedPayload{}, err
+	}
+	if err := requireFreeSpace(tempParent, zipExpandedSize(reader), "unpack the installer payload"); err != nil {
 		return loadedPayload{}, err
 	}
 	tempRoot, err := os.MkdirTemp(tempParent, ".DefenseClawSetup.")
