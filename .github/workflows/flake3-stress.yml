@@ -1,4 +1,6 @@
-# Temporary probe for ci/flake-3-opencode-node-harness-eof (wip branch only; never merged).
+# Temporary proof for ci/flake-3-opencode-node-harness-eof (wip branch only; never merged).
+# Each job runs the reload test as the first node process on a fresh runner,
+# the way the failing CI shards did, then repeats it warm.
 name: flake3 stress (temporary)
 
 on:
@@ -13,27 +15,69 @@ defaults:
     shell: pwsh
 
 jobs:
-  cold-node:
-    name: first node launch / slot ${{ matrix.slot }}
+  fresh:
+    name: ${{ matrix.variant }} / fresh runner ${{ matrix.slot }}
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3, 4, 5, 6]
+        variant: [main15, head]
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
-      - name: Time the first and later node launches on a fresh runner
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "flake3-${{ matrix.variant }}-${{ matrix.slot }}" -DiagnosticsLeaf "flake3-diag-${{ matrix.variant }}-${{ matrix.slot }}"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Select test code variant
         run: |
-          $node = (Get-Command node.exe -ErrorAction Stop).Source
-          $item = Get-Item $node
-          Write-Host "node=$node size=$($item.Length) drive=$((Split-Path -Qualifier $node))"
-          foreach ($i in 1..4) {
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $v = & $node --version
-            $sw.Stop()
-            Write-Host ("launch {0}: {1:n0} ms ({2})" -f $i, $sw.Elapsed.TotalMilliseconds, $v)
+          $variant = '${{ matrix.variant }}'
+          if ($variant -ne 'head') {
+            $base = git merge-base HEAD origin/main
+            if ($LASTEXITCODE -ne 0) { throw 'merge-base failed' }
+            git checkout $base -- internal/gateway/connector/opencode_test.go internal/gateway/connector/opencode_plugin_test_helpers_test.go internal/gateway/connector/plugin_install_marker_test.go
+            if ($LASTEXITCODE -ne 0) { throw 'checkout of the main test files failed' }
+            $f = 'internal/gateway/connector/opencode_plugin_test_helpers_test.go'
+            $c = Get-Content -Raw $f
+            $n = $c.Replace('const nodeHarnessTimeout = 60 * time.Second', 'const nodeHarnessTimeout = 15 * time.Second')
+            if ($n -eq $c) { throw 'nodeHarnessTimeout constant not found' }
+            Set-Content -NoNewline -Path $f -Value $n
+            Write-Host "main $base test files with the pre-#893 15s node deadline"
           }
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          $null = & $node --input-type=module -e "await import('node:url'); await fetch('http://127.0.0.1:9').catch(() => {})"
-          $sw.Stop()
-          Write-Host ("module+fetch launch: {0:n0} ms" -f $sw.Elapsed.TotalMilliseconds)
+          git diff --stat
+      - name: Build connector test binary
+        run: go test -c -vet=off -o (Join-Path $env:RUNNER_TEMP 'conn.test.exe') ./internal/gateway/connector
+      - name: Run the reload test cold, then warm
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $ErrorActionPreference = 'Continue'
+          $bin = Join-Path $env:RUNNER_TEMP 'conn.test.exe'
+          $pkgDir = (Resolve-Path 'internal/gateway/connector').Path
+          $results = @()
+          foreach ($i in 0..5) {
+            $out = Join-Path $env:RUNNER_TEMP "run-$i.out"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath $bin -WorkingDirectory $pkgDir -NoNewWindow -PassThru -Wait `
+              -RedirectStandardOutput $out -RedirectStandardError (Join-Path $env:RUNNER_TEMP "run-$i.err") -ArgumentList @(
+                '-test.run', '^TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed$',
+                '-test.count', '1', '-test.timeout', '20m', '-test.v')
+            $sw.Stop()
+            $lines = @(Get-Content -Path $out)
+            $verdict = if ($p.ExitCode -eq 0 -and @($lines | Where-Object { $_ -match '^--- PASS: ' }).Count -eq 1) { 'PASS' } else { 'FAIL' }
+            $dur = ($lines | Where-Object { $_ -match '^--- (PASS|FAIL): ' } | ForEach-Object { if ($_ -match '\(([0-9.]+s)\)') { $Matches[1] } }) -join ','
+            $kind = if ($i -eq 0) { 'cold' } else { 'warm' }
+            Write-Host ("{0} run {1}: {2} test={3} wall={4:n1}s" -f $kind, $i, $verdict, $dur, $sw.Elapsed.TotalSeconds)
+            $lines | Where-Object { $_ -match '_test\.go:\d+:' } | ForEach-Object { Write-Host "  $_" }
+            $results += $verdict
+          }
+          $warmFail = @($results[1..5] | Where-Object { $_ -ne 'PASS' }).Count
+          $summary = "RESULT variant=${{ matrix.variant }} slot=${{ matrix.slot }} cold=$($results[0]) warm_fail=$warmFail/5"
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
