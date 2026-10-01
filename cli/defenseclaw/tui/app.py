@@ -529,11 +529,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         width: 100%;
     }
 
+    /* Two rows: the tabs and their own underline. A border under that
+       drew a second full-width rule and cost a row on an 80x24 screen. */
     #header {
-        height: 3;
+        height: 2;
         padding: 0 1;
         background: TOKEN_SURFACE_PANEL;
-        border-bottom: heavy TOKEN_BORDER_MUTED;
     }
 
     #title {

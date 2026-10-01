@@ -62,7 +62,7 @@ async def test_open_alert_detail_leaves_its_row_visible_at_80x24(tmp_path) -> No
         assert "Details: token found" in text
 
 
-@pytest.mark.parametrize(("size", "body_top"), [((80, 24), 3), ((160, 45), 4)])
+@pytest.mark.parametrize(("size", "body_top"), [((80, 24), 2), ((160, 45), 3)])
 async def test_short_terminals_start_the_body_right_under_the_tabs(tmp_path, size, body_top: int) -> None:  # type: ignore[no-untyped-def]
     app = snapshot_app(tmp_path)
     async with app.run_test(size=size) as pilot:
