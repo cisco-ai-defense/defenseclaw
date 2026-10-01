@@ -1887,6 +1887,18 @@ func claudeCodeEnvSnapshotIsDefenseClawWritten(snapshot map[string]interface{}, 
 	return false
 }
 
+// claudeCodeEnvValueUnchanged reports whether snapshot holds key with the
+// same string value as current.
+func claudeCodeEnvValueUnchanged(snapshot map[string]interface{}, key string, current interface{}) bool {
+	original, existed := snapshot[key]
+	if !existed {
+		return false
+	}
+	originalString, _ := original.(string)
+	currentString, _ := current.(string)
+	return originalString == currentString
+}
+
 // claudeCodeOtelValueWrittenByDefenseClaw reports whether value is one that
 // this or an earlier release writes for key. A generic value is no proof of
 // ownership on its own; use it only on a snapshot that
@@ -2055,6 +2067,20 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// earlier release's env block, so the values DefenseClaw writes in it
 				// are not the operator's either.
 				predecessorSnapshot := claudeCodeEnvSnapshotIsDefenseClawWritten(originalEnv, managedEnv)
+				// The exact file snapshot can be such a snapshot too: an upgrade
+				// takes it from the settings.json an earlier release still manages
+				// while the env backup keeps the operator's real env. The restored
+				// env then starts as that snapshot's env.
+				var exactSnapshotEnv map[string]interface{}
+				if exactData != nil {
+					candidate := make(map[string]interface{}, len(envMap))
+					for key, value := range envMap {
+						candidate[key] = value
+					}
+					if claudeCodeEnvSnapshotIsDefenseClawWritten(candidate, managedEnv) {
+						exactSnapshotEnv = candidate
+					}
+				}
 				for _, key := range claudeCodeOtelEnvKeys {
 					written, managed := managedEnv[key]
 					current, present := envMap[key]
@@ -2063,13 +2089,11 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					}
 					owned := claudeCodeOtelValueIsManaged(current, written) ||
 						claudeCodeOtelValueLooksManaged(key, current, written)
-					if !owned && predecessorSnapshot {
+					if !owned && (predecessorSnapshot || exactSnapshotEnv != nil) {
 						// The snapshot restore can already have put the earlier
 						// release's value back; it is still not the operator's.
-						original, existed := originalEnv[key]
-						originalString, _ := original.(string)
-						currentString, _ := current.(string)
-						owned = existed && originalString == currentString &&
+						owned = ((predecessorSnapshot && claudeCodeEnvValueUnchanged(originalEnv, key, current)) ||
+							(exactSnapshotEnv != nil && claudeCodeEnvValueUnchanged(exactSnapshotEnv, key, current))) &&
 							claudeCodeOtelValueWrittenByDefenseClaw(key, current, written)
 					}
 					if !owned {
