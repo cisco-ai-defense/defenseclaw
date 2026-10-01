@@ -2789,101 +2789,179 @@ func TestAIDiscoveryOptionsFromConfigPublishJitter(t *testing.T) {
 }
 
 // TestRunClaimedResetsTimerBeforeScan is a regression guard for the
-// CodeRabbit finding on PR #820 — the scheduled/process timers must be
-// Reset BEFORE the synchronous runScan call so the next interval is
-// measured from scan START, not from scan END. A slow scan therefore
-// does not stretch the effective cadence.
+// CodeRabbit finding on PR #820: the scheduled and process timers must be
+// Reset BEFORE the synchronous runScan call so the next interval is measured
+// from scan START, not from scan END, and a slow scan does not stretch the
+// effective cadence.
 //
-// The test drives one full-scan tick with an artificially slow scan
-// (a report observer that sleeps for a substantial fraction of the
-// scan interval) and verifies the NEXT scheduled tick still fires
-// within a window measured from the FIRST tick's start, not its end.
+// The contract is an ordering between two events in the Run goroutine, so
+// the test checks that ordering directly instead of inferring it from
+// wall-clock periods. Manually fired timers replace the real ones, and the
+// v8 StartScan hook (called synchronously at the top of every scan) records
+// when each scan begins. A reset-after regression records the scan start
+// before the Reset on every run, independent of host load.
 func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 	dataDir := t.TempDir()
 	homeDir := t.TempDir()
 
-	// 200 ms base interval, 0 jitter — tight window so a stretched
-	// cadence is obviously outside it. Scan duration is 120 ms —
-	// >50 % of the interval, so the "reset after" bug (period ≈ 320 ms)
-	// is clearly separable from the "reset before" contract (period
-	// ≈ 200 ms).
-	scanInterval := 200 * time.Millisecond
-	scanDuration := 120 * time.Millisecond
+	// Distinct intervals identify which schedule a timer belongs to. They
+	// never elapse: the injected timers fire only when the test says so.
+	scanInterval := 30 * time.Minute
+	processInterval := 45 * time.Second
 
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
 		DataDir:         dataDir,
 		HomeDir:         homeDir,
 		ScanRoots:       []string{homeDir},
 		ScanInterval:    scanInterval,
-		ProcessInterval: 10 * time.Second, // silence the process timer for this test
+		ProcessInterval: processInterval,
 		PublishJitter:   0,
 	}, nil)
-	t.Cleanup(func() {
-		if svc.InventoryStore() != nil {
-			_ = svc.InventoryStore().Close()
-		}
-	})
 
-	// Observer records the wall-clock arrival of each scan report and
-	// sleeps to make the scan slow. Only slow the SCHEDULED ticks —
-	// let the startup scan return promptly so we're measuring the
-	// tick-to-tick period, not startup + tick.
-	var (
-		mu       sync.Mutex
-		arrivals []time.Time
-	)
-	svc.AddReportObserver(func(_ context.Context, _ AIDiscoveryReport) {
-		mu.Lock()
-		arrivals = append(arrivals, time.Now())
-		count := len(arrivals)
-		mu.Unlock()
-		if count >= 2 { // slow only scheduled ticks, not the initial startup scan
-			time.Sleep(scanDuration)
+	events := &scheduleEventLog{}
+	timers := make(chan *manualScheduleTimer, 2)
+	svc.newScheduleTimer = func(d time.Duration) scheduleTimer {
+		name := "unknown"
+		switch d {
+		case scanInterval:
+			name = "full"
+		case processInterval:
+			name = "process"
 		}
-	})
+		timer := &manualScheduleTimer{name: name, c: make(chan time.Time, 1), events: events}
+		timers <- timer
+		return timer
+	}
+	scanStarts := make(chan string, 8)
+	svc.BindObservabilityV8(&scanStartRecorderV8{events: events, starts: scanStarts})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- svc.Run(ctx) }()
-
-	// Wait for the startup scan + at least three scheduled ticks so the
-	// tick-to-tick period is measured on scans #2 → #3 (both were slow).
-	deadline := time.After(3 * time.Second)
-	for {
-		mu.Lock()
-		got := len(arrivals)
-		mu.Unlock()
-		if got >= 4 {
-			break
+	stopRun := func() {
+		cancel()
+		if err := <-runDone; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run error = %v, want context.Canceled", err)
 		}
+	}
+	defer stopRun()
+
+	// Bounded waits on specific events. The bound only limits how long a
+	// broken service can hang the test; it is not part of the contract.
+	const eventWait = time.Minute
+	waitScanStart := func(want string) {
+		t.Helper()
 		select {
-		case <-deadline:
-			cancel()
-			<-runDone
-			t.Fatalf("only observed %d scan(s) in 3 s; want ≥ 4", got)
-		case <-time.After(20 * time.Millisecond):
+		case got := <-scanStarts:
+			if got != want {
+				t.Fatalf("scan started with source %q, want %q (events=%v)", got, want, events.snapshot())
+			}
+		case <-time.After(eventWait):
+			t.Fatalf("no %q scan started within %s (events=%v)", want, eventWait, events.snapshot())
 		}
 	}
-	cancel()
-	if err := <-runDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want context.Canceled", err)
+	waitTimer := func() *manualScheduleTimer {
+		t.Helper()
+		select {
+		case timer := <-timers:
+			return timer
+		case <-time.After(eventWait):
+			t.Fatalf("Run did not create its schedule timers within %s", eventWait)
+			return nil
+		}
 	}
 
-	// arrivals[0] = startup, arrivals[1..] = scheduled. Measure
-	// scan #2 start → scan #3 start (both are slow scheduled ticks).
-	mu.Lock()
-	defer mu.Unlock()
-	if len(arrivals) < 4 {
-		t.Fatalf("arrivals = %d, want ≥ 4", len(arrivals))
+	waitScanStart("startup")
+	byName := map[string]*manualScheduleTimer{}
+	for range 2 {
+		timer := waitTimer()
+		byName[timer.name] = timer
 	}
-	period := arrivals[3].Sub(arrivals[2])
-	// Reset-before contract: period ≈ scanInterval (200 ms).
-	// Reset-after bug: period ≈ scanDuration + scanInterval (320 ms).
-	// Fail with generous margin either way — 250 ms is above the
-	// contract but below the bug regime.
-	if period > scanInterval+50*time.Millisecond {
-		t.Fatalf("period between slow ticks = %s, want ≤ %s "+
-			"(reset-after regression — cadence is stretching with scan duration; arrivals=%v)",
-			period, scanInterval+50*time.Millisecond, arrivals)
+	full, process := byName["full"], byName["process"]
+	if full == nil || process == nil {
+		t.Fatalf("schedule timers = %v, want one full and one process timer", byName)
 	}
+
+	assertResetBeforeScan := func(timer *manualScheduleTimer, source string, interval time.Duration) {
+		t.Helper()
+		before := len(events.snapshot())
+		timer.fire()
+		waitScanStart(source)
+		got := events.snapshot()[before:]
+		want := []scheduleEvent{
+			{what: timer.name + ".reset", delay: interval},
+			{what: "scan:" + source},
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("events after %s tick = %v, want %v (Reset must precede the scan it triggers)",
+				timer.name, got, want)
+		}
+	}
+	assertResetBeforeScan(full, "scheduled", scanInterval)
+	assertResetBeforeScan(process, "process", processInterval)
+}
+
+type scheduleEvent struct {
+	what  string
+	delay time.Duration
+}
+
+type scheduleEventLog struct {
+	mu     sync.Mutex
+	events []scheduleEvent
+}
+
+func (l *scheduleEventLog) add(event scheduleEvent) {
+	l.mu.Lock()
+	l.events = append(l.events, event)
+	l.mu.Unlock()
+}
+
+func (l *scheduleEventLog) snapshot() []scheduleEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]scheduleEvent(nil), l.events...)
+}
+
+// manualScheduleTimer is a scheduleTimer that fires only when the test calls
+// fire, and records every Reset in the shared event log.
+type manualScheduleTimer struct {
+	name   string
+	c      chan time.Time
+	events *scheduleEventLog
+}
+
+func (m *manualScheduleTimer) C() <-chan time.Time { return m.c }
+
+func (m *manualScheduleTimer) Reset(d time.Duration) bool {
+	m.events.add(scheduleEvent{what: m.name + ".reset", delay: d})
+	return true
+}
+
+func (m *manualScheduleTimer) Stop() bool { return true }
+
+func (m *manualScheduleTimer) fire() { m.c <- time.Now() }
+
+// scanStartRecorderV8 records the start of every scan in the shared event log.
+// StartScan runs synchronously inside runScan, before any detector work.
+type scanStartRecorderV8 struct {
+	events *scheduleEventLog
+	starts chan<- string
+}
+
+func (r *scanStartRecorderV8) StartScan(
+	ctx context.Context,
+	start AIDiscoveryV8ScanStart,
+) (context.Context, AIDiscoveryV8ScanTrace, error) {
+	r.events.add(scheduleEvent{what: "scan:" + start.Source})
+	r.starts <- start.Source
+	return ctx, nil, nil
+}
+
+func (*scanStartRecorderV8) EmitReport(
+	context.Context,
+	AIDiscoveryReport,
+	[]AIDiscoveryV8ComponentObservation,
+) error {
+	return nil
 }

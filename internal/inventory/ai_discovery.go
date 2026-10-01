@@ -585,6 +585,30 @@ type ContinuousDiscoveryService struct {
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   AIDiscoveryObservabilityV8
+
+	// newScheduleTimer builds the one-shot timers that drive the scheduled
+	// full and process scans. Nil selects real time.Timer values; tests
+	// inject manually fired timers so cadence contracts are checked by event
+	// order instead of wall-clock periods.
+	newScheduleTimer func(time.Duration) scheduleTimer
+}
+
+// scheduleTimer is the subset of *time.Timer used by the Run loop.
+type scheduleTimer interface {
+	C() <-chan time.Time
+	Reset(time.Duration) bool
+	Stop() bool
+}
+
+type realScheduleTimer struct{ *time.Timer }
+
+func (t realScheduleTimer) C() <-chan time.Time { return t.Timer.C }
+
+func (s *ContinuousDiscoveryService) startScheduleTimer(d time.Duration) scheduleTimer {
+	if s.newScheduleTimer != nil {
+		return s.newScheduleTimer(d)
+	}
+	return realScheduleTimer{time.NewTimer(d)}
 }
 
 type scanResponse struct {
@@ -960,16 +984,16 @@ func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr err
 	// is zero, so nextScheduledDelay collapses to the configured interval
 	// and the two timers behave identically to the previous ticker-based
 	// loop.
-	fullTimer := time.NewTimer(s.nextScheduledDelay(s.opts.ScanInterval))
+	fullTimer := s.startScheduleTimer(s.nextScheduledDelay(s.opts.ScanInterval))
 	defer fullTimer.Stop()
-	processTimer := time.NewTimer(s.nextScheduledDelay(s.opts.ProcessInterval))
+	processTimer := s.startScheduleTimer(s.nextScheduledDelay(s.opts.ProcessInterval))
 	defer processTimer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-fullTimer.C:
+		case <-fullTimer.C():
 			// Reset BEFORE runScan so the next interval is measured
 			// from scan start, not scan end — long scans do not stretch
 			// the effective cadence. runScan is serialized by scanMu so
@@ -977,7 +1001,7 @@ func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr err
 			// the next fire; the timer channel remains a single slot.
 			fullTimer.Reset(s.nextScheduledDelay(s.opts.ScanInterval))
 			_, _ = s.runScan(ctx, true, "scheduled")
-		case <-processTimer.C:
+		case <-processTimer.C():
 			processTimer.Reset(s.nextScheduledDelay(s.opts.ProcessInterval))
 			_, _ = s.runScan(ctx, false, "process")
 		case resp := <-s.triggers:
