@@ -325,12 +325,18 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
     scan-result schema under the Python ``jsonschema`` implementation that
     downstream Python consumers use.
 
-    The document is ``internal/cli/testdata/scan-code-json.golden.json``.
-    ``TestScanCodeJSONCommandValidatesCanonicalSchema`` (internal/cli) runs the
-    real command path in-process, validates its output against the same schema
-    file, and fails if the envelope or finding keys drift from this document.
-    Compiling the Go CLI here (``go run``) made this test's runtime depend on
-    the Go build cache and toolchain state of the Python shard, so it timed out
+    The document is ``internal/cli/testdata/scan-code-json.golden.json``, a
+    checked-in sample rather than live output. The live command is covered on
+    the Go side by ``TestScanCodeJSONCommandValidatesCanonicalSchema``
+    (internal/cli): it runs ``scan code <file> --json`` through the real
+    command tree in-process (flag parsing, the root pre-run with an isolated
+    v8 config, the audit store and the persisted-scan branch), requires the
+    process stdout to hold exactly one JSON document, validates it against the
+    same schema file, checks the scan_id it reports was persisted, and fails
+    if the envelope or finding keys drift from the sample. This test therefore
+    proves the Python validator accepts that key set; the Go test proves the
+    command emits it. Compiling the Go CLI here (``go run``) made this test's
+    runtime depend on the Go build cache of the Python shard, so it timed out
     whenever that shard compiled cold.
 
     Skipped when ``jsonschema`` is unavailable (it only ships in
