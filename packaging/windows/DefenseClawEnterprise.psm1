@@ -8944,8 +8944,8 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     if ($null -eq $approvedClient -or
         $approvedClient.Value -isnot [bool] -or
         [bool]$approvedClient.Value -ne [bool]$enforced.Value -or
-        [string]$attestation.minimum_claude_version -cne
-            (Get-DefenseClawClaudeMinimumClientVersion)) {
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $attestation.minimum_claude_version)) {
         throw 'agent application-control evidence has an invalid approved-client result or Claude version floor'
     }
     $claudeEffective = $attestation.PSObject.Properties[
@@ -17298,9 +17298,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         $approvedAgentsProperty.Value -isnot [bool] -or
         [bool]$approvedAgentsProperty.Value -ne
             [bool]$applicationControlProperty.Value -or
-        [string]$metadata.claude_minimum_client_version -cne
-            (Get-DefenseClawClaudeMinimumClientVersion)) {
-        throw "deployment metadata does not attest approved Claude clients at version $(Get-DefenseClawClaudeMinimumClientVersion) or newer"
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $metadata.claude_minimum_client_version)) {
+        throw 'deployment metadata does not attest approved Claude clients at a supported version floor'
     }
     $claudeTargetProperty = $metadata.PSObject.Properties[
         'claude_target_enabled'
