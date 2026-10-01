@@ -4182,7 +4182,7 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
     $definitions = [ordered]@{
         codex = @{
             HookScript = 'codex-hook.sh'
-            ConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
+            ConfigPath = Join-Path $UserProfile '.codex\config.toml'
             DoctorLabel = 'Codex hooks'
             DoctorRuntimePattern = 'healthy Windows-native executable registration'
         }
