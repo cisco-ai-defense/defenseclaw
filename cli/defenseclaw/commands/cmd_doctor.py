@@ -2249,6 +2249,25 @@ def _token_probe_failure(code: int, body: str) -> str:
     return "transport failure" if code == 0 else f"HTTP {code}"
 
 
+def _guardrail_health_mode(details: dict) -> str:
+    """Describe the guardrail's policy mode from its /health details.
+
+    Hook connectors report ``policy_mode`` (observe/action); gateways before
+    1.0 also set ``mode`` to the data path ("observability"), which read as
+    observe mode for a connector that blocks through its hooks.
+    """
+    connector_modes = details.get("connector_modes")
+    if isinstance(connector_modes, dict) and connector_modes:
+        return "mode=" + ", ".join(f"{name}:{connector_modes[name]}" for name in sorted(connector_modes))
+    mode = details.get("policy_mode") or details.get("mode") or "?"
+    surface = {"agent_lifecycle_hooks": "hook-enforced", "omnigent_policy_api": "policy-API-enforced"}.get(
+        details.get("enforcement_surface"), ""
+    )
+    if mode == "action" and surface and details.get("enforcement_enabled") is True:
+        return f"mode={mode}, {surface}"
+    return f"mode={mode}"
+
+
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     bind = _gateway_api_host(cfg)
     url = _gateway_api_url(cfg, "/health")
@@ -2326,7 +2345,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         continue
                     detail = state
                     if sub == "guardrail" and isinstance(details, dict):
-                        detail += f" (mode={details.get('mode', '?')})"
+                        detail += f" ({_guardrail_health_mode(details)})"
                     _emit("pass", f"  └─ {sub}", detail, r=r)
                 elif normalized_state in ("disabled", "stopped"):
                     # Cross-check the sidecar's view against on-disk

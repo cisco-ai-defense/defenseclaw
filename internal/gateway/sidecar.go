@@ -3838,7 +3838,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				detail := map[string]interface{}{
 					"summary":             summary,
 					"connector":           conn.Name(),
-					"mode":                "observability",
+					"mode":                policyMode,
+					"data_path":           "direct-to-upstream",
 					"policy_mode":         policyMode,
 					"enforcement_enabled": verifiedEnforcement,
 					"enforcement_surface": surface,
@@ -3866,7 +3867,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
 			"summary":             summary,
 			"connector":           conn.Name(),
-			"mode":                "observability",
+			"mode":                policyMode,
+			"data_path":           "direct-to-upstream",
 			"policy_mode":         policyMode,
 			"enforcement_enabled": enforcementEnabled,
 			"enforcement_surface": surface,
