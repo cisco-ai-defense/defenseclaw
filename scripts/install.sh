@@ -1012,8 +1012,9 @@ finish_swap() {
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
     # Pre-1.0 installers kept retired binaries in the temp folder they ran
     # with. On macOS that is often /tmp although TMPDIR now names a per-user
-    # folder, so look in both.
-    find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
+    # folder, so look in both. -H follows a symlinked start path such as
+    # macOS /tmp -> private/tmp; BSD find otherwise lists nothing under it.
+    find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
 }
