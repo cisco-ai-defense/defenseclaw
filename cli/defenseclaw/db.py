@@ -939,7 +939,9 @@ class Store:
         hook_severity = "'HIGH'"
         if "structured_json" in columns:
             rule_severity = self._safe_json_extract("structured_json", "$.severity")
-            hook_severity = f"CASE WHEN UPPER(COALESCE({rule_severity}, '')) = 'CRITICAL' THEN 'CRITICAL' ELSE 'HIGH' END"
+            hook_severity = (
+                f"CASE WHEN UPPER(COALESCE({rule_severity}, '')) = 'CRITICAL' THEN 'CRITICAL' ELSE 'HIGH' END"
+            )
         if {"bucket", "event_name"}.issubset(columns):
             outcomes = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
             canonical_outcome = self._canonical_alert_outcome_expression(columns)
