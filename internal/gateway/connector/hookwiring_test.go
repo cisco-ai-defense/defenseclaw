@@ -97,6 +97,15 @@ func windowsAwaitedHookScriptForTest(hookBinary string, arguments ...string) str
 	}, "; ")
 }
 
+// windowsBridgeBindsArgumentForTest reports whether a decoded awaited-hook
+// bridge passes flag and value to the launcher in both of its forms: the
+// Constrained Language fallback's quoted literals and the ProcessStartInfo
+// argument string.
+func windowsBridgeBindsArgumentForTest(decoded, flag, value string) bool {
+	return strings.Contains(decoded, powershellQuoteLiteral(flag)+" "+powershellQuoteLiteral(value)) &&
+		strings.Contains(decoded, " "+flag+" "+value)
+}
+
 func TestWindowsSystemPowerShellExeIgnoresMutableEnvironment(t *testing.T) {
 	want := windowsSystemPowerShellExe()
 	t.Setenv("SystemRoot", filepath.Join(t.TempDir(), "poisoned-system-root"))
@@ -1907,8 +1916,8 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 				)
 			}
 			decoded := decodePowerShellEncodedCommandForTest(t, windowsCommand)
-			if !strings.Contains(decoded, "'--event','"+group.eventType+"'") ||
-				!strings.Contains(decoded, "'--hook-contract','"+contract.ContractID+"'") {
+			if !windowsBridgeBindsArgumentForTest(decoded, "--event", group.eventType) ||
+				!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", contract.ContractID) {
 				t.Errorf(
 					"event %s command did not bind event and contract %s: %s",
 					group.eventType,
@@ -2388,7 +2397,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 				decoded := decodePowerShellEncodedCommandForTest(t, wantCommand)
 				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
-					!strings.Contains(decoded, "'--event','PreToolUse'") {
+					!windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
 			} else if connectorName == "claudecode" {
@@ -2417,8 +2426,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					t.Errorf("Codex PreToolUse command_windows = %q, want %q", command, wantCommand)
 				}
 				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !strings.Contains(decoded, "'--event','PreToolUse'") ||
-					!strings.Contains(decoded, "'--hook-contract','codex-hooks-v4'") {
+				if !windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") ||
+					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
 			} else if connectorName == "copilot" {
