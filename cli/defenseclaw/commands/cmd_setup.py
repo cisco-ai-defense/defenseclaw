@@ -246,6 +246,7 @@ def _log_setup_action(
     details: str,
     *,
     allow_offline: bool,
+    offline_note: str = "",
 ) -> None:
     """Audit a setup mutation without breaking explicit offline staging.
 
@@ -271,7 +272,8 @@ def _log_setup_action(
                 "stage the change for the next gateway start."
             ) from exc
         click.echo(
-            "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
+            offline_note
+            or "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
             "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change.",
             err=True,
         )
@@ -4192,6 +4194,14 @@ def setup_gateway(
         # unavailability; server rejections and every other admission failure
         # remain fatal through _log_setup_action.
         allow_offline=not verify or api_port_changed,
+        # The start hint follows from the setup restart step; say only what
+        # the missing gateway means for this change.
+        offline_note=(
+            "  Note: nothing listens on the new API port until the gateway restarts, so this change "
+            "was not written to the audit log."
+            if api_port_changed
+            else "  Note: the gateway could not be reached, so this change was not written to the audit log."
+        ),
     )
 
 
@@ -14633,9 +14643,10 @@ def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool 
     click.echo()
 
     resolved = gw.resolved_token()
-    rows = [
-        ("host", gw.host),
-        ("port", str(gw.port)),
+    # gateway.host and gateway.port address the OpenClaw gateway, so a
+    # hook-only roster has no use for them.
+    rows = [("host", gw.host), ("port", str(gw.port))] if openclaw else []
+    rows += [
         ("api_port", str(gw.api_port)),
         ("token", f"via {gw.token_env} (in .env)" if resolved else "(none — local mode)"),
     ]
@@ -14645,12 +14656,10 @@ def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool 
         click.echo(f"    {ux._style(label, fg='bright_black', bold=True)} {val}")
     click.echo()
 
+    # The setup restart step that runs after every saved change restarts a
+    # running gateway or prints the start command, so no start hint here.
     if api_port_changed:
-        ux.subhead("The new API port takes effect when the gateway starts:")
-        ux.subhead("  defenseclaw-gateway start    (or 'defenseclaw-gateway restart' if it is running)")
-    else:
-        ux.subhead("Start the gateway with:")
-        ux.subhead("  defenseclaw-gateway start")
+        ux.subhead("The new API port takes effect when the gateway starts.")
     if openclaw and not resolved:
         ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()
