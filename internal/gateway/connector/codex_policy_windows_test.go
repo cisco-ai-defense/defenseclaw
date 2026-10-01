@@ -163,7 +163,7 @@ func TestCodexPolicyAppServerTreeHelper(t *testing.T) {
 	if err := child.Start(); err != nil {
 		os.Exit(31)
 	}
-	if err := os.WriteFile(os.Getenv(codexPolicyReadyPathEnv), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+	if err := testenv.PublishFile(os.Getenv(codexPolicyReadyPathEnv), []byte(strconv.Itoa(child.Process.Pid))); err != nil {
 		os.Exit(32)
 	}
 	// Ended by the job; the release wait only covers an abandoned test.

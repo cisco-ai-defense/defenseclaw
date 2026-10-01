@@ -111,10 +111,39 @@ func resumeCapturedProcess(pid uint32) error {
 
 var procIsProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
 
-type capturedJobProcessIDList struct {
+// capturedJobProcessIDHeader is the fixed head of
+// JOBOBJECT_BASIC_PROCESS_ID_LIST; first marks where the ID array starts.
+type capturedJobProcessIDHeader struct {
 	assigned uint32
 	listed   uint32
-	ids      [256]uintptr
+	first    uintptr
+}
+
+// capturedJobProcessIDs lists every process currently assigned to job,
+// growing the buffer from NumberOfAssignedProcesses on ERROR_MORE_DATA so a
+// large tree is never truncated.
+func capturedJobProcessIDs(job windows.Handle) ([]uintptr, error) {
+	const word = unsafe.Sizeof(uintptr(0))
+	head := int(unsafe.Offsetof(capturedJobProcessIDHeader{}.first) / word)
+	capacity := 64
+	for {
+		buffer := make([]uintptr, head+capacity)
+		err := windows.QueryInformationJobObject(
+			job,
+			windows.JobObjectBasicProcessIdList,
+			uintptr(unsafe.Pointer(&buffer[0])),
+			uint32(uintptr(len(buffer))*word),
+			nil,
+		)
+		header := (*capturedJobProcessIDHeader)(unsafe.Pointer(&buffer[0]))
+		if err == nil {
+			return buffer[head : head+min(int(header.listed), capacity)], nil
+		}
+		if !errors.Is(err, windows.ERROR_MORE_DATA) {
+			return nil, err
+		}
+		capacity = max(2*capacity, int(header.assigned)+16)
+	}
 }
 
 // waitCapturedJobExited blocks until the processes TerminateJobObject is
@@ -122,19 +151,16 @@ type capturedJobProcessIDList struct {
 // releases its handles before its process object is signalled, so after this
 // returns no terminated descendant still holds the captured output pipes and
 // cmd.Wait reaches EOF without racing WaitDelay.
+//
+// The wait has no deadline, like the direct-process wait before it: every
+// listed process is already being force-terminated and runs no more user
+// code, so only kernel teardown remains.
 func waitCapturedJobExited(job windows.Handle) error {
-	var list capturedJobProcessIDList
-	err := windows.QueryInformationJobObject(
-		job,
-		windows.JobObjectBasicProcessIdList,
-		uintptr(unsafe.Pointer(&list)),
-		uint32(unsafe.Sizeof(list)),
-		nil,
-	)
-	if err != nil && !errors.Is(err, windows.ERROR_MORE_DATA) {
+	ids, err := capturedJobProcessIDs(job)
+	if err != nil {
 		return fmt.Errorf("list captured process tree: %w", err)
 	}
-	for _, id := range list.ids[:min(int(list.listed), len(list.ids))] {
+	for _, id := range ids {
 		process, openErr := windows.OpenProcess(
 			windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
 			false,

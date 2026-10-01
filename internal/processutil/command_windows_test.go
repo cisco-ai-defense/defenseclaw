@@ -75,7 +75,7 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 		if err := grandchild.Start(); err != nil {
 			os.Exit(21)
 		}
-		if err := publishProcessTreeFixture(
+		if err := testenv.PublishFile(
 			os.Getenv(processTreePIDFileEnv),
 			[]byte(strconv.Itoa(grandchild.Process.Pid)),
 		); err != nil {
@@ -129,7 +129,7 @@ func TestCombinedOutputTreeCompletesWhenGrandchildInheritsOutput(t *testing.T) {
 	if os.Getenv(inheritedOutputChildEnv) == "1" {
 		_, _ = os.Stdout.WriteString("grandchild stdout\n")
 		_, _ = os.Stderr.WriteString("grandchild stderr\n")
-		if err := publishProcessTreeFixture(
+		if err := testenv.PublishFile(
 			os.Getenv(processTreeMarkerEnv),
 			[]byte("ready"),
 		); err != nil {
@@ -201,7 +201,7 @@ func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 		if err != nil || !released {
 			os.Exit(24)
 		}
-		if err := publishProcessTreeFixture(
+		if err := testenv.PublishFile(
 			os.Getenv(processTreeMarkerEnv),
 			[]byte("managed"),
 		); err != nil {
@@ -219,7 +219,7 @@ func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(23)
 		}
-		if err := publishProcessTreeFixture(
+		if err := testenv.PublishFile(
 			os.Getenv(processTreePIDFileEnv),
 			[]byte(strconv.Itoa(child.Process.Pid)),
 		); err != nil {
@@ -261,21 +261,4 @@ func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "managed" {
 		t.Fatalf("managed marker = %q, %v", data, err)
 	}
-}
-
-func publishProcessTreeFixture(path string, data []byte) error {
-	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
 }

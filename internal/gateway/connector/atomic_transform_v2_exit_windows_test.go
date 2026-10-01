@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -309,14 +308,16 @@ func TestAtomicTransformV2ProtocolLockHelper(t *testing.T) {
 		if os.Getenv("DEFENSECLAW_V2_LOCK_EXIT_HELD") == "1" {
 			os.Exit(95)
 		}
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, err := os.Stat(release); err == nil {
-				return nil
-			}
-			time.Sleep(10 * time.Millisecond)
+		// Hold until the test signals release; there is no wall-clock bound
+		// because the test cold-starts a contender while this holder waits.
+		released, err := testenv.AwaitRelease(release)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("timed out waiting for protocol-lock release signal")
+		if !released {
+			return fmt.Errorf("owning test process exited before releasing the protocol lock")
+		}
+		return nil
 	}
 	if os.Getenv("DEFENSECLAW_V2_LOCK_ONLY") == "1" {
 		prepared, err := prepareAtomicTransformStateDir(stateDir)
@@ -394,7 +395,7 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 	}
 	ready := filepath.Join(root, "first-ready")
 	contended := filepath.Join(root, "contender-blocked")
-	release := filepath.Join(root, "release-first")
+	release := testenv.NewRelease(t)
 	command := func(path, payload string, hold bool) (*exec.Cmd, *bytes.Buffer) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2ProtocolLockHelper$")
 		output := new(bytes.Buffer)
@@ -409,7 +410,7 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 		if hold {
 			env = append(env,
 				"DEFENSECLAW_V2_LOCK_READY="+ready,
-				"DEFENSECLAW_V2_LOCK_RELEASE="+release,
+				"DEFENSECLAW_V2_LOCK_RELEASE="+release.Token(),
 			)
 		} else {
 			env = append(env, "DEFENSECLAW_V2_LOCK_CONTENDED="+contended)
@@ -422,7 +423,7 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = os.WriteFile(release, []byte("release"), 0o600)
+		release.Signal(t)
 		if first.Process != nil {
 			_ = first.Process.Kill()
 		}
@@ -443,9 +444,7 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 	if _, err := testenv.WaitForFile(contended, secondDone); err != nil {
 		t.Fatalf("long-alias contender escaped held physical lock: %v\n%s", err, secondOutput)
 	}
-	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	release.Signal(t)
 	for label, item := range map[string]struct {
 		done   <-chan error
 		output *bytes.Buffer
@@ -689,7 +688,7 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 	}
 	ready := filepath.Join(root, "owner-detached")
 	contended := filepath.Join(root, "contender-blocked")
-	release := filepath.Join(root, "release-owner")
+	release := testenv.NewRelease(t)
 	command := func(target, payload string, hold bool) (*exec.Cmd, *bytes.Buffer) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2ProtocolLockHelper$")
 		output := new(bytes.Buffer)
@@ -703,7 +702,7 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 		if hold {
 			env = append(env,
 				"DEFENSECLAW_V2_LOCK_READY="+ready,
-				"DEFENSECLAW_V2_LOCK_RELEASE="+release,
+				"DEFENSECLAW_V2_LOCK_RELEASE="+release.Token(),
 				"DEFENSECLAW_V2_LOCK_HOLD_PHASE="+string(atomicTransformPhaseIntentPersisted),
 				"DEFENSECLAW_V2_LOCK_HIDE_TARGET=1",
 			)
@@ -718,7 +717,7 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = os.WriteFile(release, []byte("release"), 0o600)
+		release.Signal(t)
 		if owner.Process != nil {
 			_ = owner.Process.Kill()
 		}
@@ -739,9 +738,7 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 	if _, err := testenv.WaitForFile(contended, waiterDone); err != nil {
 		t.Fatalf("8.3 waiter resolved or escaped while owner held protocol lock: %v\n%s", err, waiterOutput)
 	}
-	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	release.Signal(t)
 	for label, item := range map[string]struct {
 		done   <-chan error
 		output *bytes.Buffer
@@ -945,20 +942,15 @@ func TestAtomicTransformV2BoundProtocolLockReleasesAfterOwnerExit(t *testing.T) 
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("owner process did not acquire protocol lock")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Exit 95 happens only after the owner published ready while holding
+	// the protocol lock, so the exit itself orders the successor check.
 	err := command.Wait()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 95 {
 		t.Fatalf("held-lock owner exit = %v, want 95", err)
+	}
+	if _, err := os.Stat(ready); err != nil {
+		t.Fatalf("owner exited without acquiring the protocol lock: %v", err)
 	}
 	lockPath := filepath.Join(stateDir, ".defenseclaw-v2-protocol.lock")
 	before, err := os.Stat(lockPath)

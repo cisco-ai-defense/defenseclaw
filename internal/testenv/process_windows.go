@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -46,6 +47,25 @@ func WaitForFile(path string, done <-chan error) ([]byte, error) {
 		case <-poll.C:
 		}
 	}
+}
+
+// PublishFile writes data to path by renaming a complete temporary file into
+// place, so a WaitForFile reader never sees a partial write.
+func PublishFile(path string, data []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 // ProcessExit returns a channel that receives the exit code of process pid
