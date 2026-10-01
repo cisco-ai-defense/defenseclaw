@@ -2119,7 +2119,7 @@ targets:
             }
         }
         function script:Start-DefenseClawService {
-            param([Parameter(Mandatory)][string]$Name)
+            param([Parameter(Mandatory)][string]$Name, [string]$FailureLogPath)
             if ($script:HarnessState.service_start_modes[$Name] -eq 4) {
                 throw "queued or explicit start was blocked while $Name was disabled"
             }
