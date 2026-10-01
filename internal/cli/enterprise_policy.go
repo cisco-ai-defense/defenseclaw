@@ -288,7 +288,7 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 				WorkingDir:    project,
 				HookBinary:    ctx.opts.HookBinary,
 				Policy:        policy,
-				OwnedCommands: perUserOwnedHookCommands(name, target.UserHome, ""),
+				OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, "", ctx.opts.HookBinary),
 			})
 			userReport.Decisions[name] = decision
 			if decision.Deny {
