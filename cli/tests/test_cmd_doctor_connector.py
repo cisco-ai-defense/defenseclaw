@@ -1136,6 +1136,45 @@ class TestCheckHookContractLock(unittest.TestCase):
             check["detail"],
         )
 
+    def test_agent_update_to_compatible_version_is_not_drift_failure(self) -> None:
+        cases = (
+            ("claudecode", "Claude Code 2.1.276", "claudecode-hooks-v2", "2.1.285 (Claude Code)", "pass", True),
+            (
+                "amp",
+                "0.0.1785334225-gabc (released 2026-09-14T00:00:00.000Z, 3d ago)",
+                "amp-plugin-v1",
+                "0.0.1785334225-gabc (released 2026-09-14T00:00:00.000Z, 16d ago)",
+                "pass",
+                False,
+            ),
+            ("claudecode", "Claude Code 2.1.276", "claudecode-hooks-v2", "Claude Code 2.1.100", "fail", False),
+        )
+        for connector, locked, contract, discovered, want, updated in cases:
+            with self.subTest(discovered=discovered), tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                    json.dump(
+                        {
+                            "connectors": {
+                                connector: {
+                                    "connector": connector,
+                                    "compatibility_status": "known",
+                                    "contract_id": contract,
+                                    "raw_agent_version": locked,
+                                }
+                            }
+                        },
+                        fh,
+                    )
+                r = _DoctorResult()
+                with patch(
+                    "defenseclaw.commands.cmd_doctor._discovered_agent_version",
+                    return_value=discovered,
+                ):
+                    _check_hook_contract_lock(self._cfg(tmp), connector, r, platform_name="linux")
+                check = r.checks[-1]
+                self.assertEqual(check["status"], want, check["detail"])
+                self.assertEqual("agent_updated=" in check["detail"], updated, check["detail"])
+
     def test_active_devin_without_lock_fails_with_setup_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
@@ -1292,7 +1331,7 @@ class TestCheckHookContractLock(unittest.TestCase):
                 )
             with patch(
                 "defenseclaw.commands.cmd_doctor._discovered_agent_version",
-                return_value="2.0.0",
+                return_value="1.18.9",  # below the floor: an update to a newer version is not drift
             ) as discovered_version:
                 r = _DoctorResult()
                 _check_hook_contract_lock(self._cfg(tmp), "opencode", r, platform_name="linux")

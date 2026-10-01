@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -92,6 +93,51 @@ type HookContractResolution struct {
 	Status            string
 	Reason            string
 	Contract          HookContract
+	// UntestedVersion marks a Known resolution for an agent version newer
+	// than every tested range: no known-broken entry matches, so the newest
+	// contract applies. NewestTestedVersion names the bound it passed.
+	UntestedVersion     bool
+	NewestTestedVersion string
+}
+
+// UntestedNewerVersionReasonPrefix starts the Reason of an untested newer
+// agent version. Status and verify surfaces show it as "untested newer
+// version".
+const UntestedNewerVersionReasonPrefix = "untested newer version"
+
+// KnownBrokenAgentVersion is one agent version (Exact) or half-open range
+// [Min, Max) that DefenseClaw refuses even when it is newer than every
+// tested range. Reason and Issue are required so the refusal explains
+// itself.
+type KnownBrokenAgentVersion struct {
+	Exact  string
+	Min    string
+	Max    string
+	Reason string
+	Issue  string
+}
+
+// knownBrokenAgentVersions lists agent versions whose hook surface is known
+// not to work with DefenseClaw. It must match the known_broken_versions
+// lists in cli/defenseclaw/inventory/hook_contracts.json.
+var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{}
+
+// strictHookContractResolution restores exact-range matching: a version
+// outside every tested range stays unknown. The Secure Client profile sets
+// it so its version gating does not change.
+var strictHookContractResolution atomic.Bool
+
+// SetStrictHookContractResolution turns exact-range hook contract matching
+// on for this process. The config loader sets it for the Secure Client
+// profile.
+func SetStrictHookContractResolution(enabled bool) {
+	strictHookContractResolution.Store(enabled)
+}
+
+// StrictHookContractResolution reports whether this process refuses agent
+// versions newer than every tested range.
+func StrictHookContractResolution() bool {
+	return strictHookContractResolution.Load()
 }
 
 var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
@@ -1049,7 +1095,18 @@ func ResolveHookContract(connectorName, rawVersion string) HookContractResolutio
 	return resolveHookContractForOS(connectorName, rawVersion, runtime.GOOS)
 }
 
+// ResolveHookContractStrict resolves like ResolveHookContract with
+// exact-range matching, whatever this process's mode: an agent version
+// outside every tested range is unknown.
+func ResolveHookContractStrict(connectorName, rawVersion string) HookContractResolution {
+	return resolveHookContractForOSMode(connectorName, rawVersion, runtime.GOOS, true)
+}
+
 func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContractResolution {
+	return resolveHookContractForOSMode(connectorName, rawVersion, goos, StrictHookContractResolution())
+}
+
+func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict bool) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if proxyConnectorsWithoutHookGate[name] {
 		raw := strings.TrimSpace(rawVersion)
@@ -1071,11 +1128,32 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	return resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+	resolution := resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+	if strict {
+		return strictHookContractResolutionOf(resolution)
+	}
+	return resolution
+}
+
+// strictHookContractResolutionOf turns an untested newer version back into
+// the exact-range answer: unknown, no contract.
+func strictHookContractResolutionOf(resolution HookContractResolution) HookContractResolution {
+	if !resolution.UntestedVersion {
+		return resolution
+	}
+	resolution.Status = HookCompatibilityUnknown
+	resolution.Reason = "no hook contract matches normalized agent version"
+	resolution.Contract = HookContract{}
+	resolution.UntestedVersion = false
+	resolution.NewestTestedVersion = ""
+	return resolution
 }
 
 // resolveHookContractAgainst matches rawVersion against contracts, the
-// registered contracts of connector name.
+// registered contracts of connector name. A version on the known-broken
+// list is unknown. A version newer than every tested range resolves to the
+// newest contract with UntestedVersion set; versions below a floor, between
+// ranges or next to an exact pin of the same build stay unknown.
 func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
@@ -1106,6 +1184,15 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Reason:            "could not normalize agent version",
 		}
 	}
+	if broken, ok := knownBrokenAgentVersion(name, raw, normalized); ok {
+		return HookContractResolution{
+			Connector:         name,
+			RawVersion:        raw,
+			NormalizedVersion: normalized,
+			Status:            HookCompatibilityUnknown,
+			Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", normalized, broken.Reason, broken.Issue),
+		}
+	}
 	for _, contract := range contracts {
 		if contractMatchesAgentVersion(contract, raw, normalized) {
 			return HookContractResolution{
@@ -1118,6 +1205,18 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			}
 		}
 	}
+	if contract, newest, ok := newestContractBelow(contracts, normalized); ok {
+		return HookContractResolution{
+			Connector:           name,
+			RawVersion:          raw,
+			NormalizedVersion:   normalized,
+			Status:              HookCompatibilityKnown,
+			Reason:              fmt.Sprintf("%s: %s is newer than the tested versions (%s); no known problems; using hook contract %s", UntestedNewerVersionReasonPrefix, normalized, newest, contract.ContractID),
+			Contract:            contract,
+			UntestedVersion:     true,
+			NewestTestedVersion: newest,
+		}
+	}
 	return HookContractResolution{
 		Connector:         name,
 		RawVersion:        raw,
@@ -1125,6 +1224,81 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 		Status:            HookCompatibilityUnknown,
 		Reason:            "no hook contract matches normalized agent version",
 	}
+}
+
+// newestContractBelow returns the contract with the highest tested bound
+// when normalized is newer than every bound of its version scheme: at or
+// above each range's exclusive maximum and above each exact pin. An
+// open-ended range means nothing is newer than it (a version at or above
+// its minimum already matches). Date-style builds (major >= 1000, such as
+// Cursor agent 2026.07.23 or Devin 3000.11.3) are compared only with bounds
+// of the same style so a desktop 4.x release is not measured against a
+// dated preview pin.
+func newestContractBelow(contracts []HookContract, normalized string) (HookContract, string, bool) {
+	dateStyle := func(v string) bool { return versionTuple(v)[0] >= 1000 }
+	scheme := dateStyle(normalized)
+	var best HookContract
+	newest, label := "", ""
+	for _, contract := range contracts {
+		bounds := 0
+		upper, upperLabel := "", ""
+		for _, pin := range contract.ExactAgentVersions {
+			pinNorm := NormalizeAgentVersion("", pin)
+			if pinNorm == "" || dateStyle(pinNorm) != scheme {
+				continue
+			}
+			if compareVersion(normalized, pinNorm) <= 0 {
+				return HookContract{}, "", false
+			}
+			bounds++
+			if upper == "" || compareVersion(pinNorm, upper) > 0 {
+				upper, upperLabel = pinNorm, pin
+			}
+		}
+		if contract.MinAgentVersion != "" || contract.MaxAgentVersion != "" {
+			edge := contract.MaxAgentVersion
+			if edge == "" {
+				edge = contract.MinAgentVersion
+			}
+			if dateStyle(edge) == scheme {
+				if contract.MaxAgentVersion == "" || compareVersion(normalized, contract.MaxAgentVersion) < 0 {
+					return HookContract{}, "", false
+				}
+				bounds++
+				if upper == "" || compareVersion(contract.MaxAgentVersion, upper) > 0 {
+					upper, upperLabel = contract.MaxAgentVersion, "<"+contract.MaxAgentVersion
+				}
+			}
+		}
+		if bounds > 0 && (newest == "" || compareVersion(upper, newest) >= 0) {
+			best, newest, label = contract, upper, upperLabel
+		}
+	}
+	if newest == "" {
+		return HookContract{}, "", false
+	}
+	return best, label, true
+}
+
+func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVersion, bool) {
+	for _, entry := range knownBrokenAgentVersions[name] {
+		if entry.Exact != "" {
+			if exactAgentVersionMatch(raw, []string{entry.Exact}) {
+				return entry, true
+			}
+			continue
+		}
+		if (entry.Min != "" || entry.Max != "") && versionInRange(normalized, entry.Min, entry.Max) {
+			return entry, true
+		}
+	}
+	return KnownBrokenAgentVersion{}, false
+}
+
+// KnownBrokenAgentVersions returns the known-broken agent versions of a
+// connector.
+func KnownBrokenAgentVersions(connectorName string) []KnownBrokenAgentVersion {
+	return append([]KnownBrokenAgentVersion(nil), knownBrokenAgentVersions[normalizeConnectorName(connectorName)]...)
 }
 
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {

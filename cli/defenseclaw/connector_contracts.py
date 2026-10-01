@@ -89,10 +89,17 @@ class ConnectorCompatibility:
     status: str
     reason: str
     contract: ConnectorContract | None = None
+    # A known resolution for a version newer than every tested range: no
+    # known-broken entry matches, so the newest contract applies.
+    untested: bool = False
+    newest_tested: str = ""
 
     @property
     def supported(self) -> bool:
         return self.status in {STATUS_KNOWN, STATUS_UNVERSIONED, STATUS_NOT_GATED}
+
+
+UNTESTED_NEWER_VERSION = "untested newer version"
 
 
 def normalize_connector(name: str | None) -> str:
@@ -286,6 +293,51 @@ HOOK_CONTRACT_MANIFEST = hook_contract_manifest()
 PROXY_CONNECTORS, HOOK_CONTRACTS = _load_contracts_from_manifest(HOOK_CONTRACT_MANIFEST)
 
 
+def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, str], ...]]:
+    out: dict[str, tuple[dict[str, str], ...]] = {}
+    for raw_name, raw_spec in (manifest.get("connectors", {}) or {}).items():
+        entries = raw_spec.get("known_broken_versions", []) if isinstance(raw_spec, dict) else []
+        if not isinstance(entries, list):
+            raise ValueError(f"hook_contracts.json connector {raw_name!r} known_broken_versions must be a list")
+        parsed = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"hook_contracts.json connector {raw_name!r} has a malformed known-broken entry")
+            keys = ("exact", "min_inclusive", "max_exclusive", "reason", "issue")
+            item = {key: str(entry.get(key, "") or "") for key in keys}
+            has_version = item["exact"] or item["min_inclusive"] or item["max_exclusive"]
+            if not item["reason"] or not item["issue"] or not has_version:
+                raise ValueError(
+                    f"hook_contracts.json connector {raw_name!r} known-broken entry needs a version, reason and issue"
+                )
+            parsed.append(item)
+        if parsed:
+            out[normalize_connector(str(raw_name))] = tuple(parsed)
+    return out
+
+
+KNOWN_BROKEN_VERSIONS = _load_known_broken(HOOK_CONTRACT_MANIFEST)
+# Every connector the manifest registers, including not-gated ones (Kiro)
+# that publish no hook contract.
+REGISTERED_CONNECTORS = frozenset(
+    normalize_connector(str(name)) for name in (HOOK_CONTRACT_MANIFEST.get("connectors", {}) or {})
+)
+
+
+def stable_agent_version(connector: str, raw: str | None) -> str:
+    """Mirror Go stableRawAgentVersionForContract: drop Amp's relative
+    release-age suffix (" (released <date>, 3d ago)"), which changes as time
+    passes without a binary change. Other connectors keep the raw string."""
+
+    value = (raw or "").strip()
+    if normalize_connector(connector) != "amp":
+        return value
+    marker = value.find(" (released ")
+    if marker <= 0 or not value.endswith(")"):
+        return value
+    return value[:marker].strip()
+
+
 def normalize_agent_version(raw: str | None) -> str:
     raw = (raw or "").strip()
     if not raw:
@@ -371,6 +423,19 @@ def resolve_connector_contract(
             reason="could not normalize agent version",
             contract=None,
         )
+    for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
+        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
+            not entry["exact"]
+            and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
+        ):
+            return ConnectorCompatibility(
+                connector=name,
+                raw_version=raw,
+                normalized_version=normalized,
+                status=STATUS_UNKNOWN,
+                reason=f"agent version {normalized} is known broken: {entry['reason']} ({entry['issue']})",
+                contract=None,
+            )
     for contract in contracts:
         if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(
@@ -381,6 +446,22 @@ def resolve_connector_contract(
                 reason=f"matched hook contract {contract.contract_id}",
                 contract=contract,
             )
+    newest = _newest_contract_below(contracts, normalized)
+    if newest is not None:
+        contract, label = newest
+        return ConnectorCompatibility(
+            connector=name,
+            raw_version=raw,
+            normalized_version=normalized,
+            status=STATUS_KNOWN,
+            reason=(
+                f"{UNTESTED_NEWER_VERSION}: {normalized} is newer than the tested versions ({label}); "
+                f"no known problems; using hook contract {contract.contract_id}"
+            ),
+            contract=contract,
+            untested=True,
+            newest_tested=label,
+        )
     return ConnectorCompatibility(
         connector=name,
         raw_version=raw,
@@ -450,6 +531,47 @@ def connector_lock_contract_invariant(connector: str, entry: Any) -> str:
         ):
             return "location"
     return ""
+
+
+def _newest_contract_below(
+    contracts: tuple[ConnectorContract, ...],
+    normalized: str,
+) -> tuple[ConnectorContract, str] | None:
+    """Mirror Go newestContractBelow: the newest contract when ``normalized``
+    is newer than every bound of its version scheme (date-style builds with a
+    major >= 1000 compare only with date-style bounds)."""
+
+    def date_style(value: str) -> bool:
+        return _version_tuple(value)[0] >= 1000
+
+    scheme = date_style(normalized)
+    best: ConnectorContract | None = None
+    newest = label = ""
+    for contract in contracts:
+        bounds = 0
+        upper = upper_label = ""
+        for pin in contract.exact_agent_versions:
+            pin_norm = normalize_agent_version(pin)
+            if not pin_norm or date_style(pin_norm) != scheme:
+                continue
+            if _compare_version(normalized, pin_norm) <= 0:
+                return None
+            bounds += 1
+            if not upper or _compare_version(pin_norm, upper) > 0:
+                upper, upper_label = pin_norm, pin
+        if contract.min_agent_version or contract.max_agent_version:
+            edge = contract.max_agent_version or contract.min_agent_version
+            if date_style(edge) == scheme:
+                if not contract.max_agent_version or _compare_version(normalized, contract.max_agent_version) < 0:
+                    return None
+                bounds += 1
+                if not upper or _compare_version(contract.max_agent_version, upper) > 0:
+                    upper, upper_label = contract.max_agent_version, "<" + contract.max_agent_version
+        if bounds and (not newest or _compare_version(upper, newest) >= 0):
+            best, newest, label = contract, upper, upper_label
+    if best is None:
+        return None
+    return best, label
 
 
 def _contract_matches_agent_version(

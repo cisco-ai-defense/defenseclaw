@@ -682,6 +682,10 @@ install_uv() {
         && mkdir -p "${BIN_DIR}" \
         && cp "${tmp}/uv-${target}/uv" "${tmp}/uv-${target}/uvx" "${BIN_DIR}/"; then
         chmod 755 "${BIN_DIR}/uv" "${BIN_DIR}/uvx"
+        # `defenseclaw uninstall --binaries` removes the uv this installed
+        # while it still matches this record.
+        printf '%s  uv\n%s  uvx\n' "$(sha256_of "${BIN_DIR}/uv")" "$(sha256_of "${BIN_DIR}/uvx")" \
+            > "${BIN_DIR}/defenseclaw-uv.sha256" || true
         rm -rf "${tmp}"
         return 0
     fi

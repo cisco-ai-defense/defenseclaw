@@ -306,6 +306,7 @@ func runEnterpriseHooksEnumerateCycle(
 		SessionUIDs:             enterpriseHookSessionUIDs,
 		DiscoverSurfaces:        enterpriseHooksEnumerateDiscoverSurfaces,
 		DiscoverStaticSurfaces:  enterpriseHooksEnumerateDiscoverStaticSurfaces,
+		PreviousRefusedSurfaces: readEnterpriseHookRefusedSurfaces(current.DataDir, stderr),
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
 		State:                   state,
 		Logger: func(subject, reason string) {
@@ -507,6 +508,28 @@ func printEnterpriseHooksEnumerateReport(stdout, stderr io.Writer, report enterp
 	}
 	fmt.Fprintf(stderr, "[hook-enumerator] %d candidates, %d eligible, %d rows (%d new, %d deferred, %d revoked), manifest changed=%t\n",
 		report.Candidates, report.Eligible, report.Rows, report.New, report.Deferred, report.Revoked, report.Changed)
+}
+
+// readEnterpriseHookRefusedSurfaces reads the refusals the last cycle
+// published; a missing or unreadable file is none (with a warning when
+// unreadable).
+func readEnterpriseHookRefusedSurfaces(dataDir string, stderr io.Writer) []enterprisehooks.UnixRefusedSurface {
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), managed.HookGuardianRefusedSurfacesFile)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var doc struct {
+		Refused []enterprisehooks.UnixRefusedSurface `json:"refused_surfaces"`
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &doc)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not read the refused surfaces: %v\n", err)
+		return nil
+	}
+	return doc.Refused
 }
 
 // writeEnterpriseHookRefusedSurfaces publishes the users the gateway refuses

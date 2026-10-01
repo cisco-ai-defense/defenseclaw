@@ -73,7 +73,9 @@ type hookToolCallCapture struct {
 	meta      llmEventMeta
 	tool      string
 	arguments string
-	ok        bool
+	// invocationID names the pending call this request remembered.
+	invocationID string
+	ok           bool
 }
 
 type hookToolCallCaptureKey struct{}
@@ -82,12 +84,12 @@ func withHookToolCallCapture(ctx context.Context, capture *hookToolCallCapture) 
 	return context.WithValue(ctx, hookToolCallCaptureKey{}, capture)
 }
 
-func captureHookToolCall(ctx context.Context, meta llmEventMeta, tool, arguments string) {
+func captureHookToolCall(ctx context.Context, meta llmEventMeta, tool, arguments, invocationID string) {
 	if ctx == nil {
 		return
 	}
 	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil {
-		*capture = hookToolCallCapture{meta: meta, tool: tool, arguments: arguments, ok: true}
+		*capture = hookToolCallCapture{meta: meta, tool: tool, arguments: arguments, invocationID: invocationID, ok: true}
 	}
 }
 
@@ -115,10 +117,10 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 		meta.Guardrail = outcome
 		if outcome.Action == "block" {
 			meta.LifecycleOutcome = "blocked"
-			a.emitHookToolSpan(ctx, meta, capture.tool, capture.arguments, redaction.ForSinkReason(resp.Reason), nil)
+			a.emitHookToolSpanFor(ctx, meta, capture.tool, capture.invocationID, capture.arguments, redaction.ForSinkReason(resp.Reason), nil)
 			return
 		}
-		a.annotateHookToolInvocation(meta, capture.tool, outcome)
+		a.annotateHookToolInvocation(meta, capture.tool, capture.invocationID, outcome)
 		return
 	}
 	verdict := &ToolInspectVerdict{
@@ -133,11 +135,18 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 // annotateHookToolInvocation attaches an ask or alert decision to the tool
 // call this request remembered; the tool span emitted with the result
 // carries it.
-func (a *APIServer) annotateHookToolInvocation(meta llmEventMeta, tool string, outcome hookGuardrailOutcome) {
+func (a *APIServer) annotateHookToolInvocation(meta llmEventMeta, tool, invocationID string, outcome hookGuardrailOutcome) {
 	key := hookToolInvocationKey(meta, tool)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
-	if queue := a.hookToolInvocations[key]; len(queue) > 0 {
+	queue := a.hookToolInvocations[key]
+	for i := range queue {
+		if queue[i].id == invocationID {
+			queue[i].meta.Guardrail = outcome
+			return
+		}
+	}
+	if invocationID == "" && len(queue) > 0 {
 		queue[len(queue)-1].meta.Guardrail = outcome
 	}
 }

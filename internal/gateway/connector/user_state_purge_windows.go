@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -92,6 +93,13 @@ func stubHookScriptInRoot(dir *os.Root, name string) (bool, error) {
 		return false, nil
 	}
 	file, err := dir.OpenFile(name, os.O_RDWR, 0)
+	if errors.Is(err, fs.ErrPermission) && info.Mode().Perm()&0o200 == 0 {
+		// The read-only attribute, not the access list, refused the write:
+		// clear it (Chmod changes only that attribute on Windows) and retry.
+		if chmodErr := dir.Chmod(name, 0o600); chmodErr == nil {
+			file, err = dir.OpenFile(name, os.O_RDWR, 0)
+		}
+	}
 	if err != nil {
 		return false, err
 	}

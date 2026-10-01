@@ -747,7 +747,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 				reported(CorrelationTargetSession, ns, "session", "session_id"),
 				reported(CorrelationTargetTool, ns, "tool_use", "tool_use_id"),
 			)
-			return makeSpec(CorrelationProfileCopilotV1, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "the VS Code Local harness reports session_id and tool_use_id but no turn, agent or model IDs"))
+			return makeSpec(CorrelationProfileCopilotV1, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "the VS Code Local harness reports session_id and tool_use_id but no turn, agent or model IDs, and its tool_use_id is not an authoritative invocation ID (no failure events; stateful enforcement is detection-only)"))
 		default:
 			return CorrelationSpec{}, false
 		}

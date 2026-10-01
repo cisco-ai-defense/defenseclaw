@@ -567,10 +567,12 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
 		// A contract that only a different DefenseClaw release changed for the
-		// same agent version is refreshed by the Setup below, as at gateway boot.
+		// same agent version, or an agent update that still resolves to a
+		// contract, is refreshed by the Setup below, as at gateway boot.
 		if connector.HookContractCompatibilityDrifted(previous, current) && actionMode &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" &&
-			!connector.HookContractChangedByDefenseClawRelease(previous, current) {
+			!connector.HookContractChangedByDefenseClawRelease(previous, current) &&
+			!connector.HookContractAgentUpdateAdmitted(previous, current) {
 			return fmt.Errorf("connector reconcile %s: hook contract compatibility drift", name)
 		}
 	}

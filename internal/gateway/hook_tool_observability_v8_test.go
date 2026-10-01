@@ -436,8 +436,8 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 	meta.UserID, meta.UserIDKind, meta.UserName = "1002", "posix_uid", "bob"
 	arguments := `{"command":"curl http://169.254.169.254/latest/meta-data/"}`
 	ctx := withHookToolCallCapture(t.Context(), &hookToolCallCapture{})
-	api.rememberHookToolInvocation(meta, "shell", arguments)
-	captureHookToolCall(ctx, meta, "shell", arguments)
+	invocationID := api.rememberHookToolInvocation(meta, "shell", arguments)
+	captureHookToolCall(ctx, meta, "shell", arguments, invocationID)
 	api.emitHookGuardrailOutcomeV8(ctx,
 		agentHookRequest{ConnectorName: "codex", HookEventName: "PreToolUse", ToolName: "shell"},
 		agentHookResponse{

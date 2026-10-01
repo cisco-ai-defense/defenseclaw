@@ -147,6 +147,8 @@ _SETUP_RESTART_HANDLED_KEY = SETUP_RESTART_HANDLED_META_KEY
 # default restart a synchronous readiness gate, without changing restart
 # policy for unrelated setup subcommands that merely share the same config.
 _SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
+# The connectors this batch configured; the rest of the readiness roster are peers.
+_SETUP_BATCH_REQUIRED_KEY = "defenseclaw._setup_batch_required_connectors"
 _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 # Deferred per-connector audit records for a restarting bare batch. The result
 # callback emits these only after the gateway is healthy, so a fresh quickstart
@@ -4927,7 +4929,13 @@ def _check_connector_version_supported_for_setup(
         return True
 
     if compatibility.status == STATUS_KNOWN:
-        if emit:
+        if emit and compatibility.untested:
+            ux.ok(
+                f"{label}: version {version_display} is an untested newer version "
+                f"(tested versions end at {compatibility.newest_tested.lstrip('<')}); "
+                f"no known problems, using {contract}."
+            )
+        elif emit:
             ux.ok(f"{label}: version {version_display} is supported by {contract}.")
         return True
 
@@ -10185,7 +10193,17 @@ def _apply_setup_batch(
     # were already current. Unrelated setup subcommands never set this marker.
     if restart:
         ctx.meta[_SETUP_BATCH_ROLLBACK_KEY] = setup_snapshot
-        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(sorted(set(applied)))
+        readiness_targets = set(applied)
+        if preserve_global_settings:
+            # Adding to an existing roster: the gateway republishes the whole
+            # roster, so verify all of it. Waiting only for the added
+            # connectors read the existing ones as unexpected lock peers and
+            # failed `setup --add-detected` (and `make all`).
+            readiness_targets.update(
+                normalize_connector(str(name)) for name in app.cfg.active_connectors() if str(name).strip()
+            )
+        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(sorted(readiness_targets))
+        ctx.meta[_SETUP_BATCH_REQUIRED_KEY] = tuple(sorted(set(applied)))
         ctx.meta[_SETUP_BATCH_AUDIT_KEY] = tuple(sorted(deferred_audits))
     else:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
@@ -13142,9 +13160,19 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
         compatibility = resolve_connector_contract(normalize_connector(connector), raw_version)
     except Exception:  # noqa: BLE001 - diagnostics must not mask the gate result.
         return f"protected lock {invariant} is invalid"
+    version = raw_version or "an unreported version"
+    if (
+        compatibility.untested
+        and isinstance(entry, dict)
+        and entry.get("compatibility_status") == STATUS_UNKNOWN
+    ):
+        # A lock written before untested newer versions were accepted.
+        return (
+            f"the protected lock predates this build's support for {connector} {version} "
+            f"({compatibility.reason}); run `defenseclaw-gateway restart` to refresh it"
+        )
     if compatibility.status == STATUS_NOT_GATED or (compatibility.contract and compatibility.supported):
         return f"protected lock {invariant} is invalid"
-    version = raw_version or "an unreported version"
     return (
         f"no reviewed hook contract covers {connector} {version}; "
         f"the protected lock records that correctly. Pin a contract for this version in "
@@ -13800,6 +13828,48 @@ def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
     return resolved
 
 
+def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
+    """Name an installed gateway the lifecycle custody check refused, or "".
+
+    The lifecycle reported such a binary as "binary not found" with a build
+    hint, although the gateway was installed and only its ACL or mode was
+    refused.
+    """
+    from defenseclaw.gateway import GATEWAY_BIN_NAME, canonical_install_path, packaged_windows_install_root
+
+    if os.name == "nt" and packaged_windows_install_root():
+        return ""
+    raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+    found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
+    if (not found or not os.path.isabs(found)) and os.name == "nt":
+        # The per-user installer's folder, which the lifecycle also falls
+        # back to.
+        canonical = canonical_install_path()
+        found = canonical if os.path.isfile(canonical) else ""
+    if not found or not os.path.isabs(found):
+        return ""
+    found = str(Path(found).resolve())
+    if os.name != "nt":
+        from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path, unsafe_gateway_remedy
+
+        try:
+            trusted_posix_executable_path(found)
+        except UnsafePathError as exc:
+            return f"refusing to run {found}: {unsafe_gateway_remedy(exc)}"
+        return ""
+    from defenseclaw.file_permissions import windows_acl_write_error
+
+    for candidate in (found, os.path.dirname(found)):
+        problem = windows_acl_write_error(candidate)
+        if problem is not None:
+            return (
+                f"refusing to run {found}: {candidate}: {problem}; only this account and SYSTEM may "
+                "write the gateway and its folder. Run the DefenseClaw installer again, which restricts "
+                "the folder, or remove the other accounts' write access"
+            )
+    return ""
+
+
 def _restart_defense_gateway(
     data_dir: str,
     *,
@@ -13865,6 +13935,11 @@ def _restart_defense_gateway(
         else _gateway_lifecycle_executable(search_path=search_path)
     )
     if not executable:
+        refused = "" if lifecycle_executable else _refused_gateway_lifecycle_candidate(search_path)
+        if refused:
+            click.echo(" ✗ (untrusted gateway binary)")
+            click.echo(f"    {refused}")
+            return False
         click.echo(" ✗ (binary not found)")
         click.echo("    Build with: make gateway")
         return False
@@ -14267,10 +14342,19 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             click.echo("  Starting/restarting defenseclaw-gateway and verifying connector registration…")
         else:
             click.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
+        required_raw = ctx.meta.get(_SETUP_BATCH_REQUIRED_KEY)
+        focus = [
+            name
+            for name in (
+                normalize_connector(raw) for raw in (required_raw if isinstance(required_raw, (list, tuple)) else ())
+                if isinstance(raw, str) and raw
+            )
+            if name in batch_targets
+        ] or batch_targets
         primary = (
             normalize_connector(app.cfg.active_connector())
-            if hasattr(app.cfg, "active_connector") and normalize_connector(app.cfg.active_connector()) in batch_targets
-            else batch_targets[0]
+            if hasattr(app.cfg, "active_connector") and normalize_connector(app.cfg.active_connector()) in focus
+            else focus[0]
         )
         try:
             _restart_services(
@@ -14296,7 +14380,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             raise
         if "omnigent" in batch_targets:
             click.echo(
-                f"  ✓ Configured {len(batch_targets)} connector(s); DefenseClaw gateway roster and "
+                f"  ✓ Configured {len(focus)} connector(s); DefenseClaw gateway roster and "
                 "hook-contract evidence are ready"
             )
             ux.warn(
@@ -14305,7 +14389,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             )
         else:
             click.echo(
-                f"  ✓ Configured {len(batch_targets)} connector(s); runtime roster and hook-contract evidence are ready"
+                f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
             )
         return
 

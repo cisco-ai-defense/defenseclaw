@@ -502,6 +502,17 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
   root or as that user. A managed Windows host refuses `--live`; see
   [Windows](/docs/enterprise/windows#inspect-machine-policy).
 
+## Usage telemetry
+
+Machine policy registers DefenseClaw's hooks only. It does not turn on an
+agent's own OpenTelemetry export, so an agent attached this way sends no
+usage telemetry of its own (token counts, cost, session and request
+metrics). Its prompts and tool calls are still inspected and audited, and
+DefenseClaw's own spans, logs and metrics for them reach your
+[observability destinations](/docs/enterprise/configuration). To collect
+an agent's usage telemetry as well, configure its OpenTelemetry export with
+the vendor's own managed settings.
+
 ## Vendor limits
 
 These come from the agents themselves:

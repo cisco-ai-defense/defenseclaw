@@ -208,6 +208,18 @@ ACTION_INSPECT_TOOL_CONFIRM: Final[str] = "inspect-tool-confirm"
 ACTION_INSPECT_TOOL_BLOCK: Final[str] = "inspect-tool-block"
 ACTION_INSPECT_TOOL_ALERT: Final[str] = "inspect-tool-alert"
 ACTION_INSPECT_TOOL_ALLOW: Final[str] = "inspect-tool-allow"
+ACTION_INSPECT_REQUEST_CONFIRM: Final[str] = "inspect-request-confirm"
+ACTION_INSPECT_REQUEST_BLOCK: Final[str] = "inspect-request-block"
+ACTION_INSPECT_REQUEST_ALERT: Final[str] = "inspect-request-alert"
+ACTION_INSPECT_REQUEST_ALLOW: Final[str] = "inspect-request-allow"
+ACTION_INSPECT_RESPONSE_CONFIRM: Final[str] = "inspect-response-confirm"
+ACTION_INSPECT_RESPONSE_BLOCK: Final[str] = "inspect-response-block"
+ACTION_INSPECT_RESPONSE_ALERT: Final[str] = "inspect-response-alert"
+ACTION_INSPECT_RESPONSE_ALLOW: Final[str] = "inspect-response-allow"
+ACTION_INSPECT_TOOL_RESPONSE_CONFIRM: Final[str] = "inspect-tool-response-confirm"
+ACTION_INSPECT_TOOL_RESPONSE_BLOCK: Final[str] = "inspect-tool-response-block"
+ACTION_INSPECT_TOOL_RESPONSE_ALERT: Final[str] = "inspect-tool-response-alert"
+ACTION_INSPECT_TOOL_RESPONSE_ALLOW: Final[str] = "inspect-tool-response-allow"
 ACTION_INSPECT_REVEAL: Final[str] = "inspect-reveal"
 
 # Setup, operator, API, and sink instrumentation.
@@ -409,6 +421,18 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INSPECT_TOOL_BLOCK,
     ACTION_INSPECT_TOOL_ALERT,
     ACTION_INSPECT_TOOL_ALLOW,
+    ACTION_INSPECT_REQUEST_CONFIRM,
+    ACTION_INSPECT_REQUEST_BLOCK,
+    ACTION_INSPECT_REQUEST_ALERT,
+    ACTION_INSPECT_REQUEST_ALLOW,
+    ACTION_INSPECT_RESPONSE_CONFIRM,
+    ACTION_INSPECT_RESPONSE_BLOCK,
+    ACTION_INSPECT_RESPONSE_ALERT,
+    ACTION_INSPECT_RESPONSE_ALLOW,
+    ACTION_INSPECT_TOOL_RESPONSE_CONFIRM,
+    ACTION_INSPECT_TOOL_RESPONSE_BLOCK,
+    ACTION_INSPECT_TOOL_RESPONSE_ALERT,
+    ACTION_INSPECT_TOOL_RESPONSE_ALLOW,
     ACTION_INSPECT_REVEAL,
     ACTION_API_AUTH_FAILURE,
     ACTION_API_CONFIG_PATCH,

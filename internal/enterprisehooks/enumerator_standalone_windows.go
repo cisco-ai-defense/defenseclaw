@@ -168,7 +168,10 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		// why; it is reported once the row's own fate is known.
 		var notFollowed, notFollowedReason string
 		if rowContext.sessionActive {
-			discovered, _ := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+			cliVersion, _ := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+			// The row follows its app and extension surfaces too, and a
+			// rejected surface next to the CLI is reported.
+			discovered := windowsStandaloneSurfaceVersion(row, logf, rowContext, cliVersion)
 			if discovered != "" && discovered != prev.AgentVersion {
 				ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, discovered)
 				if ok {
@@ -207,11 +210,10 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		return emit
 	}
 	version, reason := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
-	if version == "" {
-		// A user with only the desktop app or an editor extension is
-		// enrolled at its admitted engine version.
-		version = windowsStandaloneSurfaceVersion(row, logf, rowContext)
-	}
+	// A user with the desktop app or an editor extension is enrolled at the
+	// oldest admitted engine version (also without a CLI), and a rejected
+	// surface next to the CLI is reported.
+	version = windowsStandaloneSurfaceVersion(row, logf, rowContext, version)
 	if version == "" {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
 		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path != "" {

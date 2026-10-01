@@ -865,8 +865,8 @@ class TestLockContractFailureDetail:
     def test_ungated_version_names_the_version_and_the_fix(self) -> None:
         entry = {
             "connector": "devin",
-            "raw_agent_version": "9999.1.1",
-            "normalized_agent_version": "9999.1.1",
+            "raw_agent_version": "3000.0.1",
+            "normalized_agent_version": "3000.0.1",
             "compatibility_status": "unknown",
             "compatibility_reason": "no hook contract matches normalized agent version",
             "hook_fail_mode": "open",
@@ -874,10 +874,14 @@ class TestLockContractFailureDetail:
         invariant = connector_lock_contract_invariant("devin", entry)
         assert invariant, "precondition: an ungated version must fail the invariant"
         detail = cmd_setup._lock_contract_failure_detail("devin", entry, invariant)
-        assert "9999.1.1" in detail
+        assert "3000.0.1" in detail
         assert "no reviewed hook contract" in detail
         assert "hook_contracts.json" in detail or "active roster" in detail
         assert "invalid" not in detail
+        # A lock from before untested newer versions were accepted.
+        newer = {**entry, "raw_agent_version": "9999.1.1", "normalized_agent_version": "9999.1.1"}
+        detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)
+        assert "predates" in detail and "defenseclaw-gateway restart" in detail
 
     def test_malformed_entry_still_reads_as_invalid(self) -> None:
         # A lock whose recorded connector does not match, or whose fields are
@@ -913,8 +917,8 @@ class TestUnconvergeablePeersAreSkipped:
     def _ungated_entry(self, connector: str) -> dict:
         return {
             "connector": connector,
-            "raw_agent_version": "9999.1.1",
-            "normalized_agent_version": "9999.1.1",
+            "raw_agent_version": "3000.0.1",
+            "normalized_agent_version": "3000.0.1",
             "compatibility_status": "unknown",
             "hook_fail_mode": "open",
         }

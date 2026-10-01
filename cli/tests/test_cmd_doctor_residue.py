@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import legacy_connector
+from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import (
     _CONNECTOR_RESIDUE_ARTIFACTS,
     _check_connector_residue,
@@ -178,8 +179,8 @@ class FixConnectorResidueTests(unittest.TestCase):
             cfg = self._cfg_with_residue(
                 data_dir, "codex_backup.json", "claudecode_backup.json",
             )
-            with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-                 patch("subprocess.run") as run_mock:
+            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="/usr/bin/defenseclaw-gateway"), \
+                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = ""
                 run_mock.return_value.stderr = ""
@@ -204,8 +205,8 @@ class FixConnectorResidueTests(unittest.TestCase):
                 with open(marker, "w", encoding="utf-8") as fh:
                     fh.write("{}")
             cfg = self._cfg_with_residue(data_dir)
-            with patch("shutil.which", return_value="defenseclaw-gateway.exe"), \
-                 patch("subprocess.run") as run_mock:
+            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="defenseclaw-gateway.exe"), \
+                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = ""
                 run_mock.return_value.stderr = ""
@@ -230,8 +231,8 @@ class FixConnectorResidueTests(unittest.TestCase):
             with open(managed, "w") as fh:
                 fh.write("{}")
             cfg = self._cfg_with_residue(data_dir)
-            with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-                 patch("subprocess.run") as run_mock:
+            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="/usr/bin/defenseclaw-gateway"), \
+                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = ""
                 run_mock.return_value.stderr = ""
@@ -244,18 +245,18 @@ class FixConnectorResidueTests(unittest.TestCase):
     def test_warns_when_gateway_binary_missing(self):
         with tempfile.TemporaryDirectory() as data_dir:
             cfg = self._cfg_with_residue(data_dir, "codex_backup.json")
-            with patch("shutil.which", return_value=None):
+            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value=None):
                 tag, detail = _fix_connector_residue(cfg, assume_yes=True)
         self.assertEqual(tag, "warn")
-        self.assertIn("not on PATH", detail)
+        self.assertIn("no verified defenseclaw-gateway", detail)
 
     def test_partial_success_when_one_teardown_fails(self):
         with tempfile.TemporaryDirectory() as data_dir:
             cfg = self._cfg_with_residue(
                 data_dir, "codex_backup.json", "claudecode_backup.json",
             )
-            with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-                 patch("subprocess.run") as run_mock:
+            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="/usr/bin/defenseclaw-gateway"), \
+                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
                 def side_effect(args, **_kwargs):
                     rv = MagicMock()
                     name = args[args.index("--connector") + 1]
@@ -274,7 +275,7 @@ class FixConnectorResidueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             cfg = self._cfg_with_residue(data_dir, "codex_backup.json")
             with patch("click.confirm", return_value=False), \
-                 patch("subprocess.run") as run_mock:
+                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
                 tag, detail = _fix_connector_residue(cfg, assume_yes=False)
         self.assertEqual(tag, "skip")
         self.assertIn("declined", detail)
@@ -332,7 +333,7 @@ class MultiConnectorResidueTests(unittest.TestCase):
             cfg = self._cfg_multi(data_dir, ["hermes", "codex"])
             cfg.active_connector = lambda: "hermes"
             cfg.guardrail = SimpleNamespace(connector="hermes")
-            with patch("subprocess.run") as run_mock:
+            with patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
                 tag, detail = _fix_connector_residue(cfg, assume_yes=True)
         self.assertEqual(tag, "skip")
         self.assertIn("no inactive-connector residue", detail)

@@ -41,6 +41,8 @@ func daemonStartDir(executable, _ string) string {
 	return filepath.Dir(filepath.Clean(executable))
 }
 
+func daemonExecPath(executable string) string { return executable }
+
 func processExecutableWindows(pid int) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {

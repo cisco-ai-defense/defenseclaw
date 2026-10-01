@@ -13,6 +13,7 @@ package connector
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -127,5 +128,35 @@ func TestRestoreManagedFileBackupsPutsBackWhatSetupFound(t *testing.T) {
 	}
 	if _, err := os.Lstat(managedFileBackupPath(dataDir, "antigravity", "hooks.json")); !os.IsNotExist(err) {
 		t.Fatalf("a restored backup record must be consumed: %v", err)
+	}
+}
+
+// A restore the target's directory refuses names the target and the cause
+// once, not the rename twice with the staged temp file (#1032).
+func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test user cannot write")
+	}
+	dataDir, dir := t.TempDir(), t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(dataDir, "openhands", "config", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateManagedFileBackupPostHash(dataDir, "openhands", "config", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	_, err := restoreManagedFileBackupIfUnchanged(dataDir, "openhands", "config", target)
+	if got, want := restoreBackupFailure(err), "could not restore "+target+": permission denied"; got != want {
+		t.Fatalf("restore failure = %q, want %q", got, want)
 	}
 }

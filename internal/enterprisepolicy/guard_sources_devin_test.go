@@ -11,6 +11,7 @@
 package enterprisepolicy
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,5 +40,16 @@ func TestGuardScansDevinPluginHooks(t *testing.T) {
 	result, err := CleanUserForeignHooks(req, time.Now())
 	if err != nil || len(result.Removed) != 0 || len(result.Reported) != 2 || readFile(t, hooks) == "" {
 		t.Fatalf("Devin plugin hooks are reported, never removed: %+v %v", result, err)
+	}
+
+	// Every recorded path counts against the scan budget, missing ones too.
+	missing := filepath.VolumeName(req.Home) + string(filepath.Separator) + "m"
+	var many []string
+	for i := 0; i <= guardScanReferenceLimit; i++ {
+		many = append(many, jsonString(filepath.Join(missing, fmt.Sprint(i))))
+	}
+	writeFile(t, filepath.Join(store, "lock.json"), `{"paths": [`+strings.Join(many, ",")+`]}`)
+	if decision := EvaluateForeignHooks(req); !decision.Incomplete || !decision.Deny {
+		t.Fatalf("a record past the scan budget must stop the scan: %+v", decision.Findings)
 	}
 }

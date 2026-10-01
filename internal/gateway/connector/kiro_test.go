@@ -834,10 +834,16 @@ func TestContainsHookScriptWalksEventKeyedHookMaps(t *testing.T) {
 	}
 }
 
-// decodeKiroWindowsBridge returns the PowerShell script inside an encoded
-// system PowerShell bridge command.
+// decodeKiroWindowsBridge returns the PowerShell script inside a Kiro
+// Windows command: `<system>\cmd.exe /d /c <encoded system PowerShell
+// bridge>`, a line feed and `exit $LASTEXITCODE`.
 func decodeKiroWindowsBridge(t *testing.T, command string) string {
 	t.Helper()
+	prefix, suffix := windowsSystemCmdExe()+" /d /c ", "\nexit $LASTEXITCODE"
+	if !strings.HasPrefix(command, prefix) || !strings.HasSuffix(command, suffix) {
+		t.Fatalf("%q is not cmd.exe running the bridge, then exit $LASTEXITCODE on its own line", command)
+	}
+	command = strings.TrimSuffix(strings.TrimPrefix(command, prefix), suffix)
 	const flag = " -EncodedCommand "
 	index := strings.LastIndex(command, flag)
 	if index < 0 || !strings.HasPrefix(command, windowsSystemPowerShellExe()+" ") {
@@ -858,8 +864,9 @@ func decodeKiroWindowsBridge(t *testing.T, command string) string {
 // `& '<launcher>' hook --connector kiro ...`: cmd.exe rejects the call
 // operator (exit 1) and PowerShell does not wait for the GUI-subsystem
 // release launcher (exit 0), so Kiro went ahead after a block. Both Kiro
-// commands are now an encoded system PowerShell script, which starts the
-// launcher, waits for it and exits with its status.
+// commands now start cmd.exe with an encoded system PowerShell script, which
+// starts the launcher, waits for it and exits with its status
+// (decodeKiroWindowsBridge checks the cmd.exe wrapper).
 func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 	launcher := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	t.Cleanup(PinNativeHookExecutableForTest(launcher))
@@ -880,6 +887,10 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 		}
 		if runtime.GOOS == "windows" && !kiroCommandOwned(command, hookInvocationCommandFor("windows", "kiro", "")) {
 			t.Fatalf("surface %q: DefenseClaw does not recognize its own command", surface)
+		}
+		// The bare bridge earlier builds wrote stays owned, so Setup replaces it.
+		if runtime.GOOS == "windows" && !kiroCommandOwned(windowsKiroPowerShellBridgeForBinary(launcher, surface), hookInvocationCommandFor("windows", "kiro", "")) {
+			t.Fatalf("surface %q: DefenseClaw does not recognize the earlier bare bridge", surface)
 		}
 	}
 	// Other connectors keep their commands.

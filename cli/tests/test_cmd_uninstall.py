@@ -98,6 +98,34 @@ class BuildPlanTests(unittest.TestCase):
         self.assertFalse(plan.remove_plugin)
         self.assertNotIn("openclaw", plan.connectors)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX launcher links")
+    def test_full_uninstall_removes_launchers_into_data_dir_and_lists_installer_uv(self):
+        bin_dir = Path(self._tmp.name) / "bin"
+        venv_bin = Path(self._tmp.name) / ".venv" / "bin"
+        bin_dir.mkdir()
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "defenseclaw").write_text("cli", encoding="utf-8")
+        (bin_dir / "defenseclaw").symlink_to(venv_bin / "defenseclaw")
+        (bin_dir / "defenseclaw-gateway").write_text("gateway", encoding="utf-8")
+        (bin_dir / "uv").write_bytes(b"uv")
+        (bin_dir / "uvx").write_bytes(b"updated by the user")
+        record = bin_dir / "defenseclaw-uv.sha256"
+        record.write_text(
+            f"{hashlib.sha256(b'uv').hexdigest()}  uv\n{hashlib.sha256(b'uvx').hexdigest()}  uvx\n",
+            encoding="utf-8",
+        )
+        owned = (str(bin_dir), (str(bin_dir / "defenseclaw"), str(bin_dir / "defenseclaw-gateway")))
+        with patch.object(cmd_uninstall, "_owned_binary_targets", return_value=owned):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True, binaries=False, revert_openclaw=False, remove_plugin=False, platform_name="linux"
+            )
+
+        self.assertEqual(plan.binary_targets[2:], (str(bin_dir / "uv"), str(record)))
+        self.assertEqual(plan.data_bound_launchers, (str(bin_dir / "defenseclaw"),))
+        cmd_uninstall._remove_data_bound_launchers(plan)
+        self.assertFalse(os.path.lexists(bin_dir / "defenseclaw"))
+        self.assertTrue((bin_dir / "defenseclaw-gateway").is_file())
+
     def test_non_windows_gateway_path_preserves_path_resolution(self):
         with patch.object(cmd_uninstall.shutil, "which", return_value="/usr/local/bin/defenseclaw-gateway"):
             plan = cmd_uninstall._build_plan(

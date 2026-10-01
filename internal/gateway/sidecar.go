@@ -3569,6 +3569,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
+	if contractResolution.UntestedVersion {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version %q: %s\n", conn.Name(), agentVersion, contractResolution.Reason)
+	}
 	singleRollback := multiConnectorSetupTransaction{}
 	if !guardianManagedLifecycle {
 		if previous := previousLock; previous.Connector != "" {
@@ -5453,6 +5456,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version %q is not covered by a known hook contract; continuing in observe mode: %s\n", conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
+	if contractResolution.UntestedVersion {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version %q: %s\n", conn.Name(), opts.AgentVersion, contractResolution.Reason)
+	}
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
@@ -6458,10 +6464,12 @@ func guardrailFailureDetails(err error) map[string]interface{} {
 	}
 }
 
-// hookContractDriftAdmission refuses upstream agent drift. A contract change
-// that only a different DefenseClaw release introduced for the same agent
-// version is expected after an upgrade or rollback: it is logged and admitted,
-// and the Setup that follows refreshes the lock.
+// hookContractDriftAdmission refuses upstream agent drift to a version with
+// no compatible hook contract. A contract change that only a different
+// DefenseClaw release introduced for the same agent version is expected after
+// an upgrade or rollback, and an agent update to a version that still
+// resolves to a contract is routine: both are logged and admitted, and the
+// Setup that follows refreshes the lock.
 func hookContractDriftAdmission(name string, previous, current connector.HookContractLockEntry) error {
 	if connector.HookContractChangedByDefenseClawRelease(previous, current) {
 		writer := "an earlier DefenseClaw release"
@@ -6470,6 +6478,11 @@ func hookContractDriftAdmission(name string, previous, current connector.HookCon
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook contract %s (written by %s) is now %s in DefenseClaw %s; agent version %q is unchanged, refreshing the lock\n",
 			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
+		return nil
+	}
+	if connector.HookContractAgentUpdateAdmitted(previous, current) {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version changed from %q to %q; hook contract %s is compatible (%s), refreshing the lock\n",
+			name, previous.RawAgentVersion, current.RawAgentVersion, current.ContractID, current.CompatibilityReason)
 		return nil
 	}
 	return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, name, previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)

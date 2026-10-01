@@ -95,17 +95,20 @@ type InstallOptions struct {
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
 type InstallResult struct {
-	Connector                  string   `json:"connector"`
-	UserHome                   string   `json:"user_home"`
-	DataDir                    string   `json:"data_dir"`
-	HookConfigPaths            []string `json:"hook_config_paths,omitempty"`
-	HookScripts                []string `json:"hook_scripts,omitempty"`
-	BackupFiles                []string `json:"backup_files,omitempty"`
-	CreatedDirs                []string `json:"created_dirs,omitempty"`
-	AgentVersion               string   `json:"agent_version,omitempty"`
-	HookContractID             string   `json:"hook_contract_id,omitempty"`
-	HookContractLockUpdatedAt  string   `json:"hook_contract_lock_updated_at,omitempty"`
-	HookContractEntryUpdatedAt string   `json:"hook_contract_entry_updated_at,omitempty"`
+	Connector       string   `json:"connector"`
+	UserHome        string   `json:"user_home"`
+	DataDir         string   `json:"data_dir"`
+	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
+	HookScripts     []string `json:"hook_scripts,omitempty"`
+	BackupFiles     []string `json:"backup_files,omitempty"`
+	CreatedDirs     []string `json:"created_dirs,omitempty"`
+	AgentVersion    string   `json:"agent_version,omitempty"`
+	HookContractID  string   `json:"hook_contract_id,omitempty"`
+	// AgentVersionStatus is "untested newer version" when the agent is newer
+	// than every tested range and runs on the newest contract.
+	AgentVersionStatus         string `json:"agent_version_status,omitempty"`
+	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at,omitempty"`
+	HookContractEntryUpdatedAt string `json:"hook_contract_entry_updated_at,omitempty"`
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
@@ -211,7 +214,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
-		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
+		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
 		setupOpts.HookContractID = resolution.Contract.ContractID
 	}
 
@@ -304,6 +307,8 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				CreatedDirs:     sortedUnique(footprint.CreatedDirs),
 				AgentVersion:    lock.RawAgentVersion,
 				HookContractID:  lock.ContractID,
+
+				AgentVersionStatus: agentVersionStatus(conn.Name(), lock.RawAgentVersion),
 			}
 			return nil
 		})
@@ -406,7 +411,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
-		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
+		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
 		setupOpts.HookContractID = resolution.Contract.ContractID
 	}
 
@@ -564,6 +569,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				CreatedDirs:     sortedUnique(footprint.CreatedDirs),
 				AgentVersion:    setupOpts.AgentVersion,
 				HookContractID:  lockEntry.ContractID,
+
+				AgentVersionStatus: agentVersionStatus(conn.Name(), setupOpts.AgentVersion),
 			}
 			return nil
 		})
@@ -1044,7 +1051,7 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if !strings.EqualFold(strings.TrimSpace(mode), "action") || os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
 		return nil
 	}
-	resolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
+	resolution := resolveHookContract(conn.Name(), opts.AgentVersion)
 	if connector.HookContractNeedsActionOverride(resolution) {
 		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
 	}
@@ -1146,4 +1153,24 @@ func sortedUnique(vals []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// resolveHookContract resolves an agent version for this process's
+// enterprise profile. The standalone profile treats a version newer than
+// every tested range as compatible (untested newer version); Secure Client
+// keeps exact-range gating even in a process that has not loaded config.
+func resolveHookContract(connectorName, agentVersion string) connector.HookContractResolution {
+	if standaloneProfileProcess() {
+		return connector.ResolveHookContract(connectorName, agentVersion)
+	}
+	return connector.ResolveHookContractStrict(connectorName, agentVersion)
+}
+
+// agentVersionStatus labels an agent version newer than every tested range
+// for status and verify output.
+func agentVersionStatus(connectorName, agentVersion string) string {
+	if resolveHookContract(connectorName, agentVersion).UntestedVersion {
+		return connector.UntestedNewerVersionReasonPrefix
+	}
+	return ""
 }

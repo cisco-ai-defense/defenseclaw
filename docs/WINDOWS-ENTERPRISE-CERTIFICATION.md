@@ -251,7 +251,9 @@ and prints JSON, but creates no user, service, directory, or policy:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -276,7 +278,9 @@ From an elevated 64-bit PowerShell 7 window:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -298,7 +302,9 @@ supplying credentials:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -409,7 +415,9 @@ second build:
   -BrokerBinary .\v1\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\v1\defenseclaw-gateway.exe `
+  -ACPBinary .\v1\defenseclaw-acp.exe `
   -HookBinary .\v1\defenseclaw-hook.exe `
+  -SensorHelperBinary .\v1\defenseclaw-sensor-helper.exe `
   -CLIBinary .\v1\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -419,7 +427,9 @@ second build:
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
   -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
+  -UpgradeACPBinary .\v2\defenseclaw-acp.exe `
   -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
+  -UpgradeSensorHelperBinary .\v2\defenseclaw-sensor-helper.exe `
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `

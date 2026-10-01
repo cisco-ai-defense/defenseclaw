@@ -128,10 +128,13 @@ func (e *Env) WriteSecret(ctx context.Context, name string, value []byte) error 
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return errors.New("DefenseClaw enterprise is not installed (no service account)")
+	// Before the first install there is no service account: the credential
+	// is staged root-only, and the install gives the gateway its access
+	// (settleSecretModes), so a config that references it installs at once.
+	mode, owner, dirMode, dirOwner := os.FileMode(0o600), rootOwner(), os.FileMode(0o700), rootOwner()
+	if ok {
+		mode, owner, dirMode, dirOwner = e.secretModes(ctx, account)
 	}
-	mode, owner, dirMode, dirOwner := e.secretModes(ctx, account)
 	if err := e.ensureDir(e.P(e.Layout.SecretsDir), dirMode, dirOwner); err != nil {
 		return err
 	}
@@ -152,6 +155,23 @@ func (e *Env) RemoveSecret(name string) error {
 		}
 	}
 	return removeFile(filepath.Join(e.P(e.Layout.SecretsDir), name))
+}
+
+// settleSecretModes gives every stored credential the mode and owner the
+// gateway reads it with; one staged before the first install is root-only
+// until then.
+func (e *Env) settleSecretModes(ctx context.Context, account Account) error {
+	names, _, err := e.listSecrets()
+	if err != nil {
+		return err
+	}
+	mode, owner, _, _ := e.secretModes(ctx, account)
+	for _, name := range names {
+		if err := e.fixMetadata(filepath.Join(e.P(e.Layout.SecretsDir), name), mode, owner); err != nil {
+			return fmt.Errorf("set the access of credential %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func (e *Env) secretModes(ctx context.Context, account Account) (os.FileMode, fileOwner, os.FileMode, fileOwner) {

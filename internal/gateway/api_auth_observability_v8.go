@@ -53,7 +53,9 @@ func (a *APIServer) emitAPIAuthenticationFailureV8(ctx context.Context, reason s
 // presented with another identity); nothing an unauthenticated caller sent
 // is recorded as its identity.
 type apiAuthenticationFailureFacts struct {
-	Principal   string // "uid:1001", "sid:S-1-5-21-..."
+	Principal string // "uid:1001", "sid:S-1-5-21-..."
+	// Caller is the verified caller, for the row's user fields.
+	Caller      auditCaller
 	AuthnMethod string
 	Connector   string
 	Route       string
@@ -65,6 +67,10 @@ func apiAuthenticationFailureFactsFor(ctx context.Context, route, connectorName 
 	facts := apiAuthenticationFailureFacts{Route: route, Connector: connectorName}
 	if caller, ok := verifiedAuditCaller(ctx); ok {
 		facts.Principal = caller.principalRef()
+		// Like the scan rows, Secure Client rows keep their existing shape.
+		if !ManagedEnterpriseActive() {
+			facts.Caller = caller
+		}
 		if _, peer := managedHookPeerFromContext(ctx); peer {
 			facts.AuthnMethod = "hook_socket_peer"
 		} else {
@@ -236,6 +242,9 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 			DefenseClawAdminPrincipalRef:          principal,
 			DefenseClawAdminAuthnMethod:           authnMethod,
 			DefenseClawAdminTargetRef:             facts.targetRef(),
+			UserID:                                proxyV8OptionalID(facts.Caller.ID),
+			DefenseClawUserIDKind:                 v8UserIDKind(facts.Caller.IDKind),
+			DefenseClawUserName:                   proxyV8OptionalID(facts.Caller.Name),
 			ConditionAdminPrincipalKnown:          principal.IsPresent(),
 			MandatoryProtectedBoundaryAuthFailure: true,
 		})

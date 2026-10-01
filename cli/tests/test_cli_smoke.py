@@ -527,7 +527,7 @@ class CliSmokeTests(unittest.TestCase):
                 patch.object(Logger, "from_config", return_value=Logger.no_runtime()),
                 patch("defenseclaw.observability.v8_writer._validate_candidate"),
             ):
-                runner.invoke(cli, ["init", "--skip-install"])
+                runner.invoke(cli, ["init", "--skip-install", "--no-start-gateway"])
                 result = runner.invoke(
                     cli,
                     ["setup", "splunk", "--o11y", "--access-token", "test-tok", "--realm", "us1", "--non-interactive"],

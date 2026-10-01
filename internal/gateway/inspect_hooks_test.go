@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +53,29 @@ func TestInspectRequest_MethodNotAllowed(t *testing.T) {
 	if w.Result().StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
 	}
+}
+
+// TestInspectRequestAuditRowNamesTheVerifiedCaller (#921): a direct
+// /api/v1/inspect/request call writes a registered, attributed audit row.
+func TestInspectRequestAuditRowNamesTheVerifiedCaller(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	ctx := context.WithValue(withServiceAccountGateway(context.Background()), verifiedUserScopedIdentityContextKey{}, "1001")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/request",
+		bytes.NewBufferString(`{"content":"What is the capital of France?"}`)).WithContext(ctx)
+	api.handleInspectRequest(httptest.NewRecorder(), req)
+	events, err := api.store.ListEvents(20)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, event := range events {
+		if event.Action == "inspect-request-allow" {
+			if event.Structured["user.id"] != "1001" || event.Structured["route"] != "/api/v1/inspect/request" {
+				t.Fatalf("inspect-request row = %+v", event.Structured)
+			}
+			return
+		}
+	}
+	t.Fatalf("no inspect-request-allow row in %d events", len(events))
 }
 
 func TestInspectRequest_EmptyContent(t *testing.T) {

@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // An uninstall with purge removes an account's per-user state as
@@ -48,6 +50,20 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		t.Fatalf("create junction: %v: %s", err, output)
 	}
 	script := filepath.Join(dataDir, "hooks", "amp-hook.sh")
+	// The managed install left the kept folders and stubs with the managed
+	// DACL, whose read-only OWNER RIGHTS entry denies the account WRITE_DAC.
+	sid := currentWindowsTestSID(t)
+	hardened := map[string]string{
+		dataDir:                         windowsRelaxTestHardenedDir,
+		filepath.Join(dataDir, "hooks"): windowsRelaxTestHardenedDir,
+		script:                          windowsRelaxTestHardenedFile,
+	}
+	for path, sddl := range hardened {
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+			t.Fatalf("set owner of %s: %v", path, err)
+		}
+		windowsRelaxTestSetDACL(t, path, windowsRelaxTestFormat(sddl, sid))
+	}
 	before, err := os.Stat(script)
 	if err != nil {
 		t.Fatal(err)
@@ -88,5 +104,16 @@ func TestPurgeWindowsUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 	}
 	if !os.SameFile(before, after) || !strings.Contains(string(body), "disabled tombstone") || strings.Contains(string(body), "exec forward") {
 		t.Fatalf("hook script was not stubbed in place (same file %t):\n%s", os.SameFile(before, after), body)
+	}
+	// What stayed goes back to a DACL the account can manage, so a later
+	// per-user install can protect its own folder.
+	for path := range hardened {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(sd.String(), windowsGuardianHardenedOwnerRightsACE) {
+			t.Fatalf("%s kept the managed DACL after the purge: %s", path, sd)
+		}
 	}
 }

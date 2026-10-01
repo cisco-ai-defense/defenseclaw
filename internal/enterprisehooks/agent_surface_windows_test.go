@@ -51,19 +51,27 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	}
 	t.Cleanup(func() { SetUnverifiedVersionsPolicy(nil) })
 
-	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext); got != "2.1.220" || len(reported) != 0 {
+	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "2.1.220" || len(reported) != 0 {
 		t.Fatalf("claudecode extension-only version = %q, reported %+v", got, reported)
 	}
-	if got := windowsStandaloneSurfaceVersion(row("devin"), nil, rowContext); got != "3000.4.25" || len(reported) != 0 {
+	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, "2.1.300"); got != "2.1.220" || len(reported) != 0 {
+		t.Fatalf("claudecode CLI plus older extension version = %q, reported %+v", got, reported)
+	}
+	if got := windowsStandaloneSurfaceVersion(row("devin"), nil, rowContext, ""); got != "3000.4.25" || len(reported) != 0 {
 		t.Fatalf("devin Desktop-only version = %q, reported %+v", got, reported)
 	}
-	if got := windowsStandaloneSurfaceVersion(row("codex"), nil, rowContext); got != "" || len(reported) != 1 ||
+	if got := windowsStandaloneSurfaceVersion(row("codex"), nil, rowContext, ""); got != "" || len(reported) != 1 ||
 		reported[0].Code != UnprotectedCodeSurfaceUnverified || reported[0].Surface != "desktop" || reported[0].Refusal != "" {
 		t.Fatalf("codex app-only version = %q, reported %+v", got, reported)
 	}
 	SetUnverifiedVersionsPolicy(func(string) string { return "refuse" })
 	reported = nil
-	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext); got != "" || len(reported) != 1 || reported[0].Refusal != RefusalEnforced {
+	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || len(reported) != 1 || reported[0].Refusal != RefusalEnforced {
 		t.Fatalf("refused claudecode extension version = %q, reported %+v", got, reported)
+	}
+	// Next to a CLI the refused extension is still reported.
+	reported = nil
+	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, "2.1.300"); got != "2.1.300" || len(reported) != 1 || reported[0].Refusal != RefusalMissing {
+		t.Fatalf("refused claudecode extension next to a CLI = %q, reported %+v", got, reported)
 	}
 }

@@ -236,13 +236,15 @@ func readWindowsDirBounded(dir string) []os.DirEntry {
 	return entries
 }
 
-// windowsStandaloneSurfaceVersion is the row version of a profile with no
-// agent CLI: the oldest engine version among its admitted app and extension
-// surfaces, or "". Rejected surfaces are reported.
-func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext) string {
+// windowsStandaloneSurfaceVersion is the row version of a profile whose
+// agent CLI is at cliVersion ("" when there is none): the older of the CLI
+// version and the oldest engine version among its admitted app and
+// extension surfaces, or "". Rejected surfaces are reported, also next to
+// a CLI.
+func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext, cliVersion string) string {
 	name := strings.ToLower(strings.TrimSpace(row.Connector))
 	admission := admitSurfaces(name, UnverifiedVersionsFor(name), DiscoverWindowsAgentSurfaces(row.UserHome, name))
-	enrolled := len(admission.admitted) != 0
+	enrolled := cliVersion != "" || len(admission.admitted) != 0
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "", RefusalMissing
 		switch {
@@ -259,9 +261,9 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 			rowContext.report(rejected.unprotected(rowContext.user, canonicalManifestTargetSID(row.SID), nil, name, consequence, refusal))
 		}
 	}
-	version := admission.rowVersion("")
-	if version != "" {
-		logfSafely(logf, row.SID, "(SID, "+name+") no agent CLI; enrolling at "+version+", the oldest admitted "+admission.surface+" engine version")
+	version := admission.rowVersion(cliVersion)
+	if version != cliVersion {
+		logfSafely(logf, row.SID, "(SID, "+name+") follows its "+admission.surface+" surface at engine version "+version)
 	}
 	return version
 }

@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -65,10 +66,16 @@ var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
 // deployment incomplete.
 func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	env, r := l.env, l.result
-	data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20)
-	if err != nil {
-		return
-	}
+	// The guardian state is in DataDir, which the service account can
+	// replace, so a failure the root-only attestation reports is named even
+	// when that state leaves it out or reports it protected. The guardian
+	// writes the ledger, then the state, then the attestation, so a state
+	// read between one reconcile's ledger and the next one's is from the
+	// attestation's reconcile.
+	ledgerPath := env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
+	ledger, _ := readBounded(ledgerPath, 4<<20)
+	attestation, err := env.readAttestation()
+	attested := err == nil && attestation.BoundTo(ledger)
 	var state struct {
 		Results []struct {
 			User      string `json:"user"`
@@ -78,14 +85,19 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			Error     string `json:"error"`
 		} `json:"results"`
 	}
-	if json.Unmarshal(data, &state) != nil {
-		return
+	if data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	if again, err := readBounded(ledgerPath, 4<<20); err != nil || !bytes.Equal(again, ledger) {
+		attested = false
 	}
 	var unverified, failed, removed, userPaths []string
+	stateFailed := map[string]bool{}
 	for _, result := range state.Results {
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
 		}
+		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
 		if targetAccountMissingError(result.Error) && l.accountAbsent(ctx, result.User) {
 			removed = append(removed, fmt.Sprintf(
 				"%s for user %s: the account no longer exists (the directory answers \"no such account\"); the enumerator removes this target after %d consecutive definitive misses, one per enumeration cycle",
@@ -109,6 +121,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 		unverified = append(unverified, fmt.Sprintf(
 			"%s %s for user %s has no verified DefenseClaw hook contract, so it runs without DefenseClaw hooks; pin a verified agent version or add a verified hook contract",
 			result.Connector, version, result.User))
+	}
+	if attested {
+		for _, target := range attestation.Targets {
+			if target.State == enterprisehooks.CredentialTargetFailed && !stateFailed[target.Key()] {
+				failed = append(failed, fmt.Sprintf("%s is not protected: the guardian's last reconcile failed it, and the guardian state does not say why; see the hook guardian's log", target.Label()))
+			}
+		}
 	}
 	sort.Strings(removed)
 	for _, message := range removed {

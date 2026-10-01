@@ -193,22 +193,22 @@ func TestHookContractResolution(t *testing.T) {
 		{"cursor_exact_agent_preview_pin", "cursor", "2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
 		{"cursor_exact_agent_preview_command_prefix", "cursor", "agent v2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
 		{"cursor_other_agent_build_unknown", "cursor", "cursor-agent 2026.07.23-deadbee", HookCompatibilityUnknown, "", "2026.7.23"},
-		{"cursor_later_agent_build_unknown", "cursor", "2026.08.31-4057e58", HookCompatibilityUnknown, "", "2026.8.31"},
+		{"cursor_later_agent_build_untested", "cursor", "2026.08.31-4057e58", HookCompatibilityKnown, "cursor-hooks-v1", "2026.8.31"},
 		{"cursor_desktop_reviewed_range", "cursor", "cursor 3.13.21", HookCompatibilityKnown, "cursor-hooks-v1", "3.13.21"},
 		{"cursor_desktop_current", "cursor", "3.19.13", HookCompatibilityKnown, "cursor-hooks-v1", "3.19.13"},
 		{"cursor_desktop_before_floor", "cursor", "cursor 2.3.99", HookCompatibilityUnknown, "", "2.3.99"},
-		{"cursor_desktop_at_ceiling", "cursor", "cursor 4.0.0", HookCompatibilityUnknown, "", "4.0.0"},
+		{"cursor_desktop_at_ceiling_untested", "cursor", "cursor 4.0.0", HookCompatibilityKnown, "cursor-hooks-v1", "4.0.0"},
 		{"omnigent_before_proven_floor", "omnigent", "omnigent 0.6.99", HookCompatibilityUnknown, "", "0.6.99"},
 		{"omnigent_proven_floor", "omnigent", "omnigent 0.7.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.7.0"},
 		{"omnigent_reviewed_mid_range", "omnigent", "omnigent 0.8.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.8.0"},
 		{"omnigent_current_pin", "omnigent", "omnigent 0.13.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.13.0"},
-		{"omnigent_after_reviewed_range", "omnigent", "omnigent 0.14.0", HookCompatibilityUnknown, "", "0.14.0"},
+		{"omnigent_after_reviewed_range_untested", "omnigent", "omnigent 0.15.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.15.0"},
 		{"omnigent_unversioned_requires_override", "omnigent", "", HookCompatibilityUnversioned, "omnigent-custom-policy-v1", ""},
 		{"opencode_reviewed_pin", "opencode", "opencode 1.18.10", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.10"},
 		{"opencode_previous_pin", "opencode", "opencode 1.18.11", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.11"},
 		{"opencode_previous_pin_11819", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
 		{"opencode_current_pin", "opencode", "opencode 1.18.33", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.33"},
-		{"opencode_next_minor_unknown", "opencode", "opencode 1.19.0", HookCompatibilityUnknown, "", "1.19.0"},
+		{"opencode_next_minor_untested", "opencode", "opencode 1.19.0", HookCompatibilityKnown, "opencode-hooks-v1", "1.19.0"},
 		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v1", ""},
 		{"antigravity_before_documented_floor", "antigravity", "Antigravity CLI v1.1.7", HookCompatibilityUnknown, "", "1.1.7"},
 		{"antigravity_documented_minimum", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.8"},
@@ -231,6 +231,56 @@ func TestHookContractResolution(t *testing.T) {
 				t.Fatalf("NormalizedVersion=%q want %q", got.NormalizedVersion, tc.wantNorm)
 			}
 		})
+	}
+}
+
+// TestUntestedNewerVersionPolicy pins the connector version policy: a version
+// newer than every tested range is compatible with the newest contract, a
+// known-broken entry and exact-range (Secure Client) mode refuse it, and an
+// agent update to a compatible version is admitted instead of drifting.
+func TestUntestedNewerVersionPolicy(t *testing.T) {
+	got := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
+	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
+		got.NewestTestedVersion != "<0.22.0" || !strings.HasPrefix(got.Reason, UntestedNewerVersionReasonPrefix) {
+		t.Fatalf("hermes 0.30.1 = %+v", got)
+	}
+	if strict := ResolveHookContractStrict("hermes", "Hermes Agent v0.30.1"); strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "" {
+		t.Fatalf("strict hermes 0.30.1 = %+v", strict)
+	}
+
+	saved := knownBrokenAgentVersions
+	t.Cleanup(func() { knownBrokenAgentVersions = saved })
+	knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
+		"hermes": {{Min: "0.30.0", Max: "0.31.0", Reason: "pre_tool_call payload renamed", Issue: "https://example.invalid/1"}},
+	}
+	broken := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
+	if broken.Status != HookCompatibilityUnknown || !strings.Contains(broken.Reason, "known broken") {
+		t.Fatalf("known-broken hermes 0.30.1 = %+v", broken)
+	}
+	knownBrokenAgentVersions = saved
+
+	previous := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.21.0", NormalizedAgentVersion: "0.21.0", ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}
+	current := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.30.1", NormalizedAgentVersion: "0.30.1", ContractID: "hermes-hooks-v2", CompatibilityStatus: got.Status}
+	if !HookContractCompatibilityDrifted(previous, current) || !HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("a compatible agent update must drift and be admitted")
+	}
+	sameAgent := previous
+	sameAgent.ContractID = "hermes-hooks-retired"
+	if HookContractAgentUpdateAdmitted(sameAgent, HookContractLockEntry{Connector: "hermes", RawAgentVersion: previous.RawAgentVersion, NormalizedAgentVersion: previous.NormalizedAgentVersion, ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}) {
+		t.Fatal("a contract change without an agent update must not be admitted as one")
+	}
+	current.CompatibilityStatus, current.ContractID = HookCompatibilityUnknown, ""
+	if HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("an update to an unknown version must not be admitted")
+	}
+	SetStrictHookContractResolution(true)
+	t.Cleanup(func() { SetStrictHookContractResolution(false) })
+	current.CompatibilityStatus, current.ContractID = HookCompatibilityKnown, "hermes-hooks-v2"
+	if HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("strict mode must refuse agent updates as before")
+	}
+	if strict := ResolveHookContract("omnigent", "omnigent 0.15.0"); strict.Status != HookCompatibilityUnknown {
+		t.Fatalf("strict-mode omnigent 0.15.0 = %+v", strict)
 	}
 }
 
@@ -544,8 +594,11 @@ func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlock
 	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.3 (2026.9.14)").Contract.ContractID; got != "hermes-hooks-v2" {
 		t.Fatalf("Hermes 0.21.3 contract = %q, want hermes-hooks-v2", got)
 	}
-	if got := ResolveHookContract("hermes", "0.22.0").Status; got != HookCompatibilityUnknown {
-		t.Fatalf("Hermes 0.22 compatibility = %q, want unknown beyond source-reviewed ceiling", got)
+	if got := ResolveHookContractStrict("hermes", "0.22.0").Status; got != HookCompatibilityUnknown {
+		t.Fatalf("Hermes 0.22 strict compatibility = %q, want unknown beyond source-reviewed ceiling", got)
+	}
+	if got := ResolveHookContract("hermes", "0.22.0"); !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" {
+		t.Fatalf("Hermes 0.22 = %+v, want untested newer version on hermes-hooks-v2", got)
 	}
 	if len(contract.Events) != 23 {
 		t.Fatalf("Hermes event count = %d, want 23: %v", len(contract.Events), contract.Events)
@@ -701,10 +754,18 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			Scope              string   `json:"scope"`
 		} `json:"capabilities"`
 	}
+	type manifestKnownBroken struct {
+		Exact        string `json:"exact"`
+		MinInclusive string `json:"min_inclusive"`
+		MaxExclusive string `json:"max_exclusive"`
+		Reason       string `json:"reason"`
+		Issue        string `json:"issue"`
+	}
 	type manifestConnector struct {
-		Kind              string             `json:"kind"`
-		CompatibilityGate string             `json:"compatibility_gate"`
-		Contracts         []manifestContract `json:"contracts"`
+		Kind                string                `json:"kind"`
+		CompatibilityGate   string                `json:"compatibility_gate"`
+		KnownBrokenVersions []manifestKnownBroken `json:"known_broken_versions"`
+		Contracts           []manifestContract    `json:"contracts"`
 	}
 	type manifest struct {
 		SchemaVersion int                          `json:"schema_version"`
@@ -758,6 +819,20 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		return contract
 	}
 	for name, spec := range gotManifest.Connectors {
+		var wantBroken []manifestKnownBroken
+		for _, entry := range knownBrokenAgentVersions[name] {
+			wantBroken = append(wantBroken, manifestKnownBroken{entry.Exact, entry.Min, entry.Max, entry.Reason, entry.Issue})
+		}
+		if len(spec.KnownBrokenVersions) != 0 || len(wantBroken) != 0 {
+			if !reflect.DeepEqual(spec.KnownBrokenVersions, wantBroken) {
+				t.Fatalf("%s known_broken_versions=%+v want %+v", name, spec.KnownBrokenVersions, wantBroken)
+			}
+		}
+		for _, entry := range spec.KnownBrokenVersions {
+			if entry.Reason == "" || entry.Issue == "" || (entry.Exact == "" && entry.MinInclusive == "" && entry.MaxExclusive == "") {
+				t.Fatalf("%s known-broken entry needs a version, reason and issue: %+v", name, entry)
+			}
+		}
 		for _, contract := range spec.Contracts {
 			for platformName := range contract.PlatformOverrides {
 				if platformName != "darwin" && platformName != "linux" && platformName != "windows" {
@@ -3289,9 +3364,16 @@ func TestAgentUnchangedSinceLock(t *testing.T) {
 // Devin 3000.11.3 is pinned on Linux only; Windows and macOS keep
 // the build their lanes were reviewed against.
 func TestDevinContractPinsArePerOS(t *testing.T) {
-	for goos, want := range map[string]string{"linux": HookCompatibilityKnown, "darwin": HookCompatibilityUnknown, "windows": HookCompatibilityUnknown} {
-		if got := resolveHookContractForOS("devin", "3000.11.3", goos).Status; got != want {
-			t.Fatalf("devin 3000.11.3 on %s: status %s, want %s", goos, got, want)
+	// 3000.11.3 is tested on Linux only; macOS and Windows accept it as an
+	// untested newer version, and exact-range (Secure Client) mode refuses it.
+	for goos, wantUntested := range map[string]bool{"linux": false, "darwin": true, "windows": true} {
+		got := resolveHookContractForOS("devin", "3000.11.3", goos)
+		if got.Status != HookCompatibilityKnown || got.UntestedVersion != wantUntested || got.Contract.ContractID != "devin-hooks-v1" {
+			t.Fatalf("devin 3000.11.3 on %s: %+v, want known untested=%v", goos, got, wantUntested)
+		}
+		strict := resolveHookContractForOSMode("devin", "3000.11.3", goos, true).Status
+		if want := map[bool]string{false: HookCompatibilityKnown, true: HookCompatibilityUnknown}[wantUntested]; strict != want {
+			t.Fatalf("devin 3000.11.3 on %s strict: status %s, want %s", goos, strict, want)
 		}
 		if got := resolveHookContractForOS("devin", "3000.4.25", goos).Status; got != HookCompatibilityKnown {
 			t.Fatalf("devin 3000.4.25 on %s: status %s", goos, got)
