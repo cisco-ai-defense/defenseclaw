@@ -228,6 +228,12 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			_ = os.Remove(f.vmDriverPath())
 			vmTOML("[openshell.drivers.vm]\n", "[openshell.drivers.vm]\ndriver_dir = \""+dir+"\"\n")(f)
 		}, want: checkWant{"vm-driver", pass, filepath.Join("libexec", "openshell-driver-vm") + " signed"}},
+		// OpenShell's release binaries install the driver where the gateway
+		// looks for it by itself, with nothing in gateway.toml.
+		{name: "driver in ~/.local/libexec/openshell", setup: func(f *doctorFixture) {
+			touchExecutable(f.t, filepath.Join(f.home, ".local", "libexec", "openshell", "openshell-driver-vm"))
+			_ = os.Remove(f.vmDriverPath())
+		}, want: checkWant{"vm-driver", pass, filepath.Join(".local", "libexec", "openshell", "openshell-driver-vm") + " signed"}},
 		// The driver pulls from a registry what it does not find for this
 		// Mac, and DefenseClaw's image names never resolve there.
 		{name: "an amd64 harness image", setup: func(f *doctorFixture) {
@@ -386,6 +392,8 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
+		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
+			"DefenseClaw changes it on Linux only; the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with")
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}

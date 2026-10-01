@@ -125,6 +125,11 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		if ev.Reason != "" {
 			b.WriteString(": " + truncate(ev.Reason, 120))
 		}
+	case sandboxapi.ActivityToolAsked:
+		b.WriteString(a.style("?", ansiYellow, ansiBold) + " tool " + firstNonEmpty(ev.Tool, "call") + " asked for confirmation")
+		if ev.Reason != "" {
+			b.WriteString(": " + truncate(ev.Reason, 120))
+		}
 	case sandboxapi.ActivityHookFailed:
 		msg := strings.TrimPrefix(ev.Message, "✗ ")
 		if msg == "" {

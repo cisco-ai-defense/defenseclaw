@@ -101,6 +101,9 @@ func hooksText(sb sandboxapi.Sandbox) string {
 	if sb.Hooks.ToolBlocked > 0 {
 		s += fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
 	}
+	if sb.Hooks.ToolAsked > 0 {
+		s += fmt.Sprintf(", %d asked", sb.Hooks.ToolAsked)
+	}
 	if sb.Hooks.HookFailed > 0 {
 		s += fmt.Sprintf(", %d failed", sb.Hooks.HookFailed)
 	}
@@ -216,6 +219,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	row("Hooks", fmt.Sprintf("%s tier, contract %s", firstNonEmpty(sb.TamperTier, "unknown"), firstNonEmpty(sb.HookContract, "-")))
 	cov := plural(sb.Hooks.HookRequests, "request", "requests") + ", " + plural(sb.Hooks.ToolCalls, "tool call", "tool calls") +
 		fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
+	if sb.Hooks.ToolAsked > 0 {
+		cov += fmt.Sprintf(", %d asked", sb.Hooks.ToolAsked)
+	}
 	if sb.Hooks.HookFailed > 0 {
 		cov += fmt.Sprintf(", %d failed (fail closed)", sb.Hooks.HookFailed)
 	}
