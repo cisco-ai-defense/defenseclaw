@@ -3698,7 +3698,7 @@ connection.close()
         $releaseWorkflowText,
         '(?ms)^  publish:.*?(?=^  [a-z0-9][a-z0-9-]*:|^  #|\z)'
     ).Value
-    Assert-True ($releasePublishJob -match 'needs:\s*\[sign,\s*install-gate\]' -and
+    Assert-True ($releasePublishJob -match 'needs:\s*\[sign,\s*install-gate(,\s*[a-z0-9-]+)*\]' -and
         $releaseWorkflowText -match 'scripts/test-install-lifecycle\.ps1 -Assets release') `
         'the release publishes only the signed assets that the Windows install gate tested'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
