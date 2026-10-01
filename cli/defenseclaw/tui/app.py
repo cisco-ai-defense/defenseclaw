@@ -12803,17 +12803,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         command_line = " ".join((intent.binary, *intent.args))
+        consequence = getattr(intent, "consequence", "") or ""
         return ConsequenceModalModel(
             title=f"Confirm: {intent.label}",
             summary="This is a destructive action and cannot be undone.",
             details=(f"Will run: {command_line}",),
-            consequence="This deletes files from disk.",
+            consequence=consequence or "This deletes files from disk.",
             actions=(
                 ConsequenceAction(
                     action_id="run",
                     hotkey="d",
                     label=intent.label,
-                    description="Runs the command and deletes the files from disk.",
+                    description=(
+                        "Runs the command." if consequence else "Runs the command and deletes the files from disk."
+                    ),
                     variant="error",
                     danger=True,
                 ),
