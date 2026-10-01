@@ -86,7 +86,7 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 			}
 		}
 		names = append(names, fmt.Sprintf("pid %d (%s) listening on %s", holder.PID, who, holder.Address))
-		if windowsEnterprisePerUserGatewayImage(holder.Image) {
+		if windowsEnterprisePerUserGatewayHolder(holder.Image, holder.Account) {
 			perUser = append(perUser, fmt.Sprintf("pid %d", holder.PID))
 		}
 	}
