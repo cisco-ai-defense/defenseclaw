@@ -88,7 +88,8 @@ def test_status_reports_hklm_shadowing_with_the_fix() -> None:
     status = _slice(module, "function Get-DefenseClawLifecycleStatus", "function Test-DefenseClawGuardianCoverageReport")
     assert "claude_policy_shadowed_by_hklm = [bool]$claudeHKLMPolicy.shadowed" in status
     assert "claude_policy_hklm_detail = $claudeHKLMPolicy.detail" in status
-    guard = status[status.index("if ($installed -and $claudeTargetEnabled) {") :]
+    guard = status[status.index("if ($installed -and $claudeTargetEnabled -and") :]
+    assert "-not (Test-DefenseClawStandaloneProfile)" in guard[:150]
     guard = guard[: guard.index("}\n    }") + 1]
     assert "$claudeEffectivePolicyVerified = $false" in guard
     view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyState", "function ConvertTo-DefenseClawBoundedDiagnostic")
