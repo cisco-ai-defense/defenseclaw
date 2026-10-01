@@ -248,7 +248,7 @@ func (s *nodeHarnessSession) wait() (report string, ok bool) {
 	}()
 	select {
 	case <-s.exited:
-		return fmt.Sprintf("node exit=%v (%v); stderr=%q", s.err, s.cmd.ProcessState, s.stderr.String()), true
+		return fmt.Sprintf("node ended with %v; stderr=%q", s.cmd.ProcessState, s.stderr.String()), true
 	case <-time.After(nodeHarnessReplyTimeout):
 		_ = s.cmd.Process.Kill()
 		return fmt.Sprintf("node did not exit within %s", nodeHarnessReplyTimeout), false
