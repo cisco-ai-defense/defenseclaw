@@ -971,11 +971,29 @@ restart_old() {
 }
 
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 waited=0 up=0
     info "Starting the gateway"
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
     PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
-    [[ ${rc} -eq 0 || ${rc} -eq 3 ]] || explain_start_failure "${log}" "${from}"
+    [[ ${rc} -eq 0 || ${rc} -eq 3 ]] && return "${rc}"
+    explain_start_failure "${log}" "${from}"
+    # A readiness timeout leaves the gateway running. A restored older release
+    # checks a large audit database before it logs anything, and only then
+    # says why it stops, so wait for it before falling back to generic advice.
+    [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
+    info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    while [[ -z "${START_EXPLAINED:-}" && ${waited} -lt 180 && -n "$(gateway_pid || true)" ]]; do
+        sleep 3
+        waited=$((waited + 3))
+        explain_start_failure "${log}" "${from}"
+        if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
+            # Answering twice in a row, without a refusal in between: it is up.
+            up=$((up + 1))
+            [[ ${up} -lt 2 ]] || { ok "The gateway finished starting"; return 0; }
+        else
+            up=0
+        fi
+    done
     return "${rc}"
 }
 
