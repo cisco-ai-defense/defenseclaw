@@ -72,6 +72,9 @@ func TestScanCodeJSONCommandValidatesCanonicalSchema(t *testing.T) {
 	}
 
 	isolateScanCodeCommand(t)
+	// One isolated home for both runs: the second reuses the migrated audit
+	// database, as repeated invocations on a real host do.
+	dataDir := isolatedScanCodeHome(t)
 
 	for _, fixture := range []struct {
 		name, file, body string
@@ -81,7 +84,6 @@ func TestScanCodeJSONCommandValidatesCanonicalSchema(t *testing.T) {
 		{name: "finding", file: "exec.py", body: "import os\nos.system(cmd)\n", wantFindings: true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			dataDir := isolatedScanCodeHome(t)
 			// The post-run closes the store the pre-run opened, but only on
 			// success; close it here too so a failing run cannot leak the
 			// handle into later tests or keep the temp dir busy on Windows.
@@ -127,7 +129,7 @@ func TestScanCodeJSONCommandValidatesCanonicalSchema(t *testing.T) {
 			// command must have persisted the scan it reported: the scan_id on
 			// stdout is the one taken from the persisted copy.
 			if cfg == nil || !strings.HasPrefix(cfg.AuditDB, dataDir) {
-				t.Fatalf("audit store %v is not inside the isolated data dir %s", cfg, dataDir)
+				t.Fatalf("the pre-run did not load the isolated config in %s", dataDir)
 			}
 			scanID, _ := document["scan_id"].(string)
 			if scanID == "" {
