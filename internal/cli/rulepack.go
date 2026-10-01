@@ -120,7 +120,15 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		Valid:       true,
 		Summary:     &summary,
 	}
-	return writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON)
+	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {
+		return err
+	}
+	if rulePackValidateDir != "" {
+		if problem := rulePackServiceReadProblem(cmd.Context(), rulePackValidateDir); problem != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
+		}
+	}
+	return nil
 }
 
 func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON bool) error {
