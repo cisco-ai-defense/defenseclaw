@@ -1250,3 +1250,18 @@ def test_setup_candidates_do_not_recursively_accept_lookalike_npm_codex(
     )
 
     assert str(lookalike) not in candidates
+
+
+def test_windows_hermes_managed_executable_matches_the_gateway_order(tmp_path: Path) -> None:
+    # Hermes 0.21.5+ bootstrap installs have bin\hermes.exe and no venv; the
+    # venv image still wins when both exist (internal/hermespath).
+    local = tmp_path / "local"
+    launcher = local / "hermes" / "bin" / "hermes.exe"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(b"launcher")
+    pick = agent_selection.agent_discovery._windows_hermes_managed_executable
+    assert pick(str(local)) == str(launcher)
+    venv = local / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"
+    venv.parent.mkdir(parents=True)
+    venv.write_bytes(b"venv")
+    assert pick(str(local)) == str(venv)

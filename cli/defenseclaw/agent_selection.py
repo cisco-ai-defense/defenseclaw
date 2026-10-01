@@ -729,6 +729,7 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
                 os.path.join(local, "OpenAI", "Codex", "bin"),
                 os.path.join(local, "OpenAI", "Codex", "runtimes"),
                 os.path.join(local, "hermes", "hermes-agent", "venv", "Scripts"),
+                os.path.join(local, "hermes", "bin"),
                 os.path.join(local, "Microsoft", "WinGet", "Links"),
                 os.path.join(local, "pnpm"),
             )
@@ -818,12 +819,17 @@ def _is_windows_opencode_setup_binary(candidate: str) -> bool:
 
 
 def _windows_managed_hermes_prefixes() -> tuple[str, ...]:
-    """Return only the official updater-managed Hermes executable directory."""
+    """Return only the official updater-managed Hermes executable directory.
+
+    The same single image the gateway admits (internal/hermespath): the
+    hermes-agent venv image, else the bootstrap installer's bin launcher.
+    """
 
     local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
     if not local:
         return ()
-    return (os.path.abspath(os.path.join(local, "hermes", "hermes-agent", "venv", "Scripts")),)
+    executable = agent_discovery._windows_hermes_managed_executable(local)
+    return (os.path.abspath(os.path.dirname(executable)),)
 
 
 def _windows_known_folder(identifier: str) -> str:
