@@ -7,6 +7,7 @@
 param(
     [switch]$Worker,
     [string]$ResultPath,
+    [string]$StartSignalPath,
     [int]$HoldMilliseconds = 0
 )
 
@@ -1662,6 +1663,24 @@ if ($Worker) {
         throw 'bootstrap environment worker requires -ResultPath'
     }
     try {
+        if (-not [string]::IsNullOrWhiteSpace($StartSignalPath)) {
+            # Engine startup, script parsing and the production definition
+            # load are finished. Report readiness and enter the race only on
+            # the parent's shared start signal so every worker's protected
+            # root, compile and cleanup overlap. The wait is bounded so an
+            # abandoned worker exits on its own.
+            [IO.File]::WriteAllText(
+                [IO.Path]::GetFullPath($ResultPath) + '.ready',
+                [string]$PID
+            )
+            $startWait = [Diagnostics.Stopwatch]::StartNew()
+            while (-not [IO.File]::Exists($StartSignalPath)) {
+                if ($startWait.Elapsed.TotalSeconds -ge 600) {
+                    throw 'bootstrap race start signal did not arrive within 600 seconds'
+                }
+                [Threading.Thread]::Sleep(20)
+            }
+        }
         $workerResult = Invoke-ProtectedEnvironmentProbe `
             -Hold $HoldMilliseconds
         [IO.File]::WriteAllText(
@@ -1754,6 +1773,34 @@ $raceRoot = [IO.Path]::Combine(
 [void][IO.Directory]::CreateDirectory($raceRoot)
 $processes = [Collections.Generic.List[Diagnostics.Process]]::new()
 $resultPaths = [Collections.Generic.List[string]]::new()
+$raceStartSignalPath = [IO.Path]::Combine($raceRoot, 'start')
+# Worker startup (a cold engine start and script parse, slow and variable on
+# loaded hosted runners) is bounded separately from the race. The race
+# deadline starts at the shared start signal and is one deadline for all six
+# workers, not a fresh wait per worker.
+$raceStartupSeconds = 240
+$raceSeconds = 120
+function Get-BootstrapRaceWorkerDiagnostic {
+    param([int]$Index)
+    $workerProcess = $processes[$Index]
+    $state = if ($workerProcess.HasExited) {
+        "exited $($workerProcess.ExitCode)"
+    }
+    else {
+        'running'
+    }
+    $ready = [IO.File]::Exists($resultPaths[$Index] + '.ready')
+    $result = if ([IO.File]::Exists($resultPaths[$Index])) {
+        [IO.File]::ReadAllText($resultPaths[$Index])
+    }
+    else {
+        'no result'
+    }
+    return (
+        "worker $Index (pid $($workerProcess.Id)) $state, ready=$ready, " +
+        "result: $result"
+    )
+}
 try {
     $engine = if ($PSVersionTable.PSEdition -eq 'Core') {
         [IO.Path]::Combine($PSHOME, 'pwsh.exe')
@@ -1778,6 +1825,8 @@ try {
             '-Worker',
             '-ResultPath',
             ('"{0}"' -f $workerResultPath.Replace('"', '\"')),
+            '-StartSignalPath',
+            ('"{0}"' -f $raceStartSignalPath.Replace('"', '\"')),
             '-HoldMilliseconds',
             '750'
         ) -join ' '
@@ -1792,20 +1841,61 @@ try {
         }
         $processes.Add($process)
     }
-    foreach ($process in $processes) {
-        # Hosted Windows runners can spend well over 30 seconds starting six
-        # concurrent PowerShell workers while Defender scans Add-Type output.
-        if (-not $process.WaitForExit(120000)) {
-            try {
-                $process.Kill()
+    $raceClock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $notReady = @(
+            for ($index = 0; $index -lt $processes.Count; $index++) {
+                if ([IO.File]::Exists($resultPaths[$index] + '.ready')) {
+                    continue
+                }
+                if ($processes[$index].HasExited) {
+                    throw (
+                        'bootstrap race worker failed before the race: ' +
+                        (Get-BootstrapRaceWorkerDiagnostic -Index $index)
+                    )
+                }
+                $index
             }
-            catch {
-                # Best-effort termination after a bounded test timeout.
-            }
-            throw "bootstrap race worker $($process.Id) timed out"
+        )
+        if ($notReady.Count -eq 0) {
+            break
         }
-        if ($process.ExitCode -ne 0) {
-            throw "bootstrap race worker $($process.Id) exited $($process.ExitCode)"
+        if ($raceClock.Elapsed.TotalSeconds -ge $raceStartupSeconds) {
+            throw (
+                "bootstrap race workers were not ready within $raceStartupSeconds seconds: " +
+                (@(
+                    foreach ($index in $notReady) {
+                        Get-BootstrapRaceWorkerDiagnostic -Index $index
+                    }
+                ) -join '; ')
+            )
+        }
+        [Threading.Thread]::Sleep(50)
+    }
+    [IO.File]::WriteAllText($raceStartSignalPath, '')
+    $raceClock.Restart()
+    for ($index = 0; $index -lt $processes.Count; $index++) {
+        $remaining = [Math]::Max(
+            0,
+            [int](($raceSeconds * 1000) - $raceClock.ElapsedMilliseconds)
+        )
+        if (-not $processes[$index].WaitForExit($remaining)) {
+            throw (
+                "bootstrap race did not finish within $raceSeconds seconds of the start signal: " +
+                (@(
+                    for ($pending = 0; $pending -lt $processes.Count; $pending++) {
+                        if (-not $processes[$pending].HasExited) {
+                            Get-BootstrapRaceWorkerDiagnostic -Index $pending
+                        }
+                    }
+                ) -join '; ')
+            )
+        }
+        if ($processes[$index].ExitCode -ne 0) {
+            throw (
+                'bootstrap race worker failed: ' +
+                (Get-BootstrapRaceWorkerDiagnostic -Index $index)
+            )
         }
     }
     $raceResults = @(
@@ -1831,7 +1921,18 @@ try {
     }
 }
 finally {
+    # Never leave a worker running after a failure: it would keep writing
+    # under the race root while it is deleted and hold the caller's pipes.
     foreach ($process in $processes) {
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill()
+            }
+            catch {
+                # The worker may exit between HasExited and Kill.
+            }
+            [void]$process.WaitForExit(10000)
+        }
         $process.Dispose()
     }
     if ([IO.Directory]::Exists($raceRoot)) {
