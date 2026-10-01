@@ -284,7 +284,10 @@ fi
 # descriptor-backed --config form works on curl releases older than 7.55.0,
 # unlike --header @file.
 {{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
-AUTH_HEADER_FD_OPEN=0
+# unset first so a name the agent exported cannot carry either value into
+# curl's environment; plain shell variables are never inherited.
+unset _DC_CURL_CONFIG_TOKEN _DC_HOOK_PAYLOAD
+_DC_CURL_CONFIG_TOKEN=
 if [ -n "${API_TOKEN}" ]; then
   # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
   # before formatting curl configuration, then escape the two metacharacters
@@ -292,38 +295,57 @@ if [ -n "${API_TOKEN}" ]; then
   case "${API_TOKEN}" in
     *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
   esac
-  CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
-  CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"
-  exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${CURL_CONFIG_TOKEN}\"")
-  AUTH_HEADER_FD_OPEN=1
+  _DC_CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
+  _DC_CURL_CONFIG_TOKEN="${_DC_CURL_CONFIG_TOKEN//\"/\\\"}"
   AUTH_HEADER_ARGS=(--config "/dev/fd/8")
 fi
+_DC_HOOK_PAYLOAD="${PAYLOAD}"
 
-# curl does not need the shell-local values once the private descriptors are
-# open. Clear them before spawning curl so no credential or payload is
-# inherited as process environment.
-exec 9< <(printf '%s' "${PAYLOAD}")
+# curl does not need the original values: the request reads them from the
+# private descriptors opened below. Clear them before spawning curl so no
+# credential or payload is inherited as process environment.
 API_TOKEN=
 PAYLOAD=
-CURL_CONFIG_TOKEN=
-unset API_TOKEN PAYLOAD CURL_CONFIG_TOKEN
+unset API_TOKEN PAYLOAD
+
+# Each attempt opens fresh descriptors, because curl consumes them.
+codex_gateway_post() {
+  local status=0
+  if [ -n "${_DC_CURL_CONFIG_TOKEN}" ]; then
+    exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${_DC_CURL_CONFIG_TOKEN}\"")
+  fi
+  exec 9< <(printf '%s' "${_DC_HOOK_PAYLOAD}")
+  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: codex-hook/1.0" \
+    -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
+    -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
+    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+    "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
+    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
+    --max-time "$HOOK_MAX_TIME" \
+    --data-binary "@/dev/fd/9" 2>/dev/null) || status=$?
+  exec 9<&-
+  if [ -n "${_DC_CURL_CONFIG_TOKEN}" ]; then
+    exec 8<&-
+  fi
+  return "$status"
+}
 
 CURL_STATUS=0
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
-  -H "Content-Type: application/json" \
-  -H "X-DefenseClaw-Client: codex-hook/1.0" \
-  -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
-  -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
-  --max-time "$HOOK_MAX_TIME" \
-  --data-binary "@/dev/fd/9" 2>/dev/null) || CURL_STATUS=$?
-exec 9<&-
-if [ "$AUTH_HEADER_FD_OPEN" = "1" ]; then
-  exec 8<&-
+codex_gateway_post || CURL_STATUS=$?
+# A refused connection means this account's gateway is not running (after a
+# reboot, for example): start it once and retry. SessionEnd has no time for a
+# start. See defenseclaw_gateway_cold_start in _hardening.sh.
+if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ] &&
+  defenseclaw_gateway_cold_start "$CURL_STATUS"; then
+  CURL_STATUS=0
+  codex_gateway_post || CURL_STATUS=$?
 fi
+_DC_CURL_CONFIG_TOKEN=
+_DC_HOOK_PAYLOAD=
+unset _DC_CURL_CONFIG_TOKEN _DC_HOOK_PAYLOAD
 if [ "$CURL_STATUS" -ne 0 ]; then
   fail_unreachable "gateway unreachable"
 fi{{end}}

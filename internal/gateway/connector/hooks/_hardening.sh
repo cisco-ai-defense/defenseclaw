@@ -139,6 +139,9 @@ defenseclaw_harden_env() {
   # hook tears down on exit. Fall back to the gateway data dir if
   # mktemp is unavailable.
   _DEFENSECLAW_HOOK_HOME_OWNED=""
+  # The account's real HOME, kept unexported for defenseclaw_gateway_cold_start.
+  unset DEFENSECLAW_AGENT_HOME
+  DEFENSECLAW_AGENT_HOME="${HOME:-}"
   if command -v mktemp >/dev/null 2>&1; then
     DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
     if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
@@ -732,6 +735,77 @@ defenseclaw_log_hook_failure() {
     >> "$log_file" 2>/dev/null || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
+}
+
+# defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
+# a cold start runs: the one that last ran this data directory, then the
+# installer's ~/.local/bin, then the hardened PATH.
+defenseclaw_gateway_binary() {
+  local data="$1" home="$2" record="" candidate=""
+  if [ -f "${data}/gateway.pid" ]; then
+    IFS= read -r -n 4096 record < "${data}/gateway.pid" 2>/dev/null || true
+    if [[ "$record" =~ \"executable\"[[:space:]]*:[[:space:]]*\"(/[^\"]+)\" ]]; then
+      candidate="${BASH_REMATCH[1]}"
+      case "$candidate" in
+        */defenseclaw-gateway)
+          if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+  fi
+  candidate="${home}/.local/bin/defenseclaw-gateway"
+  if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  candidate="$(command -v defenseclaw-gateway 2>/dev/null)" || return 1
+  case "$candidate" in
+    /*) [ -x "$candidate" ] && printf '%s' "$candidate" && return 0 ;;
+  esac
+  return 1
+}
+
+# defenseclaw_gateway_cold_start CURL_STATUS starts this account's per-user
+# gateway when the hook's request was refused (curl exit 7): nothing else
+# starts a per-user gateway after a reboot on Linux or macOS. It returns 0
+# once `defenseclaw-gateway start --hook-cold-start` reports the gateway
+# ready, and the caller retries its request once; any other outcome returns
+# 1 and the caller fails as unreachable. It never starts a gateway that was
+# stopped with `defenseclaw-gateway stop` (gateway.stopped), during an
+# install (.install.lock), for a managed or socket hook, or when
+# DEFENSECLAW_GATEWAY_AUTOSTART is 0. The start command serializes
+# concurrent hooks and backs off after a failure. This is the one helper
+# that calls out to the gateway's own CLI.
+defenseclaw_gateway_cold_start() {
+  [ "${1:-}" = "7" ] || return 1
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  case "${DEFENSECLAW_GATEWAY_AUTOSTART:-1}" in
+    0|false|FALSE|no|NO|off|OFF) return 1 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin=""
+  [ -n "$home" ] && [ -d "$home" ] || return 1
+  data="${DEFENSECLAW_HOME:-${home}/.defenseclaw}"
+  [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
+  [ ! -e "${data}/gateway.stopped" ] || return 1
+  [ ! -e "${data}/.install.lock" ] || return 1
+  [ ! -e "${data}/.disabled" ] || return 1
+  bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
+  # The gateway keeps running after the hook exits: give it the account's
+  # HOME and installer bin directory, drop the hook's git and locale pins,
+  # and lift the hook's soft resource limits back to the hard ones.
+  (
+    ulimit -S -t "$(ulimit -H -t)" 2>/dev/null || true
+    ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
+    exec env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL -u LC_ALL -u LANG \
+      HOME="$home" PATH="${home}/.local/bin:${PATH}" \
+      "$bin" start --hook-cold-start </dev/null >/dev/null 2>&1
+  )
 }
 
 defenseclaw_response_failure_reason() {

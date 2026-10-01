@@ -2206,6 +2206,13 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if platform_support.host_os() in {"linux", "darwin"}:
+        # No service unit restarts a per-user gateway on Linux or macOS; the
+        # agent shell hooks start it on their next call (RHEL-U3-06).
+        renderer.echo(
+            "  After a reboot, agent hooks start the gateway on their next call;"
+            " after defenseclaw-gateway stop, run: defenseclaw-gateway start"
+        )
     if _sandboxes_possible():
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():
