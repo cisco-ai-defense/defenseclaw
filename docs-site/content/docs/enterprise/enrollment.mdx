@@ -171,7 +171,7 @@ agent engine it runs:
 | Claude Code | Claude Desktop | The Claude Code build it keeps under its data folder (macOS, Windows; Linux and the Windows MSIX package are not yet live-checked) |
 | Codex | VS Code-family extension `openai.chatgpt`, Codex app | The bundled `codex` CLI on Linux and macOS, run with `--version` as the user; none on Windows, so these are reported, not enrolled ([vendor docs](https://learn.chatgpt.com/docs/hooks)) |
 | Cursor | Cursor desktop | The app version, as before |
-| Devin | Devin Desktop | The Devin CLI it bundles, read from that CLI's man page on every OS; nothing is run. Devin Desktop 3.10 bundles 3000.10.x, outside the `devin-hooks-v1` pins, so it is reported until the range is reviewed ([Devin](/docs/connectors/devin#devin-desktop-in-a-standalone-enterprise-deployment)) |
+| Devin | Devin Desktop | The Devin CLI it bundles, read from that CLI's man page on every OS; nothing is run. Devin Desktop 3.10 bundles 3000.10.x, an untested newer version of `devin-hooks-v1`; a version below 3000.4.25 or a known-broken one is reported ([Devin](/docs/connectors/devin#devin-desktop-in-a-standalone-enterprise-deployment)) |
 | Antigravity | Antigravity IDE | None: the IDE shares the CLI's hook file ([vendor docs](https://antigravity.google/docs/hooks)) but is never enrolled on its own, and its launcher is never run |
 
 The editor folders searched are `.vscode`, `.vscode-insiders`,

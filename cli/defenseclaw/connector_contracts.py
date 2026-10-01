@@ -538,8 +538,9 @@ def _newest_contract_below(
     normalized: str,
 ) -> tuple[ConnectorContract, str] | None:
     """Mirror Go newestContractBelow: the newest contract when ``normalized``
-    is newer than every bound of its version scheme (date-style builds with a
-    major >= 1000 compare only with date-style bounds)."""
+    is newer than every bound of its version scheme, or between two exact pins
+    of one contract (date-style builds with a major >= 1000 compare only with
+    date-style bounds)."""
 
     def date_style(value: str) -> bool:
         return _version_tuple(value)[0] >= 1000
@@ -548,17 +549,25 @@ def _newest_contract_below(
     best: ConnectorContract | None = None
     newest = label = ""
     for contract in contracts:
-        bounds = 0
+        bounds = pins_above = 0
         upper = upper_label = ""
         for pin in contract.exact_agent_versions:
             pin_norm = normalize_agent_version(pin)
             if not pin_norm or date_style(pin_norm) != scheme:
                 continue
-            if _compare_version(normalized, pin_norm) <= 0:
+            cmp = _compare_version(normalized, pin_norm)
+            if cmp == 0:
                 return None
+            if cmp < 0:
+                pins_above += 1
+                continue
             bounds += 1
             if not upper or _compare_version(pin_norm, upper) > 0:
                 upper, upper_label = pin_norm, pin
+        # Between two exact pins of one contract (Devin on Linux) is an
+        # untested version of it; below all of its pins is under its floor.
+        if pins_above and not bounds:
+            return None
         if contract.min_agent_version or contract.max_agent_version:
             edge = contract.max_agent_version or contract.min_agent_version
             if date_style(edge) == scheme:

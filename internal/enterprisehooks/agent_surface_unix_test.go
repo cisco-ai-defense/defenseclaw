@@ -81,14 +81,14 @@ func TestDiscoverUnixDevinDesktopReadsBundledCLIVersion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(page), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(page, []byte(".ie \\n(.g .ds Aq \\(aq\n.el .ds Aq '\n.TH devin 1  \"devin 3000.4.25 (fcf7ba39)\" \n"), 0o644); err != nil {
+	if err := os.WriteFile(page, []byte(".ie \\n(.g .ds Aq \\(aq\n.el .ds Aq '\n.TH devin 1  \"devin 3000.10.48 (fcf7ba39)\" \n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	surfaces := DiscoverUnixAgentSurfaces(context.Background(), home, "devin", true)
-	if len(surfaces) != 1 || surfaces[0].Host != "devin-desktop" || surfaces[0].EngineVersion != "3000.4.25" {
+	if len(surfaces) != 1 || surfaces[0].Host != "devin-desktop" || surfaces[0].EngineVersion != "3000.10.48" {
 		t.Fatalf("devin surfaces = %+v", surfaces)
 	}
-	if got := admitSurfaces("devin", connector.UnverifiedVersionsReport, surfaces).rowVersion(""); got != "3000.4.25" {
+	if got := admitSurfaces("devin", connector.UnverifiedVersionsReport, surfaces).rowVersion(""); got != "3000.10.48" {
 		t.Fatalf("Desktop-only row version = %q", got)
 	}
 }
