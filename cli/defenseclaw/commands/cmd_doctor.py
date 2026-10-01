@@ -1636,7 +1636,11 @@ def _configured_local_retention_days(cfg) -> int:
 
 
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
-    from defenseclaw.doctor_recovery import AuditDBHealthStatus, inspect_audit_db
+    from defenseclaw.doctor_recovery import (
+        _AUDIT_FULL_INTEGRITY_MAX_BYTES,
+        AuditDBHealthStatus,
+        inspect_audit_db,
+    )
 
     db_path = str(getattr(cfg, "audit_db", "") or "")
     health = inspect_audit_db(
@@ -1686,11 +1690,13 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Audit database",
-            f"{db_path}; required schema present, but integrity is unverified for {size_mib} MiB file",
+            f"{db_path}; required schema present; integrity not checked because the {size_mib} MiB file "
+            f"is above Doctor's {_AUDIT_FULL_INTEGRITY_MAX_BYTES // (1024 * 1024)} MiB limit. No action is needed unless the gateway "
+            f"reports audit errors; to check it, stop the gateway and run: sqlite3 {db_path} 'PRAGMA quick_check'",
             r=r,
             check_id="doctor.state.audit-db",
             reason_code=health.reason_code,
-            remediation="stop the gateway and run an offline SQLite integrity check",
+            remediation=f"defenseclaw-gateway stop; sqlite3 {db_path} 'PRAGMA quick_check'",
         )
         return
     detail = f"{db_path}; SQLite quick_check=ok; required schema present"
@@ -1777,14 +1783,17 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
         )
         return
     if health.status is DeviceKeyHealthStatus.LEGACY_UNPROVENANCED:
+        # Keys an earlier release created carry no provenance record and
+        # never will; Doctor keeps them (replacing one breaks pairings), so
+        # a warning would only stay forever on every upgraded install.
         _emit(
-            "warn",
+            "pass",
             "Device identity",
-            "Ed25519 key is valid and private, but cryptographic provenance is unavailable",
+            "Ed25519 key is valid and private; it predates key provenance records "
+            "(created by an earlier release) and is kept as is; no action needed",
             r=r,
             check_id="doctor.identity.device-key",
             reason_code=health.reason_code,
-            remediation="review identity continuity before sandbox pairing; do not replace an in-use key",
         )
         return
     if health.status is DeviceKeyHealthStatus.MISSING:
@@ -8587,10 +8596,14 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
             "audit database passed private-custody, integrity, and schema checks",
             effects=effects,
         )
-    if health.status in {
-        AuditDBHealthStatus.INVALID,
-        AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
-    }:
+    if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
+        return RepairDecision(
+            "noop",
+            "audit database schema is present; the file is above Doctor's integrity-check size "
+            "limit, so Doctor leaves it as is",
+            effects=effects,
+        )
+    if health.status is AuditDBHealthStatus.INVALID:
         remediation = (
             "run `defenseclaw-gateway restart` (it applies audit database migrations) after a trusted backup review"
             if health.reason_code == "audit-db-schema-incomplete"
@@ -8641,10 +8654,9 @@ def _fix_audit_db_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
     health = inspect_audit_db(target, data_dir=data_dir)
     if health.status is AuditDBHealthStatus.VALID:
         return ("skip", "audit database already passed integrity and schema checks")
-    if health.status in {
-        AuditDBHealthStatus.INVALID,
-        AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
-    }:
+    if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
+        return ("skip", "audit database schema is present; it is above the integrity-check size limit and is kept")
+    if health.status is AuditDBHealthStatus.INVALID:
         return (
             "fail",
             f"existing audit database is invalid ({health.reason_code}); refusing to replace it",

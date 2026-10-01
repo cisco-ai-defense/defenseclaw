@@ -667,6 +667,33 @@ def test_audit_read_only_uri_preserves_question_and_fragment_path_bytes(
     assert result.checks[0]["reason_code"] == ""
 
 
+def test_upgraded_install_with_large_audit_db_and_legacy_key_gets_next_steps(tmp_path, monkeypatch) -> None:
+    from defenseclaw import doctor_recovery
+
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value=""):
+        tag, detail = cmd_doctor._fix_audit_db_recovery(cfg, assume_yes=True)
+    assert tag == "pass", detail
+    monkeypatch.setattr(doctor_recovery, "_AUDIT_FULL_INTEGRITY_MAX_BYTES", 0)
+    monkeypatch.setattr(
+        doctor_recovery,
+        "inspect_device_key",
+        lambda *_a, **_k: doctor_recovery.DeviceKeyHealth(
+            doctor_recovery.DeviceKeyHealthStatus.LEGACY_UNPROVENANCED, "device-key-legacy"
+        ),
+    )
+
+    result = _DoctorResult()
+    cmd_doctor._check_audit_db(cfg, result)
+    cmd_doctor._check_device_identity(cfg, result)
+
+    audit, identity = result.checks
+    assert audit["status"] == "warn" and "PRAGMA quick_check" in audit["detail"]
+    assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
+    assert identity["status"] == "pass" and "no action needed" in identity["detail"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode custody regression")
 def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) -> None:
     data_dir = _private_data_dir(tmp_path)
