@@ -141,8 +141,11 @@ type CopilotVSCodeUserRequest struct {
 }
 
 // EnsureCopilotVSCodeUser writes or removes DefenseClaw's Local hook file
-// and plugin under Home. A file that holds anything DefenseClaw did not
-// render is left alone and reported in Kept: it is the user's, and the
+// and plugin under Home. The Local hook file's name is DefenseClaw's own,
+// so on a managed computer the guardian owns it outright: whatever a user
+// leaves there (deleted, emptied or edited) is rewritten, and removed on
+// uninstall. A plugin file that holds anything DefenseClaw did not render
+// is left alone and reported in Kept: it is the user's, and the
 // foreign-hook guard judges it.
 func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserResult, error) {
 	var result CopilotVSCodeUserResult
@@ -159,9 +162,11 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 		return result, err
 	}
 	owned := GuardRequest{GOOS: goos, HookBinary: req.HookBinary}
+	ownedHooks := func(data []byte) bool { return owned.ownedHooksDocument(data) || inertHooksDocument(data) }
+	guardianOwned := func([]byte) bool { return true }
 	var errs []error
 	result.HookFile = CopilotVSCodeLocalHookFilePath(home)
-	if ok, err := ensureOwnedUserFile(&result, owned, result.HookFile, hooks, req.HookFile, true, req.DryRun); err != nil {
+	if ok, err := ensureOwnedUserFile(&result, result.HookFile, hooks, guardianOwned, req.HookFile, req.DryRun); err != nil {
 		errs = append(errs, err)
 	} else {
 		result.HookFileOK = ok
@@ -173,11 +178,11 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	}
 	pluginHooks := filepath.Join(result.PluginDir, "hooks", "hooks.json")
 	pluginManifest := filepath.Join(result.PluginDir, "plugin.json")
-	hooksOK, err := ensureOwnedUserFile(&result, owned, pluginHooks, hooks, req.Plugin, true, req.DryRun)
+	hooksOK, err := ensureOwnedUserFile(&result, pluginHooks, hooks, ownedHooks, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	manifestOK, err := ensureOwnedUserFile(&result, owned, pluginManifest, manifest, req.Plugin, false, req.DryRun)
+	manifestOK, err := ensureOwnedUserFile(&result, pluginManifest, manifest, nil, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -192,9 +197,10 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 }
 
 // ensureOwnedUserFile makes path hold want (keep) or not exist (!keep),
-// touching it only when it is absent or DefenseClaw's own. It reports
-// whether path now holds want.
-func ensureOwnedUserFile(result *CopilotVSCodeUserResult, owned GuardRequest, path string, want []byte, keep, hooksDoc, dryRun bool) (bool, error) {
+// touching it only when it is absent, holds want, or mine (nil: never)
+// claims its other content as DefenseClaw's. It reports whether path now
+// holds want.
+func ensureOwnedUserFile(result *CopilotVSCodeUserResult, path string, want []byte, mine func([]byte) bool, keep, dryRun bool) (bool, error) {
 	info, err := os.Lstat(path)
 	exists := err == nil
 	if err != nil && !os.IsNotExist(err) {
@@ -209,7 +215,7 @@ func ensureOwnedUserFile(result *CopilotVSCodeUserResult, owned GuardRequest, pa
 		if current, err = os.ReadFile(path); err != nil {
 			return false, err
 		}
-		if !bytes.Equal(current, want) && !(hooksDoc && (owned.ownedHooksDocument(current) || inertHooksDocument(current))) {
+		if !bytes.Equal(current, want) && (mine == nil || !mine(current)) {
 			result.Kept = append(result.Kept, path)
 			return false, nil
 		}
