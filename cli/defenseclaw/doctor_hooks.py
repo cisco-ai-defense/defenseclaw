@@ -316,9 +316,9 @@ class WindowsHookCheck:
         showing the operator the exact registration that needs repair.
         """
         if self.target:
-            runtime = f"runtime_path={self.target}" if self.healthy else f"runtime_path={self.target!r}"
+            runtime = f"runtime_path={_display_path(self.target, trusted=self.healthy)}"
         elif self.raw_target:
-            runtime = f"runtime_path={self.raw_target!r}"
+            runtime = f"runtime_path={_display_path(self.raw_target)}"
         elif self.command:
             runtime = f"runtime_command={self.command!r}"
         else:
@@ -787,6 +787,11 @@ def _stable_regular_file(path: str, root: str, *, read_limit: int = 0) -> bytes:
     if identity_before != identity_after or is_link_or_reparse(path):
         raise _InspectionError("stale", f"registered hook target changed during inspection: {path}")
     return body
+
+
+def _display_path(path: str, *, trusted: bool = False) -> str:
+    """Render a path as-is unless it holds characters that need escaping."""
+    return path if trusted or path.isprintable() else repr(path)
 
 
 def _windows_hook_runtime_root(path: str) -> str | None:
@@ -3514,18 +3519,18 @@ def validate_windows_hook_registration(
                     "foreign",
                     f"Antigravity requires the protected native defenseclaw-hook.exe PE target: {resolved}",
                 )
+            # The per-user installer registers the packaged launcher in its
+            # bin directory, which the generic PE check below keeps contained
+            # in the install root. Only the stable launcher that the earlier
+            # native Setup published carries runtime state to validate.
             stable_runtime_root = _windows_hook_runtime_root(resolved)
-            if not stable_runtime_root:
-                raise _InspectionError(
-                    "foreign",
-                    "Antigravity registration does not target the canonical protected stable hook launcher",
+            if stable_runtime_root:
+                antigravity_runtime_evidence = _validate_antigravity_hook_runtime_state(
+                    resolved,
+                    runtime_root=stable_runtime_root,
+                    install_root=install_root,
+                    data_dir=data_dir,
                 )
-            antigravity_runtime_evidence = _validate_antigravity_hook_runtime_state(
-                resolved,
-                runtime_root=stable_runtime_root,
-                install_root=install_root,
-                data_dir=data_dir,
-            )
         if basename in {"defenseclaw-gateway.exe", "defenseclaw-gateway.cmd"}:
             _stable_regular_file(resolved, install_root, read_limit=64 * 1024)
             raise _InspectionError("stale", f"registered hook uses the obsolete gateway launcher: {resolved}")
