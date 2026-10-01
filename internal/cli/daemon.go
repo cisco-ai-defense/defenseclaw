@@ -280,7 +280,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	}
 	if !rotationTransaction {
 		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix)
+			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 		}
 	}
 
@@ -632,7 +632,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix)
+		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")

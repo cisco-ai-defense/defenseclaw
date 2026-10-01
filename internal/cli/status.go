@@ -186,7 +186,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
 		printGatewayKV("Endpoint", addr)
 		Subhead(problem + ". Its status is not shown.")
-		Subhead(foreignGatewayListenerFix)
+		Subhead(foreignGatewayListenerFix(cfg))
 		return fmt.Errorf("the gateway port is held by another process")
 	}
 

@@ -2278,7 +2278,8 @@ def _foreign_gateway_port_holder(cfg) -> str:
 def _foreign_gateway_port_detail(cfg, holder: str) -> str:
     return (
         f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
-        "Stop that process or set gateway.api_port to a free port, then run `defenseclaw-gateway start`"
+        "Stop that process, or move this account's gateway with `defenseclaw setup gateway --api-port <free port>`, "
+        "then run `defenseclaw-gateway start`"
     )
 
 
@@ -2338,7 +2339,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 "warn",
                 "Sidecar API",
                 f"{bind}:{cfg.gateway.api_port} answers, but not as this account's verified gateway "
-                f"({trust.detail}){held}. Stop that process or set gateway.api_port to a free port, "
+                f"({trust.detail}){held}. Stop that process, or move this account's gateway with "
+                "`defenseclaw setup gateway --api-port <free port>`, "
                 "then run `defenseclaw-gateway restart`",
                 r=r,
             )

@@ -145,9 +145,20 @@ all: _source-install-dev-preflight
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
 	@echo ""
-	@echo "╭────────────────────────────────────────────────────────────╮"
-	@echo "│  DefenseClaw is installed and ready.                       │"
-	@echo "╰────────────────────────────────────────────────────────────╯"
+	@# Say "ready" only when this account's gateway answers; a gateway that
+	@# could not start (for example, its port is held by another account)
+	@# is otherwise easy to miss above the LLM setup output.
+	@if "$(INSTALL_DIR)/defenseclaw-gateway" status >/dev/null 2>&1; then \
+		echo "╭────────────────────────────────────────────────────────────╮"; \
+		echo "│  DefenseClaw is installed and ready.                       │"; \
+		echo "╰────────────────────────────────────────────────────────────╯"; \
+	else \
+		echo "╭────────────────────────────────────────────────────────────╮"; \
+		echo "│  DefenseClaw is installed, but its gateway is not running. │"; \
+		echo "╰────────────────────────────────────────────────────────────╯"; \
+		echo "  defenseclaw-gateway status   # shows why, and the fix"; \
+		echo "  defenseclaw-gateway start    # start it"; \
+	fi
 	@echo ""
 	@echo "Try it out:"
 	@echo "  defenseclaw            # launch the TUI"
