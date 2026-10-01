@@ -595,22 +595,26 @@ func TestCanonicalConsumerShutdownIsRetryableIdempotentAndCannotReactivate(t *te
 	case <-fixture.adapter.closeEntered:
 	case err := <-first:
 		t.Fatalf("first shutdown returned %v before adapter close was entered", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for first shutdown to reach adapter close")
 	}
 	cancel()
 	if err := <-first; !errors.Is(err, context.Canceled) {
 		t.Fatalf("first shutdown = %v", err)
 	}
 	close(fixture.adapter.closeGate)
-	shutdownCanonical(t, fixture.consumer)
-	shutdownCanonical(t, fixture.consumer)
+	// No wall-clock deadline on the waits above or the retries below: each
+	// one waits on a specific event, and a real hang is caught by the test
+	// binary's -timeout rather than by a guess about runner speed.
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := fixture.consumer.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown retry %d = %v", attempt, err)
+		}
+	}
 	fixture.consumer.Activate()
 	if result := fixture.consumer.tryEnqueueRecord(fixture.modelRecord(t, "late")); result != telemetry.V8CanonicalSpanEnqueueClosed {
 		t.Fatalf("post-shutdown enqueue = %s", result)
 	}
 	if got := fixture.adapter.closeCalls.Load(); got != 2 {
-		t.Fatalf("adapter close calls = %d, want one timed-out and one successful attempt", got)
+		t.Fatalf("adapter close calls = %d, want one cancelled and one successful attempt", got)
 	}
 }
 
