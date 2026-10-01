@@ -1913,6 +1913,23 @@ class TestCheckHookHealth(unittest.TestCase):
         # With no Hermes host running there is nothing to reload.
         self.assertEqual(results[False]["status"], "pass", results[False])
 
+    def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
+        from defenseclaw.commands import cmd_doctor
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        uid = os.getuid()
+        for args, want in (
+            ("/usr/bin/python3 /home/u/.local/bin/hermes", True),
+            ("uv run hermes", None),
+            ("python3 -m hermes_cli.main", None),
+            ("vim notes.txt", False),
+        ):
+            listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
+            done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done):
+                self.assertIs(cmd_doctor._hermes_host_running(), want, args)
+
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")

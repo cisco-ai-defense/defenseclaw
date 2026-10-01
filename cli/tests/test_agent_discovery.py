@@ -126,6 +126,7 @@ def test_devin_version_probe_accepts_the_longer_linux_revision(monkeypatch) -> N
         "Devin 3000.4.25 (7e8e528a)",
         "devin 03000.4.25 (7e8e528a)",
         "devin 3000.4.25 (7e8e528g)",
+        "devin 3000.11.3 (abcdefa)",
         "devin 3000.4.25 (7e8e528a) extra",
         "prefix devin 3000.4.25 (7e8e528a)",
         "devin 3000.4.25 runtime 1.2.3",

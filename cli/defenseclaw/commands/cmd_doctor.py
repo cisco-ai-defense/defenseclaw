@@ -5641,7 +5641,7 @@ def _hermes_host_running() -> bool | None:
         return None
     try:
         proc = subprocess.run(
-            ["ps", "-A", "-o", "uid=,args="],
+            ["ps", "-A", "-o", "pid=,uid=,args="],
             capture_output=True,
             text=True,
             timeout=3.0,
@@ -5652,14 +5652,24 @@ def _hermes_host_running() -> bool | None:
     if proc.returncode != 0:
         return None
     uid = str(os.getuid())
+    own = {str(os.getpid()), str(os.getppid())}
+    wrapped = False
     for line in proc.stdout.splitlines():
         fields = line.split()
-        if len(fields) < 2 or fields[0] != uid:
+        if len(fields) < 3 or fields[1] != uid or fields[0] in own:
             continue
+        args = fields[2:]
         # A script launcher puts the interpreter first: python .../bin/hermes.
-        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in fields[1:3]):
+        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in args[:2]):
             return True
-    return False
+        # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
+        # that is not proof of absence.
+        if any(
+            os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES or arg.lower().startswith("hermes_cli")
+            for arg in args[2:]
+        ):
+            wrapped = True
+    return None if wrapped else False
 
 
 def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:

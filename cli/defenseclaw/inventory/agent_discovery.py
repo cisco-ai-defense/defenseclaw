@@ -1897,7 +1897,7 @@ def _normalize_devin_cli_version_output(output: str) -> str:
             return output
 
     revision = fields[2]
-    if not 9 <= len(revision) <= 42 or not revision.startswith("(") or not revision.endswith(")"):
+    if len(revision) not in (10, 14) or not revision.startswith("(") or not revision.endswith(")"):
         return output
     if any(character not in "0123456789abcdef" for character in revision[1:-1]):
         return output
