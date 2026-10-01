@@ -864,7 +864,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			enterpriseHooksClaudeEffectivePolicyVerified(state.Results)
 	}
 	report.OK = len(report.Errors) == 0
-	report.Warnings = enterpriseHookMachinePolicyWarnings(cfg, report.Verification)
+	report.Warnings = append(report.Warnings, enterpriseHookMachinePolicyWarnings(cfg, report.Verification)...)
 	if enterpriseHookJSON {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 			return err
