@@ -1973,3 +1973,17 @@ func sidecarV8BootstrapCode(err error) sidecarObservabilityV8BootstrapErrorCode 
 	}
 	return ""
 }
+
+func TestObservabilityClawModeOmittedForSeveralConnectors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Claw.Mode = "claudecode"
+	cfg.Guardrail.Connector = "claudecode"
+	if got := observabilityClawMode(cfg); got != "claudecode" {
+		t.Fatalf("single connector claw mode = %q, want claudecode", got)
+	}
+	cfg.Claw.Mode = "antigravity"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"antigravity": {}, "claudecode": {}}
+	if got := observabilityClawMode(cfg); got != "" {
+		t.Fatalf("multi-connector claw mode = %q, want it omitted", got)
+	}
+}
