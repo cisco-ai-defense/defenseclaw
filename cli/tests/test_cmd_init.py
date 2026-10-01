@@ -4390,3 +4390,27 @@ class TestResolveGatewayForConnectorGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_init_leaves_out_a_connector_setup_cannot_select_on_windows(tmp_path):
+    # One refused Amp executable failed the whole roster (WIN2-U2-07).
+    from defenseclaw.bootstrap import StepResult
+    from defenseclaw.commands import cmd_init
+
+    settings = [{"connector": "claudecode"}, {"connector": "amp"}, {"connector": "codex"}]
+    with (
+        patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+        patch(
+            "defenseclaw.agent_selection.setup_agent_selection_problems",
+            return_value={"amp": "cannot select amp executable"},
+        ),
+    ):
+        kept, problems = cmd_init._leave_out_unselectable_connectors(settings, tmp_path)
+    assert [s["connector"] for s in kept] == ["claudecode", "codex"]
+
+    report = SimpleNamespace(setup=[StepResult("Config", "ok")], readiness=[], profile="action", data_dir="")
+    cmd_init._report_unselectable_connectors(report, problems)
+    assert report.status == "partial"
+    assert report.setup[-1].next_command == "defenseclaw setup amp"
+    assert "cannot select amp executable" in report.setup[-1].detail
+
