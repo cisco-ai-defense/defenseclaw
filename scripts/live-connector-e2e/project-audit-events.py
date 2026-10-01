@@ -67,7 +67,7 @@ def _require_indexed_text_match(
         )
 
 
-def _read_projected_records(database: Path) -> list[str]:
+def _query_rows(database: Path) -> list[tuple[object, ...]]:
     if not database.is_file():
         raise ValueError(f"canonical audit database is missing: {database}")
 
@@ -111,8 +111,12 @@ def _read_projected_records(database: Path) -> list[str]:
     if rows is None:
         raise RuntimeError("canonical audit projection query did not complete")
 
-    records: list[str] = []
-    for (
+    return rows
+
+
+def _validated_record(row: tuple[object, ...]) -> str:
+    """Return the exact stored record after checking it against its row."""
+    (
         rowid,
         record_id,
         bucket,
@@ -127,67 +131,91 @@ def _read_projected_records(database: Path) -> list[str]:
         payload_raw,
         raw,
         projection_hash,
-    ) in rows:
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError(f"audit row {rowid} has no canonical projected record")
-        if raw != raw.strip() or "\r" in raw or "\n" in raw:
-            raise ValueError(f"audit row {rowid} canonical projection is not one JSONL record")
-        try:
-            record = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"audit row {rowid} has an invalid canonical projection") from exc
-        if not isinstance(record, dict):
-            raise ValueError(f"audit row {rowid} canonical projection is not an object")
-        if type(record_schema_version) is not int or record_schema_version != 1:
-            raise ValueError(f"audit row {rowid} has an invalid indexed schema version")
-        if type(record.get("schema_version")) is not int:
-            raise ValueError(f"audit row {rowid} has an invalid canonical schema version type")
-        if record.get("schema_version") != 1:
-            raise ValueError(f"audit row {rowid} is not a canonical schema-v1 record")
-        correlation = record.get("correlation")
-        if not isinstance(correlation, dict):
-            raise ValueError(f"audit row {rowid} canonical correlation is not an object")
-        body = record.get("body")
-        if not isinstance(body, dict):
-            raise ValueError(f"audit row {rowid} canonical body is not an object")
-        if not isinstance(payload_raw, str):
-            raise ValueError(f"audit row {rowid} indexed payload_json is not text")
-        try:
-            payload = json.loads(payload_raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"audit row {rowid} indexed payload_json is invalid") from exc
-        if not isinstance(payload, dict) or not _same_json_type_and_value(payload, body):
-            raise ValueError(f"audit row {rowid} indexed payload disagrees with canonical body")
-        comparisons = (
-            ("record_id", record.get("record_id"), record_id),
-            ("bucket", record.get("bucket"), bucket),
-            ("event_name", record.get("event_name"), event_name),
-            ("source", record.get("source"), source),
-            ("signal", record.get("signal"), signal),
-            ("connector", record.get("connector"), connector),
-            ("request_id", correlation.get("request_id"), request_id),
-            ("session_id", correlation.get("session_id"), session_id),
-            ("turn_id", correlation.get("turn_id"), turn_id),
+    ) = row
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"audit row {rowid} has no canonical projected record")
+    if raw != raw.strip() or "\r" in raw or "\n" in raw:
+        raise ValueError(f"audit row {rowid} canonical projection is not one JSONL record")
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"audit row {rowid} has an invalid canonical projection") from exc
+    if not isinstance(record, dict):
+        raise ValueError(f"audit row {rowid} canonical projection is not an object")
+    if type(record_schema_version) is not int or record_schema_version != 1:
+        raise ValueError(f"audit row {rowid} has an invalid indexed schema version")
+    if type(record.get("schema_version")) is not int:
+        raise ValueError(f"audit row {rowid} has an invalid canonical schema version type")
+    if record.get("schema_version") != 1:
+        raise ValueError(f"audit row {rowid} is not a canonical schema-v1 record")
+    correlation = record.get("correlation")
+    if not isinstance(correlation, dict):
+        raise ValueError(f"audit row {rowid} canonical correlation is not an object")
+    body = record.get("body")
+    if not isinstance(body, dict):
+        raise ValueError(f"audit row {rowid} canonical body is not an object")
+    if not isinstance(payload_raw, str):
+        raise ValueError(f"audit row {rowid} indexed payload_json is not text")
+    try:
+        payload = json.loads(payload_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"audit row {rowid} indexed payload_json is invalid") from exc
+    if not isinstance(payload, dict) or not _same_json_type_and_value(payload, body):
+        raise ValueError(f"audit row {rowid} indexed payload disagrees with canonical body")
+    comparisons = (
+        ("record_id", record.get("record_id"), record_id),
+        ("bucket", record.get("bucket"), bucket),
+        ("event_name", record.get("event_name"), event_name),
+        ("source", record.get("source"), source),
+        ("signal", record.get("signal"), signal),
+        ("connector", record.get("connector"), connector),
+        ("request_id", correlation.get("request_id"), request_id),
+        ("session_id", correlation.get("session_id"), session_id),
+        ("turn_id", correlation.get("turn_id"), turn_id),
+    )
+    for field, projected, indexed in comparisons:
+        _require_indexed_text_match(
+            projected,
+            indexed,
+            rowid=rowid,
+            field=field,
+            required=field in ("record_id", "bucket", "event_name", "source", "signal"),
         )
-        for field, projected, indexed in comparisons:
-            _require_indexed_text_match(
-                projected,
-                indexed,
-                rowid=rowid,
-                field=field,
-                required=field in ("record_id", "bucket", "event_name", "source", "signal"),
-            )
-        expected_hash = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        if not isinstance(projection_hash, str) or projection_hash != expected_hash:
-            raise ValueError(f"audit row {rowid} canonical projection hash is invalid")
-        if record.get("event_name") == "hook_decision":
-            for field in (
-                "defenseclaw.guardrail.would_block",
-                "defenseclaw.guardrail.enforced",
-            ):
-                if type(body.get(field)) is not bool:
-                    raise ValueError(f"audit row {rowid} hook decision {field} is not boolean")
-        records.append(raw)
+    expected_hash = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    if not isinstance(projection_hash, str) or projection_hash != expected_hash:
+        raise ValueError(f"audit row {rowid} canonical projection hash is invalid")
+    if record.get("event_name") == "hook_decision":
+        for field in (
+            "defenseclaw.guardrail.would_block",
+            "defenseclaw.guardrail.enforced",
+        ):
+            if type(body.get(field)) is not bool:
+                raise ValueError(f"audit row {rowid} hook decision {field} is not boolean")
+    return raw
+
+
+def _read_projected_records(
+    database: Path,
+    validated: dict[object, tuple[object, ...]] | None = None,
+) -> list[str]:
+    """Read every canonical record in rowid order.
+
+    ``validated`` maps a rowid to the exact row last accepted for it. A row
+    that is byte-for-byte unchanged is not re-validated, because validation
+    is a pure function of the row; any new, changed, or reordered row is
+    validated in full. The map is replaced only after every row passes.
+    """
+    records: list[str] = []
+    accepted: dict[object, tuple[object, ...]] = {}
+    for row in _query_rows(database):
+        rowid = row[0]
+        if validated is None or validated.get(rowid) != row:
+            _validated_record(row)
+        accepted[rowid] = row
+        records.append(row[-2])  # type: ignore[arg-type]
+    if validated is not None:
+        validated.clear()
+        validated.update(accepted)
     return records
 
 
@@ -228,43 +256,68 @@ def project(audit_db: Path, output: Path) -> None:
 SERVE_PROTOCOL = 1
 
 
-def _write_response(responses: TextIO, response: dict[str, object]) -> None:
+def _write_line(responses: TextIO, response: dict[str, object]) -> None:
     responses.write(json.dumps(response, separators=(",", ":")))
     responses.write("\n")
-    responses.flush()
 
 
-def _serve_request(line: str) -> dict[str, object]:
-    try:
-        request = json.loads(line)
-        if not isinstance(request, dict) or set(request) != {"audit_db", "out"}:
-            raise ValueError("projection request must name exactly audit_db and out")
-        audit_db = request["audit_db"]
-        output = request["out"]
-        if not isinstance(audit_db, str) or not audit_db or not isinstance(output, str) or not output:
-            raise ValueError("projection request paths must be non-empty text")
-        project(Path(audit_db), Path(output))
-    except (OSError, ValueError, sqlite3.Error) as exc:
-        return {"ok": False, "error": f"canonical audit projection failed: {exc}"}
-    return {"ok": True}
+class _Server:
+    def __init__(self) -> None:
+        self._validated: dict[Path, dict[object, tuple[object, ...]]] = {}
+
+    def answer(self, line: str, responses: TextIO) -> None:
+        try:
+            request = json.loads(line)
+            if not isinstance(request, dict) or not (
+                set(request) == {"audit_db"} or set(request) == {"audit_db", "out"}
+            ):
+                raise ValueError("projection request must name audit_db and optionally out")
+            audit_db = request["audit_db"]
+            output = request.get("out")
+            if not isinstance(audit_db, str) or not audit_db:
+                raise ValueError("projection request audit_db must be non-empty text")
+            if output is not None and (not isinstance(output, str) or not output):
+                raise ValueError("projection request out must be non-empty text")
+            database = Path(audit_db)
+            if output is not None and database.resolve() == Path(output).resolve():
+                raise ValueError("canonical projection output must differ from the audit database")
+            validated = self._validated.setdefault(database.resolve(), {})
+            records = _read_projected_records(database, validated)
+            if output is not None:
+                _replace_jsonl(Path(output), records)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            _write_line(responses, {"ok": False, "error": f"canonical audit projection failed: {exc}"})
+            return
+        if output is not None:
+            _write_line(responses, {"ok": True})
+            return
+        # Every record is validated to be exactly one line, so the records
+        # follow the header one per line.
+        _write_line(responses, {"ok": True, "records": len(records)})
+        for record in records:
+            responses.write(record)
+            responses.write("\n")
 
 
 def serve(requests: TextIO, responses: TextIO) -> int:
     """Answer one projection request per line until end of input.
 
-    Each request is ``{"audit_db": ..., "out": ...}``. The response is
-    ``{"ok": true}`` once the snapshot is atomically published, or
-    ``{"ok": false, "error": ...}`` when the projection is rejected; a
-    rejected projection leaves the server ready for the next request. End of
-    input (the harness closing its pipe or exiting) is the only shutdown
-    request.
+    ``{"audit_db": ...}`` answers ``{"ok": true, "records": N}`` followed by
+    the N canonical records, one per line. ``{"audit_db": ..., "out": ...}``
+    atomically publishes a JSONL snapshot and answers ``{"ok": true}``. A
+    rejected projection answers ``{"ok": false, "error": ...}`` and leaves the
+    server ready for the next request. End of input (the harness closing its
+    pipe or exiting) is the only shutdown request.
     """
-    _write_response(responses, {"ready": True, "protocol": SERVE_PROTOCOL})
+    server = _Server()
+    _write_line(responses, {"ready": True, "protocol": SERVE_PROTOCOL})
+    responses.flush()
     while True:
         line = requests.readline()
         if not line:
             return 0
-        _write_response(responses, _serve_request(line))
+        server.answer(line, responses)
+        responses.flush()
 
 
 def main() -> int:

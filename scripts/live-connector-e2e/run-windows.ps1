@@ -4326,7 +4326,7 @@ function Stop-CanonicalAuditProjectorWithFailure([string]$Reason) {
     throw "canonical audit projector $Reason$detail"
 }
 
-function Read-CanonicalAuditProjectorResponse(
+function Read-CanonicalAuditProjectorLine(
     [object]$Projector,
     [DateTime]$Deadline,
     [string]$Phase,
@@ -4347,6 +4347,16 @@ function Read-CanonicalAuditProjectorResponse(
     if ($null -eq $line) {
         Stop-CanonicalAuditProjectorWithFailure "exited before its $Phase response"
     }
+    return $line
+}
+
+function Read-CanonicalAuditProjectorResponse(
+    [object]$Projector,
+    [DateTime]$Deadline,
+    [string]$Phase,
+    [int]$TimeoutSeconds
+) {
+    $line = Read-CanonicalAuditProjectorLine $Projector $Deadline $Phase $TimeoutSeconds
     try {
         $response = $line | ConvertFrom-Json -ErrorAction Stop
     } catch {
@@ -4410,13 +4420,18 @@ function Start-CanonicalAuditProjector {
     return $projector
 }
 
-function Invoke-CanonicalAuditProjection([string]$AuditDb, [string]$OutputPath) {
+# With an OutputPath the projector atomically publishes a JSONL snapshot
+# there. Without one it streams the validated records back on the pipe and
+# this returns them, so a poll writes and reads no file at all.
+function Invoke-CanonicalAuditProjection([string]$AuditDb, [string]$OutputPath = '') {
     $projector = $script:CanonicalAuditProjector
     if ($null -ne $projector -and $projector.Process.HasExited) {
         Stop-CanonicalAuditProjectorWithFailure 'exited unexpectedly between requests'
     }
     if ($null -eq $projector) { $projector = Start-CanonicalAuditProjector }
-    $request = [ordered]@{ audit_db = $AuditDb; out = $OutputPath } | ConvertTo-Json -Compress
+    $request = [ordered]@{ audit_db = $AuditDb }
+    if (-not [string]::IsNullOrEmpty($OutputPath)) { $request.out = $OutputPath }
+    $request = $request | ConvertTo-Json -Compress
     $timeout = $script:CanonicalAuditProjectionRequestTimeoutSeconds
     $deadline = [DateTime]::UtcNow.AddSeconds($timeout)
     try {
@@ -4437,6 +4452,18 @@ function Invoke-CanonicalAuditProjection([string]$AuditDb, [string]$OutputPath) 
         # the server stays ready for the next request.
         throw [string](Get-JsonPropertyValue $response 'error')
     }
+    if (-not [string]::IsNullOrEmpty($OutputPath)) { return }
+    $count = Get-JsonPropertyValue $response 'records'
+    if (($count -isnot [long] -and $count -isnot [int]) -or $count -lt 0) {
+        Stop-CanonicalAuditProjectorWithFailure 'returned a malformed projection response'
+    }
+    # The records share the request deadline: a projector that stalls part
+    # way through is killed rather than leaving a half-read stream behind.
+    $records = [string[]]::new($count)
+    for ($index = 0; $index -lt $count; $index++) {
+        $records[$index] = Read-CanonicalAuditProjectorLine $projector $deadline 'projection' $timeout
+    }
+    return $records
 }
 
 function New-CanonicalAuditProjectionSnapshot {
@@ -4474,12 +4501,7 @@ function Get-EventLines([string]$Path) {
         return @(Read-EventJsonLines $Path)
     }
 
-    $snapshot = New-CanonicalAuditProjectionSnapshot
-    try {
-        return @(Read-EventJsonLines $snapshot)
-    } finally {
-        Remove-Item -LiteralPath $snapshot -Force -ErrorAction SilentlyContinue
-    }
+    return @(Invoke-CanonicalAuditProjection ([IO.Path]::GetFullPath($script:AuditDb)))
 }
 
 function Get-JsonPropertyValue([AllowNull()][object]$Object, [string]$Name) {

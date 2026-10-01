@@ -2275,10 +2275,15 @@ connection.close()
         $servingProjector = $script:CanonicalAuditProjector
         Assert-True ($null -ne $servingProjector -and -not $servingProjector.Process.HasExited) `
             'canonical SQLite reads are served by a live long-lived projector'
+        $projectionRoot = Join-Path ([IO.Path]::GetFullPath($StateRoot)) '.canonical-event-projection'
+        $snapshotsBeforePolls = @(Get-ChildItem -LiteralPath $projectionRoot -Force -ErrorAction SilentlyContinue).Count
         foreach ($poll in 1..20) {
             Assert-True (@(Get-EventLines $script:AuditDb).Count -eq 6) `
                 "canonical poll $poll reads the committed history"
         }
+        Assert-True (@(Get-ChildItem -LiteralPath $projectionRoot -Force -ErrorAction SilentlyContinue).Count -eq
+            $snapshotsBeforePolls) `
+            'canonical polls stream records and leave no snapshot file behind'
         Assert-True ([object]::ReferenceEquals($script:CanonicalAuditProjector, $servingProjector) -and
             -not $servingProjector.Process.HasExited) `
             'repeated canonical polls and rejected projections reuse one projector process'
@@ -4984,10 +4989,11 @@ threading.Event().wait()
         'canonical audit polls reuse one long-lived projector; start-up is never charged to a poll'
     Assert-True ($canonicalEventReader -match '\.canonical-event-projection' -and
         $canonicalEventReader -match '\[guid\]::NewGuid' -and
-        $eventLineRouter -match 'New-CanonicalAuditProjectionSnapshot' -and
-        $eventLineRouter -match 'Remove-Item -LiteralPath \$snapshot' -and
+        $eventLineRouter -match 'Invoke-CanonicalAuditProjection \(\[IO\.Path\]::GetFullPath\(\$script:AuditDb\)\)\)' -and
+        $eventLineRouter -notmatch 'New-CanonicalAuditProjectionSnapshot|Read-EventJsonLines \$snapshot' -and
+        $canonicalProjectionRequest -match "Read-CanonicalAuditProjectorLine \`$projector \`$deadline 'projection' \`$timeout" -and
         $harnessText -notmatch '\$script:GatewayJsonl') `
-        'Windows live readiness exclusively reads a private transient canonical SQLite projection'
+        'Windows live readiness streams the canonical SQLite projection; evidence snapshots stay private and transient'
     Assert-True ($auditProjectorText -match 'mode=ro' -and
         $auditProjectorText -match 'PRAGMA query_only=ON' -and
         $auditProjectorText -match 'ORDER BY rowid' -and
