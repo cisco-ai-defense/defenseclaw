@@ -135,7 +135,12 @@ $script:ManifestCatchUpWaitSeconds = 30
 $script:ManifestCatchUpPollMilliseconds = 3000
 $script:ManifestCatchUpWindowSeconds = 120
 $script:SchemaVersion = 1
-$script:AgentApplicationControlAttestationSchemaVersion = 2
+# Schema 3 binds Claude effective-policy evidence to the Claude policy identity
+# (machine policy bytes plus hook binary). Schema 2 bound it to targets.yaml,
+# which the enumerator rewrites on every enrollment change; schema-2 files are
+# still read, but a verified Claude result in one is reported as stale.
+$script:AgentApplicationControlAttestationSchemaVersion = 3
+$script:LegacyAgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
 $script:ProgramFiles = [string]$trustedMachineRoots.ProgramFiles
@@ -6755,6 +6760,9 @@ function Get-DefenseClawLayout {
     )
     $codexVendorDirectory = Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'OpenAI'
     $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path $codexVendorDirectory 'Codex'
+    $claudeManagedPolicyDirectory = Microsoft.PowerShell.Management\Join-Path `
+        (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'ClaudeCode') `
+        'managed-settings.d'
     $runtimeDirectory = Microsoft.PowerShell.Management\Join-Path `
         $StateRoot `
         'runtime'
@@ -6858,6 +6866,20 @@ function Get-DefenseClawLayout {
                     'managed-settings.d') `
                 '.defenseclaw-managed-hooks.lock'
         )
+        # The machine-wide Claude policy fragment and its DefenseClaw sidecar
+        # are written by the gateway, never by this module. They are read
+        # only to bind Claude effective-policy evidence to the exact policy
+        # identity the live Claude proof exercised.
+        ClaudeManagedPolicyPath = (
+            Microsoft.PowerShell.Management\Join-Path `
+                $claudeManagedPolicyDirectory `
+                '90-defenseclaw.json'
+        )
+        ClaudeManagedPolicyStatePath = (
+            Microsoft.PowerShell.Management\Join-Path `
+                $claudeManagedPolicyDirectory `
+                '.defenseclaw-managed-hooks.state'
+        )
         CodexRequirementsOwnershipPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-ownership.json')
         CodexRequirementsAclBackupPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-acl-backup.json')
         AgentApplicationControlAttestationPath = (Microsoft.PowerShell.Management\Join-Path $installState 'agent-application-control-attestation.json')
@@ -6866,6 +6888,9 @@ function Get-DefenseClawLayout {
         CoreHardeningCertification = [bool]$CoreHardeningCertification
         AgentApplicationControlAttested = [bool]$AgentApplicationControlAttested
         ClaudeEffectivePolicyVerified = $false
+        # Non-empty when protected evidence records a verified Claude policy
+        # that is not the currently installed Claude policy identity.
+        ClaudeEffectivePolicyStaleReason = ''
         ClaudeTargetEnabled = $false
         CodexTargetEnabled = $false
         CursorTargetEnabled = $false
@@ -8745,6 +8770,37 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
+function Set-DefenseClawRequestedAttestations {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$AttestAgentApplicationControl,
+        [switch]$AttestClaudeEffectivePolicy
+    )
+    # Explicit attestations describe the transaction being started. The
+    # lifecycle applies them after reading existing evidence and again after
+    # pending-transaction recovery, which restores the interrupted
+    # transaction's evidence state (and any stale reason) into the layout.
+    if ($AttestAgentApplicationControl) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
+        }
+        $Layout.AgentApplicationControlAttested = $true
+    }
+    if ($AttestClaudeEffectivePolicy) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
+        }
+        # A fresh live proof rebinds the evidence to the current Claude
+        # policy identity, whatever the recorded evidence said.
+        $Layout.ClaudeEffectivePolicyVerified = $true
+        if (Test-DefenseClawStandaloneProfile) {
+            $Layout['ClaudeEffectivePolicyStaleReason'] = ''
+        }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = ''
+        }
+    }
+}
 function Get-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
@@ -8794,8 +8850,17 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     catch {
         throw "cannot parse agent application-control attestation: $($_.Exception.Message)"
     }
-    if ([int]$attestation.schema_version -ne
-        (Get-DefenseClawAgentApplicationControlAttestationSchemaVersion)) {
+    $schemaVersion = [int]$attestation.schema_version
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $schemaVersion -ne
+            (Get-DefenseClawAgentApplicationControlAttestationSchemaVersion)) {
+        throw "unsupported agent application-control attestation schema: $($attestation.schema_version)"
+    }
+    if (-not (Test-DefenseClawStandaloneProfile) -and
+        $schemaVersion -ne
+            $script:AgentApplicationControlAttestationSchemaVersion -and
+        $schemaVersion -ne
+            $script:LegacyAgentApplicationControlAttestationSchemaVersion) {
         throw "unsupported agent application-control attestation schema: $($attestation.schema_version)"
     }
     $enforced = $attestation.PSObject.Properties[
@@ -8829,6 +8894,13 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     $claudeManifestHash = $attestation.PSObject.Properties[
         'claude_effective_policy_manifest_sha256'
     ]
+    $claudePolicyHash = $attestation.PSObject.Properties[
+        'claude_effective_policy_managed_policy_sha256'
+    ]
+    $claudeHookHash = $attestation.PSObject.Properties[
+        'claude_effective_policy_hook_sha256'
+    ]
+    $claudeStaleReason = ''
     if (Test-DefenseClawStandaloneProfile) {
         # Standalone evidence binds the Claude policy identity the live proof
         # exercised, never targets.yaml (which the enumerator rewrites on
@@ -8838,32 +8910,70 @@ function Get-DefenseClawAgentApplicationControlAttestation {
             -Layout $Layout `
             -Attestation $attestation `
             -Verified ([bool]$claudeEffective.Value)
-        Microsoft.PowerShell.Utility\Add-Member `
-            -InputObject $attestation `
-            -NotePropertyName 'claude_effective_policy_stale_reason' `
-            -NotePropertyValue $claudeStaleReason `
-            -Force
     }
-    elseif ([bool]$claudeEffective.Value) {
-        if ($null -eq $claudeManifestHash -or
-            [string]$claudeManifestHash.Value -cnotmatch '^[0-9a-f]{64}$' -or
-            -not (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.ManifestPath `
-                -PathType Leaf)) {
-            throw 'Claude effective-policy evidence is not bound to an installed manifest'
+    else {
+    # A verified Claude result whose binding no longer matches the installed
+    # Claude policy identity is reported as unverified, never thrown: every
+    # lifecycle action, including the re-attesting Repair and Uninstall, must
+    # stay available. Only malformed evidence fails closed.
+    if ($schemaVersion -eq
+        $script:LegacyAgentApplicationControlAttestationSchemaVersion) {
+        if ([bool]$claudeEffective.Value) {
+            if ($null -eq $claudeManifestHash -or
+                [string]$claudeManifestHash.Value -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Claude effective-policy evidence is not bound to an installed manifest'
+            }
+            $claudeStaleReason = (
+                'Claude effective-policy evidence predates the Claude policy ' +
+                'binding; rerun the live Claude proof and Repair ' +
+                '-AttestClaudeEffectivePolicy'
+            )
         }
-        $actualManifestHash = (
-            Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $Layout.ManifestPath `
-                -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
-        if ($actualManifestHash -cne [string]$claudeManifestHash.Value) {
-            throw 'Claude effective-policy evidence is stale for the installed manifest'
+        elseif ($null -ne $claudeManifestHash -and
+            -not [string]::IsNullOrEmpty([string]$claudeManifestHash.Value)) {
+            throw 'unverified Claude effective-policy evidence unexpectedly records a manifest binding'
         }
     }
-    elseif ($null -ne $claudeManifestHash -and
-        -not [string]::IsNullOrEmpty([string]$claudeManifestHash.Value)) {
-        throw 'unverified Claude effective-policy evidence unexpectedly records a manifest binding'
+    else {
+        if ($null -ne $claudeManifestHash) {
+            throw 'Claude effective-policy evidence records a legacy manifest binding'
+        }
+        if ([bool]$claudeEffective.Value) {
+            if ($null -eq $claudePolicyHash -or
+                [string]$claudePolicyHash.Value -cnotmatch '^[0-9a-f]{64}$' -or
+                $null -eq $claudeHookHash -or
+                [string]$claudeHookHash.Value -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Claude effective-policy evidence is not bound to a Claude policy identity'
+            }
+            try {
+                $currentClaudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding `
+                    -Layout $Layout
+                if ([string]$currentClaudeBinding.managed_policy_sha256 -cne
+                        [string]$claudePolicyHash.Value -or
+                    [string]$currentClaudeBinding.hook_sha256 -cne
+                        [string]$claudeHookHash.Value) {
+                    $claudeStaleReason = (
+                        'Claude effective-policy evidence was recorded for a ' +
+                        'different DefenseClaw Claude policy or hook binary; ' +
+                        'rerun the live Claude proof and Repair ' +
+                        '-AttestClaudeEffectivePolicy'
+                    )
+                }
+            }
+            catch {
+                $claudeStaleReason = (
+                    'the installed DefenseClaw Claude policy identity is ' +
+                    "unavailable: $($_.Exception.Message)"
+                )
+            }
+        }
+        elseif (($null -ne $claudePolicyHash -and
+                -not [string]::IsNullOrEmpty([string]$claudePolicyHash.Value)) -or
+            ($null -ne $claudeHookHash -and
+                -not [string]::IsNullOrEmpty([string]$claudeHookHash.Value))) {
+            throw 'unverified Claude effective-policy evidence unexpectedly records a Claude policy binding'
+        }
+    }
     }
     if ([string]$attestation.attested_by_sid -notmatch '^S-\d-\d+(?:-\d+)+$') {
         throw 'agent application-control attestation contains an invalid administrator SID'
@@ -8889,7 +8999,155 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     catch {
         throw "agent application-control attestation contains an invalid timestamp: $($_.Exception.Message)"
     }
+    # claude_effective_policy_verified stays the recorded claim, which is what
+    # metadata, service environments and transaction snapshots were published
+    # with. Callers that report or re-publish the result consult this reason.
+    Microsoft.PowerShell.Utility\Add-Member `
+        -InputObject $attestation `
+        -NotePropertyName 'claude_effective_policy_stale_reason' `
+        -NotePropertyValue $claudeStaleReason `
+        -Force
     return $attestation
+}
+
+function Get-DefenseClawClaudeEffectivePolicyBinding {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # The live Claude proof exercises the machine-wide DefenseClaw policy
+    # fragment and the hook binary it launches, so the evidence binds exactly
+    # those bytes. The fragment is rendered from the resolved Claude hook
+    # contract, so a contract change also changes its digest. targets.yaml and
+    # the sidecar's target SID list are deliberately excluded: the enumerator
+    # rewrites both on every enrollment change without changing the policy
+    # Claude loads.
+    $policyPath = [string]$Layout.ClaudeManagedPolicyPath
+    $statePath = [string]$Layout.ClaudeManagedPolicyStatePath
+    foreach ($entry in @(
+        @($policyPath, 'DefenseClaw Claude managed policy', 4194304),
+        @($statePath, 'DefenseClaw Claude managed policy state', 65536),
+        @([string]$Layout.HookPath, 'DefenseClaw hook binary', [int64]::MaxValue)
+    )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath ([string]$entry[0]) `
+            -PathType Leaf)) {
+            throw "$($entry[1]) is missing: $($entry[0])"
+        }
+        Assert-DefenseClawNoReparsePath -Path ([string]$entry[0])
+        $item = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath ([string]$entry[0]) `
+            -Force
+        if ([int64]$item.Length -le 0 -or [int64]$item.Length -gt [int64]$entry[2]) {
+            throw "$($entry[1]) has an invalid size: $($entry[0])"
+        }
+    }
+    $policySha256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $policyPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    try {
+        $state = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $statePath `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        throw "cannot parse DefenseClaw Claude managed policy state: $($_.Exception.Message)"
+    }
+    # The sidecar is the gateway's ownership record for the fragment. Requiring
+    # its digest proves the bytes are DefenseClaw's canonical rendering rather
+    # than an arbitrary file at the documented path.
+    if ([string]$state.policy_sha256 -cne "sha256:$policySha256") {
+        throw 'DefenseClaw Claude managed policy does not match its ownership record'
+    }
+    $recordedHook = [string]$state.hook_executable
+    if ([string]::IsNullOrWhiteSpace($recordedHook) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath($recordedHook).TrimEnd('\'),
+            [IO.Path]::GetFullPath([string]$Layout.HookPath).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'DefenseClaw Claude managed policy launches a hook outside the installed layout'
+    }
+    $hookSha256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.HookPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    return [ordered]@{
+        managed_policy_sha256 = $policySha256
+        hook_sha256 = $hookSha256
+    }
+}
+
+function Get-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    # -AttestClaudeEffectivePolicy records a live Claude proof the
+    # administrator ran before this transaction started, so it can only vouch
+    # for the Claude policy and hook binary installed at that point. Capture
+    # that identity before anything is staged, and refuse up front when the
+    # transaction would replace the hook the proof exercised (threat model
+    # W-34).
+    try {
+        $baseline = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw (
+            '-AttestClaudeEffectivePolicy requires the installed DefenseClaw ' +
+            'Claude policy and hook binary that the live Claude proof ' +
+            "exercised: $($_.Exception.Message)"
+        )
+    }
+    if ($Sources.ContainsKey('hook') -and
+        -not [string]::Equals(
+            [string]$Sources['hook'].sha256,
+            [string]$baseline.hook_sha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the supplied hook binary ' +
+            'differs from the installed DefenseClaw hook binary that the live ' +
+            'Claude proof exercised. Run this transaction without ' +
+            '-AttestClaudeEffectivePolicy, rerun the live Claude proof against ' +
+            'the new hook, then run Repair -AttestClaudeEffectivePolicy with ' +
+            'the same hook binary'
+        )
+    }
+    return $baseline
+}
+
+function Assert-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][Collections.IDictionary]$Baseline
+    )
+    # The evidence writer hashes the policy and hook on disk after staging.
+    # Both must still be the bytes captured before this transaction, so the
+    # published binding never names bytes the live proof did not run.
+    try {
+        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
+    }
+    if ([string]$current.hook_sha256 -cne [string]$Baseline.hook_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: this transaction replaced ' +
+            'the DefenseClaw hook binary that the live Claude proof exercised; ' +
+            'rerun the live Claude proof against the new hook, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
+    if ([string]$current.managed_policy_sha256 -cne
+        [string]$Baseline.managed_policy_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the DefenseClaw Claude ' +
+            'policy changed during this transaction, so the live Claude proof ' +
+            'did not exercise it; rerun the live Claude proof, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
 }
 
 function Write-DefenseClawAgentApplicationControlAttestation {
@@ -8902,18 +9160,21 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         return
     }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $claudeManifestHash = ''
+    $claudePolicyHash = ''
+    $claudeHookHash = ''
     if ([bool]$Layout.ClaudeEffectivePolicyVerified) {
-        if (-not (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.ManifestPath `
-            -PathType Leaf)) {
-            throw 'cannot attest Claude effective policy without an installed protected manifest'
+        if (-not [string]::IsNullOrEmpty(
+            [string]$Layout.ClaudeEffectivePolicyStaleReason)) {
+            throw "refusing to re-publish stale Claude effective-policy evidence: $($Layout.ClaudeEffectivePolicyStaleReason)"
         }
-        $claudeManifestHash = (
-            Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $Layout.ManifestPath `
-                -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
+        try {
+            $claudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+        }
+        catch {
+            throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
+        }
+        $claudePolicyHash = [string]$claudeBinding.managed_policy_sha256
+        $claudeHookHash = [string]$claudeBinding.hook_sha256
     }
     Write-DefenseClawJsonAtomic -Value ([ordered]@{
         schema_version = $script:AgentApplicationControlAttestationSchemaVersion
@@ -8922,19 +9183,23 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
         minimum_claude_version = (Get-DefenseClawClaudeMinimumClientVersion)
         claude_effective_policy_verified = [bool]$Layout.ClaudeEffectivePolicyVerified
-        claude_effective_policy_manifest_sha256 = $claudeManifestHash
+        claude_effective_policy_managed_policy_sha256 = $claudePolicyHash
+        claude_effective_policy_hook_sha256 = $claudeHookHash
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
     }) -Path $Layout.AgentApplicationControlAttestationPath
-    [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
+    $written = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
+    if (-not [string]::IsNullOrEmpty(
+        [string]$written.claude_effective_policy_stale_reason)) {
+        throw "Claude policy identity changed while attesting: $($written.claude_effective_policy_stale_reason)"
+    }
+    $Layout.ClaudeEffectivePolicyStaleReason = ''
 }
 
 function Get-DefenseClawAgentApplicationControlAttestationSchemaVersion {
     <#
-        Standalone evidence is schema 3: Claude effective-policy evidence is
-        bound to the Claude policy identity. The Secure Client profile keeps
-        its historical schema.
+        Both profiles write schema 3 Claude policy identity evidence.
     #>
     if (Test-DefenseClawStandaloneProfile) {
         return 3
@@ -8957,7 +9222,7 @@ function Get-DefenseClawClaudeManagedPolicyPaths {
     }
 }
 
-function Get-DefenseClawClaudeEffectivePolicyBinding {
+function Get-DefenseClawStandaloneClaudeEffectivePolicyBinding {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # The live Claude proof exercises the machine-wide DefenseClaw policy
     # fragment and the hook binary it launches, so the evidence binds exactly
@@ -9058,7 +9323,7 @@ function Get-DefenseClawStandaloneClaudeEvidenceStaleReason {
         throw 'Claude effective-policy evidence is not bound to a Claude policy identity'
     }
     try {
-        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+        $current = Get-DefenseClawStandaloneClaudeEffectivePolicyBinding -Layout $Layout
     }
     catch {
         return "the installed DefenseClaw Claude policy identity is unavailable: $($_.Exception.Message)"
@@ -9085,7 +9350,7 @@ function Write-DefenseClawStandaloneAgentApplicationControlAttestation {
             throw "refusing to re-publish stale Claude effective-policy evidence: $staleReason"
         }
         try {
-            $claudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+            $claudeBinding = Get-DefenseClawStandaloneClaudeEffectivePolicyBinding -Layout $Layout
         }
         catch {
             throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
@@ -9612,6 +9877,7 @@ function Restore-DefenseClawTransaction {
     $Layout.ClaudeEffectivePolicyVerified = [bool](
         $snapshotClaudeEffective.Value
     )
+    $Layout.ClaudeEffectivePolicyStaleReason = ''
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf) {
@@ -9627,6 +9893,11 @@ function Restore-DefenseClawTransaction {
         }
         if (Test-DefenseClawStandaloneProfile) {
             $Layout['ClaudeEffectivePolicyStaleReason'] = [string](
+                $restoredAttestation.claude_effective_policy_stale_reason
+            )
+        }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = [string](
                 $restoredAttestation.claude_effective_policy_stale_reason
             )
         }
@@ -17006,6 +17277,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         $Layout.ClaudeEffectivePolicyVerified = [bool](
             $metadata.claude_effective_policy_verified
         )
+        $Layout.ClaudeEffectivePolicyStaleReason = ''
     }
     else {
         $attestation = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
@@ -17022,6 +17294,11 @@ function Assert-DefenseClawEnterpriseDeployment {
         )
         if (Test-DefenseClawStandaloneProfile) {
             $Layout['ClaudeEffectivePolicyStaleReason'] = [string](
+                $attestation.claude_effective_policy_stale_reason
+            )
+        }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = [string](
                 $attestation.claude_effective_policy_stale_reason
             )
         }
@@ -17924,6 +18201,15 @@ function Get-DefenseClawLifecycleStatus {
             -not $pending -and
             $errors.Count -eq 0
     }
+    # Recorded Claude evidence for a policy identity that is no longer
+    # installed degrades to unverified with the reason, rather than failing
+    # the lifecycle.
+    $claudeEffectivePolicyStaleReason = [string](
+        $Layout.ClaudeEffectivePolicyStaleReason
+    )
+    if (-not [string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
+        $claudeEffectivePolicyVerified = $false
+    }
     # Cursor uses the same protected Guardian/runtime readiness lane but does
     # not require Codex machine policy or application-control proof.
     $externalSecuritySatisfied = [bool](
@@ -17965,6 +18251,14 @@ function Get-DefenseClawLifecycleStatus {
         claude_minimum_client_version = (Get-DefenseClawClaudeMinimumClientVersion)
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_effective_policy_verified = [bool]$claudeEffectivePolicyVerified
+        claude_effective_policy_stale_reason = $(
+            if ([string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
+                $null
+            }
+            else {
+                $claudeEffectivePolicyStaleReason
+            }
+        )
         security_complete = [bool](
             $healthy -and
             $externalSecuritySatisfied
@@ -22001,6 +22295,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    # Pending-transaction recovery has already run, so this is the Claude
+    # policy identity the administrator's live proof exercised. Capture it
+    # before any service, journal, or artifact is touched.
+    $claudeProofBaseline = $null
+    if ($RefreshClaudeEffectivePolicyAttestation) {
+        $claudeProofBaseline = Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+            -Layout $Layout `
+            -Sources $Sources
+    }
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
@@ -22418,8 +22721,27 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Force
             $attestationExists = $false
         }
-        elseif (-not $attestationNeedsRefresh -and $attestationExists) {
-            [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
+        elseif ($attestationExists) {
+            # Re-read after this transaction staged its binaries: a replaced
+            # hook binary changes the Claude policy identity.
+            $currentAttestation =
+                Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
+            if (-not $RefreshClaudeEffectivePolicyAttestation) {
+                $Layout.ClaudeEffectivePolicyStaleReason = [string](
+                    $currentAttestation.claude_effective_policy_stale_reason
+                )
+            }
+        }
+        if (-not $RefreshClaudeEffectivePolicyAttestation -and
+            [bool]$Layout.ClaudeEffectivePolicyVerified -and
+            -not [string]::IsNullOrEmpty(
+                [string]$Layout.ClaudeEffectivePolicyStaleReason)) {
+            # Evidence recorded for another Claude policy identity is retired
+            # as unverified. It is never re-bound to the current identity,
+            # including by an -AttestAgentApplicationControl-only refresh.
+            $Layout.ClaudeEffectivePolicyVerified = $false
+            $Layout.ClaudeEffectivePolicyStaleReason = ''
+            $attestationNeedsRefresh = $true
         }
         if ($Action -ne 'Install') {
             # Upgrade/Repair deliberately capture the previous hook identity
@@ -22444,9 +22766,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($Sources.ContainsKey('manifest') -and
             -not $RefreshClaudeEffectivePolicyAttestation -and
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
-            # Approved-client evidence is bound to exact manifest bytes. A
-            # replacement manifest must be exercised again before the external
-            # prerequisite can be re-attested.
+            # An administrator-supplied replacement manifest can change
+            # Claude enrollment, so it must be exercised again before the
+            # external prerequisite can be re-attested.
             $Layout.ClaudeEffectivePolicyVerified = $false
             $attestationNeedsRefresh = $true
             $targetReport = Invoke-DefenseClawCodexRequirementsCommand `
@@ -22468,6 +22790,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($RefreshClaudeEffectivePolicyAttestation -and
             -not [bool]$Layout.ClaudeTargetEnabled) {
             throw '-AttestClaudeEffectivePolicy requires at least one enabled Claude target in the protected manifest'
+        }
+        if ($RefreshClaudeEffectivePolicyAttestation) {
+            Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                -Layout $Layout `
+                -Baseline $claudeProofBaseline
         }
         if (-not [bool]$Layout.ClaudeTargetEnabled -and
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
@@ -23926,8 +24253,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         throw '-AttestAgentApplicationControl is valid only with Install, Upgrade, or Repair'
     }
     if ($AttestClaudeEffectivePolicy -and
-        $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-AttestClaudeEffectivePolicy is valid only with Install, Upgrade, or Repair'
+        $Action -notin @('Upgrade', 'Repair')) {
+        # A fresh Install has no DefenseClaw Claude policy yet, so no live
+        # Claude proof can have exercised it (threat model W-34).
+        throw (
+            '-AttestClaudeEffectivePolicy is valid only with Upgrade or ' +
+            'Repair: install first, run the live Claude proof against the ' +
+            'installed policy, then run Repair -AttestClaudeEffectivePolicy'
+        )
     }
     if ($CoreHardeningCertification -and
         ($AttestAgentApplicationControl -or
@@ -24041,24 +24374,16 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 $existingApplicationControlAttestation.claude_effective_policy_stale_reason
             )
         }
-    }
-    if ($AttestAgentApplicationControl) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
-        }
-        $layout.AgentApplicationControlAttested = $true
-    }
-    if ($AttestClaudeEffectivePolicy) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
-        }
-        $layout.ClaudeEffectivePolicyVerified = $true
-        # A fresh live proof supersedes recorded evidence for another
-        # Claude policy identity.
-        if (Test-DefenseClawStandaloneProfile) {
-            $layout['ClaudeEffectivePolicyStaleReason'] = ''
+        else {
+            $layout.ClaudeEffectivePolicyStaleReason = [string](
+                $existingApplicationControlAttestation.claude_effective_policy_stale_reason
+            )
         }
     }
+    Set-DefenseClawRequestedAttestations `
+        -Layout $layout `
+        -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+        -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
     if ($Action -eq 'Status') {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
@@ -24348,6 +24673,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -Purge:$Purge `
                 -SelfUninstallCallerPID $SelfUninstallCallerPID
         }
+        # Recovery above restored the interrupted transaction's evidence
+        # state; this transaction's explicit attestations still apply.
+        Set-DefenseClawRequestedAttestations `
+            -Layout $layout `
+            -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+            -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
         return Invoke-DefenseClawInstallLikeLifecycle `
             -Action $Action `
             -Layout $layout `
