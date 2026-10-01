@@ -223,6 +223,16 @@ def _parse_go_build_info(output: str) -> dict:
                     "sum": fields[3] if len(fields) >= 4 else None,
                 }
             )
+        elif fields[0] == "=>" and len(fields) >= 2:
+            # A replace directive: the binary contains the module on this
+            # line, not the one on the dep line above it.
+            if not dependencies or "replace" in dependencies[-1]:
+                raise ArtifactError(f"go version -m reported a replacement without its module: {line!r}")
+            dependencies[-1]["replace"] = {
+                "path": fields[1],
+                "version": fields[2] if len(fields) >= 3 else "",
+                "sum": fields[3] if len(fields) >= 4 and fields[3] else None,
+            }
     if not module_path:
         raise ArtifactError("go version -m did not report the main module")
     dependencies.sort(key=lambda item: (item["path"], item["version"], item["sum"] or ""))
@@ -414,6 +424,7 @@ class SpdxDocument:
         license_comment: str | None = None,
         purl: str | None = None,
         files_analyzed: bool = True,
+        source_info: str | None = None,
     ) -> str:
         package_id = _spdx_id("Package", identity)
         record = {
@@ -434,6 +445,8 @@ class SpdxDocument:
             record["packageFileName"] = package_file_name
         if license_comment:
             record["licenseComments"] = f"Python metadata license field: {license_comment}"
+        if source_info:
+            record["sourceInfo"] = source_info
         if purl:
             record["externalRefs"] = [
                 {
@@ -841,6 +854,12 @@ def _go_sum_sha256(value: str | None) -> str | None:
     return digest.hex()
 
 
+def _is_local_go_replacement(path: str) -> bool:
+    # Go treats a replacement as a directory when it is a relative path that
+    # starts with ./ or ../, or an absolute path.
+    return path.startswith(("./", "../", ".\\", "..\\", "/")) or bool(re.match(r"^[A-Za-z]:[\\/]", path))
+
+
 def _add_go_inventory(
     document: SpdxDocument,
     inventory_path: Path,
@@ -889,16 +908,40 @@ def _add_go_inventory(
             version = dependency.get("version")
             if not isinstance(path, str) or not path or not isinstance(version, str) or not version:
                 raise ArtifactError(f"Go inventory dependency is invalid for {label}")
+            identity = f"go-module:{path}@{version}"
+            checksum = _go_sum_sha256(dependency.get("sum"))
+            source_info = None
+            replace = dependency.get("replace")
+            if replace is not None:
+                replace_path = replace.get("path") if isinstance(replace, dict) else None
+                replace_version = replace.get("version") if isinstance(replace, dict) else None
+                if not isinstance(replace_path, str) or not replace_path or not isinstance(replace_version, str):
+                    raise ArtifactError(f"Go inventory replacement is invalid for {label}: {path}")
+                if _is_local_go_replacement(replace_path):
+                    # A directory in the source tree: no module sum exists.
+                    # Keep the replaced module's name and version, so the
+                    # package still matches advisories for that version.
+                    identity = f"{identity}=>{replace_path}"
+                    checksum = None
+                    source_info = f"{path}@{version} replaced by the source directory {replace_path}"
+                else:
+                    source_info = f"replaces {path}@{version}"
+                    path, version = replace_path, replace_version
+                    identity = f"go-module:{path}@{version}"
+                    checksum = _go_sum_sha256(replace.get("sum"))
+                if not version:
+                    raise ArtifactError(f"Go inventory replacement has no version for {label}: {path}")
             purl_path = urllib.parse.quote(path, safe="/-._~")
             purl_version = urllib.parse.quote(version, safe="-._~+")
             module_id = document.add_package(
-                f"go-module:{path}@{version}",
+                identity,
                 path,
                 version,
                 "LIBRARY",
-                checksum=_go_sum_sha256(dependency.get("sum")),
+                checksum=checksum,
                 purl=f"pkg:golang/{purl_path}@{purl_version}",
                 files_analyzed=False,
+                source_info=source_info,
             )
             module_ids.add(module_id)
             document.relate(package_id, "DEPENDS_ON", module_id)
