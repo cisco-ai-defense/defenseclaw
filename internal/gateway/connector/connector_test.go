@@ -9006,6 +9006,9 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 			// Removing an overwritten key is also an operator change; teardown
 			// must not resurrect its pre-Setup value.
 			delete(env, key)
+		case "DEFENSECLAW_FAIL_MODE":
+			// DefenseClaw-only config: teardown removes it whatever its value.
+			env[key] = "closed"
 		default:
 			// Keep the old value as a prefix to prove ownership is exact-value
 			// based, not a broad marker/prefix heuristic.
@@ -9051,6 +9054,58 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 	}
 	if _, present := env["OTEL_EXPORTER_OTLP_PROTOCOL"]; present {
 		t.Errorf("operator-removed env was resurrected during teardown: %v", env)
+	}
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Errorf("DEFENSECLAW_FAIL_MODE survived teardown: %v", env)
+	}
+}
+
+// RHEL-U3-06 (uninstall env): a stale earlier-release block put back over a
+// pristine file must not leave its fail mode or prompt-capture value behind.
+func TestClaudeCode_TeardownRemovesStaleEarlierReleaseEnv(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"env":{"AWS_REGION":"us-east-1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env := settings["env"].(map[string]interface{})
+	env["DEFENSECLAW_FAIL_MODE"] = "closed"
+	env["OTEL_LOG_USER_PROMPTS"] = "1"
+	env["ANTHROPIC_MODEL"] = "operator-added"
+	out, _ := json.Marshal(settings)
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ = settings["env"].(map[string]interface{})
+	want := map[string]interface{}{"AWS_REGION": "us-east-1", "ANTHROPIC_MODEL": "operator-added"}
+	if !reflect.DeepEqual(env, want) {
+		t.Fatalf("env after teardown = %v, want %v", env, want)
 	}
 }
 
@@ -9578,6 +9633,10 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
+	// This account's gateway is running, so a 401 means its token drifted.
+	if err := os.WriteFile(filepath.Join(dcHome, "gateway.pid"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
@@ -9618,6 +9677,32 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
 		}
+	}
+}
+
+// TestHookScript_401WithoutOwnGateway_NamesAnotherListener covers a shared
+// host (RHEL-U3-07): this account's gateway is stopped and another account's
+// gateway holds the default port, so the 401 is not token drift.
+func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	if err := writeHookScriptsCommonWithFailMode(dir, strings.TrimPrefix(srv.URL, "http://"), "tok-test", "closed", []string{"claude-code-hook.sh"}); err != nil {
+		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	output, _ := cmd.CombinedOutput()
+	text := string(output)
+	if !strings.Contains(text, "this account's gateway is not running, so another account or program answered on its port") ||
+		!strings.Contains(text, "defenseclaw-gateway start") || strings.Contains(text, "token drift") {
+		t.Errorf("hook output should name another listener instead of token drift, got:\n%s", text)
 	}
 }
 
