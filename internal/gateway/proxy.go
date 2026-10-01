@@ -568,6 +568,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", p.handleChatCompletion)
 	mux.HandleFunc("/chat/completions", p.handleChatCompletion)
+	mux.HandleFunc("/v1/responses", p.handleResponsesAPI)
+	mux.HandleFunc("/responses", p.handleResponsesAPI)
 	mux.HandleFunc("/v1/models", p.handleModels)
 	mux.HandleFunc("/models", p.handleModels)
 	mux.HandleFunc("/health/liveness", p.handleHealth)
@@ -2213,6 +2215,65 @@ func (p *GuardrailProxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"healthy"}`))
+}
+
+// handleResponsesAPI handles OpenAI Responses API requests (/v1/responses).
+// When a direct provider is configured with Bifrost support, the request is
+// forwarded through Bifrost which bridges Responses API to chat/completions
+// for providers that don't support it natively. The response is streamed
+// back as SSE events in the Responses API format.
+func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	// Decompress zstd if needed
+	if isZstdBody(body) {
+		if dec, decErr := decompressZstd(body); decErr == nil {
+			body = dec
+		}
+	}
+
+	// Try to resolve a provider through the direct-provider path or routing
+	provider := p.resolveConfiguredProvider(&ChatRequest{RawBody: body})
+	if provider == nil {
+		// Fall through to passthrough handler
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		p.handlePassthrough(w, r)
+		return
+	}
+
+	bp, ok := provider.(*bifrostProvider)
+	if !ok {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		p.handlePassthrough(w, r)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[guardrail] responses-api: routing via bifrost provider=%s model=%s\n",
+		bp.providerKey, bp.model)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+
+	err = bp.ResponsesStreamRaw(r.Context(), body, func(chunk []byte) {
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		if canFlush {
+			flusher.Flush()
+		}
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] responses-api error: %v\n", err)
+	}
 }
 
 // handleModels returns a minimal OpenAI-compatible /v1/models response.

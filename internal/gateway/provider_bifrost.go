@@ -663,6 +663,42 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	return usage, nil
 }
 
+// ResponsesStreamRaw sends a raw Responses API request body through Bifrost
+// and streams SSE chunks back to the caller. Bifrost internally bridges to
+// chat/completions for providers that don't support the Responses API natively.
+func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byte, chunkCb func([]byte)) error {
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
+	if err != nil {
+		return err
+	}
+
+	bReq := &schemas.BifrostResponsesRequest{
+		Provider:       bp.providerKey,
+		Model:          bp.model,
+		RawRequestBody: rawBody,
+	}
+	bCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
+	bCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+
+	stream, bErr := client.ResponsesStreamRequest(bCtx, bReq)
+	if bErr != nil {
+		return bifrostErrorToGo(bErr)
+	}
+
+	for chunk := range stream {
+		if chunk.BifrostError != nil {
+			return bifrostErrorToGo(chunk.BifrostError)
+		}
+		if chunk.BifrostResponsesStreamResponse != nil {
+			data, marshalErr := json.Marshal(chunk.BifrostResponsesStreamResponse)
+			if marshalErr == nil {
+				chunkCb(data)
+			}
+		}
+	}
+	return nil
+}
+
 // ---------- Type conversion helpers ----------
 
 func newBifrostRequestContext(ctx context.Context, req *ChatRequest) *schemas.BifrostContext {
