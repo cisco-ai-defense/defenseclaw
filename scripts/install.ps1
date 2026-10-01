@@ -1499,7 +1499,11 @@ function Invoke-Install {
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
-    if (-not $PrevVersion) { Invoke-FirstInstallExtras }
+    if (-not $PrevVersion) {
+        Invoke-FirstInstallExtras
+    } elseif ($Quickstart) {
+        Write-Warn "Skipped -Quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+    }
     $setupBin = if ($Setup) { Join-Path $Setup.Root "bin" } else { "" }
     $pathChanged = Update-UserPath -Add $BinDir -Remove $setupBin
     Write-Host ""

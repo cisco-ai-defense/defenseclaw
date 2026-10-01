@@ -646,6 +646,8 @@ fi
 
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
+elif [[ "${RUN_QUICKSTART}" == true ]]; then
+    warn "Skipped --quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
 fi
 rm -rf "${STAGING}"
 ensure_path_hint
