@@ -3598,13 +3598,20 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	)`
 }
 
+// connectorHookAlertSeveritySQL shows an enforced hook block that matched a
+// CRITICAL rule as CRITICAL; the row's own severity stays INFO, so every
+// other enforced block reads as HIGH.
+const connectorHookAlertSeveritySQL = `CASE WHEN json_valid(COALESCE(event.structured_json,''))
+		AND UPPER(COALESCE(json_extract(event.structured_json,'$.severity'),'')) = 'CRITICAL'
+		THEN 'CRITICAL' ELSE 'HIGH' END`
+
 func alertEffectiveSeveritySQL() string {
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	legacyExplicit := legacyExplicitAlertSQL()
 	return `CASE
 		WHEN UPPER(TRIM(COALESCE(event.severity,''))) NOT IN ('','INFO')
 			THEN UPPER(TRIM(event.severity))
-		WHEN ` + connectorEnforcedAlertSQL() + ` THEN 'HIGH'
+		WHEN ` + connectorEnforcedAlertSQL() + ` THEN ` + connectorHookAlertSeveritySQL + `
 		WHEN event.bucket = 'network.egress'
 		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
 			THEN 'WARNING'
