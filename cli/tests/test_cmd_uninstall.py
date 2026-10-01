@@ -1413,5 +1413,28 @@ class StopGatewayOnAManagedHostTests(unittest.TestCase):
         self.assertIn("could not stop sidecar", str(raised.exception))
 
 
+class OrphanCopilotPluginTests(unittest.TestCase):
+    def test_orphan_managed_copilot_plugin_is_removed_without_a_managed_deployment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse'"
+            hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": command, "timeout": 30}]}}
+            (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value="/managed"),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertTrue(plugin.exists(), "a managed deployment owns the plugin")
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertFalse(plugin.parent.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

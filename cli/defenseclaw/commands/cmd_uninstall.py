@@ -933,6 +933,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+    if "copilot" in plan.connectors or plan.remove_data_dir:
+        _remove_orphan_copilot_plugin()
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
@@ -997,6 +999,65 @@ def _remove_data_bound_launchers(plan: UninstallPlan) -> None:
             failures.append(f"{path}: {exc}")
     if failures:
         raise OSError("; ".join(failures))
+
+
+# The manifest of the Copilot plugin a managed deployment renders into each
+# account (~/.copilot/installed-plugins/defenseclaw/defenseclaw).
+_COPILOT_PLUGIN_MANIFEST = {
+    "name": "defenseclaw",
+    "description": "DefenseClaw guardrail hooks",
+    "version": "1.0.0",
+    "hooks": "hooks/hooks.json",
+}
+
+
+def _remove_orphan_copilot_plugin() -> None:
+    """Remove DefenseClaw's managed Copilot plugin once nothing manages it.
+
+    A managed deployment renders this plugin into each account and its own
+    uninstall removes it. On a host with no managed deployment a leftover
+    copy only names a hook binary that may be gone, so the per-user
+    uninstall removes it. The plugin must hold exactly DefenseClaw's
+    rendered manifest and managed Copilot hook commands; anything else is
+    the user's and stays.
+    """
+    from defenseclaw import upgrade_shim
+
+    if upgrade_shim.managed_deployment():
+        return
+    plugin = os.path.join(os.path.expanduser("~"), ".copilot", "installed-plugins", "defenseclaw", "defenseclaw")
+    hooks_dir = os.path.join(plugin, "hooks")
+    manifest = os.path.join(plugin, "plugin.json")
+    hooks_file = os.path.join(hooks_dir, "hooks.json")
+    try:
+        if _is_reparse_path(plugin) or _is_reparse_path(hooks_dir):
+            return
+        if sorted(os.listdir(plugin)) != ["hooks", "plugin.json"] or os.listdir(hooks_dir) != ["hooks.json"]:
+            return
+        if not all(stat.S_ISREG(os.lstat(path).st_mode) for path in (manifest, hooks_file)):
+            return
+        with open(manifest, encoding="utf-8") as handle:
+            if json.load(handle) != _COPILOT_PLUGIN_MANIFEST:
+                return
+        with open(hooks_file, encoding="utf-8") as handle:
+            events = json.load(handle).get("hooks")
+        handlers = [h for group in events.values() for h in group] if isinstance(events, dict) else []
+        if not handlers or not all(
+            isinstance(h, dict)
+            and "copilot" in str(h.get("command", ""))
+            and "enterprise-managed" in str(h.get("command", ""))
+            for h in handlers
+        ):
+            return
+        os.unlink(hooks_file)
+        os.unlink(manifest)
+        os.rmdir(hooks_dir)
+        os.rmdir(plugin)
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(plugin))
+        ux.ok(f"removed orphaned Copilot plugin {plugin}")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return
 
 
 def _remove_empty_plugin_cache() -> None:
