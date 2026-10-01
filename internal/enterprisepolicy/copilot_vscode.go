@@ -323,7 +323,9 @@ func CopilotVSCodeUserState(home, goos, hookBinary string) (hookFile, plugin boo
 	manifest, _ := renderCopilotPluginManifest()
 	same := func(path string, want []byte) bool {
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
+		// The size check keeps the read to want's length: the guardian
+		// runs this as root over files a user controls.
+		if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(want)) {
 			return false
 		}
 		data, err := os.ReadFile(path)

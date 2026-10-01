@@ -371,6 +371,22 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 			"DefenseClaw's Claude Code version floor %s is missing; `%s` (or reconcile or repair) writes it back",
 			path, env.lifecycleCommand("ensure")))
 	}
+	// A per-user file the guardian owns (Copilot's VS Code Local hook file)
+	// that a user deleted or edited leaves that agent surface unguarded
+	// until the guardian's next pass rewrites it.
+	for _, state := range result.States {
+		if len(state.UserFileDrift) == 0 {
+			continue
+		}
+		paths := state.UserFileDrift
+		if len(paths) > 5 {
+			paths = append(append([]string{}, paths[:5]...), fmt.Sprintf("and %d more", len(state.UserFileDrift)-5))
+		}
+		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+			"DefenseClaw's %s hook file is missing or modified for %d enrolled user(s): %s; the hook guardian rewrites it on its next pass",
+			state.Connector, len(state.UserFileDrift), strings.Join(paths, ", ")))
+		r.SecurityComplete = false
+	}
 }
 
 // codeNoConnectorsEnabled names a deployment whose config enables no

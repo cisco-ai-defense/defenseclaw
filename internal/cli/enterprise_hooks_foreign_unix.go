@@ -153,14 +153,17 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if vscode != nil {
 		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
 	}
-	// A governed Local harness is re-checked every interval (a user can
-	// delete the file); a removal runs once per change.
+	// A governed Local harness is re-checked every interval; a removal runs
+	// once per change. The Local hook file is the guardian's own, so one a
+	// user deleted or edited is rewritten on the next pass, like a per-user
+	// registration, not after the interval.
 	governed := vscode != nil && (vscode.HookFile || vscode.Plugin)
 	for _, account := range accounts {
 		fingerprint += account.User + "=" + strings.Join(leftovers(account.User), ",") + ";"
 	}
+	drifted := vscode != nil && vscode.HookFile && enterpriseHookCopilotVSCodeHookFileDrift(accounts, vscode.HookBinary)
 	enterpriseHookForeignCleanupState.Lock()
-	due := fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
+	due := drifted || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
 		((len(cleanups) > 0 || governed || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
@@ -333,6 +336,22 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 		out[name] = report
 	}
 	return out
+}
+
+// enterpriseHookCopilotVSCodeHookFileDrift reports whether an available
+// account's home lacks DefenseClaw's current VS Code Local hook file. It
+// only compares the file's bytes (CopilotVSCodeUserState); the worker,
+// running as the user, writes it.
+func enterpriseHookCopilotVSCodeHookFileDrift(accounts []enterprisehooks.UnixEligibleAccount, hookBinary string) bool {
+	for _, account := range accounts {
+		if enterpriseHookCheckHome(account.Home, account.UID).State != enterprisehooks.HomeAvailable {
+			continue
+		}
+		if file, _ := enterprisepolicy.CopilotVSCodeUserState(account.Home, runtime.GOOS, hookBinary); !file {
+			return true
+		}
+	}
+	return false
 }
 
 // runEnterpriseHookWorkerCopilotVSCode runs inside the worker as the user.
