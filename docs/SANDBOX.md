@@ -8,27 +8,26 @@ behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
 The operator guide for the sandbox commands is the
-[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
-(`docs-site/content/docs/setup/sandbox.mdx`): setup, running a harness, the
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/):
+setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
 servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
 Telemetry details are in
 [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
 
-## Build status
+## Known gaps
 
-The integration is being built in layers. The packages in the
-[code map](#code-map) exist with unit tests, the daemon runs the sandbox
-manager, hook ingress and egress proxy when `openshell.enabled` is on, and
-the `defenseclaw-gateway sandbox` command tree (setup, doctor, run and the
-lifecycle, approval, workspace, policy, pack, image, wrapper and teardown
-commands) drives it through the REST API under `/api/v1/sandbox/`. The
-surfaces are in place: the Python `defenseclaw sandbox` Click stubs mirror
-the Go tree (pinned in `internal/cli/testdata/sandbox_commands.json`) and
-exec `defenseclaw-gateway sandbox`, `defenseclaw doctor` has a Sandbox
-section, the TUI has a Sandboxes panel (key 7) and the sandbox setup wizard
-in Setup slot 13, and the macOS app shows sandboxes in the menu bar,
-Overview and a Sandboxes panel. Still to come:
+The packages in the [code map](#code-map) exist with unit tests. The daemon
+runs the sandbox manager, hook ingress and egress proxy when
+`openshell.enabled` is on. The `defenseclaw-gateway sandbox` command tree
+(setup, doctor, run and the lifecycle, approval, workspace, policy, pack,
+image, wrapper and teardown commands) drives it through the REST API under
+`/api/v1/sandbox/`. The Python `defenseclaw sandbox` Click stubs mirror the
+Go tree (pinned in `internal/cli/testdata/sandbox_commands.json`) and exec
+`defenseclaw-gateway sandbox`. `defenseclaw doctor` has a Sandbox section,
+the TUI has a Sandboxes panel (key 7) and the sandbox setup wizard in Setup
+slot 13, and the macOS app shows sandboxes in the menu bar, Overview and a
+Sandboxes panel. These gaps remain:
 
 - **MCP import and per-run configuration for the other harnesses.** Only
   Claude Code and Codex bring the user's MCP servers along and get per-run
@@ -1060,7 +1059,7 @@ The rest of the package asks the decider this builds:
 - `Allow(ActionApprove)` checks the guard and the feed with it.
 
 No feed matcher is passed around: the policy uses the proxy's own feed.
-`internal/openshell/manager/egress_semantics_test.go` drives the policy
+`internal/openshell/manager/egress_test.go` drives the policy
 layer, a live proxy, REST unblock and triage with the same inputs and pins
 that they agree.
 
@@ -1768,8 +1767,8 @@ For both harnesses the allowed run is repeated with hostile user and project
 settings planted: every known way to switch the managed hooks off or divert
 them. The hooks must still fire, and none of the planted programs may run.
 `HookFireOptions.RunFiles` mounts a sandbox's per-run files into every probe
-container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
-`test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
+container. `TestLiveRunConfig` (tag `openshell_integration`, in the out-of-tree live
+suite; see [Testing](#testing)) uses it to prove the per-run
 configuration below against the real harnesses.
 
 The probe of an image for the vm driver (`BuildSpec.MicroVM`) ends with the
@@ -2250,8 +2249,8 @@ images stay unverified, so they are never selected for a sandbox.
 | OmniGent | 0.13.0 (PyPI, root-owned uv tool on a private CPython) | Server configuration `/etc/omnigent/config.yaml` through `OMNIGENT_CONFIG_HOME`; the launcher stops and stops reusing any recorded server or daemon started without it | managed | none (its policies decide) | Bedrock Mantle (default model `openai.gpt-oss-20b`), OpenAI API key (`--model` required), Anthropic API key (unverified) | verified (mock model) |
 
 OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
-(`TestLiveSandboxHookOnlyHarness` in `internal/gateway`, on branch
-`test/openshell-live`), with the project
+(`TestLiveSandboxHookOnlyHarness`, in the out-of-tree live suite), with the
+project
 bind-mounted, the DefenseClaw hook ingress holding a real binding, and the
 DefenseClaw egress proxy, once against the E2E mock model and once against
 `anthropic.claude-haiku-4-5` on Bedrock Mantle through each harness's curated
@@ -2308,9 +2307,8 @@ version, binary realpaths and digests) but stay unverified: both CLIs need a
 vendor account before any agent turn and fire no hook without one.
 
 Hermes, OpenHands, Antigravity and OmniGent ran end to end through the
-DefenseClaw daemon (`TestSandboxHookOnlyHarness` in `test/e2e/openshell`, on
-branch `test/openshell-live`)
-against the E2E mock model behind a `--credential` binding on
+DefenseClaw daemon (`TestSandboxHookOnlyHarness`, in the out-of-tree live
+suite) against the E2E mock model behind a `--credential` binding on
 `host.openshell.internal`: hooks (OmniGent: policy events) reached the
 ingress with the model key substituted, the marker command a test rule
 blocks was denied with the rule's reason, and egress went through the proxy
@@ -2989,26 +2987,19 @@ go test -run Sandbox ./internal/gateway/ ./internal/gateway/connector/ \
   ./internal/audit/
 ```
 
-On macOS, `TestSandboxHooksScrubInheritedEnvironment` in
-`internal/gateway/connector` currently fails: the hook request loses the
-allowlisted trace context. Run the connector sandbox hook tests on Linux
-until that is fixed.
+Run the connector sandbox hook tests on Linux. The macOS failure of
+`TestSandboxHooksScrubInheritedEnvironment` is tracked as an issue.
 
 Policy, provider-profile, sandbox-artifact and hook golden files are
 regenerated with `DEFENSECLAW_UPDATE_GOLDEN=1`; review the diff.
 
 Live tests need a real OpenShell 0.1.x gateway (with bind mounts enabled for
-the workspace tests) and Docker, so CI cannot run them. They are kept for dev
-hosts on branch `test/openshell-live`, one commit on top of this branch: the
-`openshell_integration` Go tests in `internal/openshell/`,
-`internal/openshell/image/`, `internal/openshell/workspace/`,
-`internal/openshell/sandboxcli/` and `internal/gateway/`, the end-to-end
-suite in `test/e2e/openshell/` (mock model servers, harness scenarios),
-`scripts/test-e2e-openshell.sh` and the manual OpenShell Integration E2E
-workflow. To run them against newer work, rebase that commit onto it. This
-section on that branch lists the commands and the environment variables the
-tests read. The live tests create short-lived, prefixed sandboxes and delete
-them.
+the workspace tests) and Docker, so CI cannot run them. They live out of tree
+and are run on dev hosts: `openshell_integration` Go tests for the OpenShell
+client, image, workspace, sandbox CLI and gateway packages, an end-to-end
+suite with mock model servers and harness scenarios, and a manual OpenShell
+integration workflow. The live tests create short-lived, prefixed sandboxes
+and delete them.
 
 ## Hosts that still have the legacy install
 

@@ -248,6 +248,23 @@ register a connector hook route.
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
 | `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
 | `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
+| `POST` | `/api/v1/kiro/hook` | Kiro | [`internal/gateway/connector/kiro.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/kiro.go) |
+
+### ACP guard
+
+The ACP guard sits between an editor (such as Zed or a JetBrains IDE) and an
+ACP agent, and asks the gateway to evaluate each frame. See
+[ACP guard](/docs/acp-guard) for setup.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/acp/catalog` | Built-in catalog of known ACP agents. |
+| `GET` | `/v1/acp/profiles` | ACP `enabled`, effective `mode`, `default_profile`, and configured `profiles`. |
+| `POST` | `/api/v1/acp/challenge` | Issue a one-time `server_nonce` for a signed evaluation request. |
+| `POST` | `/api/v1/acp/evaluate` | Evaluate one ACP frame, or a completed agent turn when `aggregate` is set. Unknown fields are rejected; returns `503` when the ACP guard is disabled. |
+
+The ACP routes accept the ACP guard credential. In managed enterprise mode each
+principal and binding has its own administrator-issued credential.
 
 All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.
 
@@ -357,7 +374,7 @@ not perform the CLI's filesystem quarantine/restore workflow.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/guardrail/event` | Emit canonical telemetry for an already-decided guardrail event. Requires `evaluation_id`, `direction` (`prompt` or `completion`), `action` (`allow`, `alert`, or `block`), and severity (`NONE` through `CRITICAL`); latency/token values must be finite and nonnegative. Returns `{"status":"ok"}`. No production caller is wired in this repository. |
+| `POST` | `/v1/guardrail/event` | Emit canonical telemetry for an already-decided guardrail event. Requires `evaluation_id`, `direction` (`prompt` or `completion`), `action` (`allow`, `alert`, or `block`), and severity (`NONE` through `CRITICAL`); latency/token values must be finite and nonnegative. Returns `{"status":"ok"}`. Reserved; no DefenseClaw component calls it. |
 | `POST` | `/v1/guardrail/evaluate` | Combine caller-supplied, precomputed `local_result` / `cisco_result` values with required `evaluation_id`, `direction`, and `mode`, plus optional model/scanner/content/timing metadata. It does not scan arbitrary content and returns a `GuardrailOutput` with `action`, `severity`, `reason`, and `scanner_sources`. |
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
 | `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into the active DefenseClaw config file, validate the full YAML file, and apply it through the central reloader. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. Managed-enterprise deployments reject this API mutation. |
@@ -429,13 +446,20 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/history` | Detection history for one component. |
 | `GET` | `/api/v1/ai-usage/confidence/policy` | Show the active confidence-scoring policy. |
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
+| `GET` | `/api/v1/ai-usage/runtime` | Latest [runtime-plane](/docs/ai-discovery/runtime-planes) snapshot: findings together with sensor coverage. Returns `503` when runtime planes are off. |
+| `POST` | `/api/v1/ai-usage/runtime/scan` | Run a runtime-plane poll now and return its result. |
 
 ### Correlation ledger
 
-Each read route accepts exactly one supported identity anchor (for example
-`record_id`, `evaluation_id` is not a supported query key here,
-`semantic_event_id`, `session_id`, `trace_id`, or `tool_invocation_id`) and
-supports bounded cursor pagination.
+Each read route accepts exactly one identity anchor and supports bounded
+cursor pagination (`limit` up to 500, `after_time`, `after_id`).
+
+- **Supported anchors:** `record_id`, `semantic_event_id`, `logical_event_id`,
+  `session_id`, `turn_id`, `agent_id`, `lifecycle_id`, `execution_id`,
+  `model_request_id`, `model_response_id`, `tool_invocation_id`, `trace_id`,
+  `span_id`, and `connector_instance_id`.
+- **Not supported:** `evaluation_id` and any other key. Unknown query keys are
+  rejected, and each key may appear once.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -526,7 +550,7 @@ Notable behaviours:
   it on structured JSONL and audit/scan rows, but the current
   `ToolInspectVerdict` HTTP schema does not expose `evaluation_id` or
   `rule_ids`. Connector-hook responses do expose both fields, as shown below.
-  See [Observability §1.4](/docs/observability) for the per-surface contract.
+  See [destination failure circuits](/docs/observability#destination-failure-circuits) and the [observability overview](/docs/observability) for the per-surface contract.
 - **Pattern-rule and CodeGuard decisions populate both representations** for
   backward compatibility. Clean verdicts can omit details, and static, MCP, or
   AID merge paths can add string `findings` without synthesizing matching

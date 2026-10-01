@@ -1,6 +1,6 @@
 ---
 title: Verify and monitor
-description: Check the health of a standalone DefenseClaw enterprise deployment on Windows, Linux, and macOS, read the lifecycle result, and find the logs, events, and audit records to alert on.
+description: Check status and health, read logs and events, inspect machine policy and per-user state, and rotate credentials in a DefenseClaw enterprise deployment.
 keywords:
   - DefenseClaw enterprise monitoring
   - enterprise verify
@@ -108,8 +108,7 @@ inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names
 its route and reason. Each tool call the foreign-hook guard denies adds a
 `connector-hook` row with `event: foreign_hook_session` that names the file.
-Scan-finding and scan-verdict rows do not carry the account yet
-([#921](https://github.com/cisco-ai-defense/defenseclaw/issues/921)); join
+Scan-finding and scan-verdict rows do not carry the account; join
 them to the hook decision on `evaluation_id`.
 
 For the machine-policy view per user, see
@@ -128,7 +127,7 @@ The MDM wrapper scripts print the same document.
 | `ok` | `true` only when `errors` is empty |
 | `exit_code` | The process exit code |
 | `installed`, `installed_version` | Whether a deployment is recorded, and its version |
-| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
+| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Windows, see [Recover a pending Windows transaction](/docs/enterprise/troubleshooting#recover-a-pending-windows-transaction) |
 | `services[]` | Each managed service or unit, with its state |
 | `readiness` | `gateway`, `guardian`, `enumerator`, `sensor_helper`: each `true` when that component is ready |
 | `coverage_complete` | The core services are ready (definition per OS below) |
@@ -163,7 +162,10 @@ The two summary fields are computed differently on each OS:
   is enabled, and `ai_defense_error` when it is not available. To check AI
   Defense, see [AI Defense is not used](/docs/enterprise/troubleshooting#symptoms).
 - **Users.** On Linux and macOS, neither summary field depends on whether any
-  user is enrolled. Check `enrollment` for that.
+  user is enrolled. Check `enrollment` for that. Machine-policy connectors
+  (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets
+  unless `enterprise.enrollment.unenrolled_users` is `deny`, so
+  `enrollment.targets: 0` is normal when you enable only those.
 
 ### What to alert on
 
@@ -194,21 +196,19 @@ lifecycle places DefenseClaw's hooks for the connectors that support it. See
 the result summarizes it. The `enterprise policy` commands show each
 connector's route, lock, and coverage in detail. They never write.
 
-On this release, set `DEFENSECLAW_CONFIG` to the managed config path when you
-run these commands. Without it they read the calling user's
-`~/.defenseclaw/config.yaml` and refuse.
+Run these commands as root or an elevated administrator. They read the
+managed config automatically.
 
 ```bash title="Linux"
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
 ```
 
 ```bash title="macOS"
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 ```
 
 ```powershell title="Windows (elevated PowerShell)"
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
 ```
 
@@ -219,18 +219,19 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 - `policy verify --live` runs the real client as a user and proves that it
   loads DefenseClaw's hooks. It needs `--user`, exactly one `--connector`
   (`codex` or `claudecode`), and `--agent-binary` with the client's absolute
-  path. The default timeout is 90 seconds (`--timeout`). On Windows, run it
-  from the target user's own session.
+  path. The default timeout is 90 seconds (`--timeout`). It is not available
+  on a managed Windows host; see
+  [Windows: Inspect machine policy](/docs/enterprise/windows#inspect-machine-policy).
 
 ```bash title="Linux: live check for one user"
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify \
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify \
   --live --user alice --connector codex --agent-binary /usr/local/bin/codex --json
 ```
 
 ## Per-user connector state
 
 Connectors without a machine policy file, such as Devin, Antigravity,
-Hermes, OpenCode, and Amp, are wired into each user's own agent config by the
+Hermes, OpenCode (only when the managed plugin is not in force), and Amp, are wired into each user's own agent config by the
 *guardian*. The *enumerator* decides which users to protect.
 
 1. The enumerator runs every 5 minutes on every OS. It writes the target
@@ -317,6 +318,24 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux rotate-credential
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos rotate-credentials --json
 ```
 
+The command moves every user to a new key, then retires the old one. It exits
+`0` when the rotation committed. It exits `1` with `rotation_failed` when a
+step failed; the rotation then puts every user back on the old key. Fix the
+user it names, or remove them from enrollment, and rotate again.
+
+What users see:
+
+- **Hooks and plugins on Linux and macOS** keep working through the
+  rotation, because they use the hook socket.
+- **Agents that are already running** keep sending telemetry with the
+  credential they loaded when they started. It works until the commit; after
+  that the gateway refuses it, and that agent's telemetry is lost until the
+  user restarts the agent. Agents started after the rotation use the new
+  credentials. Ask users to restart their agents after a rotation.
+
+<Accordions>
+<Accordion title="How the rotation works">
+
 The rotation moves every user to the new key before the key takes effect:
 
 1. **Check.** Nothing changes until the gateway reports that it serves the
@@ -357,15 +376,8 @@ previous key, how many targets and users it moved, and the targets it
 skipped. If you interrupt the command, it prints the `reconcile` command to
 run.
 
-What users see:
-
-- **Hooks and plugins on Linux and macOS** keep working through the
-  rotation, because they use the hook socket.
-- **Agents that are already running** keep sending telemetry with the
-  credential they loaded when they started. It works until the commit; after
-  that the gateway refuses it, and that agent's telemetry is lost until the
-  user restarts the agent. Agents started after the rotation use the new
-  credentials. Ask users to restart their agents after a rotation.
+</Accordion>
+</Accordions>
 
 On Windows, `enterprise windows rotate-credentials` exits `1639` and changes
 nothing. The Windows guardian writes a user's credentials only while that
@@ -397,7 +409,7 @@ only when it runs elevated.
 | 100 | Installed |
 | 101 | Upgraded |
 | 102 | Repaired, or a reconcile ran |
-| 110 | Uninstalled |
+| 110 | Uninstalled (Application log only, because uninstall removes the `DefenseClaw` log) |
 | 111 | `ensure` found nothing to change |
 | 112 | `ensure` applied a change |
 | 120 | `status` or `verify` found the deployment unhealthy (warning) |
@@ -407,6 +419,58 @@ only when it runs elevated.
 
 A healthy `status` or `verify` writes no event, so frequent polling does not
 fill the event log.
+
+#### Check event-log entries
+
+Only LocalSystem and Administrators can write the `DefenseClaw` log (source
+`DefenseClaw Lifecycle`), and the accounts that can read the Application log
+can read it. Each run that writes an event registers the log and resets its
+access. A
+successful uninstall unregisters it, so the uninstall event (110) goes only
+to the Application log; forward the `DefenseClaw` log to your SIEM if you
+need its entries after uninstall. Unregistering does not delete the entries:
+Windows keeps `%WINDIR%\System32\winevt\Logs\DefenseClaw.evtx` (the Event
+Log service holds it open until it restarts), and a later install that
+registers the log again shows the old entries with the new ones.
+
+Any account can write Application-log entries under any source name,
+including `DefenseClaw Enterprise`, so treat the Application-log copies as
+legacy. Point MDM detection rules
+and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
+DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
+source.
+
+Each DefenseClaw event ends with `record <id>`, and the matching line of
+`enterprise-lifecycle.log`, which only administrators and LocalSystem can
+write, holds the same id under `event.record` with the event ID
+(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
+event logs that took the entry (`event.logs`). Check the entries from any
+prompt:
+
+```powershell title="Check the DefenseClaw event-log entries"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
+# The legacy Application-log copies:
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application
+```
+
+An entry is DefenseClaw's only when all of these hold:
+
+- its message ends with `record <id>` and the lifecycle log has a line with
+  that record;
+- the entry's event ID and the SHA-256 of its message (the UTF-8 bytes of the
+  event's insertion string, `$event.Properties[0].Value`) match that line;
+- it was written within two minutes of that line's `time`;
+- no earlier entry carried the same record. A later entry with the same
+  record is a copy.
+
+`events` exits 1 and names each entry that fails, and also when the newest
+lifecycle line whose event went to the checked log has no DefenseClaw entry
+there.
+Entries older than the lifecycle log's first event record, such as those an
+earlier release wrote without records, show as unverifiable. Apply the same
+rules in a SIEM: matching a record alone is not enough, because anyone can
+copy a genuine entry.
 
 ### Linux
 
@@ -451,14 +515,11 @@ JSONL, and JSONL files. See [Observability](/docs/observability).
 
 Two limits apply on a managed host:
 
-- The lifecycle writes each service's environment itself. The only variables
-  you control are the proxy variables that Linux and macOS derive from
-  `enterprise.network`, and the lifecycle offers no supported way to set the
-  variable that a destination's `token_env`, `bearer_env` or `{env: NAME}`
-  header names. A reference that cannot be resolved fails config validation,
-  so `ensure` refuses the config. Splunk HEC always needs `token_env`. Use
-  destinations that need no credential from the environment, such as a JSONL
-  file that your log agent forwards.
+- Environment references do not work. The lifecycle writes each service's
+  environment, so `{env: NAME}`, `token_env` and `bearer_env` cannot be
+  resolved, and `ensure` refuses the config. Store the credential and use a
+  credential reference instead; see
+  [Observability credentials](/docs/enterprise/configuration#observability-credentials).
 - The gateway runs in a sandbox. On Linux it can write only inside
   `/var/lib/defenseclaw` and `/var/log/defenseclaw`, so a `jsonl` file
   destination must use a path there. Your log agent can collect the file from

@@ -17,7 +17,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make ts-test` | OpenClaw plugin Vitest suite |
 | `make rego-test` | OPA tests for `policies/rego/` |
 | `make check` | v7 parity, observability-v8, dashboard, provider, model-catalog, and guardrail-catalog gates |
-| `make lint` | Ruff, Go formatting/linting, and Python compile check |
+| `make lint` | Ruff, Go formatting/linting, the go.mod no-toolchain check, the repro-flags and assemble parity checks, and a Python compile check |
 
 ## Focused Tests
 
@@ -129,6 +129,12 @@ The standalone managed-enterprise packages have their own install lanes.
 They install and remove system services, so run them only on a disposable
 host (a CI runner, a container or a throwaway VM), as root or from an
 elevated shell.
+
+CI runs these lanes on each pull request: the `.deb` on Ubuntu 24.04, the
+`.rpm` in RHEL 9 and RHEL 8 containers that boot systemd, the macOS `.pkg` on
+a macOS runner, and the unsigned Windows Setup on a Windows runner. Each lane
+runs install, a second `ensure` that must change nothing, `verify`, `status`,
+the detection script and uninstall, and checks every lifecycle result.
 
 | Script | What it does |
 | --- | --- |

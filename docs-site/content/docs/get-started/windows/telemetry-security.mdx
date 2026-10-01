@@ -142,14 +142,14 @@ authenticated; it is not a claim that localhost is inherently trusted.
 - A connector-scoped token is restricted by connector, route, signal, and
   loopback origin.
 - Management routes require their own authentication.
-- A non-loopback agent-to-gateway deployment is not native Windows-certified.
+- A non-loopback agent-to-gateway deployment is not supported on native Windows.
 - Outbound OTLP, Splunk, Galileo, webhooks, and provider calls are independent
   client connections. Their availability does not expand hook coverage.
 - Windows OpenClaw/ZeptoClaw proxy listeners are unsupported.
 
 Do not expose the local API to a LAN merely to make a remote agent work. That
-changes the tested topology and adds authentication, TLS, firewall, and host
-ownership requirements this guide does not certify.
+changes the supported topology and adds authentication, TLS, firewall, and host
+ownership requirements this guide does not cover.
 
 ## Release and installer trust
 
@@ -166,56 +166,44 @@ them as `NotSigned`. Their integrity comes from the checksum set, not from a
 `Cisco Systems, Inc.` Digital Signatures entry.
 
 The release gate installs, upgrades, and rolls back the exact release files on
-a Windows x64 runner before publishing. That trust chain does not fabricate
-connector evidence: supported availability for Codex, Cursor, Devin, Hermes,
-OpenCode, OmniGent, Copilot, and Antigravity does not populate validation
-fields or change `live=false`. An authenticated Amp turn requires
-`AMP_API_KEY`; its absence does not change the native Windows support
-classification.
+a Windows x64 runner before publishing.
 
-Local and pull-request artifacts are not published releases. Passing their
-tests proves code and lifecycle behavior, not release provenance. See
+Local and pull-request builds are not published releases and carry no release
+signature. See
 [Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade).
 
 ## Ownership and filesystem boundary
 
-The public package runs as the current user and owns only exact state it
-created or recorded. Security-sensitive installer transaction directories,
-credentials, audit storage, and identity records use current-user ownership,
-non-reparse checks, and private Windows DACL validation. OpenCode's managed
-plugin restricts access to the current user, Administrators, and SYSTEM; that
-limits other standard users but is not tamper-proof against the owning user or
-an administrator. Doctor detects managed-plugin digest drift, and Setup
-reconciles it. This is not a blanket claim that every file below every
-user-selected connector root has an identical DACL.
+`install.ps1` and DefenseClaw run as the current user and change only files
+they created or recorded. Credentials, audit storage, identity records and
+installer state are private to the current user. OpenCode's managed plugin is
+limited to the current user, Administrators and SYSTEM; this keeps other
+standard users out but does not stop the owning user or an administrator.
+`defenseclaw doctor` reports changes to the managed plugin, and
+`defenseclaw setup <connector>` restores it.
 
-Setup and lifecycle commands:
+The installer and lifecycle commands:
 
-- refuse an existing application directory without valid DefenseClaw installer
-  state;
-- recheck state identity around live mutation;
-- reject unsafe reparse ancestry for protected transaction and recorded
-  connector-home paths;
-- stop only a gateway/watchdog whose executable, PID start identity, data root,
-  and protected record agree;
-- refuse to replace a foreign HKCU Run value, PATH mutation, Installed Apps
-  record, listener, process, or connector file; and
-- retain ambiguous recovery evidence instead of deleting it as cleanup.
+- refuse to take over an install folder that has no DefenseClaw install state;
+- reject protected paths that pass through links or junctions;
+- stop only a gateway whose executable, process and data root match the
+  recorded ones;
+- refuse to replace a `PATH` entry, listener, process or connector file that
+  DefenseClaw did not create; and
+- keep recovery files when a step is unclear instead of deleting them.
 
-Product executables opt into Windows long-path behavior, and installer journals
-and process identity are tested beyond legacy `MAX_PATH`. Do not extrapolate
-that guarantee to every third-party agent/plugin. Avoid connector paths that
-differ only by case; the product does not advertise case-distinct Windows
-connector homes as separate supported identities.
+DefenseClaw executables support Windows long paths. Third-party agents and
+plugins may not. Avoid connector paths that differ only by case.
 
 ## Transaction and fail-closed boundaries
 
-“Fail closed” has several precise meanings:
+“Fail closed” means different things at each boundary. Each row states what
+DefenseClaw guarantees and where the guarantee stops.
 
-| Boundary | Proven behavior |
+| Boundary | Guarantee and limits |
 | --- | --- |
-| Setup verification | Invalid architecture, launch identity, authenticated digest/provenance, recorded-versus-observed Authenticode state, payload, path, ownership, or prior state refuses before live mutation where possible. |
-| Setup transaction | Pre-commit failure rolls back owned changes; ambiguous or committed phases retain a journal and require safe recovery/convergence. |
+| Install verification | An unsupported architecture, a checksum or signature mismatch, or an unsafe path or prior state stops `install.ps1` before it changes anything. |
+| Install and upgrade | If any step fails, the installer restores the previous install. `defenseclaw rollback` undoes the last upgrade. |
 | Hook delivery/response | Effective `closed` blocks only vendor-supported block-capable events for transport and malformed/unauthorized response failures. For OpenCode, only the awaited `tool.execute.before` thrown-error path is authoritative; after/lifecycle delivery remains best effort. Hermes officially warns and continues for timeout, nonzero exit, malformed output, authentication, and transport failures, so DefenseClaw never claims fail-closed Hermes delivery. |
 | Managed enterprise hook | The narrow administrator-managed Claude Code path fails closed when protected policy identity is invalid. |
 | Runtime skill selection | A disabled-state database or provenance failure blocks the exact Codex/Claude skill-selection surface. Hermes exposes no equivalent native skill-selection enforcement event. Amp has no separate skill-load callback; its resulting tool calls remain governed at `tool.call`. |
@@ -230,15 +218,15 @@ drift until restart.
 
 ## Administrator-managed Claude Code exception
 
-The public per-user Setup does not install a machine-wide service or enterprise
-guardian. A separate, limited gateway command can publish Claude Code managed
+A per-user `install.ps1` install does not add a machine-wide service or
+enterprise guardian. A separate, limited gateway command can publish Claude Code managed
 hooks for allow-listed interactive users only when the gateway and hook binary
 have first been deployed in a protected Administrator/LocalSystem-owned machine
 path. A user-writable `%LOCALAPPDATA%` installation is deliberately rejected as
 the elevated command source.
 
-That path does not provide a machine-scope Setup/MSI, general Windows connector
-guardian, remote gateway, or private distribution credentials. Follow the
+That path does not provide a machine-wide installer, a general Windows connector
+guardian, a remote gateway, or private distribution credentials. Follow the
 exact prerequisites in
 [Enterprise deployment](/docs/setup/enterprise-deployment#native-windows-claude-code-managed-hooks).
 Machine-wide deployment with Codex, Claude Code, and Cursor managed hooks is

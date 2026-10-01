@@ -11,7 +11,7 @@
 <h1>DefenseClaw</h1>
 
 <p>
-  <strong>Security governance for OpenClaw and agentic AI runtimes.</strong><br />
+  <strong>Security governance for AI coding agents and agentic runtimes.</strong><br />
   Scan capabilities before use, inspect runtime traffic, and export durable audit evidence.
 </p>
 
@@ -27,6 +27,16 @@ DefenseClaw combines a Python operator CLI, a Go gateway, connector hooks, polic
 scanners, and observability exporters. It is an enforcement and evidence layer;
 it does not prove that an agent, model interaction, or third-party capability is
 risk-free.
+
+## Get started
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
+defenseclaw quickstart
+```
+
+Then read the [docs](https://cisco-ai-defense.github.io/defenseclaw/docs/). On
+native Windows, see [Install DefenseClaw](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/).
 
 ## Documentation
 

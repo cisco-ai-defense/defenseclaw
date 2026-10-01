@@ -38,25 +38,8 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
 
 ## Where the data comes from
 
-| Field | Source |
-| --- | --- |
-| Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector` for proxy mode) |
-| Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
-| Subprocess policy | Effective setup call sites for `SetupSubprocessEnforcement` in `internal/gateway/connector/*.go`, cross-checked with `_CONNECTOR_META[<id>].subprocess_policy` |
-| Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
-| Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
-| HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
-| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers in `internal/gateway/connector/` (tamper tier and hook config file); in `internal/openshell/harness/`, each harness's `DefaultVersion` (image pin), `Verification()` (status, and the reason an unverified harness is unverified), and the credential profiles and in-sandbox login marked unverified (sign-in paths not tested live) |
-
-The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change. The Go tests in `internal/gateway/connector` and `internal/openshell/harness` fail when its sandbox fields disagree with the code.
-
-<Callout type="info" title="Advertised contract vs empirical verification">
-The Antigravity contract documents native ask and hard deny only on
-`PreToolUse`. `PreInvocation` and `PostInvocation` are context-transform
-surfaces, `PostToolUse` is observation-only, and DefenseClaw returns the
-documented allow shape for `Stop`. No permission-bypass override is claimed
-without persisted official-client evidence.
-</Callout>
+Generated from the connector registry. The Go tests fail when the matrix
+disagrees with the code.
 
 ## Common patterns
 
@@ -120,8 +103,8 @@ pending in the matrix above.
   `--harness` (repeatable) replaces it, so name every harness you want.
   `sandbox image build <harness>...` builds the harnesses you name without
   changing it, and `sandbox run` builds a missing image on the first run. The
-  TUI and macOS setup wizards list only Claude Code and Codex, and a wizard
-  run replaces `openshell.harnesses` with the ones you tick.
+  macOS app's setup wizard lists only Claude Code and Codex, and a wizard run
+  replaces `openshell.harnesses` with the ones you tick.
 
 Every sandbox hook fails closed.
 

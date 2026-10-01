@@ -1,12 +1,14 @@
 ---
 title: ZeptoClaw
-description: ZeptoClaw routes through DefenseClaw via api_base redirect plus response-scan. Full guardrail pipeline runs on every request.
+description: ZeptoClaw routes its provider traffic through the DefenseClaw guardrail proxy, which inspects every request and response.
 keywords:
   - DefenseClaw ZeptoClaw connector
   - ZeptoClaw guardrail
 ---
 
-ZeptoClaw is the second proxy connector. DefenseClaw rewrites `~/.zeptoclaw/config.json` providers to point at the local guardrail proxy; every request is inspected on its way out and every response on its way back.
+ZeptoClaw is the second proxy connector. DefenseClaw rewrites the providers in
+`~/.zeptoclaw/config.json` to point at the local guardrail proxy. Every request
+is inspected on its way out, and every response on its way back.
 
 ## Platform support
 
@@ -41,108 +43,22 @@ or Linux.
 
 </Tabs>
 
-`setup zeptoclaw` is the dedicated ZeptoClaw alias. It delegates to the shared
-guardrail setup backend and exposes the proxy connector's common setup
-options; it is not a byte-for-byte copy of every `setup guardrail` flag. See
-the [quick-alias reference](/docs/setup/guardrail/aliases) for the alias and
-[full guardrail setup](/docs/setup/guardrail) for the complete wizard. The
-proxy is always in the data path: `--mode observe` records without policy
-blocking, while `--mode action` enforces.
+`setup zeptoclaw` is the ZeptoClaw alias for the shared guardrail setup. The
+proxy is always in the data path: `--mode observe` records without blocking,
+and `--mode action` enforces.
 
-#### What this command sets vs. leaves at defaults
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
-The flags above explicitly set: connector, mode, and (optionally) rule pack. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+ZeptoClaw-specific differences:
 
-| Knob | Value when omitted | Flag to override |
-| --- | --- | --- |
-| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
-| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
-| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
-| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
-| HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
-| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
-| Proxy port | `4000` | `--port <int>` |
-| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
-
-See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
-
-#### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Pilot (observe)', 'Action + HITL', 'Action + judge', 'Strict / regulated']}>
-
-<Tab value="Pilot (observe)">
-
-```bash
-defenseclaw setup zeptoclaw \
-  --mode observe \
-  --rule-pack permissive \
-  --restart
-```
-
-The proxy is in the data path but nothing blocks. Every collected prompt and
-response produces a projection in mandatory SQLite event history. On a fresh v8
-configuration, the effective local profile is `none`, so registered prompt,
-response, tool, path, and identifier fields can remain full fidelity. A global
-or bucket profile can redact the local projection; optional destinations receive
-their own selected projection. Run this for at least a week before promoting —
-see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
-
-</Tab>
-
-<Tab value="Action + HITL">
-
-```bash
-defenseclaw setup zeptoclaw \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --restart
-```
-
-HIGH findings can produce a raw `confirm` action; CRITICAL still blocks unconditionally. ZeptoClaw has **no native ask surface**, so confirm takes its immediate fallback with `raw_action` preserved. The TUI and audit log can review the event but cannot approve and resume it. See the [HITL page](/docs/hitl) for the per-connector matrix.
-
-</Tab>
-
-<Tab value="Action + judge">
-
-```bash
-export DEFENSECLAW_LLM_KEY='replace-with-your-key'
-
-defenseclaw setup zeptoclaw \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --restart
-```
-
-Adds the configured LLM judge as a second pass on regex-flagged prompts.
-Latency and provider cost depend on the selected judge model.
-
-</Tab>
-
-<Tab value="Strict / regulated">
-
-```bash
-defenseclaw policy activate strict
-defenseclaw setup zeptoclaw \
-  --mode action \
-  --rule-pack strict \
-  --restart
-```
-
-Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with a reviewed
-first-party allow-list for additional containment.
-
-</Tab>
-
-</Tabs>
+- Proxy aliases have no `--fail-mode` flag. Use `defenseclaw guardrail fail-mode <open|closed>`.
+- The proxy listens on port `4000` by default. Change it with `--port <int>`.
+- To add the LLM judge, pass `--detection-strategy regex_judge --judge-model <provider/model> --judge-api-key-env DEFENSECLAW_LLM_KEY`.
+- ZeptoClaw has no native ask surface, so `--human-approval` confirm verdicts
+  take their immediate fallback. See [HITL](/docs/hitl).
+- Redaction follows the v8 bucket and profile policy. Edit `observability.destinations[].routes[].selector.buckets`
+  and `observability.redaction_profiles`, then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
 <Callout title="Treat local event history as sensitive data">
 The mandatory database is configured by `observability.local` (by default,
@@ -159,20 +75,7 @@ for retention behavior. Retention removes eligible rows and makes their pages
 available for SQLite reuse, but the database file does not shrink automatically.
 </Callout>
 
-#### Decision aids — should I turn this on?
-
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="ZeptoClaw has no native ask. Confirm uses an immediate fallback with raw_action preserved for review." />
-  <Card href="/docs/setup/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-## Files DefenseClaw will modify
+## Files DefenseClaw modifies
 
 <Files>
   <Folder name="~/.zeptoclaw" defaultOpen>
@@ -190,13 +93,12 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 ## Hook capabilities
 
 The proxy can block inspected requests, responses, and tool-call payloads.
-ZeptoClaw has no native ask event.
 
 <Callout>
 ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback with `raw_action` preserved so operators can review the original request in the TUI or audit log; neither surface can resume it.
 </Callout>
 
-## Subprocess policy
+### Subprocess policy
 
 The policy is `shims` on every platform. Connector setup installs PATH shims
 for `curl`, `wget`, `ssh`, `nc`, `pip`, and `npm` that send each invocation to
@@ -204,11 +106,26 @@ the gateway's tool-inspection endpoint before running the real binary. Shims
 inspect those command paths only; they do not provide syscall, filesystem, or
 network isolation.
 
-ZeptoClaw does not run in an OpenShell sandbox; OpenShell 0.1 support for it
-is pending in the [capability matrix](/docs/capability-matrix).
+## Sandbox
+
+ZeptoClaw does not run in an OpenShell sandbox. See the
+[capability matrix](/docs/capability-matrix) for sandbox support by connector.
 
 ## Disable
 
 ```bash
-defenseclaw guardrail disable --yes
+defenseclaw guardrail disable --connector zeptoclaw --yes
 ```
+
+`--connector` turns off only ZeptoClaw on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. To remove
+the connector from the config, use `defenseclaw setup remove zeptoclaw`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/reference/redaction" title="Redaction" description="Profiles, buckets, and how to verify them." />
+  <Card href="/docs/connectors/openclaw" title="OpenClaw" description="The other proxy connector." />
+</Cards>

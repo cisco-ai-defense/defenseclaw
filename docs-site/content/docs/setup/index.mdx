@@ -1,6 +1,6 @@
 ---
 title: Setup
-description: DefenseClaw setup and configuration surfaces in one place — from the central guardrail wizard to keys, webhooks, registries, observability, legacy sandbox cleanup, and per-connector hooks.
+description: Every DefenseClaw setup command in one place, from the guardrail wizard and connector aliases to keys, scanners, webhooks and registries.
 keywords:
   - defenseclaw setup
   - DefenseClaw configuration
@@ -12,12 +12,10 @@ keywords:
   - per-connector setup
 ---
 
-`defenseclaw setup` is the main family of operator commands that takes
-DefenseClaw from "binary on disk" to "actively defending an agent". Mutating
-commands update only the configuration or owned integration surface they
-manage; restart, prompting, and audit behavior is command-specific. The
-top-level `keys`, `registry`, and `sandbox` groups are included here because
-they are part of the same operator workflow.
+`defenseclaw setup` is the family of commands that takes DefenseClaw from
+installed to protecting an agent. Each command changes only the configuration it
+owns. The top-level `keys` and `registry` groups are listed here because they are
+part of the same workflow.
 
 <Callout title="The one-line summary">
 Run `defenseclaw setup guardrail` once. Reach for the auxiliary surfaces when
@@ -58,6 +56,8 @@ surface.
   <Card title="setup opencode" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenCode with --connector opencode and writes the bridge plugin." />
   <Card title="setup amp" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Amp with --connector amp and writes the synchronous TypeScript policy plugin." />
   <Card title="setup omnigent" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OmniGent with --connector omnigent and installs its custom Python policy bridge." />
+  <Card title="setup kiro" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Kiro with --connector kiro and writes the Kiro IDE and CLI hooks." />
+  <Card title="setup acp" href="/docs/setup/guardrail/aliases#acp-agents-in-jetbrains-and-zed" description="Finds ACP agents in JetBrains IDEs or Zed and routes them through the DefenseClaw ACP guard." />
 </Cards>
 
 ## Auxiliary configuration commands
@@ -95,7 +95,7 @@ which ones are interactive and which ones are designed for scripts.
   <Card
     title="setup local-observability"
     href="/docs/observability/local-observability"
-    description="Bring up the bundled OTLP collector + Grafana stack so you can see decisions live without leaving your laptop."
+    description="Run the bundled Prometheus, Loki, Tempo and Grafana stack on loopback to watch decisions live."
   />
   <Card
     title="setup redaction"
@@ -112,26 +112,26 @@ which ones are interactive and which ones are designed for scripts.
     href="/docs/setup/mcp-scanner"
     description="Wire the cisco-ai-mcp-scanner SDK into admission. Behavioral introspection of MCP servers before they're added."
   />
-  <Card
-    title="defenseclaw sandbox legacy-cleanup"
-    href="/docs/setup/sandbox"
-    description="Linux-only removal of the retired standalone OpenShell sandbox (openshell-sandbox 0.0.x). Restores host OpenClaw networking, ownership, and config."
-  />
 </Cards>
+
+### Other setup commands
+
+These commands are documented in [CLI reference: setup](/docs/reference/cli#setup):
+
+- `defenseclaw setup` with `-c/--connector`, `--detected`, `--all` or `--add-detected` configures several hook
+  connectors in one batch.
+- `setup llm`, `setup provider` and `setup migrate-llm` manage the unified LLM block and custom providers.
+- `setup galileo`, `setup observability` and `setup notifications` configure telemetry and desktop notifications.
+- `setup trusted-paths`, `setup rotate-token` and `setup gateway` manage trusted folders, the gateway token and the
+  gateway connection.
+- `setup remove <connector>` removes a connector. See
+  [Replace a connector](/docs/setup/guardrail/multi-connector#replace-a-connector).
 
 ### OpenShell sandbox
 
-`defenseclaw sandbox setup` prepares a Linux machine or an Apple-silicon Mac
-to run Claude Code and Codex inside NVIDIA OpenShell 0.1 sandboxes, and
-`defenseclaw sandbox run claude` starts one on the current project folder.
-On a Mac, sandboxes are OpenShell MicroVMs and every run works on a copy (see
-[macOS](/docs/setup/sandbox#macos)).
-The same setup is the **Sandboxes (OpenShell)** wizard in the TUI's Setup
-and the Sandbox wizard in the macOS app; the TUI Sandboxes panel (key 7) shows live activity. Run
-`defenseclaw sandbox --help` for every command.
-`defenseclaw sandbox legacy-cleanup` removes the retired `openshell-sandbox`
-0.0.x install from Linux hosts. The [sandbox guide](/docs/setup/sandbox)
-covers setup, runs and legacy cleanup.
+`defenseclaw sandbox setup` prepares a machine to run agents in OpenShell
+sandboxes. Start with the guided [OpenShell sandboxes](/docs/sandboxes) path, or see
+[Which harnesses can run](/docs/setup/sandbox#which-harnesses-can-run).
 
 ## Deployment and policy references
 
@@ -145,6 +145,11 @@ than the command cards above.
     description="Provision the managed OS service, guardian, trust boundaries, scoped credentials, and tamper-repair controls."
   />
   <Card
+    title="Enterprise deployment"
+    href="/docs/enterprise"
+    description="Deploy DefenseClaw across a fleet with managed config, MDM recipes and machine policy."
+  />
+  <Card
     title="Sandbox policy packs"
     href="/docs/setup/sandbox-policy"
     description="The open, balanced, and strict OpenShell sandbox packs, custom packs, openshell.admin limits, and sandbox policy explain."
@@ -156,7 +161,7 @@ than the command cards above.
   />
 </Cards>
 
-## Interactive vs non-interactive — global matrix
+## Interactive vs non-interactive
 
 The operator-facing commands do not all share one interaction model. The table
 below is the canonical mapping for their interactive and scripted forms.
@@ -165,34 +170,26 @@ below is the canonical mapping for their interactive and scripted forms.
 | --- | --- | --- | --- |
 | `setup guardrail` | yes (default) | `--non-interactive` + flags | Wizard explains each prompt; non-interactive mode requires every required flag. |
 | `setup routing` | no | `--enable`, `--disable`, or `--status` | Requires Docker. Applies only to proxy-mode OpenAI Chat Completions traffic. |
-| `setup <connector>` | yes | flags + `--yes` | Adds or reconfigures a connector; pass `--mode observe\|action` to choose enforcement mode. |
-| `keys list` / `set` / `fill-missing` / `check` | yes (default) | `--value` + `--yes` | `keys set` prompts for the value (hidden) when `--value` is omitted. |
+| `setup <connector>` | yes | flags + `--yes` | Adds or reconfigures a connector. `--yes` adds next to other hook connectors; `--replace` replaces them. |
+| `setup acp` | yes | `--yes` | Adopts ACP agents in JetBrains or Zed. `--activate` turns on action mode. |
+| `setup remove <connector>` | yes | `--yes` | Refuses to remove the last connector unless `--force`. |
+| `keys list` / `set` / `fill-missing` / `check` | yes (default) | `keys set --value-stdin` | `keys set` prompts for the value (hidden) when no value is given. |
 | `setup webhook add <type>` | yes (default) | `--non-interactive` + flags | URL and secret-env are prompt-or-flag; type is always positional. |
 | `setup webhook test <name>` | n/a | n/a | Always non-interactive; safe to re-run. |
 | `registry add <id>` | yes (default) | `--non-interactive` + flags | `wizard` is the friendly first-run alias. |
 | `registry sync` / `entries` / `approve` / `reject` | n/a | flags only | Designed for cron / scripts. |
 | `setup splunk` | yes | `--non-interactive` + flags | HEC token comes from `--hec-token <value>` or, if omitted, the `DEFENSECLAW_SPLUNK_HEC_TOKEN` env var. |
-| `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
+| `setup local-observability [up\|down\|reset\|status\|logs\|url\|env]` | no | subcommands | Bare command means `up`. `down` stops the stack and keeps its data. |
 | `setup redaction` | yes (bare command) | subcommands + flags | Simple choices lead into **Show advanced settings?** for all 14 buckets, custom profiles, destinations, and ordered routes. Mutations support `--dry-run`, `--json`, `--yes`, and optional restart. |
-| `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
+| `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-analyzer toggles. The scanner SDKs ship with DefenseClaw. |
 | `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon (OpenShell MicroVMs). Run it again at any time; the [sandbox guide](/docs/setup/sandbox) covers the other `sandbox` commands. |
 | `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. |
 
-<Callout title="Redaction is a v8 policy editor, not an on/off toggle">
-Run `defenseclaw setup redaction` for the guided workflow, or use subcommands
-such as `status`, `remove-all`, `bucket`, `profile`, `destination`, and `route`
-for automation. The command edits
-`observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles` and compiles the staged effective plan. A
-changed non-dry-run write creates a private timestamped backup and verifies the
-installed plan. `remove-all` selects profile `none` for configurable projections;
-it cannot weaken the release-owned managed enterprise destination.
-
-For an independent operator cross-check, run `defenseclaw config validate`,
-`defenseclaw config show --effective --section observability`, and
-`defenseclaw observability plan`; use `defenseclaw-gateway restart` when your
-deployment requires an explicit activation restart.
-</Callout>
+Redaction is a v8 policy editor, not an on/off switch. `defenseclaw setup redaction`, its **Show advanced settings?**
+step and subcommands such as `remove-all` edit `observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`. Check the result with `defenseclaw config validate`,
+`defenseclaw config show --effective --section observability` and `defenseclaw observability plan`, then run
+`defenseclaw-gateway restart`. See [Setup guardrail](/docs/setup/guardrail#prompt-flag-mapping).
 
 The same workflow is available in **TUI → Setup → Redaction Policy** on macOS,
 Linux, and native Windows. The macOS app's **Logs → Redaction policy…** sheet
@@ -203,18 +200,14 @@ for the full bucket/profile/destination/route command surface.
 The interactive flow for the central command is replayed end-to-end on the [Setup guardrail](/docs/setup/guardrail) page. Interactive auxiliary commands follow the same prompt-or-flag rhythm; use the matrix above for script-only commands.
 </Callout>
 
-## What gets written where
+## Where setup writes
 
-Setup and auxiliary configuration commands can write these paths under
-`~/.defenseclaw/`, depending on the feature being configured:
+Setup commands write under `~/.defenseclaw/`: `config.yaml`, the `.env` secret file, the `audit.db` history and
+registry caches. See [Configuration](/docs/reference/configuration) for every path.
+A `gateway.jsonl` file is optional and exists only when you add an explicit `kind: jsonl` destination.
 
-```
-~/.defenseclaw/
-  config.yaml          # canonical configuration (edited by commands that own config)
-  .env                 # secret values — never committed, never logged
-  audit.db             # SQLite audit store (configuration changes land here too)
-  gateway.jsonl        # optional only when an explicit kind: jsonl destination uses this path
-  registries/<id>/     # cached manifest + scanner verdicts for each registry source
-```
+## Next steps
 
-Next steps: [`defenseclaw setup guardrail`](/docs/setup/guardrail) is the right starting point if you have not run it yet. Already running? `defenseclaw keys set DEFENSECLAW_LLM_KEY` is the most common follow-up — it unlocks the LLM judge and the LLM-backed scanners. The full guided workflow lives at [Unified LLM key](/docs/setup/unified-llm-key).
+- [Set up the guardrail](/docs/setup/guardrail) if you have not run it yet.
+- [Store the unified LLM key](/docs/setup/unified-llm-key) to turn on the LLM judge and the LLM-backed scanners.
+- [Add a second connector](/docs/setup/guardrail/multi-connector).

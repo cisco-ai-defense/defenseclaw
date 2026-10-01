@@ -1,6 +1,6 @@
 ---
 title: Stop Claude Code from deleting a critical path
-description: Wire DefenseClaw into Claude Code, collect representative observe-mode traffic, then safely verify CMD-RM-RF against a disposable path.
+description: Wire DefenseClaw into Claude Code, collect representative observe-mode traffic, then verify CMD-RM-RF with a command that runs only inside a throwaway container.
 keywords:
   - block rm -rf claude code
   - claude code dangerous shell
@@ -33,7 +33,7 @@ By the end of this story, you'll have:
 defenseclaw setup claude-code
 ```
 
-This is the [observability-only alias](/docs/connectors/claudecode). Claude
+This is the [Claude Code alias](/docs/connectors/claudecode), which starts in observe mode. Claude
 Code talks directly to its native upstream. DefenseClaw inspects through the
 version-selected hook contract: 28 lifecycle events for `>=2.1.154,<2.1.219`
 or 29 for `>=2.1.219`, where `DirectoryAdded` is observational. It also
@@ -73,7 +73,7 @@ representative traffic to understand your agent before the first block decision.
 
 ```bash
 ls ~/.defenseclaw/policies/guardrail/default/
-sed -n '80,125p' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
+grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
 ```
 
 The `CMD-RM-RF` rule is CRITICAL and matches `/` plus protected top-level
@@ -112,16 +112,18 @@ Claude Code supports native PreToolUse ask, so the approval prompt surfaces insi
 
 ### Trigger the rule
 
-Create an empty target so the exercise remains safe even if the connector is
-not enforcing:
+The test command deletes `/etc` inside a disposable Docker container, so it
+matches `CMD-RM-RF` but cannot touch your machine even if the connector is not
+enforcing.
 
-```bash
-mkdir -p /var/tmp/defenseclaw-demo-empty
-```
+<Callout type="warn">
+Use the command exactly as written. Never ask an agent to run `rm -rf` against
+a real system path outside a throwaway container or VM.
+</Callout>
 
-Then ask Claude Code:
+Ask Claude Code:
 
-> Please run `rm -rf /var/tmp/defenseclaw-demo-empty`.
+> Please run `docker run --rm alpine rm -rf /etc`.
 
 The PreToolUse hook fires, the gateway scores the command, the default rule pack
 returns `CMD-RM-RF` at CRITICAL, and Claude Code receives a deny decision before
@@ -145,13 +147,6 @@ Inspect the matching event's stable `connector`, `severity`, `action`, and
 `structured.rule_ids` fields; exact IDs and timestamps are generated at
 runtime.
 
-Because the denied command did not remove the empty fixture, clean it up
-outside the agent:
-
-```bash
-rmdir /var/tmp/defenseclaw-demo-empty
-```
-
 </Step>
 
 </Steps>
@@ -168,7 +163,7 @@ rmdir /var/tmp/defenseclaw-demo-empty
     { id: 'p',  label: 'Policy',         kind: 'policy' },
   ]}
 >
-  <Message from="u"  to="cc" label="rm -rf /var/tmp/defenseclaw-demo-empty" />
+  <Message from="u"  to="cc" label="docker run --rm alpine rm -rf /etc" />
   <Message from="cc" to="h"  label="PreToolUse(command)" />
   <Message from="h"  to="g"  label="POST /api/v1/claudecode/hook" />
   <Message from="g"  to="p"  label="evaluate(command)" />

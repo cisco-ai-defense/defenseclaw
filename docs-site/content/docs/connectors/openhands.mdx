@@ -49,27 +49,21 @@ By default this is **global/user-scoped**: DefenseClaw writes native OpenHands h
 The OpenHands connector is **hook-only**. `defenseclaw setup openhands` defaults to observability-only `mode=observe`, and `defenseclaw setup openhands --mode action` enables hook-native blocking. OpenHands still talks directly to its configured upstream model provider in both modes; DefenseClaw never inserts an LLM proxy.
 </Callout>
 
-#### What `setup openhands` actually does
+`setup openhands` is the OpenHands alias for the shared guardrail setup. It
+defaults to observe mode and can join an existing hook-connector roster when
+you choose **Add**.
 
-The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
-| Flag | Default | What it does |
-| --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt. |
-| `--mode observe\|action` | `observe` | `observe` records only; `action` returns OpenHands' documented deny response on policy hits. |
-| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
-| `--workspace / --workspace-dir` | unset | Opt into repo-local `.openhands/hooks.json`; unset means global `~/.openhands/hooks.json`. |
+OpenHands-specific differences:
 
-`setup openhands` is the dedicated OpenHands alias. It uses the shared
-guardrail setup backend, defaults to observe mode, and can join an existing
-hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared
-for global setup and set only when `--workspace` is supplied. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for common options and
-[full guardrail setup](/docs/setup/guardrail) for advanced scanner and judge
-configuration.
+- `--workspace` (or `--workspace-dir`) opts into repo-local
+  `.openhands/hooks.json`. Without it, setup writes the global
+  `~/.openhands/hooks.json` and clears `claw.workspace_dir`.
+- `--mode action` returns OpenHands' documented deny response on policy hits.
 
-#### Version contract
+### Version contract
 
 DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The supported POSIX contract starts at `OpenHands CLI 1.12.0`, the first version that loads user-global `~/.openhands/hooks.json`. It is source-reviewed against `OpenHands CLI 1.16.0` with no maximum version currently declared.
 
@@ -77,7 +71,45 @@ DefenseClaw validates the installed OpenHands CLI version during setup when the 
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. OpenHands 1.16.0 loads a repository-local `.openhands/hooks.json` instead of the global file, not next to it: in a project that has its own file, none of DefenseClaw's global hooks run, so tool calls there are not inspected or logged. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly. In an enterprise deployment the guardian writes only the global file, and the foreign-hook guard does not cover OpenHands; see the [enterprise residual risks](/docs/enterprise/threat-model#residual-risks).
 </Callout>
 
-## Hook schema
+## Files DefenseClaw modifies
+
+<Files>
+  <Folder name="~/.openhands" defaultOpen>
+    <File name="hooks.json" />
+    <File name="mcp.json" />
+  </Folder>
+  <Folder name="~/.agents">
+    <Folder name="skills">
+      <File name="..." />
+    </Folder>
+  </Folder>
+  <Folder name="<workspace>/.openhands">
+    <File name="hooks.json (only with --workspace)" />
+  </Folder>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name="hooks">
+      <File name="openhands-hook.sh" />
+    </Folder>
+  </Folder>
+</Files>
+
+### Inventory surfaces
+
+OpenHands MCP servers are managed in [`~/.openhands/mcp.json`](https://docs.openhands.dev/openhands/usage/cli/mcp-servers), so MCP discovery is global by default. Current OpenHands skills use `.agents/skills`; global setup resolves that as `~/.agents/skills`, and workspace setup resolves it under the pinned repository. DefenseClaw also discovers deprecated `.openhands/skills` and `.openhands/microagents` paths, installed skills in `~/.openhands/skills/installed`, and the public OpenHands extensions cache at `~/.openhands/cache/skills/public-skills/skills`. That cache is where OpenHands' own "Loaded: N skills" count comes from after the SDK syncs public skills. OpenHands has no plugin install surface in the documented local contract, so DefenseClaw treats plugins as unsupported and hides the Plugins TUI panel while `claw.mode=openhands`.
+
+`claw.workspace_dir` is optional. Empty means global user scope. When set via `--workspace`, workspace-local skills/rules discovery uses that repository until you clear it with a global setup run or point it at another workspace.
+
+The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` under `locations`, so `defenseclaw doctor` can report both the hook contract and the concrete hook/MCP/skill locations it is using.
+
+## Hook capabilities
+
+<HookEventsList connector="openhands" />
+
+<Callout>
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `PreToolUse` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
+</Callout>
+
+### Hook schema
 
 DefenseClaw writes the native OpenHands shape: top-level `snake_case` event keys, each containing matcher groups and `command` hooks. It does not wrap the config in a Claude Code-style top-level `hooks` object.
 
@@ -108,42 +140,6 @@ OpenHands can block `pre_tool_use`, `user_prompt_submit`, and `stop`. Non-blocki
 ```
 
 OpenHands documents `additionalContext` for context injection. DefenseClaw uses that field for downgraded alerts or confirm verdicts because OpenHands does not expose a native ask/approval surface in the documented hook contract.
-
-## Local surfaces
-
-<Files>
-  <Folder name="~/.openhands" defaultOpen>
-    <File name="hooks.json" />
-    <File name="mcp.json" />
-  </Folder>
-  <Folder name="~/.agents">
-    <Folder name="skills">
-      <File name="..." />
-    </Folder>
-  </Folder>
-  <Folder name="<workspace>/.openhands">
-    <File name="hooks.json (only with --workspace)" />
-  </Folder>
-  <Folder name="~/.defenseclaw" defaultOpen>
-    <Folder name="hooks">
-      <File name="openhands-hook.sh" />
-    </Folder>
-  </Folder>
-</Files>
-
-OpenHands MCP servers are managed in [`~/.openhands/mcp.json`](https://docs.openhands.dev/openhands/usage/cli/mcp-servers), so MCP discovery is global by default. Current OpenHands skills use `.agents/skills`; global setup resolves that as `~/.agents/skills`, and workspace setup resolves it under the pinned repository. DefenseClaw also discovers deprecated `.openhands/skills` and `.openhands/microagents` paths, installed skills in `~/.openhands/skills/installed`, and the public OpenHands extensions cache at `~/.openhands/cache/skills/public-skills/skills`. That cache is where OpenHands' own "Loaded: N skills" count comes from after the SDK syncs public skills. OpenHands has no plugin install surface in the documented local contract, so DefenseClaw treats plugins as unsupported and hides the Plugins TUI panel while `claw.mode=openhands`.
-
-`claw.workspace_dir` is optional. Empty means global user scope. When set via `--workspace`, workspace-local skills/rules discovery uses that repository until you clear it with a global setup run or point it at another workspace.
-
-The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` under `locations`, so `defenseclaw doctor` can report both the hook contract and the concrete hook/MCP/skill locations it is using.
-
-## Hook capabilities
-
-<HookEventsList connector="openhands" />
-
-<Callout>
-OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `PreToolUse` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
-</Callout>
 
 ## OpenShell sandbox
 
@@ -215,27 +211,12 @@ exist only in the image; nothing on your host changes.
   `-- --headless -t "TEXT"` to `sandbox run` for a detached run. OpenHands'
   headless mode approves every action itself, so `--safe` keeps its prompts
   only in interactive runs.
-- **Other traffic.** Apart from the model, a mock-model run reached only
-  `pypi.org` (the version check), `github.com` and `raw.githubusercontent.com`
-  (the public skills download). That traffic goes through the DefenseClaw
-  egress proxy, which logs it and applies the blocklist. OpenShell also
-  logged about 20 refused attempts to reach the sandbox's own hostname;
-  OpenHands worked regardless.
-- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
-  OpenShell sandbox, on a mock model behind a credential binding, showed:
-  - hooks reaching the sandbox ingress, with OpenShell substituting the model
-    key;
-  - a command that a DefenseClaw rule blocks refused by the hook, with the
-    rule's reason passed back to the model;
-  - egress through the proxy, including a blocklisted host that a
-    sandbox-scoped unblock then let through.
-
-  The image also passes the hook-fire probe. In that probe a replaced user
-  `hooks.json` is restored, a planted `sitecustomize` module in the launch
-  environment never runs, and the launcher refuses to start when the hooks
-  file is a directory. The curated provider profiles have not carried a real
-  model inside a sandbox; see the harness's verification note for what was
-  run.
+- **Other traffic.** Apart from the model, OpenHands reaches only `pypi.org`
+  (the version check), `github.com` and `raw.githubusercontent.com` (the
+  public skills download). That traffic goes through the DefenseClaw egress
+  proxy, which logs it and applies the blocklist. OpenShell also refuses
+  OpenHands' attempts to reach the sandbox's own hostname; OpenHands works
+  regardless.
 
 ## Enterprise deployments
 
@@ -295,4 +276,15 @@ See R1, R15, R18 and R30 in the
 defenseclaw guardrail disable --connector openhands --yes
 ```
 
+`--connector` turns off only OpenHands on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`.
+
 Teardown removes DefenseClaw-owned hook entries from `~/.openhands/hooks.json` or the pinned workspace hook file and leaves unrelated OpenHands hooks untouched.
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/hitl" title="Human-in-the-loop" description="How confirm verdicts reach OpenHands." />
+  <Card href="/docs/setup/sandbox" title="OpenShell sandbox" description="Run OpenHands in a sandbox." />
+</Cards>

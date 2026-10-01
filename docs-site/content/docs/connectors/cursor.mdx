@@ -9,25 +9,29 @@ keywords:
 ---
 
 The Cursor connector wires DefenseClaw into Cursor's
-[user-scoped hooks.json](https://cursor.com/docs/hooks) so documented prompt,
-tool, shell, MCP, file, and lifecycle events can be evaluated.
+[user-scoped hooks.json](https://cursor.com/docs/hooks), so DefenseClaw can
+evaluate documented prompt, tool, shell, MCP, file, and lifecycle events.
 
+- **Observe mode** records findings and returns allow with `would_block`
+  audit state. The hooks are registered with `failClosed: false`.
+- **Action mode** returns Cursor's native deny response on supported
+  pre-action events. The hooks are registered with `failClosed: true`.
+- Native ask (HITL) is not enabled.
+
+<Callout type="warn" title="Higher-priority Cursor hooks win">
 Cursor runs every matching hook and merges conflicts in **Enterprise > Team >
-Project > User** priority. DefenseClaw owns only the user hook. It cannot prove
-that an Enterprise, Team, or Project source is absent, and Cursor exposes no
-safe API for detecting an actual higher-priority conflict. DefenseClaw reports
-that limitation and does not infer a conflict. Ordinary user-hook action mode
-returns the documented native deny response on supported pre-action events and
-writes `failClosed: true`; observe remains allow/`would_block` with
-`failClosed: false`. Native ask/HITL is not enabled. No Enterprise or Team hook
-system is implemented by this connector.
+Project > User** priority. DefenseClaw owns only the user hook. Cursor exposes
+no safe API to detect a higher-priority conflict, so DefenseClaw reports that
+limitation instead of guessing. This connector does not install Enterprise or
+Team hooks.
+</Callout>
 
 ## Platform support
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | User-scoped command hooks invoke the portable DefenseClaw hook. |
-| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and protected `defenseclaw-hook.exe`. Validation metadata remains empty and `live=false`; the support label does not fabricate certification evidence. |
+| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and protected `defenseclaw-hook.exe`. Not yet tested against the official client. |
 
 ## Setup
 
@@ -59,115 +63,28 @@ Windows/WSL paths are outside this native connector path.
   </Tab>
 </Tabs>
 
-This defaults to the observe template. Cursor talks directly to its native
-upstream; DefenseClaw inspects and, in action mode, denies through hooks.
-**There is no proxy-enforcement path** for Cursor. DefenseClaw does not claim
-enterprise-wide authority or native human approval.
+`setup cursor` is the Cursor alias for the shared guardrail setup. It defaults
+to observe mode and can join an existing hook-connector roster when you choose
+**Add**. Cursor talks directly to its native upstream; there is no proxy path.
 
-#### What `setup cursor` actually does
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
-The table highlights convenience options rather than the complete alias
-surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, add/replace, workspace, and rule-pack-directory
-options. See the [quick-alias reference](/docs/setup/guardrail/aliases); use
-[full guardrail setup](/docs/setup/guardrail) for scanner, detection-strategy,
-and judge-provider configuration.
+Cursor-specific differences:
 
-| Flag | Default | What it does |
-| --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt. |
-| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
+- `--mode action` pins the hooks to `failClosed: true`, and `--mode observe`
+  pins them to `failClosed: false`. A conflicting `--fail-mode` value is
+  ignored with a warning, so observe cannot block and action cannot fail open.
+- Human approval stays disabled. Confirm verdicts become attributed alerts.
+- Setup and repair report ready only when every managed hook, the runtime
+  adapter, the contract lock, and the active connector roster agree. Adding or
+  repairing another connector cannot displace a configured Cursor
+  registration.
+- To add the LLM judge, run `defenseclaw setup guardrail --connector cursor`
+  with `--detection-strategy regex_judge --judge-model <provider/model>
+  --judge-api-key-env DEFENSECLAW_LLM_KEY --judge-hook-connectors cursor`.
 
-`setup cursor` is the dedicated Cursor alias. It uses the shared guardrail
-setup backend, defaults to observe mode, and can join an existing
-hook-connector roster when you choose **Add**.
-
-`--mode action` pins the managed registration to `failClosed: true`;
-`--mode observe` pins it to `failClosed: false`. A conflicting `--fail-mode`
-value is ignored with a warning so observe cannot become blocking and action
-cannot silently become fail-open. Human approval remains disabled.
-Setup/repair reports readiness only after the current 21-event `type: command`,
-30-second, mode-matched registration, managed runtime adapter, contract lock,
-and complete active-connector roster agree.
-Adding or repairing another connector waits for that full roster, so it cannot
-report success after displacing an already configured Cursor registration.
-
-#### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Standard', 'Action enforcement', 'Local stack', 'Add scanning rigor']}>
-
-<Tab value="Standard">
-
-```bash
-defenseclaw setup cursor
-```
-
-Confirms once, wires observe-mode hooks against `~/.cursor/hooks.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and observe mode does not block. Pass `--yes` to skip the confirmation in CI.
-
-</Tab>
-
-<Tab value="Action enforcement">
-
-```bash
-defenseclaw setup cursor --mode action --no-human-approval --yes
-```
-
-Registers all 21 managed command hooks with `failClosed: true`. Policy blocks
-on supported pre-action events return Cursor's event-native deny shape. Confirm
-verdicts remain attributed alerts because DefenseClaw does not enable native
-ask/HITL. Status and Doctor report action plus user-hook enforcement while also
-reporting that higher-priority conflict detection is unavailable.
-
-</Tab>
-
-<Tab value="Local stack">
-
-```bash
-defenseclaw setup cursor --yes --with-local-stack
-```
-
-Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally for ad-hoc dashboards. That command writes the export destination after the alias has already restarted the gateway, so run its printed `defenseclaw-gateway restart` step before expecting exports. See [Local observability](/docs/observability/local-observability).
-
-</Tab>
-
-<Tab value="Add scanning rigor">
-
-```bash
-export DEFENSECLAW_LLM_KEY='replace-with-your-key'
-
-defenseclaw setup cursor                                  # base alias first
-defenseclaw setup guardrail \
-  --connector cursor \
-  --rule-pack strict \
-  --scanner-mode local \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --judge-hook-connectors cursor \
-  --restart
-```
-
-The alias selects Cursor; the follow-up `setup guardrail --connector cursor` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
-
-</Tab>
-
-</Tabs>
-
-#### Decision aids — should I turn this on?
-
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="DefenseClaw does not enable Cursor native ask/HITL; confirm verdicts remain attributed alerts." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector cursor`." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-## Files DefenseClaw will modify
+## Files DefenseClaw modifies
 
 <Files>
   <Folder name="~/.cursor" defaultOpen>
@@ -248,11 +165,8 @@ with a mock model, so it cannot pass for Cursor Agent until a check runs with
 a Cursor key.
 
 `defenseclaw sandbox run cursor` builds the whole image first (several GB) and
-only then refuses it. The unverified image stays:
-`defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and
-`defenseclaw sandbox image prune` keeps it because it is the newest Cursor Agent
-image. Remove it with `docker image rm <tag>`; the next prune forgets its
-record.
+only then refuses it. `defenseclaw sandbox image list` shows the image with
+HOOKS VERIFIED `no`. Remove it with `docker image rm <tag>`.
 </Callout>
 
 The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
@@ -261,10 +175,7 @@ the Cursor Agent image already holds:
 - **Managed tier.** The hooks are in root-owned `/etc/cursor/hooks.json`,
   Cursor's enterprise hooks file, with `failClosed` on every event. Cursor
   still runs team, user and project hooks, but the enterprise answer wins, so
-  they cannot allow what DefenseClaw denies. On Cursor's authless local build
-  of the same release (not the build the image ships), the enterprise hooks
-  fired and blocked a shell call, and user and project `hooks.json` files
-  answering allow changed nothing.
+  they cannot allow what DefenseClaw denies.
 - **Launch flags.** Cursor's own sandbox cannot run inside OpenShell, so the
   agent starts with `--sandbox disabled` and `--trust`. Skip-permissions mode
   adds `--force`; `--safe` drops `--force` from the arguments you pass. The
@@ -277,14 +188,26 @@ the Cursor Agent image already holds:
   (`/usr/local/lib/defenseclaw/bin/cursor-launch login`, which runs
   `cursor-agent login` through the launcher and its egress proxy settings)
   keeps a long-lived session in the sandbox home, where the agent can read it
-  and send it out. Neither was tested live, and `sandbox run` has no `--llm`
-  choice for Cursor Agent.
-- **Image.** Cursor Agent 2026.07.23-e383d2b, the build the hook contract
-  reviewed, from its release archive with a SHA-256 DefenseClaw measured
-  (Cursor publishes no digests).
+  and send it out. `sandbox run` has no `--llm` choice for Cursor Agent.
+- **Image.** The sandbox image ships Cursor Agent 2026.07.23-e383d2b.
 
 ## Disable
 
 ```bash
 defenseclaw guardrail disable --connector cursor --yes
 ```
+
+`--connector` turns off only Cursor on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. Teardown
+restores the pre-DefenseClaw `hooks.json` or removes only DefenseClaw-owned
+entries. To remove the connector from the config, use
+`defenseclaw setup remove cursor`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/hitl" title="Human-in-the-loop" description="Why Cursor confirm verdicts become alerts." />
+  <Card href="/docs/connectors/compatibility" title="Compatibility" description="Supported Cursor Agent builds and hook contracts." />
+</Cards>

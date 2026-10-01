@@ -151,9 +151,14 @@ the account name alone, with no configuration required to stay that way.
 
 ---
 
-# Part 1 — macOS
+## How to validate
 
-## Step 1 — Unit tests
+Run these steps after changing identity collection, the hook readers or the Windows SID path.
+Use a disposable endpoint for the live steps.
+
+### Validate on macOS
+
+#### Step 1 — Unit tests
 
 ```bash
 go test ./internal/useridentity/...
@@ -166,7 +171,7 @@ each shipped hook's own reader block against the helper under `/bin/bash`
 specifically, not whatever bash is first on `PATH`. See "the bash 3.2 trap"
 below for why that distinction is the whole test.
 
-## Step 2 — A live gateway with a file sink
+#### Step 2 — A live gateway with a file sink
 
 There is no environment variable that turns on file output in v8; it is a
 config destination. Use an isolated home so nothing touches your real install.
@@ -209,7 +214,7 @@ curl -s http://127.0.0.1:18970/health \
   | python3 -c 'import json,sys; print([d["name"] for d in json.load(sys.stdin)["telemetry"]["details"]["destinations"]])'
 ```
 
-## Step 3 — Render the real hooks
+#### Step 3 — Render the real hooks
 
 Hook endpoints reject any request whose contract does not match the installed
 runtime lock, so you cannot hand-craft one with `curl`. Render the real hooks
@@ -225,7 +230,7 @@ done
 `--config-home` is hidden but supported, and it is what keeps this off your
 real `~/.codex`, `~/.claude.json`, and `~/.cursor`.
 
-## Step 4 — Drive the hooks
+#### Step 4 — Drive the hooks
 
 Invoke them exactly as the agent does — the argument form is in the rendered
 `confighome/config.toml` (Codex) and `confighome/hooks.json` (Cursor).
@@ -268,7 +273,7 @@ for line in open('/private/tmp/dc-idfab/home/telemetry.jsonl'):
 PY
 ```
 
-## Observed output on macOS
+#### Observed output on macOS
 
 Captured from the run above on macOS 15 (arm64), uid 501. Five records carry
 identity per session-start-plus-one-tool-call sequence. The account name and
@@ -328,7 +333,7 @@ gateway derives a pseudonymous `user-<hash>` id from it. Seeing `501` /
 `posix_uid` / `dcuser` there means the hook's headers arrived and won, while
 the payload still supplied the address the OS cannot know.
 
-## The bash 3.2 trap
+#### The bash 3.2 trap
 
 The first implementation read the helper's output with `mapfile`. `mapfile` is
 bash 4; macOS ships bash 3.2 as `/bin/bash`, which is what the hooks' shebang
@@ -356,7 +361,7 @@ reports correctly. It also asserts each hook actually expands
 never passing them to `curl` fails just as quietly.
 
 Note the same `mapfile` guard still wraps W3C **trace** header propagation in
-all ten hooks (`TRACE_HEADER_ARGS`). That is pre-existing on `main`, not
+all nine hooks (`TRACE_HEADER_ARGS`). That is pre-existing on `main`, not
 introduced here, and it means `traceparent` / `tracestate` are also not
 propagated from macOS hooks. It is the identical mechanical fix — replace
 `mapfile -t` with the same read loop — but it changes trace behavior rather
@@ -364,14 +369,14 @@ than adding a field, so it is deliberately left out of this implementation.
 
 ---
 
-# Part 2 — Windows
+### Validate on Windows
 
 The Windows SID path is covered by native Windows CI in addition to
 cross-compilation. The procedure below remains the release-validation path for
 proving a real standard-user token, ProfileList round trip, and multi-user
 managed-enterprise attribution on a disposable endpoint.
 
-## Step 1 — Prove the platform code runs
+#### Step 1 — Prove the platform code runs
 
 ```powershell
 go test ./internal/useridentity/... -v
@@ -386,7 +391,7 @@ worth running.
 directions — SID to profile directory and back. It skips rather than fails when
 no profile resolves, so read the output, not just the exit code.
 
-## Step 2 — Standalone hook run as `dcstd`
+#### Step 2 — Standalone hook run as a standard user
 
 Build as the admin account, then run as the standard user so the SID belongs to
 a non-admin. Repeat Part 1 steps 2–4 with Windows paths; the Windows hook is
@@ -403,16 +408,16 @@ Expect `user.id` to be that SID, `defenseclaw.user.id_kind` to be
 `windows_sid`, and `defenseclaw.user.name` to be the bare account name with no
 `DOMAIN\` prefix.
 
-## Step 3 — Two users, one endpoint
+#### Step 3 — Two users, one endpoint
 
 This is the case the feature exists for and the one macOS cannot exercise well.
 Drive agent sessions as two different accounts and confirm each record carries
 that account's SID — not the installing admin's, and not the service account's.
 
-## Step 4 — Enterprise-managed run
+#### Step 4 — Enterprise-managed run
 
 Install per the enterprise flow (`packaging/windows/install-enterprise.ps1`),
-then drive real sessions as `dcstd` with the installed hooks.
+then drive real sessions as a standard user with the installed hooks.
 
 Check specifically:
 
@@ -430,7 +435,7 @@ Check specifically:
   pass reads the daemon's own home and is deliberately skipped under managed
   enterprise; a row naming the service principal means that gate failed.
 
-## Step 5 — Cursor on Windows
+#### Step 5 — Cursor on Windows
 
 Cursor's Windows transport uses the generated PowerShell adapter and
 `--input-file` rather than native stdin, which is a different path into
@@ -438,7 +443,7 @@ Cursor's Windows transport uses the generated PowerShell adapter and
 
 ---
 
-## What to check in every record
+#### What to check in every record
 
 - `user.id` present with an `id_kind` that matches its shape. An id the gateway
   cannot classify is emitted without a kind rather than being labelled

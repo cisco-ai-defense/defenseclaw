@@ -1,6 +1,6 @@
 ---
 title: Setup skill scanner
-description: Scan configured connector skills before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
+description: Scan agent skills before an agent can run them. DefenseClaw wraps cisco-ai-skill-scanner and maps each verdict through skill_actions.
 keywords:
   - DefenseClaw skill scanner
   - cisco-ai-skill-scanner
@@ -11,9 +11,9 @@ keywords:
   - install watcher
 ---
 
-Agents are getting comfortable installing skills. A "skill" is a small bundle — instructions, optional tools, sometimes auto-applied — that an LLM picks up and follows. The same shape is also a great place to hide a prompt-injection or an exfiltration tool.
+A skill is a small bundle of instructions and optional tools that an agent picks up and follows. A skill can also hide a prompt injection or an exfiltration tool.
 
-DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so operator-installed and modified skills get a deterministic + LLM-assisted review before an agent is allowed to use them. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
+DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so installed and modified skills get a deterministic and optional LLM-assisted review before an agent is allowed to use them. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
 
 <DefenseClawDemo scenario="skill-quarantine" variant="critical" />
 
@@ -23,7 +23,7 @@ The watcher moved a new skill out of the agent-visible path **before** scanning 
 
 ## What it scans
 
-The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/skill.py) accepts four target shapes — all **positional**. URL fetches in particular take the URL itself as the positional target (no `--remote` involved). The `--remote` flag does exist, but for a different scenario: it forwards the scan request to a sidecar API for a skill installed on a remote host (see the "Remote sidecar" tab below).
+`defenseclaw skill scan` accepts a positional target or the `--path` flag. A URL is passed as the positional target. The `--remote` flag is for a different case: it sends the scan request to a sidecar API for a skill on a remote host.
 
 - **Local skill name** (`my-skill`) — resolves through configured connector skill directories. On a multi-connector install, a bare name checks matching connector copies; pass `--connector <name>` to force one connector's skill source.
 - **`--path <dir>`** — scan a directory you specify, useful inside a skill repo's pre-commit hook.
@@ -33,7 +33,7 @@ The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-
 For each skill it runs:
 
 1. Static checks — manifest validation, allow-list of tool names, suspicious filesystem paths.
-2. Optional **LLM-assisted analysis** — runs whenever the unified LLM key is configured. The upstream scanner auto-detects the provider from the LiteLLM-shaped `provider/model` string, so OpenAI, Anthropic, Bedrock, Gemini, Vertex AI, Azure, Groq, Mistral, DeepSeek, OpenRouter, Ollama, vLLM, and other LiteLLM-supported providers all work without special-casing.
+2. Optional **LLM-assisted analysis**. By default it runs when a model is configured for `scanners.skill` and is off otherwise. Pass `--use-llm` to turn it on for one scan, or `--no-use-llm` to turn it off. The scanner detects the provider from the `provider/model` string, so any LiteLLM-supported provider works.
 3. A consolidated `ScanResult` with severity, findings, and (when applicable) a recommended action.
 
 ## One-shot scan
@@ -44,47 +44,43 @@ For each skill it runs:
 defenseclaw skill scan --all
 ```
 
-For automation, add `--json`. Batch JSON remains a single top-level array for
-backward compatibility. Successful results and per-skill error rows are always
-written before the command returns nonzero for a scanner failure; a telemetry
-recording warning is included on the affected result but does not fail or erase
-the completed scan.
+Scans every configured connector's skill directory and prints findings tagged by connector. `--all` is also the default when you give no target. Use `--connector <name>` to scan one connector.
 
-Walks every configured connector's skill directory, scans each bundle, prints connector-tagged findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI. Use `--connector <name>` to narrow the scan to one connector.
+For automation, add `--json`. Batch JSON is a single top-level array. Successful results and per-skill error rows are written before the command exits nonzero for a scanner failure. A telemetry warning is added to the affected result but does not fail the scan.
   </Tab>
   <Tab value="Specific path">
 ```bash
 defenseclaw skill scan --path ./my-skill
 ```
 
-Useful inside a skill repo's pre-commit hook — fail the build if the skill regresses.
+Use it in a skill repository's pre-commit hook to fail the build when the skill regresses.
   </Tab>
   <Tab value="Remote URL">
 ```bash
 defenseclaw skill scan https://github.com/some-org/skill-bundle/archive/refs/heads/main.tar.gz
 ```
 
-Pass the URL of a `.tar.gz` or `.zip` archive **as the positional target**. The CLI downloads it into a temporary directory, extracts it with size limits, scans it, and deletes the directory. A repository page URL is not an archive and is rejected. Note: `--remote` is for a different scenario (see the next-to-last tab).
+Pass the URL of a `.tar.gz` or `.zip` archive **as the positional target**. The CLI downloads it into a temporary directory, extracts it with size limits, scans it, and deletes the directory. A repository page URL is not an archive and is rejected.
   </Tab>
   <Tab value="Clawhub URI">
 ```bash
 defenseclaw skill scan clawhub://author/skill@1.2.0
 ```
 
-Resolves through your configured Clawhub registry source. Add `--action` to make the call enforce the operator's `skill_actions` policy on the result.
+Resolves through your configured Clawhub registry source. Add `--action` to apply the `skill_actions` policy to the result.
   </Tab>
   <Tab value="Remote sidecar">
 ```bash
 defenseclaw skill scan my-skill --remote
 ```
 
-`--remote` means "POST the scan request to a remote sidecar over HTTP" — the scanner runs on a remote host (e.g. an SSM port-forward). Useful when the skill lives on a different machine than the operator CLI.
+`--remote` sends the scan request to a sidecar API over HTTP, so the scan runs on the remote host. Use it when the skill lives on a different machine than the CLI.
   </Tab>
 </Tabs>
 
 ## Continuous protection: the install watcher
 
-Running a one-shot scan is a starting point. The real value is the **install watcher** that ships with `defenseclaw setup guardrail`:
+A one-shot scan is a starting point. The **install watcher** that `defenseclaw setup guardrail` turns on scans every new or changed skill:
 
 <Sequence
   caption="block → scan → release: the agent never sees a skill that hasn't been evaluated. Watcher is `defenseclaw-gateway`'s install watcher; Scanner is `cisco-ai-skill-scanner`."
@@ -107,38 +103,36 @@ Running a one-shot scan is a starting point. The real value is the **install wat
   <Message from="watcher" to="fs"      label="if file=quarantine: hold + emit event" />
 </Sequence>
 
-The flow is **quarantine → scan → release-or-keep-quarantined**, not the other way around — the skill never executes against the agent until the scan completes. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
-
-You don't have to wire any of that yourself. `defenseclaw setup guardrail` enables the watcher for the connectors you select.
+The order is quarantine, scan, then release or keep quarantined. The agent cannot run the skill until the scan completes. `defenseclaw setup guardrail` turns on the watcher for the connectors you select.
 
 ## Configure the action mapping
 
-The scanner's verdict is a *severity*. What that severity *does* lives in the active OPA policy file (`policies/<name>.yaml`) under `skill_actions`. The schema is real per-severity buckets (not threshold floors):
+The scanner's verdict is a severity. The active policy file maps each severity to actions under `skill_actions`. Each severity has its own entry; they are not thresholds.
 
 ```yaml title="policies/default.yaml (excerpt)"
 admission:
   scan_on_install: true
-  allow_list_bypass_scan: true                # first-party skills bypass scanning when the allow_list matches
+  allow_list_bypass_scan: true
 
 skill_actions:
   critical:
-    file:    quarantine
+    file: quarantine
     runtime: disable
     install: block
   high:
-    file:    quarantine
+    file: quarantine
     runtime: disable
     install: block
   medium:
-    file:    none                              # no filesystem action
-    runtime: enable                            # agent can still call it
+    file: none
+    runtime: enable
     install: none
   low:
-    file:    none
+    file: none
     runtime: enable
     install: none
   info:
-    file:    none
+    file: none
     runtime: enable
     install: none
 
@@ -146,7 +140,11 @@ first_party_allow_list:
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill
-    source_path_contains: [".openclaw/workspace/skills/codeguard", ".openclaw/skills/codeguard", ".zeptoclaw/skills/codeguard", ".claude/skills/codeguard"]
+    source_path_contains:
+      - ".openclaw/workspace/skills/codeguard"
+      - ".openclaw/skills/codeguard"
+      - ".zeptoclaw/skills/codeguard"
+      - ".claude/skills/codeguard"
 ```
 
 Each severity bucket has three independent actions:
@@ -155,8 +153,10 @@ Each severity bucket has three independent actions:
 - **`runtime`** — `enable` or `disable`. Whether the agent can invoke the skill at all.
 - **`install`** — `none` or `block`. Whether to refuse a fresh install.
 
-`first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/defaults) for what each shipped rule pack sets these to.
+`first_party_allow_list` is a policy-file key, not a `~/.defenseclaw/config.yaml` key. A skill whose source path contains one of the listed entries skips `skill_actions`. The shipped file also lists the first-party DefenseClaw plugin. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/defaults) for what each shipped rule pack sets these to.
 
+<Accordions>
+  <Accordion title="Codex and Hermes skill directories">
 Codex's personal and project skill directories both use the shared
 `.agents/skills` namespace. Path alone cannot distinguish a protected install
 from an attacker-controlled repository entry, so CodeGuard at either Codex
@@ -172,6 +172,8 @@ Hermes mixes installer-synced and operator-authored skills under
 `.bundled_manifest` hash, installed copy, and matching
 `$HERMES_HOME/hermes-agent/skills` source tree all agree. Modified, untracked,
 linked, oversized, or otherwise unverifiable copies remain scan-required.
+  </Accordion>
+</Accordions>
 
 To switch profiles for the entire `skill_actions` table:
 
@@ -183,17 +185,39 @@ defenseclaw policy activate permissive   # quarantines critical only
 
 ## Provide the LLM key (optional but recommended)
 
-LLM-assisted analysis is what catches the *new* malicious skills you don't yet have a regex for.
+LLM-assisted analysis catches malicious skills that no static rule matches yet.
 
 ```bash
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider-native variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) via `inject_llm_env`. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
+DefenseClaw passes the unified key to the scanner as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider variable such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
 <Callout type="info">
-LLM mode works with any LiteLLM-supported provider. The upstream Skill Scanner SDK auto-detects the provider from the LiteLLM-shaped `provider/model` string in your unified config (e.g. `bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0`, `gemini/gemini-2.5-pro`, `vertex_ai/gemini-1.5-pro`). For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
+LLM mode works with any LiteLLM-supported provider. The scanner detects the provider from the `<provider/model>` string in your unified config. For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
 </Callout>
+
+## Configure the scanner
+
+`defenseclaw setup skill-scanner` sets the analyzers and policy preset. Run it bare for prompts, or pass flags with `--non-interactive`:
+
+```bash
+defenseclaw setup skill-scanner --non-interactive \
+  --use-llm --use-behavioral --policy balanced
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--use-llm` | Turn on the LLM analyzer. |
+| `--llm-provider [anthropic\|openai]`, `--llm-model`, `--llm-consensus-runs` | Choose the LLM analyzer's provider, model and number of consensus runs. |
+| `--use-behavioral`, `--use-trigger` | Turn on the behavioral and trigger analyzers. |
+| `--enable-meta` | Turn on the meta-analyzer. |
+| `--use-virustotal`, `--use-aidefense` | Turn on the VirusTotal scanner and the AI Defense analyzer. |
+| `--policy [strict\|balanced\|permissive\|none]` | Scan policy preset. |
+| `--lenient` | Tolerate malformed skills. |
+| `--verify / --no-verify` | Run connectivity checks after setup. On by default. |
+
+Run `defenseclaw setup skill-scanner --help` for the full list.
 
 ## Availability and recovery
 
@@ -210,7 +234,7 @@ dependency error and exits cleanly; it does not crash the gateway.
 
 ## Manage individual skills
 
-The watcher's verdict is the default. Operators always have manual override:
+The watcher's verdict is the default. You can override it by hand:
 
 ```bash
 defenseclaw skill list                              # on-disk skills + state, across ALL active connectors
@@ -224,7 +248,10 @@ defenseclaw skill allow my-skill --reason "vetted"
 defenseclaw skill disable my-skill                    # runtime off, file untouched
 defenseclaw skill enable my-skill
 defenseclaw skill info my-skill                       # detailed view
+defenseclaw skill unblock my-skill                    # clear block, file and runtime state
 ```
+
+To install a skill through the scanner, use `defenseclaw skill install <name>`. It installs a copy into each configured connector's skill directory and scans each copy. By default it only reports findings; pass `--action` to apply `skill_actions`. Pass `--force` to overwrite an existing skill and `--connector` to install for one connector. `defenseclaw skill search <query>` searches Clawhub with a local or cached client. Add `--allow-remote-fetch` only if you accept that it fetches and runs the Clawhub package from the network.
 
 Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.
 

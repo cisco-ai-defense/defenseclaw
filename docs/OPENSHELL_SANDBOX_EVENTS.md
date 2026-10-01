@@ -9,12 +9,12 @@ interface in [`internal/audit/sandbox_v8.go`](../internal/audit/sandbox_v8.go),
 which never accepts a family name or free-form attributes. See
 [SANDBOX.md](SANDBOX.md) for the architecture.
 
-The producers are complete, but nothing calls them yet: the sandbox manager,
-the `WatchSandbox` watcher and the egress proxy's event sink are not wired
-up. When they are, the process builds one `audit.NewSandboxRecorder` and
-shares it, because the recorder tracks each sandbox's phase for the active
-gauge. On daemon start the reconciler must record a lifecycle event for every
-existing sandbox so the gauge is republished.
+The gateway sidecar builds one `audit.NewSandboxRecorder` per process and
+shares it: the sandbox manager (through `manager.Options.Telemetry`) and the
+sandbox runtime both write to it. One recorder is required because it tracks
+each sandbox's phase for the active gauge. On daemon start the manager's
+reconcile pass records a lifecycle event (trigger `reconcile`) for every
+existing sandbox, so the gauge is republished.
 
 ## Sandbox correlation (`correlation.sandbox`)
 

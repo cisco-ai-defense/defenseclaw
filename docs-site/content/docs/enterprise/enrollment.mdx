@@ -1,6 +1,6 @@
 ---
 title: Enrollment
-description: How the standalone profile finds users on Windows, Linux and macOS, which enrollment settings each OS honors, how directory accounts, new users and deleted users are handled, and how to publish the target list yourself.
+description: How the enumerator picks the users and agents to protect on Windows, Linux and macOS, the filters you can set, and what happens when users change.
 keywords:
   - DefenseClaw enrollment
   - hook enumerator
@@ -91,8 +91,7 @@ ignores DefenseClaw's hooks and version floor, runs without DefenseClaw, and
 is not reported. So does a Copilot CLI below its 1.0.18 floor (for example
 1.0.15, run with `--no-auto-update`), which does not load
 `/etc/github-copilot/policy.d`. See
-[Vendor limits](/docs/enterprise/machine-policy#vendor-limits); tracked in
-[#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
+[Vendor limits](/docs/enterprise/machine-policy#vendor-limits).
 
 A per-user agent that a user runs without installing it is not found
 either. OpenHands before 1.12.0 does not load DefenseClaw's hooks, and a

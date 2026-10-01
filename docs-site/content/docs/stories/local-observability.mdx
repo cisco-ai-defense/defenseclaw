@@ -24,7 +24,7 @@ For the full deep-dive on flags, dashboards, and tear-down, see [Observability �
   <Card title="Prometheus" description="Metrics exported through the local OTel Collector." />
   <Card title="Loki" description="Canonical gateway logs with connector and severity attributes." />
   <Card title="Tempo" description="Gateway and connector traces exported through OTLP." />
-  <Card title="Grafana" description="Fourteen provisioned DefenseClaw dashboards backed by Prometheus, Loki, and Tempo." />
+  <Card title="Grafana" description="The provisioned DefenseClaw dashboard set, backed by Prometheus, Loki, and Tempo." />
 </Cards>
 
 ## Run it
@@ -50,19 +50,10 @@ Brings up five containers via Docker Compose:
 
 The Compose file binds all published ports to loopback by default.
 
-</Step>
-
-<Step>
-
-### Verify the hot-reloaded destination
-
-Unless `up` was run with `--no-config`, it already created or updated
-`observability.destinations[local-observability]` with the selected
-logs/metrics/traces signals and the collector endpoint. A running gateway
-hot-reloads that destination without changing its PID or interrupting active
-agent sessions—even when `gateway.config_reload.mode` is `restart`. If the
-gateway is stopped, the destination takes effect on its next normal start. No
-connector setup command or manual gateway restart is required.
+Unless you pass `--no-config`, `up` also writes the
+`observability.destinations[local-observability]` entry. A running gateway
+hot-reloads it without a restart or interrupting agent sessions; a stopped
+gateway picks it up on its next start.
 
 </Step>
 
@@ -80,11 +71,9 @@ warns whenever no-password access is active. The Loki, Tempo, and Prometheus
 developer APIs are still separately loopback-only; do not expose them through
 `HOST_BIND` without an external access-control layer.
 
-Fourteen dashboards are provisioned, including Overview, Traffic, Security,
-Findings, Policy Decisions, HITL, Connectors, Connector Detail, Activity,
-Runtime, Scanners, AI Discovery, Agent Identity, and Agent 360. See
-[Grafana dashboards](/docs/observability/grafana-dashboards) for their exact
-queries and panels.
+The DefenseClaw folder in Grafana holds the full bundled dashboard set; start
+with **Overview**. See [Grafana dashboards](/docs/observability/grafana-dashboards)
+for the complete list and what each one answers.
 
 </Step>
 
@@ -142,4 +131,4 @@ The local stack is for building intuition. For production, replace each componen
 - Tempo → your tracing backend (Honeycomb, Tempo, Jaeger, ...).
 - Grafana → whatever your team already uses for dashboards.
 
-Point the gateway's OTLP exporter at your collector and DefenseClaw's signals land alongside the rest of your telemetry. See the [Reference / Configuration](/docs/reference/configuration) page for the full env-var list.
+Add an OTLP destination that points at your collector, and DefenseClaw's signals land alongside the rest of your telemetry. You can keep the local stack running next to it; each destination has its own queue and routing. See [destination capabilities and fan-out](/docs/observability#destination-capabilities-and-fan-out).

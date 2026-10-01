@@ -63,9 +63,8 @@ irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/ins
 When a newer release exists, interactive CLI commands and the TUI show one
 line: `DefenseClaw X.Y.Z is available (you have A.B.C) — run 'defenseclaw
 upgrade'`. The check runs at most once a day and never in scripts, JSON output,
-or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check:
-false` in `config.yaml`; on Windows the `DisableSelfUpdate` enterprise policy
-also turns it off. Nothing is ever installed without you running
+or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1`. On Windows the
+`DisableSelfUpdate` enterprise policy also turns it off. Nothing is ever installed without you running
 `defenseclaw upgrade`.
 
 ## Upgrading from 0.x to 1.0
@@ -123,7 +122,8 @@ installer runs it after every swap; running it again is safe.
 Two connectors changed in this release. One is migrated for you; the other
 needs a one-time manual cleanup.
 
-### Windsurf is now Devin
+<Accordions>
+<Accordion title="Windsurf is now Devin">
 
 Windsurf was renamed **Devin Desktop** (Cognition). DefenseClaw now protects it
 with the [`devin` connector](/docs/connectors/devin), which covers Devin CLI and
@@ -167,7 +167,8 @@ existing Cascade conversations keep running without DefenseClaw hooks.
 To confirm, run `defenseclaw doctor` and check that the Devin hook row passes,
 then open a new Devin Desktop tab or Devin CLI session.
 
-### Gemini CLI was removed
+</Accordion>
+<Accordion title="Gemini CLI was removed">
 
 DefenseClaw no longer ships a Gemini CLI connector. For Google's agent, use
 [Antigravity](/docs/connectors/antigravity) instead.
@@ -271,23 +272,12 @@ error points to this section. Step 1 fixes that. If a plugin directory is
 configured and plugin discovery fails, the gateway keeps names it cannot
 resolve and retries their teardown later instead of dropping them.
 
-#### Native Windows installs from pre-release builds
-
-Native Windows Setup builds made after 0.8.10 and before this release could
-select Windsurf or Gemini CLI. This release's Setup and uninstaller still read
-an install state that selected Windsurf: repair and upgrade switch the
-selection to `devin`, and the gateway removes DefenseClaw's Cascade hook
-entries on its next start. To remove such an install, upgrade it first and
-then uninstall, so that cleanup runs.
-
-Native Windows installs made from pre-release main builds that selected Gemini
-CLI must be uninstalled with their original build before installing this
-release; this release's Setup and uninstaller refuse that install state. Then
-clean up Gemini CLI entries with the steps above.
-
 Telemetry schemas no longer accept `geminicli` as a connector value. Rows that
 an older release exported with that value do not validate against the current
 schemas if you re-export them.
+
+</Accordion>
+</Accordions>
 
 ## Troubleshooting
 

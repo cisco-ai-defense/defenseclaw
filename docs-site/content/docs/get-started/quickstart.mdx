@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: First run in two minutes. Pick init for the guided wizard or quickstart for the zero-prompt scripted equivalent — both call the same first-run backend and end with a working guardrail.
+description: Configure DefenseClaw in a few minutes with the guided init wizard or the zero-prompt quickstart command.
 keywords:
   - defenseclaw quickstart
   - defenseclaw init
@@ -9,14 +9,9 @@ keywords:
   - first guardrail
 ---
 
-After the [install](/docs/get-started/install), DefenseClaw is on disk but not yet configured. You then run **one** first-run command. There are two of them — they do the same work, with different UX.
+After the [install](/docs/get-started/install), DefenseClaw is on disk but not yet configured. Run **one** first-run command. Both write the config, seed the audit database and set up the guardrail for your agent.
 
-<Callout>
-On native Windows, first review the [connector platform table and setup
-notes](/docs/connectors#platform-support). Windows uses native hook, plugin, or
-awaited-policy lanes, excludes WSL agents and proxy-only connectors, and
-otherwise uses the same `init` and `quickstart` backend described here.
-</Callout>
+On native Windows, first check the [connector platform table](/docs/connectors#platform-support).
 
 <Cards>
   <Card title="defenseclaw init" description="Interactive wizard. Asks about connector, profile, scanner mode, judge, HITL. Recommended the first time." />
@@ -24,13 +19,10 @@ otherwise uses the same `init` and `quickstart` backend described here.
 </Cards>
 
 <Callout>
-You do **not** need to run `init` before `quickstart`. Both invoke
-the same `run_first_run` backend (`cli/defenseclaw/bootstrap.py`)
-that writes config, seeds the audit DB, configures guardrail, and
-starts the gateway. Pick one.
+You do **not** need to run `init` before `quickstart`. Pick one. They differ in one way that matters: `quickstart` starts the gateway unless you pass `--skip-gateway`. Interactive `init` asks whether to start it. Non-interactive `init` starts the gateway only with `--start-gateway`.
 </Callout>
 
-## Path A — Interactive (`defenseclaw init`)
+## Path A interactive init [#path-a-interactive-defenseclaw-init]
 
 The recommended first run for a human at a terminal. The wizard walks you through every choice, shows defaults, and explains the trade-offs.
 
@@ -38,7 +30,7 @@ The recommended first run for a human at a terminal. The wizard walks you throug
 defenseclaw init
 ```
 
-On a TTY this runs the guided path (`_prompt_first_run`). It runs local agent discovery, **pre-selects every installed hook connector**, and configures them **all in `observe` (log-only) mode** by default — pressing Enter through the connector prompt brings up everything you have. Rather than asking observe-vs-action for each one, it asks a single question, **"Action-mode connector(s)"**, naming the subset that should enforce. Leave it blank and every connector stays in observe.
+On a terminal, `init` runs the guided wizard. It runs local agent discovery, **pre-selects every installed hook connector**, and configures them **all in `observe` (log-only) mode** by default — pressing Enter through the connector prompt brings up everything you have. Rather than asking observe-vs-action for each one, it asks a single question, **"Action-mode connector(s)"**, naming the subset that should enforce. Leave it blank and every connector stays in observe.
 
 The action-only policy knobs — hook fail-mode (`open`/`closed`) and HITL human-approval plus its minimum severity — are asked **once** and shared across every connector you promote to action; observe connectors never see them. Proxy connectors (`openclaw`, `zeptoclaw`) are detected but excluded from the observe-all set — they own the single LLM proxy port and can't be multi-connector peers — so the wizard prints a one-line note pointing you to `defenseclaw setup <proxy>` for them.
 
@@ -51,8 +43,8 @@ An action connector whose installed version doesn't map to a known hook contract
 To skip the wizard — including inside a session that *is* a TTY (CI on a pty, scripted demos) — `defenseclaw init` exposes two **init-only** multi-connector flags. These do **not** exist on `quickstart`:
 
 ```bash
-# Observe every detected hook connector, enforce on codex:
-defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
+# Observe every detected hook connector, enforce on codex, start the gateway:
+defenseclaw init --non-interactive --yes --observe-all --action-connectors codex --start-gateway
 ```
 
 | Flag (`init` only) | Effect |
@@ -62,12 +54,13 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--non-interactive` | Skip every prompt. |
 | `--yes` / `-y` | Auto-accept every confirmation. |
 | `--connector <x>` | Pre-select a single agent. Single-connector path — wins over the multi flags. |
+| `--start-gateway` | Start the gateway after setup. Without it, non-interactive `init` does not start the gateway. |
 
 With neither multi flag nor `--connector`, non-interactive init keeps the single-connector default: one discovery-backed connector in `observe`. An explicit `--connector` always wins.
 
-## Path B — Zero prompts (`defenseclaw quickstart`)
+## Path B zero-prompt quickstart [#path-b-zero-prompts-defenseclaw-quickstart]
 
-The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: `observe` profile, `local` scanner, no LLM judge, no HITL.
+The scripted equivalent. No prompts, and safe defaults: `observe` profile, `local` scanner, no LLM judge, no HITL.
 
 <Steps>
 
@@ -80,12 +73,8 @@ defenseclaw quickstart --connector claudecode
 ```
 
 Replace `claudecode` with the setup name for the agent you use. On native
-Windows, choose a supported connector: Amp, Antigravity, Claude Code, Codex
-CLI, Copilot CLI, Cursor Agent, Devin CLI, Hermes, Kiro, OmniGent (native
-degraded), or OpenCode. OpenHands and the OpenClaw/ZeptoClaw proxy connectors are
-unsupported there and `quickstart` rejects them before setup writes. See the
-[Native Windows guide](/docs/get-started/windows) for each connector's exact
-boundary. Other platforms also offer proxy and additional hook connectors.
+Windows, pick a connector that the [platform table](/docs/connectors#platform-support)
+lists as supported; `quickstart` rejects the others before it writes anything.
 `quickstart` configures **one** connector. If you
 skip `--connector`, it uses the single configured or detected connector; if
 more than one connector is configured/detected, or the installer hint disagrees
@@ -98,22 +87,36 @@ with the detected connector, it exits and asks you to rerun with `--connector
 
 ### Watch the report
 
-The command emits a one-screen first-run summary:
+The command prints a one-screen first-run report. This sample is illustrative; the steps, paths and hints depend on your machine:
 
-```
-DefenseClaw — first run report
-──────────────────────────────────────────────
-status              ok
-connector           claudecode (Claude Code)
-profile             observe
-scanner_mode        local
-judge               disabled
-hilt                disabled
-gateway             running on 127.0.0.1:18970
-audit DB            ~/.defenseclaw/audit.db
+```text
+  DefenseClaw First-Run
+  status=ready connector=claudecode profile=observe
+  ────────────────────────────────────────────────────────
+
+  Setup
+  ✓ Config  created defaults
+  ✓ Bootstrap  ~/.defenseclaw
+  ✓ Skill scanner  ~/.local/bin/skill-scanner
+  ✓ MCP scanner  ~/.local/bin/mcp-scanner
+  ✓ Guardrail  claudecode, mode=observe
+  ✓ Sidecar  started
+
+  Readiness
+  ✓ Config file  ~/.defenseclaw/config.yaml
+  ✓ Audit database  ~/.defenseclaw/audit.db
+  ✓ Device key  ~/.defenseclaw/device.key
+
+  Next
+  defenseclaw doctor
+  defenseclaw keys list
+  Adding another agent later: defenseclaw setup <connector>
+  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup
 ```
 
-If `status` is `needs_attention` the command exits non-zero and lists the gaps (missing API key, gateway port in use, …) with the exact next command to run.
+The `status` is `ready`, `partial` (a step warned) or `needs_attention` (a step failed). The Next list can also show `Unguarded ACP agents found (...): defenseclaw setup acp` when an ACP editor agent is not guarded yet.
+
+If `status` is `needs_attention`, the command exits non-zero. The failed steps and the Next list show the command to run.
 
 </Step>
 
@@ -121,7 +124,8 @@ If `status` is `needs_attention` the command exits non-zero and lists the gaps (
 
 ### Drive the agent
 
-Open Claude Code (or whichever connector you picked). DefenseClaw now receives
+Open Claude Code (or whichever connector you picked). If it was already
+running, fully quit and reopen it so it loads the new hooks. DefenseClaw now receives
 the lifecycle events and interception surfaces supported by that connector.
 Watch the resulting decisions land in the live dashboard:
 
@@ -129,49 +133,25 @@ Watch the resulting decisions land in the live dashboard:
 defenseclaw tui
 ```
 
-Or take a scriptable snapshot from mandatory SQLite event history:
+Or take a scriptable snapshot from the local audit database:
 
 ```bash
 defenseclaw-gateway audit export --output - | tail -n 200 | jq .
 ```
 
-JSONL is no longer an implicit mirror. If you need a continuous external file,
-configure an explicit v8 `kind: jsonl` destination with the buckets, signals,
-and redaction profile that file is allowed to receive.
+DefenseClaw does not write a JSONL file by default. To send events to a file
+or another system, add a destination; see [Observability](/docs/observability).
 
 </Step>
 
 </Steps>
-
-## What both paths do
-
-<Flow
-  direction="TB"
-  caption="init (guided) and quickstart (scripted) both delegate to the same run_first_run backend in bootstrap.py — the only difference is whether they prompt."
->
-  <Node id="init" kind="operator">{`defenseclaw init\n(guided wizard)`}</Node>
-  <Node id="quick" kind="operator">{`defenseclaw quickstart\n(zero-prompt)`}</Node>
-  <Node id="bootstrap" kind="generic">{`run_first_run()\nbootstrap.py`}</Node>
-  <Node id="apply" kind="generic">apply choices to config.yaml</Node>
-  <Node id="env" kind="generic">{`bootstrap_env\nseed DB · dirs · scanners`}</Node>
-  <Node id="guard" kind="connector">{`quiet guardrail setup\nfor resolved connector`}</Node>
-  <Node id="gw" kind="gateway">{`start defenseclaw-gateway\n(unless --skip-gateway)`}</Node>
-  <Node id="report" kind="generic">first-run report</Node>
-  <Edge from="init" to="bootstrap" />
-  <Edge from="quick" to="bootstrap" />
-  <Edge from="bootstrap" to="apply" />
-  <Edge from="apply" to="env" />
-  <Edge from="env" to="guard" />
-  <Edge from="guard" to="gw" />
-  <Edge from="gw" to="report" />
-</Flow>
 
 ## All `quickstart` flags
 
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|devin|copilot|openhands|antigravity|opencode|amp|omnigent",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|devin|copilot|openhands|antigravity|opencode|amp|omnigent|kiro",
       description: "Agent connector. Required when more than one connector is configured or detected; otherwise quickstart uses the single configured/detected connector, then the installer hint if no connector can be detected.",
     },
     "--mode": {
@@ -234,10 +214,12 @@ and redaction profile that file is allowed to receive.
 | CI pipeline (no TTY, deterministic config) | `defenseclaw quickstart --connector <x> --non-interactive --yes --json-summary` |
 | Scripted demo / repeatable test fixture | `defenseclaw quickstart --connector <x> --force` |
 
-## Next
+## Next steps
 
 <Cards>
-  <Card title="First guardrail in 5 minutes" href="/docs/get-started/first-guardrail" description="A macOS/Linux walkthrough that ends with a real block decision; Windows operators are directed to the native verification checklist." />
+  <Card title="First guardrail in a few minutes" href="/docs/get-started/first-guardrail" description="A macOS/Linux walkthrough that ends with a real block decision; Windows operators are directed to the native verification checklist." />
+  <Card title="Protect a second agent" href="/docs/setup/guardrail/multi-connector#add-a-connector" description="Quickstart configures one agent. Add Codex or another agent to the same gateway." />
+  <Card title="ACP guard" href="/docs/acp-guard" description="Guard ACP editors such as Zed and JetBrains. Run defenseclaw setup acp when the report lists unguarded ACP agents." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface — modes, judge, rule packs, HITL — for tuning after the first run." />
   <Card title="AI Discovery" href="/docs/ai-discovery" description="See what AI is already running on the host before you start applying rules." />
 </Cards>

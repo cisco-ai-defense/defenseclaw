@@ -38,6 +38,7 @@ defenseclaw guardrail enable  --connector codex
 | Hermes | `~/.hermes/config.yaml` | DefenseClaw hook entries |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` | Managed bridge plugin (file removed) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` or native Windows equivalent | Unchanged managed system plugin is removed; a prior file is restored |
+| Kiro | `~/.kiro/hooks/defenseclaw.json`, `~/.kiro/agents/defenseclaw.json` and the Kiro CLI default-agent setting | Managed files removed; the prior default agent is restored |
 | OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; managed policy module; Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
 | OpenClaw | `~/.openclaw/openclaw.json` | Plugin allow/load entries |
 | ZeptoClaw | `~/.zeptoclaw/config.json` (api_base, safety) | DefenseClaw rewrites |
@@ -50,4 +51,4 @@ The audit DB and `~/.defenseclaw/` config are **not** removed. Use `defenseclaw 
 defenseclaw doctor
 ```
 
-`doctor` will confirm that no DefenseClaw hook scripts remain in the agent's config and that the gateway is offline (or running without the proxy listener bound).
+`doctor` confirms that no DefenseClaw hook scripts remain in the agent's config and that the gateway is offline (or running without the proxy listener bound).

@@ -69,9 +69,10 @@ need the documented reload or restart after a change.
 defenseclaw keys list                            # tabular: env name, feature, requirement, source
 defenseclaw keys list --json                     # machine-readable
 defenseclaw keys list --missing-only             # triage view
+defenseclaw keys list --show-values              # masked values (first and last 4 characters)
 
 defenseclaw keys set DEFENSECLAW_LLM_KEY         # hidden prompt, writes to .env
-defenseclaw keys set DEFENSECLAW_LLM_KEY --value "$LLM_KEY"   # CI form
+printf '%s\n' "$LLM_KEY" | defenseclaw keys set DEFENSECLAW_LLM_KEY --value-stdin   # CI form
 
 defenseclaw keys fill-missing                    # walk every REQUIRED-but-unset key
 defenseclaw keys fill-missing --yes              # skip the upfront confirmation
@@ -87,9 +88,10 @@ defenseclaw keys check                           # exit 0 iff every REQUIRED is 
 defenseclaw keys list
 defenseclaw keys list --json
 defenseclaw keys list --missing-only
+defenseclaw keys list --show-values
 
 defenseclaw keys set DEFENSECLAW_LLM_KEY
-defenseclaw keys set DEFENSECLAW_LLM_KEY --value $env:LLM_KEY
+$env:LLM_KEY | defenseclaw keys set DEFENSECLAW_LLM_KEY --value-stdin
 
 defenseclaw keys fill-missing
 defenseclaw keys fill-missing --yes
@@ -100,6 +102,15 @@ defenseclaw keys check
 </Tab>
 
 </Tabs>
+
+Prefer `--value-stdin` in scripts: `--value` puts the secret on the command
+line, where shell history and process listings can capture it.
+
+<Callout type="warn">
+`keys list --show-values` prints part of each value: the first and last four
+characters, with values of eight characters or fewer shown as `****`. Do not
+use it in shared terminals, screen shares, or CI logs.
+</Callout>
 
 `keys set` logs a `config.update` activity with target `dotenv:<ENV>` and only
 the before/after presence state; the value itself is never logged.

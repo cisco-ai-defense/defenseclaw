@@ -13,6 +13,8 @@ keywords:
   - defenseclaw setup amp
   - defenseclaw setup omnigent
   - defenseclaw setup devin
+  - defenseclaw setup kiro
+  - defenseclaw setup acp
   - defenseclaw setup openclaw
   - defenseclaw setup zeptoclaw
 ---
@@ -38,6 +40,7 @@ These connectors talk directly to their native upstream, so DefenseClaw never pr
   <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
   <Card title="Amp" href="/docs/connectors/amp" description="defenseclaw setup amp — synchronous pre-execution and model-bound result policy, with foreground native confirmation" />
   <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent — custom policy bridge with native ALLOW / ASK / DENY" />
+  <Card title="Kiro" href="/docs/connectors/kiro" description="defenseclaw setup kiro — Kiro IDE and CLI hooks" />
 </Cards>
 
 ```bash
@@ -47,7 +50,7 @@ defenseclaw setup cursor --no-restart        # apply config without bouncing the
 ```
 
 <Callout>
-These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already active, choose **Add** to keep both connectors wired under `guardrail.connectors` and let `claw.mode` become `multi`.
+These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already active, choose **Add** to keep both connectors under `guardrail.connectors`.
 </Callout>
 
 ### What a direct-to-upstream alias does
@@ -76,13 +79,16 @@ Restarts the gateway (unless `--no-restart`).
 
 </Steps>
 
-### Common flags
+## Shared flags
+
+Every hook connector alias (`setup claude-code`, `codex`, `cursor`, `devin`, `copilot`, `openhands`, `antigravity`,
+`hermes`, `opencode`, `amp`, `omnigent` and `kiro`) takes the same flags. Connector pages list only what differs.
 
 <TypeTable
   type={{
     "--yes / -y": {
       type: "flag",
-      description: "Skip the confirmation prompt (non-interactive).",
+      description: "Skip the confirmation prompt. With other hook connectors present, adds this one.",
     },
     "--restart / --no-restart": {
       type: "flag",
@@ -91,16 +97,70 @@ Restarts the gateway (unless `--no-restart`).
     },
     "--mode observe / action": {
       type: "option",
-      description: "Choose record-only behavior or connector-native enforcement on supported callbacks.",
+      description: "Record only, or enforce on supported callbacks. A re-run keeps the current mode.",
       default: "observe",
+    },
+    "--replace": {
+      type: "flag",
+      description: "Replace the other configured connectors instead of adding next to them.",
+    },
+    "--enable-judge / --no-enable-judge": {
+      type: "flag",
+      description: "Turn the LLM judge on or off for this connector.",
+    },
+    "--judge-hook-connectors": {
+      type: "all|none|<comma list>",
+      description: "Hook connectors the judge inspects. Defaults to this connector with --enable-judge.",
+    },
+    "--fail-mode": {
+      type: "open|closed",
+      description: "What the hook does when the gateway fails or answers with an error.",
+    },
+    "--rule-pack": {
+      type: "default|strict|permissive",
+      description: "Rule-pack profile for this connector. Omit to inherit the global pack.",
+    },
+    "--rule-pack-dir": {
+      type: "path",
+      description: "Custom rule-pack directory for this connector. Pass \"\" to clear it.",
+    },
+    "--human-approval / --no-human-approval": {
+      type: "flag",
+      description: "Turn human approval (HITL) on or off for this connector in action mode.",
+    },
+    "--hilt-min-severity": {
+      type: "high|medium|low|critical",
+      description: "Lowest severity that asks for human approval.",
+    },
+    "--block-message": {
+      type: "string",
+      description: "Block text for this connector. Empty inherits the global message.",
+    },
+    "--workspace / --workspace-dir": {
+      type: "path",
+      description: "Write workspace-scoped config instead of the global user config.",
     },
     "--with-local-stack / --no-local-stack": {
       type: "flag",
-      description: "Bring up the bundled Prom/Loki/Tempo/Grafana stack via `defenseclaw setup local-observability up` once config is saved.",
+      description: "Also run `defenseclaw setup local-observability up` once config is saved.",
       default: "--no-local-stack",
     },
   }}
 />
+
+In a multi-connector install, the policy flags write an override for this connector only. When it is the only
+connector, `--rule-pack` sets the global pack.
+
+### Turn off or remove a connector
+
+These two commands are different:
+
+- `defenseclaw guardrail disable --connector <name> --yes` turns a connector off. DefenseClaw removes its hooks and
+  keeps its settings. `defenseclaw guardrail enable --connector <name>` turns it back on.
+- `defenseclaw setup remove <name>` removes the connector from DefenseClaw. Set it up again to protect it.
+
+See [Replace a connector](/docs/setup/guardrail/multi-connector#replace-a-connector) and
+[Disabling](/docs/setup/guardrail/disabling).
 
 <Callout type="warning" title="Port 3000 is the current local-stack preflight">
 `--with-local-stack` treats any TCP listener on `127.0.0.1:3000` as an
@@ -124,13 +184,25 @@ defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-## Add or reconfigure connectors
+## ACP agents in JetBrains and Zed
 
-Use `defenseclaw setup <connector>` to add or reconfigure that connector. On hosts that already have another connector wired, the interactive flow asks whether to add the connector alongside the existing one or replace the old wiring. Use `defenseclaw setup remove <connector>` when you want to retire a connector.
+`defenseclaw setup acp` finds ACP agents configured in JetBrains IDEs or Zed and routes them through the DefenseClaw
+ACP guard. It observes by default; pass `--activate` for action mode. Limit it to one client with
+`--client jetbrains|zed`. See [ACP guard](/docs/acp-guard).
 
-## Why aliases at all?
+```bash
+defenseclaw setup acp --client zed
+```
 
-Operators previously walked through the full `setup guardrail` wizard just to configure one connector. The aliases expose the common observe/action path directly:
+## Add or replace connectors
+
+On a host with another hook connector, setup asks whether to add or replace. See
+[Add a connector](/docs/setup/guardrail/multi-connector#add-a-connector) and
+[Replace a connector](/docs/setup/guardrail/multi-connector#replace-a-connector).
+
+## Why aliases
+
+The aliases skip the full `setup guardrail` wizard and expose the common observe and action paths directly:
 
 ```bash
 defenseclaw setup codex                         # observe by default

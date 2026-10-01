@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Fifteen active connectors share one adapter interface while exposing connector-specific proxy, hook, ACP, policy, telemetry, and approval capabilities.
+description: Fourteen active connectors share one adapter interface while exposing connector-specific proxy, hook, ACP, policy, telemetry, and approval capabilities.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -15,6 +15,8 @@ keywords:
   - OpenCode connector
   - Amp connector
   - OmniGent connector
+  - Kiro connector
+  - ZeptoClaw connector
 ---
 
 Connectors are the adapter layer between agent frameworks and DefenseClaw.
@@ -23,36 +25,48 @@ capabilities its agent actually exposes. Proxy routing, lifecycle hooks,
 custom policy callbacks, component discovery, CodeGuard, subprocess wrapping,
 native telemetry, and approval support therefore vary by connector.
 
-## Integration families
+## Pick your agent
 
-<Cards>
-  <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, and Kiro. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream. Kiro also has native ACP support." />
-  <Card title="Custom policy connector" description="OmniGent. DefenseClaw installs an in-process Python policy bridge and maps six awaited policy phases to ALLOW, ASK, or DENY without proxying model traffic." />
-  <Card title="ACP guard" href="/docs/acp-guard" description="The shared guard protects verified native ACP entry points for Kiro and other connectors without creating an IDE-specific extension." />
-  <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
-</Cards>
+| Agent | Integration | Where DefenseClaw enforces |
+| --- | --- | --- |
+| [Claude Code](/docs/connectors/claudecode) | Hook | Native lifecycle hooks; native ask at `PreToolUse` |
+| [Codex](/docs/connectors/codex) | Hook | Native lifecycle hooks plus native OTLP |
+| [Cursor](/docs/connectors/cursor) | Hook | Native user hooks; confirm verdicts stay alerts |
+| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Native lifecycle hooks; native ask at `preToolUse` |
+| [Devin CLI and Devin Desktop](/docs/connectors/devin) | Hook | Native Devin hooks shared by the CLI and Devin Local |
+| [Kiro](/docs/connectors/kiro) | Hook, plus optional [ACP](/docs/acp-guard) | Kiro IDE and Kiro CLI hook configs |
+| [Amp](/docs/connectors/amp) | Plugin hook | `tool.call` and model-bound `tool.result` |
+| [Antigravity](/docs/connectors/antigravity) | Hook | `PreToolUse` only |
+| [Hermes](/docs/connectors/hermes) | Hook | Native Hermes hooks |
+| [OpenCode](/docs/connectors/opencode) | Hook | Awaited `tool.execute.before` |
+| [OpenHands](/docs/connectors/openhands) | Hook | Native OpenHands hooks |
+| [OmniGent](/docs/connectors/omnigent) | Custom policy | Six in-process policy phases (`ALLOW`, `ASK`, `DENY`) |
+| [OpenClaw](/docs/connectors/openclaw) | Proxy | Model requests and responses, plus `before_tool_call` |
+| [ZeptoClaw](/docs/connectors/zeptoclaw) | Proxy | Model requests and responses |
+
+- **Proxy connectors** route model traffic through the DefenseClaw proxy.
+- **Hook connectors** wire into the agent's native lifecycle hooks; the agent
+  talks directly to its model provider.
+- The [ACP guard](/docs/acp-guard) is a separate path for native ACP entry
+  points. [Connector compatibility](/docs/connectors/compatibility) lists the
+  versioned hook contracts.
 
 <Callout type="info">
 **One gateway, many hook connectors.** A single DefenseClaw gateway can serve several hook connectors at once, each with its own guardrail posture under `guardrail.connectors.<name>` — pick **Add** (not Replace) when you run a second `setup <connector>`. Proxy connectors (OpenClaw, ZeptoClaw) bind a listener and own the traffic plane, so they can't be multi peers. See [Multi-connector](/docs/setup/guardrail/multi-connector).
 </Callout>
 
-## Pick yours
-
 <ConnectorCatalog />
 
 ## Platform support
 
-Every connector page now keeps its macOS/Linux and native Windows setup in one
-place, including platform-specific paths, dependencies, and enforcement
-limits. **Supported** means the connector is available through the ordinary
-setup path; it does not invent official-client validation evidence when that
-evidence has not been recorded.
+Each connector page covers its macOS/Linux and native Windows setup, paths,
+dependencies, and enforcement limits. **Supported** means the connector is
+available through the ordinary setup path.
 
 | Connector | macOS / Linux | Native Windows x64 | Important Windows boundary |
 | --- | --- | --- | --- |
-| [Claude Code](/docs/connectors/claudecode) | **Supported** | **Supported** | Direct executable hooks; Git for Windows is optional and WSL is outside the native contract. |
-| [Codex](/docs/connectors/codex) | **Supported** | **Supported** | Event-bound system PowerShell bridge to the packaged hook executable plus native OTLP; no resumable native ask response. |
+| [Claude Code](/docs/connectors/claudecode) | **Supported** | **Supported** | Direct executable hooks; Git for Windows is optional and WSL is outside the native contract. Not yet tested against the official Windows client. |
+| [Codex](/docs/connectors/codex) | **Supported** | **Supported** | Event-bound system PowerShell bridge to the packaged hook executable plus native OTLP; no resumable native ask response. Not yet tested against the official Windows client. |
 | [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | Regular connector: workspace-scoped native hooks in `.kiro/hooks` for Kiro IDE and `kiro-cli --v3`, a CLI 2.x agent config for bare `kiro-cli`, plus optional ACP via the shipped stdio guard. |
 | [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
 | [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
@@ -70,33 +84,19 @@ Connectors that earlier releases shipped under other names, or that were
 removed, are listed with migration steps in
 [Upgrade → Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors).
 
-## Capability summary
-
-| Family | Connectors | Data path | Enforcement boundary |
-| --- | --- | --- | --- |
-| Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
-| Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Kiro | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook. Kiro also exposes native ACP. |
-| Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
-| ACP | Tested Kiro + Zed path; cataloged native modes for Cursor, Hermes, OpenCode, Copilot, and Devin. Native entry points only — no bridges | DefenseClaw mediates client ↔ agent JSON-RPC | Bidirectional prompt, output, approval, filesystem, terminal, and extension-method policy |
+## Approvals
 
 Native ask is event-specific: OpenClaw (`before_tool_call`), Claude Code
 (`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only),
-Amp (`tool.call` and model-bound `tool.result` in the active foreground
-thread), and OmniGent's three pre-action phases. DefenseClaw does not enable
-Cursor's native ask response; Cursor confirm verdicts remain attributed
-alerts. Other confirmation verdicts use the connector's documented fallback.
-See the [HITL reference](/docs/hitl) for the canonical per-event matrix and
-[Connector Compatibility](/docs/connectors/compatibility) for exact version
-ranges and script generations.
+Amp (`tool.call` and model-bound `tool.result`), and OmniGent's three
+pre-action phases. Other confirmation verdicts use the connector's documented
+fallback. See [HITL](/docs/hitl) for the per-event matrix.
 
 ## OpenShell sandbox
 
 `defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell
-sandbox that sees only your project folder, on Linux, or on a Mac with Apple
-silicon in a MicroVM of its own that works on a copy of the folder
-([macOS](/docs/setup/sandbox#macos)); the [sandbox guide](/docs/setup/sandbox)
-covers setup and every command.
-DefenseClaw builds sandbox images for these harnesses:
+sandbox; see the [sandbox guide](/docs/setup/sandbox). DefenseClaw builds
+sandbox images for these harnesses:
 
 - **Run today:** [Claude Code](/docs/connectors/claudecode#in-an-openshell-sandbox),
   [Codex](/docs/connectors/codex#in-an-openshell-sandbox),
@@ -113,12 +113,9 @@ DefenseClaw builds sandbox images for these harnesses:
   account before any agent turn, so their images have not passed
   DefenseClaw's hook check.
 
-Claude Code, Codex, Copilot CLI, Cursor Agent and OmniGent register their
-hooks in a root-owned managed policy or configuration, so user and project
-settings cannot switch them off. The others are in the user tier: the agent
-can edit their hook file, or code the agent or a repository adds runs beside
-the hooks. Every other connector is pending. The [capability matrix](/docs/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
-shows each harness's image pin, tier and verification.
+OpenClaw and ZeptoClaw do not run in a sandbox. The
+[capability matrix](/docs/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
+shows each harness's image pin, hook tier and verification.
 
 ## How a connector is structured
 

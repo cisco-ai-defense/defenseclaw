@@ -359,5 +359,5 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
 | **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
 
-The [troubleshooting table](/docs/setup/sandbox#troubleshooting) in the full
+The [troubleshooting table](/docs/setup/sandbox/troubleshooting) in the full
 guide covers the rest.

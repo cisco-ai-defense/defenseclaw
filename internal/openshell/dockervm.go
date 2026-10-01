@@ -25,8 +25,8 @@ import (
 	"time"
 )
 
-// TroubleshootingURL is the sandbox guide's troubleshooting section.
-const TroubleshootingURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/#troubleshooting"
+// TroubleshootingURL is the sandbox troubleshooting page.
+const TroubleshootingURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/troubleshooting/"
 
 // ErrNoProbeImage means no image the Docker VM's kernel can be checked in
 // is on this machine. Doctor never pulls one itself.

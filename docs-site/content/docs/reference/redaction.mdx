@@ -392,6 +392,10 @@ normal log collection cannot disable this SQLite-only compliance floor.
 
 ## V7 compatibility (upgrades only)
 
+<Accordions>
+
+<Accordion title="What happens to v7 redaction settings">
+
 The v7 `privacy` block's `disable_redaction` field and
 `DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
 They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
@@ -401,6 +405,10 @@ with an actionable upgrade message.
 
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
 does not alter the v8 destination route graph or a persistent-sink projection.
+
+</Accordion>
+
+</Accordions>
 
 ## Write and activation safety
 

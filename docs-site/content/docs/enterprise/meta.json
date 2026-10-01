@@ -19,6 +19,8 @@
     "---Operate---",
     "operations",
     "lifecycle",
-    "troubleshooting"
+    "troubleshooting",
+    "---Harden a user install---",
+    "../setup/enterprise-deployment"
   ]
 }

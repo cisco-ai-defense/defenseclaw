@@ -192,15 +192,10 @@ lifecycle decides which files to trust. It also generates the target manifest fr
 profiles on the computer, so you never write `targets.yaml`.
 
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
-The exit code follows Windows Installer conventions:
-
-| Code | Meaning |
-| --- | --- |
-| `0` | Success, or nothing to do |
-| `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. When the rollback itself cannot finish, the transaction stays pending (see [Recover a pending transaction](#recover-a-pending-transaction)). For `status` and `verify`, `1603` means the deployment is unhealthy. |
-| `1618` | Another lifecycle run holds the lock. Retry later. |
-| `1639` | Invalid arguments: a malformed command line (such as a relative `CONFIG=` path or an unknown property), or arguments the lifecycle rejected (for example `/ensure` without `CONFIG=` on a computer with no deployment, a config the gateway cannot load, or a run that `enterprise.trust` refuses). Retrying does not help. |
-| `3010` | Reserved. The lifecycle never requests a restart. |
+The exit code follows Windows Installer conventions: `0` success, `1603`
+failure, `1618` another run holds the lock, and `1639` invalid arguments. See
+[Exit codes](/docs/enterprise/mdm#exit-codes). If a failed run cannot roll
+back, see [Recover a pending transaction](#recover-a-pending-transaction).
 
 Setup properties use `NAME=value`. Names are case-insensitive and ignore
 dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
@@ -260,18 +255,8 @@ $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 ```
 
 `status` reports the state. `verify` also checks every file, permission,
-service and hook, and returns a nonzero exit code when anything fails. Look
-for these fields:
-
-| Field | Healthy value |
-| --- | --- |
-| `ok` | `true` |
-| `installed`, `installed_version` | `true` and the version you deployed |
-| `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
-| `coverage_complete` | `true`: installed, the guardian is ready, and no transaction is pending |
-| `security_complete` | `true`: see below |
-| `enrollment.targets` | The number of entries (one per user and connector) in the target manifest. `0` means nobody is protected yet. |
-| `errors` | Empty |
+service and hook, and returns a nonzero exit code when anything fails. The
+fields to check are on [Health fields](/docs/enterprise/operations#health-fields).
 
 On Windows, `security_complete` needs at least one of Codex, Claude Code or
 Cursor enabled, and no agent reported as `agent_unprotected` or
@@ -324,55 +309,8 @@ for the event IDs, and
 [Status and verify](/docs/enterprise/operations#status-and-verify) for
 monitoring.
 
-Only LocalSystem and Administrators can write the `DefenseClaw` log (source
-`DefenseClaw Lifecycle`), and the accounts that can read the Application log
-can read it. Each run that writes an event registers the log and resets its
-access. A
-successful uninstall unregisters it, so the uninstall event (110) goes only
-to the Application log; forward the `DefenseClaw` log to your SIEM if you
-need its entries after uninstall. Unregistering does not delete the entries:
-Windows keeps `%WINDIR%\System32\winevt\Logs\DefenseClaw.evtx` (the Event
-Log service holds it open until it restarts), and a later install that
-registers the log again shows the old entries with the new ones.
-
-Any account can write Application-log entries under any source name,
-including `DefenseClaw Enterprise`, so the Application-log copies are
-legacy, and a later release stops writing them. Point MDM detection rules
-and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
-DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
-source.
-
-Each DefenseClaw event ends with `record <id>`, and the matching line of
-`enterprise-lifecycle.log`, which only administrators and LocalSystem can
-write, holds the same id under `event.record` with the event ID
-(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
-event logs that took the entry (`event.logs`). Check the entries from any
-prompt:
-
-```powershell title="Check the DefenseClaw event-log entries"
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
-# The legacy Application-log copies:
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application
-```
-
-An entry is DefenseClaw's only when all of these hold:
-
-- its message ends with `record <id>` and the lifecycle log has a line with
-  that record;
-- the entry's event ID and the SHA-256 of its message (the UTF-8 bytes of the
-  event's insertion string, `$event.Properties[0].Value`) match that line;
-- it was written within two minutes of that line's `time`;
-- no earlier entry carried the same record. A later entry with the same
-  record is a copy.
-
-`events` exits 1 and names each entry that fails, and also when the newest
-lifecycle line whose event went to the checked log has no DefenseClaw entry
-there.
-Entries older than the lifecycle log's first event record, such as those an
-earlier release wrote without records, show as unverifiable. Apply the same
-rules in a SIEM: matching a record alone is not enough, because anyone can
-copy a genuine entry.
+To check that an event-log entry really came from DefenseClaw, see
+[Check event-log entries](/docs/enterprise/operations#check-event-log-entries).
 
 `status` and `verify` also name every agent the enumerator found installed
 but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
@@ -435,81 +373,9 @@ its record from the elevated prompt with `audit export`, as in
 
 ## Recover a pending transaction
 
-A lifecycle that fails normally rolls back. If the rollback itself cannot
-finish, the transaction stays pending: the result reports
-`transaction_pending: true`, the DefenseClaw services stay stopped, and
-vendor machine policy the transaction had already published can still point
-at the stopped gateway. `status` shows the state; `verify` refuses until the
-transaction is recovered. The failed result names the command to run next.
-
-Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
-**System**, or another MDM's system context). `/ensure` recovers the pending
-transaction and then installs or upgrades; `/uninstall` recovers it and
-removes the deployment:
-
-```powershell title="As LocalSystem"
-DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
-DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
-```
-
-`/repair` also recovers the transaction; after a failed first install it
-then stops with "run Install", so `/ensure` is the one-step command. Outside
-an MDM, a one-time scheduled task that runs as SYSTEM gives the same context.
-From a payload folder (see [Run the lifecycle CLI from a payload
-folder](#advanced-run-the-lifecycle-cli-from-a-payload-folder)),
-`"$Payload\defenseclaw.exe" enterprise windows ensure` (or `repair`,
-`uninstall`) with the same `--profile`, trust and `--config` options, run as
-LocalSystem, works the same way.
-
-Recovery first uses the gateway the pending transaction staged. When that
-gateway cannot restore or retire the transaction's managed-hook state, or
-cannot remove the per-user runtime roots the transaction created (the
-target-runtime rollback cleanup), for example a release whose defect caused
-the failure, the standalone lifecycle
-retries that step once with the `defenseclaw-gateway.exe` that ships in the
-running Setup's payload (or beside the staged `defenseclaw.exe`), and only
-when all of these hold:
-
-- the lifecycle runs as LocalSystem;
-- that gateway passes the same checks an install applies to its payload: an
-  administrator-owned source on a local NTFS volume and the deployment's
-  trust mode (a valid Authenticode signature, limited to the allowed signers
-  when any are set, or the SHA-256 the payload manifest pins);
-- it is not the gateway that already failed, and it is not inside the
-  install root;
-- it is the same release as the gateway that failed or a newer one, read
-  from each gateway's version resource (an older Setup never recovers a
-  newer release's transaction);
-- the run is not an `--allow-unsigned` certification run.
-
-The verified gateway is copied to `C:\Program Files\Cisco\DefenseClaw\bin`,
-where the hidden command must run, and the step runs again; the rollback
-then restores that file to its state before the transaction. The result and
-`enterprise-lifecycle.log` record a `recovery_gateway_fallback` warning with
-the binary, where it was copied from, its SHA-256, the trust basis, its
-release and the staged gateway's release, the account, and the staged
-gateway's failure. When recovery declines the
-fallback, a `recovery_gateway_not_used` warning gives the reason
-(`not_local_system`, `untrusted`, `same_binary`, `older_release`,
-`version_unknown`, `no_payload`, `inside_install_root`, `unsigned_scope`)
-and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
-the internal detail is kept in a `lifecycle_diagnostic` warning for support.
-Do not edit DefenseClaw files or permissions by hand to recover.
-
-Recovery then restarts the restored release, and its gateway starts only
-after that release's guardian publishes full coverage. When the restored
-release is the one that cannot (for example, its guardian cannot republish a
-user's lost per-user state), every recovery would fail the same way. Under
-the same conditions as above, the standalone lifecycle instead finishes the
-recovery with the restored release stopped and disabled and records a
-`recovery_activation_deferred` warning (the restored and the Setup's
-releases, the Setup gateway's SHA-256 and trust basis, and the coverage
-failure). `/ensure` then upgrades to the running Setup's release in the same
-run; its gateway also starts only after full coverage. `/repair` stops at
-that point with the next step, because it reapplies the installed release
-that could not start. With the same release, or from an elevated
-administrator prompt, recovery keeps the coverage failure and a
-`recovery_gateway_not_used` warning gives the reason.
+If a failed run cannot roll back, the transaction stays pending and the
+services stay stopped. Run Setup `/ensure` as LocalSystem to recover. See
+[Recover a pending Windows transaction](/docs/enterprise/troubleshooting#recover-a-pending-windows-transaction).
 
 ## Per-user installs
 
@@ -522,10 +388,8 @@ to run:
 | `defenseclaw upgrade`, `defenseclaw rollback` | Refuse when the marker key exists |
 | Per-user gateway | Refuses to start on a managed computer |
 
-Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
-Add `--all` to also delete `%USERPROFILE%\.defenseclaw`. See
-[Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
+Remove per-user installs before you deploy; see
+[Handle existing per-user installs](/docs/enterprise/rollout#step-4-handle-existing-per-user-installs).
 
 ## Remove
 
@@ -608,13 +472,11 @@ trust modes:
 | `authenticode` | Every binary and script carries an Authenticode signature that Windows reports as `Valid`. An allowed-signer list narrows the accepted signer certificates. |
 | `hash_pinned` | Every file that is not validly signed must match a SHA-256 digest in an administrator-owned payload manifest. The CLI checks the installer script and module against it before PowerShell starts. |
 
-The default depends on how you start the lifecycle:
-
-| Entry point | Trust used | How to change it |
-| --- | --- | --- |
-| Standalone Setup | Chosen by the build. An unsigned Setup uses `hash_pinned` with a payload manifest (`payload-trust.json`) that Setup writes itself from its embedded, verified manifest. A signed Setup uses `authenticode`. | `ALLOWEDSIGNERS=` pins the signer of a signed build. You never supply `payload-trust.json`. |
-| `defenseclaw.exe enterprise windows` | `authenticode` | `--trust-mode hash_pinned --payload-manifest <file>`. `--allowed-signer <sha256>` (repeatable) pins signers. |
-| MDM wrapper (`Invoke-DefenseClawEnterprise.ps1`) | `HashPinned`: it checks the Setup file against `-Sha256` before running it | `-TrustMode Authenticode -AllowedSigners <sha256>`. See [Install with an MDM](/docs/enterprise/mdm). |
+The Standalone Setup picks the mode from its build: a signed Setup uses
+`authenticode`, and an unsigned one uses `hash_pinned` with a manifest it
+writes itself. The defaults for the CLI and the MDM wrapper, and how
+`enterprise.trust` narrows them, are on
+[Payload trust](/docs/enterprise/configuration#payload-trust).
 
 Releases are Authenticode-signed only when the release pipeline has a
 code-signing certificate. Check the Setup you downloaded:
@@ -631,16 +493,6 @@ if ($sig.SignerCertificate) {
 `Valid` means the Setup is signed, and the last line prints the signer's
 SHA-256 thumbprint for `ALLOWEDSIGNERS=`. `NotSigned` means a hash-pinned
 build: trust comes from the Setup hash you checked against `checksums.txt`.
-
-`enterprise.trust` in the config can only narrow what the entry point
-accepts. `mode: authenticode` refuses a hash-pinned run, including the
-unsigned Setup, with `1639`, and also refuses a run over a deployment that
-was installed hash-pinned, because that deployment keeps admitting its
-payload by its recorded pins. Leave the mode unset or set `hash_pinned`
-while you deploy unsigned builds; a signed Setup is still verified by its
-signature. `enterprise.trust.allowed_signers` works like `--allowed-signer`;
-when both are given they must list the same thumbprints. See
-[Payload trust](/docs/enterprise/configuration#payload-trust).
 
 The deployment marker's `TrustMode` records how the installed deployment
 was trusted. The MDM `detect.ps1` and `uninstall.ps1` scripts check the

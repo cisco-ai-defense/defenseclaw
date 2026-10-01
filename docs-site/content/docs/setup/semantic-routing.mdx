@@ -16,11 +16,11 @@ request, resolves the returned model alias locally, and then forwards through th
 normal guardrail proxy path.
 
 <Callout title="Proxy connectors only">
-Automatic routing currently applies to **OpenClaw** and **ZeptoClaw** requests that
+Automatic routing applies to **OpenClaw** and **ZeptoClaw** requests that
 reach the proxy as OpenAI-compatible `*/chat/completions` traffic. Hook-based
-connectors—Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands,
-Antigravity, Hermes, OpenCode, Amp, and OmniGent—keep their existing provider
-path and are not rerouted.
+connectors (Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands,
+Antigravity, Hermes, OpenCode, Amp, OmniGent and Kiro) keep their existing
+provider path and are not rerouted.
 </Callout>
 
 ## Compatibility at a glance
@@ -59,12 +59,11 @@ open with it.
 
 DefenseClaw is hook-only on native Windows. The only connectors eligible for
 semantic routing—OpenClaw and ZeptoClaw—both require the guardrail proxy and are
-unsupported there. Semantic routing is therefore currently a macOS/Linux
-feature even when the classifier itself runs remotely.
+unsupported there. Semantic routing is a macOS and Linux feature, even when the
+classifier runs remotely.
 
-The managed flow has been manually exercised on Apple silicon with Docker
-Desktop. The lifecycle and configuration contract are unit-tested without
-depending on host architecture.
+The managed sidecar image runs on amd64 and arm64 hosts, including Apple silicon
+Macs with Docker Desktop.
 
 ## Configure routing
 
@@ -129,6 +128,23 @@ The setup command checks Docker, saves the routing state, and tells the gateway 
 start the pinned router image on its next launch. The generated router configuration
 lives under `~/.defenseclaw/semantic-router/`; it is runtime state, not a file you
 need to maintain.
+
+### Use a remote router
+
+To use a router you run yourself, set `routing.remote.endpoint`. The gateway then
+sends classifier requests there and does not start a local container:
+
+```yaml title="~/.defenseclaw/config.yaml"
+routing:
+  enabled: true
+  remote:
+    endpoint: https://router.example.com
+    timeout_ms: 1500     # 0 uses the default; the maximum is 5000
+  models:
+    # ... same models, signals and decisions as above
+```
+
+Non-loopback endpoints must use HTTPS.
 
 ### Store routed-model keys with DefenseClaw
 
@@ -203,10 +219,7 @@ their original provider again after the restart.
 | Routed provider returns authentication errors | Check the named `api_key_env` with `defenseclaw keys list`; do not copy the secret into YAML. |
 | Router startup fails after editing YAML | Validate the configured port, unique model names, decision `model_refs`, and Docker logs for the labeled container. |
 
-<Callout title="Why this is not under bundles/">
-The integration manages one version-pinned container and generates per-install router
-configuration from `config.yaml`. DefenseClaw's `bundles/` directory is reserved for
-versioned operator assets such as Compose stacks, dashboards, and static service
-configuration that must be packaged into the CLI. There is no reusable Compose bundle
-to ship for this lifecycle today.
-</Callout>
+## Next steps
+
+- [Unified LLM key](/docs/setup/unified-llm-key) for the provider keys routed models use.
+- [OpenClaw](/docs/connectors/openclaw) and [ZeptoClaw](/docs/connectors/zeptoclaw), the connectors that support routing.

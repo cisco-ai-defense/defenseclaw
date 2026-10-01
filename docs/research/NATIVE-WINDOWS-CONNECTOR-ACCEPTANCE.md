@@ -8,6 +8,10 @@ and the accepted additions (Amp, Copilot CLI, Cursor, Devin CLI,
 Antigravity, OpenCode, OmniGent, and Hermes). Google-agent setup uses
 Antigravity.
 
+The ledger's scope is the connector matrix in
+`.github/workflows/windows-native.yml`. Connectors outside that matrix, such as
+Kiro, are not tracked here.
+
 This ledger records implementation coverage. It is not packaged, signed, live,
 or certification evidence. A manual, synthetic, skipped, unrun, or
 `continue-on-error` job cannot promote a connector.

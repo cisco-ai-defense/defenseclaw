@@ -1,6 +1,6 @@
 ---
 title: Upgrade, repair and remove
-description: Upgrade, roll back, change the config, repair, and uninstall a standalone DefenseClaw enterprise deployment on Windows, Linux, and macOS, with a decommission checklist.
+description: Change the config, upgrade, repair, roll back and uninstall a standalone DefenseClaw enterprise deployment on Windows, Linux and macOS.
 keywords:
   - DefenseClaw enterprise upgrade
   - DefenseClaw rollback
@@ -28,21 +28,11 @@ captured output in `last-activation-failure.log` in the lifecycle directory
 `/opt/cisco/defenseclaw/lifecycle` on macOS). Only root can read it, and the
 rollback does not remove it, even after a first install.
 
-Only one lifecycle run works at a time. On Linux and macOS a run that finds
-another one in progress waits 5 seconds and exits `75` (busy); pass
-`--lock-wait <duration>` (at most `15m`) to wait longer. The apply trigger
-and the deb, rpm and pkg install scripts wait up to 10 minutes, so a change
-made during another run is applied after it. The deb and rpm removal
-scripts wait the same, and a removal that still finds the lock busy fails
-without deleting anything (the macOS pkg has no removal script). On
-Windows a busy run exits `1618`. MDM agents retry both.
-
-A `config.yaml` or credential written while a run holds the lock is
-applied by a follow-up transaction of that run (warning `input_changed`).
-When the run fails instead, the apply trigger runs `ensure` again once it
-ends; a newer `config.yaml` written during a failed in-place apply is put
-back and applied then, and only the edit the failed run checked is kept as
-rejected.
+Only one lifecycle run works at a time. A run that finds another one in
+progress exits `75` on Linux and macOS, or `1618` on Windows. Retry on exit
+`75` or `1618`; MDM agents retry both. On Linux and macOS, `--lock-wait
+<duration>` (at most `15m`) waits longer before giving up. A config or
+credential you write during a run is applied after it.
 
 The examples use these paths:
 
@@ -64,7 +54,7 @@ installed version, `ensure` upgrades in place. It keeps the installed config
 unless you also pass `CONFIG=`.
 
 ```powershell
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure JSON=1
 $LASTEXITCODE
 ```
 
@@ -79,12 +69,12 @@ Upgrade with the channel you installed from. A host where the package owns
 the binaries refuses a payload upgrade (`package_owned_binaries`).
 
 ```bash title="Debian and Ubuntu package"
-VERSION=1.4.0   # the release you deploy
+VERSION="<version>"   # set this to the release you deploy
 sudo apt install "./defenseclaw-enterprise-${VERSION}-linux-amd64.deb"
 ```
 
 ```bash title="RHEL package"
-VERSION=1.4.0
+VERSION="<version>"   # set this to the release you deploy
 sudo dnf upgrade "./defenseclaw-enterprise-${VERSION}-linux-amd64.rpm"
 ```
 
@@ -94,7 +84,7 @@ script never fails the package transaction, so read that file or run `verify`
 afterwards.
 
 ```bash title="Payload archive"
-VERSION=1.4.0
+VERSION="<version>"   # set this to the release you deploy
 sudo mkdir -p "/var/tmp/defenseclaw-${VERSION}"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-amd64.tar.gz" -C "/var/tmp/defenseclaw-${VERSION}" --no-same-owner
 cd "/var/tmp/defenseclaw-${VERSION}"
@@ -111,7 +101,7 @@ the lifecycle fails, the script fails the installation, so your MDM reports
 it.
 
 ```bash
-VERSION=1.4.0
+VERSION="<version>"   # set this to the release you deploy
 sudo installer -pkg "./defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
 sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 ```
@@ -184,7 +174,7 @@ On Windows, pass the new file to the same release's Setup. `ensure` sees that
 the config differs from the installed one and applies it:
 
 ```powershell
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\Staging\config.yaml JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 ```
 
 If the new config is invalid, `ensure` fails and does not apply it: on Linux
@@ -251,7 +241,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 ```
 
 ```powershell title="Windows"
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
 ```
 
 - **What changed (Linux and macOS).** The result lists what `repair`
@@ -385,7 +375,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge
 ```
 
 ```powershell title="Windows: remove everything"
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
 ```
 
 After an uninstall, ask users to restart running agents. An agent that loaded

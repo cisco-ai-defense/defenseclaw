@@ -116,7 +116,7 @@ Check the signature on `checksums.txt` with
 the file against it, then the pkg's own signature:
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION="<version>"  # set this to the release you deploy
 cosign verify-blob --bundle checksums.txt.bundle \
   --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -171,7 +171,7 @@ The lifecycle re-owns the file to `root:_defenseclaw 0640` when it installs.
 ### 3a. Install the pkg
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION="<version>"  # set this to the release you deploy
 sudo installer -pkg "defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
 sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 ```
@@ -201,7 +201,7 @@ The payload folder and its binaries must be owned by root and not writable
 by group or others:
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION="<version>"  # set this to the release you deploy
 PAYLOAD="/var/root/defenseclaw-enterprise-${VERSION}"
 sudo install -d -o root -g wheel -m 0700 "$PAYLOAD"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-darwin-arm64.tar.gz" \
@@ -264,17 +264,8 @@ pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
 ```
 
 `status` reports the state. `verify` also checks every file, permission,
-service and readiness check, and exits `1` when anything fails. Look for:
-
-| Field | Healthy value |
-| --- | --- |
-| `ok` | `true` |
-| `installed`, `installed_version` | `true` and the version you deployed |
-| `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
-| `coverage_complete` | `true`: the gateway, guardian and enumerator are ready |
-| `security_complete` | `true`: coverage is complete, the sensor helper is ready, and there are no errors |
-| `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
-| `errors` | Empty |
+service and readiness check, and exits `1` when anything fails. The fields to
+check are on [Health fields](/docs/enterprise/operations#health-fields).
 
 When the config enables no agent under `guardrail.connectors` while there
 are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
@@ -300,10 +291,8 @@ per-user product refuses to run:
 | `defenseclaw upgrade` | Refuses |
 | Per-user gateway | Refuses to start |
 
-Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
-Add `--all` to also delete `~/.defenseclaw`. See
-[Uninstall](/docs/get-started/install#uninstall).
+Remove per-user installs before you deploy; see
+[Handle existing per-user installs](/docs/enterprise/rollout#step-4-handle-existing-per-user-installs).
 
 ## Remove
 
@@ -382,10 +371,8 @@ profile as a higher-precedence source. Export DefenseClaw's entries in plist
 form and add them to your profile:
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml \
-  /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml \
-  /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
 ```
 
 Use `--connector claudecode --format plist` for Claude Code. The policy

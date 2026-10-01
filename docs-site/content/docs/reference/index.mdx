@@ -1,6 +1,6 @@
 ---
 title: Reference
-description: Lightweight reference index. CLI command index, gateway API surface, configuration files, and environment variables. Authoritative source for CLI flags is `defenseclaw <command> --help`.
+description: Reference index for the DefenseClaw CLI, configuration, environment variables, keys, redaction, fail modes, and gateway API. Authoritative source for CLI flags is `defenseclaw <command> --help`.
 keywords:
   - DefenseClaw reference
   - DefenseClaw CLI reference
@@ -11,11 +11,15 @@ keywords:
 The narrative docs live elsewhere — these pages are the lookup tables you reach for after you understand the system.
 
 <Cards>
-  <Card title="CLI commands" href="/docs/reference/cli" description="Every defenseclaw verb, grouped by what you're trying to do." />
+  <Card title="CLI commands" href="/docs/reference/cli" description="The common defenseclaw and defenseclaw-gateway commands, grouped by task." />
   <Card title="Sandbox CLI" href="/docs/reference/sandbox-cli" description="Every defenseclaw sandbox command and flag for NVIDIA OpenShell sandboxes, with an example each." />
-  <Card title="Command generator" href="/docs/command-generator" description="Interactive builder for a non-interactive defenseclaw setup guardrail invocation. Pick connector, mode, scanner, judge, HITL — copy the command." />
-  <Card title="Gateway API" href="/docs/reference/gateway-api" description="The HTTP surface defenseclaw-gateway exposes. Used by connectors, hooks, and the CLI." />
-  <Card title="Configuration" href="/docs/reference/configuration" description="config.yaml schema, environment variables, and the on-disk layout." />
+  <Card title="Configuration" href="/docs/reference/configuration" description="config.yaml schema and the on-disk layout." />
+  <Card title="Environment variables" href="/docs/reference/env-vars" description="Every environment variable DefenseClaw reads, generated from the registry." />
+  <Card title="Keys" href="/docs/reference/keys" description="Where credentials live, how they resolve, and the defenseclaw keys commands." />
+  <Card title="Redaction" href="/docs/reference/redaction" description="Field-aware redaction for local history, buckets, and export destinations." />
+  <Card title="Fail modes" href="/docs/reference/fail-modes" description="How connector fail mode handles transport and response failures, and how to diagnose them." />
+  <Card title="Gateway API" href="/docs/reference/gateway-api" description="The HTTP surface defenseclaw-gateway exposes to connectors, hooks, and the CLI." />
+  <Card title="Command generator" href="/docs/command-generator" description="Interactive builder for a non-interactive defenseclaw setup guardrail command." />
 </Cards>
 
 <Callout>

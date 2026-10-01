@@ -4,11 +4,11 @@
     "index",
     "cli",
     "sandbox-cli",
-    "gateway-api",
     "configuration",
+    "env-vars",
     "keys",
     "redaction",
     "fail-modes",
-    "env-vars"
+    "gateway-api"
   ]
 }
