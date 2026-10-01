@@ -20,7 +20,6 @@ package processutil
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +30,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 const (
@@ -42,6 +43,7 @@ const (
 	managedBreakawayChildEnv  = "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD"
 	inheritedOutputHelperEnv  = "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_HELPER"
 	inheritedOutputChildEnv   = "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD"
+	processTreeReleaseEnv     = "DEFENSECLAW_PROCESS_TREE_RELEASE"
 )
 
 func TestCommandContextPreventsConsoleAllocation(t *testing.T) {
@@ -62,8 +64,10 @@ func TestCommandContextPreventsConsoleAllocation(t *testing.T) {
 
 func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 	if os.Getenv(processTreeGrandchildEnv) == "1" {
-		time.Sleep(30 * time.Second)
-		return
+		// Never released: only the captured job's termination (or the test
+		// process exiting) ends this process.
+		_, _ = testenv.AwaitRelease(os.Getenv(processTreeReleaseEnv))
+		os.Exit(0)
 	}
 	if os.Getenv(processTreeHelperEnv) == "1" {
 		grandchild := exec.Command(os.Args[0], "-test.run=^TestCombinedOutputTreeKillsGrandchildrenOnCancellation$")
@@ -77,11 +81,12 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 		); err != nil {
 			os.Exit(22)
 		}
-		time.Sleep(30 * time.Second)
-		return
+		_, _ = testenv.AwaitRelease(os.Getenv(processTreeReleaseEnv))
+		os.Exit(0)
 	}
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	release := testenv.NewRelease(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmd := CommandContext(ctx, os.Args[0], "-test.run=^TestCombinedOutputTreeKillsGrandchildrenOnCancellation$")
@@ -89,6 +94,7 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 		os.Environ(),
 		processTreeHelperEnv+"=1",
 		processTreePIDFileEnv+"="+pidFile,
+		processTreeReleaseEnv+"="+release.Token(),
 	)
 	done := make(chan error, 1)
 	go func() {
@@ -96,46 +102,26 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 		done <- err
 	}()
 
-	var childPID int
-	deadline := time.Now().Add(5 * time.Second)
-	for childPID == 0 {
-		data, err := os.ReadFile(pidFile)
-		if err == nil {
-			childPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
-			if err != nil {
-				t.Fatal(err)
-			}
-		} else if !processTreeFixtureNotReady(err) {
-			t.Fatal(err)
-		}
-		if childPID == 0 {
-			if time.Now().After(deadline) {
-				t.Fatal("captured helper did not launch its grandchild")
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	child, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(childPID))
+	// The helper publishes the grandchild PID only after starting it; if the
+	// helper dies first, CombinedOutputTree returns and the wait fails at once.
+	data, err := testenv.WaitForFile(pidFile, done)
 	if err != nil {
-		t.Fatalf("open grandchild %d: %v", childPID, err)
+		t.Fatalf("captured helper did not launch its grandchild: %v", err)
 	}
-	defer windows.CloseHandle(child)
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := testenv.ProcessExit(t, childPID)
 
 	cancel()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("cancelled process tree returned success")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("cancelled process tree did not return promptly")
+	if err := <-done; err == nil {
+		t.Fatal("cancelled process tree returned success")
 	}
-	result, err := windows.WaitForSingleObject(child, 5000)
-	if err != nil {
-		t.Fatalf("wait for cancelled grandchild: %v", err)
-	}
-	if result != windows.WAIT_OBJECT_0 {
-		t.Fatalf("grandchild wait result = %#x, want terminated", result)
+	// The grandchild is never released, so its exit can only be the job
+	// termination that cancellation performs.
+	if code := <-child; code != 1 {
+		t.Fatalf("grandchild exit code = %d, want 1 from captured-job termination", code)
 	}
 }
 
@@ -160,19 +146,14 @@ func TestCombinedOutputTreeCompletesWhenGrandchildInheritsOutput(t *testing.T) {
 		if err := grandchild.Start(); err != nil {
 			os.Exit(25)
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			data, err := os.ReadFile(os.Getenv(processTreeMarkerEnv))
-			if err == nil {
-				if string(data) != "ready" {
-					os.Exit(27)
-				}
-				break
-			}
-			if !processTreeFixtureNotReady(err) || time.Now().After(deadline) {
-				os.Exit(28)
-			}
-			time.Sleep(10 * time.Millisecond)
+		grandchildDone := make(chan error, 1)
+		go func() { grandchildDone <- grandchild.Wait() }()
+		data, err := testenv.WaitForFile(os.Getenv(processTreeMarkerEnv), grandchildDone)
+		if err != nil {
+			os.Exit(28)
+		}
+		if string(data) != "ready" {
+			os.Exit(27)
 		}
 		_, _ = os.Stdout.WriteString("helper complete\n")
 		return
@@ -214,7 +195,12 @@ func TestCapturedJobFlagsLimitBreakawayToManagedLaunches(t *testing.T) {
 
 func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 	if os.Getenv(managedBreakawayChildEnv) == "1" {
-		time.Sleep(300 * time.Millisecond)
+		// Finish only after the test has observed this process outlive the
+		// launcher's job; a child that did not break away is killed first.
+		released, err := testenv.AwaitRelease(os.Getenv(processTreeReleaseEnv))
+		if err != nil || !released {
+			os.Exit(24)
+		}
 		if err := publishProcessTreeFixture(
 			os.Getenv(processTreeMarkerEnv),
 			[]byte("managed"),
@@ -233,31 +219,47 @@ func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(23)
 		}
+		if err := publishProcessTreeFixture(
+			os.Getenv(processTreePIDFileEnv),
+			[]byte(strconv.Itoa(child.Process.Pid)),
+		); err != nil {
+			os.Exit(22)
+		}
 		return
 	}
 
-	marker := filepath.Join(t.TempDir(), "managed-breakaway-finished")
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "managed-breakaway-finished")
+	pidFile := filepath.Join(dir, "managed-breakaway.pid")
+	release := testenv.NewRelease(t)
 	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestCombinedOutputTreeAllowsExplicitManagedBreakaway$")
-	cmd.Env = append(os.Environ(), managedBreakawayHelperEnv+"=1", processTreeMarkerEnv+"="+marker)
+	cmd.Env = append(
+		os.Environ(),
+		managedBreakawayHelperEnv+"=1",
+		processTreeMarkerEnv+"="+marker,
+		processTreePIDFileEnv+"="+pidFile,
+		processTreeReleaseEnv+"="+release.Token(),
+	)
 	if output, err := CombinedOutputTree(cmd, true); err != nil {
 		t.Fatalf("managed launcher failed: %v: %s", err, output)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		data, err := os.ReadFile(marker)
-		if err == nil {
-			if string(data) != "managed" {
-				t.Fatalf("managed marker = %q", data)
-			}
-			break
-		}
-		if !processTreeFixtureNotReady(err) {
-			t.Fatal(err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("explicitly managed breakaway process did not survive launcher exit")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The launcher exited and its job was terminated. The child blocks until
+	// released, so it is still running only if it broke away from that job.
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("managed launcher did not publish its child: %v", err)
+	}
+	childPID, err := strconv.Atoi(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := testenv.ProcessExit(t, childPID) // fails if the child is already gone
+	release.Signal(t)
+	if code := <-exited; code != 0 {
+		t.Fatalf("explicitly managed breakaway process exit code = %d, want 0 after release", code)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "managed" {
+		t.Fatalf("managed marker = %q, %v", data, err)
 	}
 }
 
@@ -276,10 +278,4 @@ func publishProcessTreeFixture(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(temporaryPath, path)
-}
-
-func processTreeFixtureNotReady(err error) bool {
-	return errors.Is(err, os.ErrNotExist) ||
-		errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
-		errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }

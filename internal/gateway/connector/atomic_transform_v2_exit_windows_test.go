@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -294,6 +295,10 @@ func TestAtomicTransformV2ProtocolLockHelper(t *testing.T) {
 	payload := []byte(os.Getenv("DEFENSECLAW_V2_LOCK_PAYLOAD"))
 	ready := os.Getenv("DEFENSECLAW_V2_LOCK_READY")
 	release := os.Getenv("DEFENSECLAW_V2_LOCK_RELEASE")
+	if contended := os.Getenv("DEFENSECLAW_V2_LOCK_CONTENDED"); contended != "" {
+		report := func(string) { _ = os.WriteFile(contended, []byte("contended"), 0o600) }
+		windowsLockContendedHookForTest.Store(&report)
+	}
 	waitForRelease := func() error {
 		if ready == "" {
 			return nil
@@ -388,6 +393,7 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 		t.Skipf("target leaf has no distinct 8.3 alias: %s", shortPath)
 	}
 	ready := filepath.Join(root, "first-ready")
+	contended := filepath.Join(root, "contender-blocked")
 	release := filepath.Join(root, "release-first")
 	command := func(path, payload string, hold bool) (*exec.Cmd, *bytes.Buffer) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2ProtocolLockHelper$")
@@ -405,6 +411,8 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 				"DEFENSECLAW_V2_LOCK_READY="+ready,
 				"DEFENSECLAW_V2_LOCK_RELEASE="+release,
 			)
+		} else {
+			env = append(env, "DEFENSECLAW_V2_LOCK_CONTENDED="+contended)
 		}
 		cmd.Env = append(os.Environ(), env...)
 		return cmd, output
@@ -421,15 +429,8 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 	})
 	firstDone := make(chan error, 1)
 	go func() { firstDone <- first.Wait() }()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first alias process did not reach the held-lock phase")
-		}
-		time.Sleep(10 * time.Millisecond)
+	if _, err := testenv.WaitForFile(ready, firstDone); err != nil {
+		t.Fatalf("first alias process did not reach the held-lock phase: %v\n%s", err, firstOutput)
 	}
 	second, secondOutput := command(longPath, "second", false)
 	if err := second.Start(); err != nil {
@@ -437,10 +438,10 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 	}
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- second.Wait() }()
-	select {
-	case err := <-secondDone:
+	// The contender reports finding the protocol lock held before it blocks;
+	// finishing first means it never waited for the holder.
+	if _, err := testenv.WaitForFile(contended, secondDone); err != nil {
 		t.Fatalf("long-alias contender escaped held physical lock: %v\n%s", err, secondOutput)
-	case <-time.After(500 * time.Millisecond):
 	}
 	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
 		t.Fatal(err)
@@ -449,13 +450,8 @@ func TestAtomicTransformV2SerializesLongAndShortAliasProcesses(t *testing.T) {
 		done   <-chan error
 		output *bytes.Buffer
 	}{"first": {firstDone, firstOutput}, "second": {secondDone, secondOutput}} {
-		select {
-		case err := <-item.done:
-			if err != nil {
-				t.Fatalf("%s alias process: %v\n%s", label, err, item.output)
-			}
-		case <-time.After(20 * time.Second):
-			t.Fatalf("%s alias process did not finish", label)
+		if err := <-item.done; err != nil {
+			t.Fatalf("%s alias process: %v\n%s", label, err, item.output)
 		}
 	}
 	data, err := os.ReadFile(longPath)
@@ -692,6 +688,7 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 		t.Skipf("target leaf has no distinct 8.3 alias: %s", shortPath)
 	}
 	ready := filepath.Join(root, "owner-detached")
+	contended := filepath.Join(root, "contender-blocked")
 	release := filepath.Join(root, "release-owner")
 	command := func(target, payload string, hold bool) (*exec.Cmd, *bytes.Buffer) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2ProtocolLockHelper$")
@@ -710,6 +707,8 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 				"DEFENSECLAW_V2_LOCK_HOLD_PHASE="+string(atomicTransformPhaseIntentPersisted),
 				"DEFENSECLAW_V2_LOCK_HIDE_TARGET=1",
 			)
+		} else {
+			env = append(env, "DEFENSECLAW_V2_LOCK_CONTENDED="+contended)
 		}
 		cmd.Env = append(os.Environ(), env...)
 		return cmd, output
@@ -726,15 +725,8 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 	})
 	ownerDone := make(chan error, 1)
 	go func() { ownerDone <- owner.Wait() }()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("owner did not pause with the 8.3 target temporarily hidden\n%s", ownerOutput)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if _, err := testenv.WaitForFile(ready, ownerDone); err != nil {
+		t.Fatalf("owner did not pause with the 8.3 target temporarily hidden: %v\n%s", err, ownerOutput)
 	}
 	waiter, waiterOutput := command(shortPath, "waiter", false)
 	if err := waiter.Start(); err != nil {
@@ -742,10 +734,10 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 	}
 	waiterDone := make(chan error, 1)
 	go func() { waiterDone <- waiter.Wait() }()
-	select {
-	case err := <-waiterDone:
+	// The contender reports finding the protocol lock held before it blocks;
+	// finishing first means it never waited for the holder.
+	if _, err := testenv.WaitForFile(contended, waiterDone); err != nil {
 		t.Fatalf("8.3 waiter resolved or escaped while owner held protocol lock: %v\n%s", err, waiterOutput)
-	case <-time.After(500 * time.Millisecond):
 	}
 	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
 		t.Fatal(err)
@@ -754,13 +746,8 @@ func TestAtomicTransformV2WaiterResolvesShortAliasOnlyAfterProtocolLock(t *testi
 		done   <-chan error
 		output *bytes.Buffer
 	}{"owner": {ownerDone, ownerOutput}, "waiter": {waiterDone, waiterOutput}} {
-		select {
-		case err := <-item.done:
-			if err != nil {
-				t.Fatalf("%s process: %v\n%s", label, err, item.output)
-			}
-		case <-time.After(20 * time.Second):
-			t.Fatalf("%s process did not finish", label)
+		if err := <-item.done; err != nil {
+			t.Fatalf("%s process: %v\n%s", label, err, item.output)
 		}
 	}
 	data, err := os.ReadFile(longPath)

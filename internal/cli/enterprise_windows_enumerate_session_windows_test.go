@@ -44,9 +44,18 @@ func TestEnterpriseWindowsEnumerateIntervalRunsACycleOnSignIn(t *testing.T) {
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
 		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
 	}
+	// Each cycle reports its start; the first one is held until the sign-in
+	// burst has been delivered, so the burst lands while the loop is busy and
+	// must coalesce into exactly one pending sign-in.
 	var cycles atomic.Int32
+	started := make(chan int32, 8)
+	releaseFirst := make(chan struct{})
 	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
-		cycles.Add(1)
+		n := cycles.Add(1)
+		started <- n
+		if n == 1 {
+			<-releaseFirst
+		}
 		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
 	}
 	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
@@ -69,26 +78,26 @@ func TestEnterpriseWindowsEnumerateIntervalRunsACycleOnSignIn(t *testing.T) {
 			initialDelay: time.Millisecond,
 		}, manifest)
 	}()
-	waitForCycles := func(want int32) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for cycles.Load() < want {
-			if time.Now().After(deadline) {
-				t.Fatalf("cycles = %d, want %d", cycles.Load(), want)
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+	if n := <-started; n != 1 {
+		t.Fatalf("first cycle = %d, want initial cycle", n)
 	}
-	waitForCycles(1)
 	winsession.NotifyLogon()
 	winsession.NotifyLogon()
-	waitForCycles(2)
-	time.Sleep(50 * time.Millisecond)
-	if got := cycles.Load(); got != 2 {
-		t.Fatalf("a burst of sign-ins ran %d cycles in total, want 2", got)
+	close(releaseFirst)
+	if n := <-started; n != 2 {
+		t.Fatalf("sign-in cycle = %d, want 2", n)
+	}
+	// The hourly ticker cannot fire here, and a session cycle needs a pending
+	// sign-in. With the burst consumed and the channel empty, no further cycle
+	// can start, so the count is final.
+	if pending := len(winsession.Logons()); pending != 0 {
+		t.Fatalf("a burst of sign-ins left %d pending notifications, want 0", pending)
 	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("interval loop: %v", err)
+	}
+	if got := cycles.Load(); got != 2 {
+		t.Fatalf("a burst of sign-ins ran %d cycles in total, want 2", got)
 	}
 }
