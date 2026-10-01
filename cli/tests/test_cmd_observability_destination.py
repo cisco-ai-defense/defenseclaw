@@ -567,6 +567,44 @@ def test_socket_default_http_handshake_is_bodyless_options_and_never_writes() ->
     assert sock.closed
 
 
+def test_socket_plaintext_grpc_handshake_waits_for_server_settings() -> None:
+    target = destination_test._parse_target(
+        "http://8.8.8.8:4317",
+        "grpc",
+        "",
+        destination_test._NetworkSafety(),
+        destination_test._TLSSettings(insecure=True),
+    )
+
+    class _H2Socket(_DummySocket):
+        def __init__(self, reply: bytes) -> None:
+            super().__init__()
+            self.sent = b""
+            self.reply = reply
+
+        def sendall(self, data: bytes) -> None:
+            self.sent += data
+
+        def recv(self, amount: int) -> bytes:
+            chunk, self.reply = self.reply[:amount], self.reply[amount:]
+            return chunk
+
+    for reply, failure in ((b"\x00\x00\x06\x04\x00\x00\x00\x00\x00", None), (b"HTTP/1.1 400", "protocol_failed")):
+        sock = _H2Socket(reply)
+        transport = destination_test.SocketProbeTransport(
+            resolver=lambda _host, _port, _timeout: ["8.8.8.8"],
+            dialer=lambda _address, _port, _timeout, sock=sock: sock,
+        )
+        if failure is None:
+            transport.handshake(target, timeout=2.5)
+        else:
+            with pytest.raises(destination_test.DestinationTestError) as error:
+                transport.handshake(target, timeout=2.5)
+            assert error.value.failure_class == failure
+        assert sock.sent.startswith(b"PRI * HTTP/2.0")
+        assert sock.closed
+
+
 class _DummySocket:
     def __init__(self) -> None:
         self.closed = False

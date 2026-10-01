@@ -19,6 +19,7 @@ keeps its key letter, and unread badges stay. PANELS order never changes.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 
 # Every Textual Tab has one cell of padding on each side.
@@ -54,6 +55,9 @@ LABEL_PRIORITY: tuple[str, ...] = (
 
 
 _SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+# Windows console fonts lack most superscript digits and draw them as
+# degree-like glyphs, so letter-only tabs there show a plain "8(3)" badge.
+_PLAIN_BADGE = os.name == "nt"
 
 
 def _label(key: str, name: str, unread: int) -> str:
@@ -64,7 +68,9 @@ def _label(key: str, name: str, unread: int) -> str:
     """
 
     if not name:
-        return f"{key}{str(unread).translate(_SUPERSCRIPT)}" if unread else key
+        if not unread:
+            return key
+        return f"{key}({unread})" if _PLAIN_BADGE else f"{key}{str(unread).translate(_SUPERSCRIPT)}"
     return f"{key} {name} ({unread})" if unread else f"{key} {name}"
 
 

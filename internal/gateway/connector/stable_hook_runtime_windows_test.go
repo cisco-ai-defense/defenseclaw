@@ -332,7 +332,9 @@ func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing
 		t.Fatalf("seed canonical Codex hook: %v", err)
 	}
 
-	managedPath := filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
+	// Per-user Windows Codex hooks live in config.toml (current Codex ignores
+	// CODEX_HOME\managed_config.toml on Windows).
+	managedPath := configPath
 	raw, err := os.ReadFile(managedPath)
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +365,7 @@ func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing
 	// A maintenance gateway has no packaged install layout, and this override
 	// simulates its ordinary repository/legacy fallback. Teardown must still
 	// recognize the exact canonical installed command already stored in Codex's
-	// managed config even when that installed executable is now missing.
+	// config even when that installed executable is now missing.
 	defenseclawHookBinaryOverride = `C:\maintenance-temp\defenseclaw-hook.exe`
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("maintenance Codex teardown: %v", err)

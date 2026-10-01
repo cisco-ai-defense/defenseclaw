@@ -20,7 +20,8 @@ import (
 )
 
 // patchCodexManagedHooks merges only DefenseClaw's hook matrix into Codex's
-// documented user-owned managed layer. The layer is trusted by Codex itself;
+// legacy managed layer (managed enterprise Windows installs only; see
+// codexUsesManagedHookLayer). The layer is trusted by Codex itself;
 // trust is therefore established by provenance rather than by manufacturing
 // an undocumented hooks.state hash. The managed-file backup and atomic
 // transform primitives provide the same CAS, crash-safety, and drift-aware
@@ -163,6 +164,18 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 		return fmt.Errorf("write Codex managed config: %w", err)
 	}
 	return nil
+}
+
+// migrateCodexManagedHooks removes the matrix an earlier per-user Windows
+// release registered in managed_config.toml. It does nothing when neither that
+// file nor its setup backup exists, so a fresh install never creates either.
+func (c *CodexConnector) migrateCodexManagedHooks(opts SetupOpts) error {
+	_, configErr := os.Lstat(codexManagedConfigPath())
+	_, backupErr := os.Lstat(managedFileBackupPath(opts.DataDir, c.Name(), codexManagedConfigLogicalName))
+	if os.IsNotExist(configErr) && os.IsNotExist(backupErr) {
+		return nil
+	}
+	return c.restoreCodexManagedHooks(opts)
 }
 
 func (c *CodexConnector) restoreCodexManagedHooks(opts SetupOpts) error {

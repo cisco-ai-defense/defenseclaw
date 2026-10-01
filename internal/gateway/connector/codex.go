@@ -370,16 +370,27 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	}
 
 	hookScript := filepath.Join(hookDir, "codex-hook.sh")
-	if runtime.GOOS == "windows" {
-		// Native Windows installs use Codex's documented legacy managed
-		// configuration layer. Codex treats hooks discovered from this source as
-		// administrator-managed, so setup never needs to synthesize private
-		// hooks.state trust records or ask the operator to approve /hooks.
+	if codexUsesManagedHookLayer(opts) {
+		// Managed enterprise installs keep the matrix in Codex's legacy
+		// managed configuration layer, where hooks are source-trusted.
 		if err := c.patchCodexManagedHooks(opts, hookScript); err != nil {
 			return c.rollbackSetupAfterSnapshot(
 				opts,
 				runtimeSnapshot,
 				fmt.Errorf("codex managed_config.toml hook patch: %w", err),
+				false,
+				false,
+			)
+		}
+	} else if runtime.GOOS == "windows" {
+		// Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
+		// per-user install registers its matrix in config.toml (below) and
+		// removes the one an earlier release left in the ignored layer.
+		if err := c.migrateCodexManagedHooks(opts); err != nil {
+			return c.rollbackSetupAfterSnapshot(
+				opts,
+				runtimeSnapshot,
+				fmt.Errorf("codex managed_config.toml hook migration: %w", err),
 				false,
 				false,
 			)
@@ -391,7 +402,7 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			runtimeSnapshot,
 			fmt.Errorf("codex config.toml patch: %w", err),
 			false,
-			runtime.GOOS == "windows",
+			codexUsesManagedHookLayer(opts),
 		)
 	}
 
@@ -402,7 +413,7 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 				runtimeSnapshot,
 				fmt.Errorf("codex CodeGuard skill install: %w", err),
 				true,
-				runtime.GOOS == "windows",
+				codexUsesManagedHookLayer(opts),
 			)
 		}
 	}
@@ -742,7 +753,7 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 		},
 		SupportsFailClosed: true,
 		Scope:              "user",
-		ConfigPath:         codexHookConfigPath(),
+		ConfigPath:         codexHookConfigPathForOptions(opts),
 	}
 }
 
@@ -1215,8 +1226,18 @@ func codexManagedConfigPath() string {
 	return filepath.Join(filepath.Dir(codexConfigPath()), codexManagedConfigLogicalName)
 }
 
-func codexHookConfigPath() string {
-	if runtime.GOOS == "windows" {
+// codexUsesManagedHookLayer reports whether Setup registers the hook matrix in
+// CODEX_HOME/managed_config.toml. Only managed enterprise Windows installs do:
+// current Codex releases ignore that file on Windows for per-user installs and
+// warn "CODEX_HOME/managed_config.toml is no longer supported on Windows", so a
+// per-user registration there would never run. Per-user installs on every
+// platform use config.toml with position-aware trust state.
+func codexUsesManagedHookLayer(opts SetupOpts) bool {
+	return runtime.GOOS == "windows" && opts.ManagedEnterprise
+}
+
+func codexHookConfigPathForOptions(opts SetupOpts) string {
+	if codexUsesManagedHookLayer(opts) {
 		return codexManagedConfigPath()
 	}
 	return codexConfigPath()
@@ -1224,9 +1245,9 @@ func codexHookConfigPath() string {
 
 // ownedHookContractPresent performs the Codex-specific runtime guardian check.
 // A command substring is insufficient: Codex only executes a handler when its
-// complete event shape is valid and its source is trusted. On Windows that
-// source is managed_config.toml; legacy user-scoped registrations additionally
-// require position-aware trust state. Reuse Setup's authoritative verifier so
+// complete event shape is valid and its source is trusted. In the managed
+// enterprise layer that source is managed_config.toml; user-scoped
+// registrations additionally require position-aware trust state. Reuse Setup's authoritative verifier so
 // guardian repair cannot mistake a partial, moved, disabled, asynchronous, or
 // untrusted matrix for active protection.
 func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
@@ -1261,7 +1282,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		}
 	}
 
-	configPath := codexHookConfigPath()
+	configPath := codexHookConfigPathForOptions(opts)
 	data, err = os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1292,7 +1313,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		return false, nil
 	}
 	var verifyErr error
-	if runtime.GOOS == "windows" {
+	if codexUsesManagedHookLayer(opts) {
 		verifyErr = verifyManagedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
 	} else {
 		verifyErr = verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
@@ -1555,10 +1576,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if _, exists := cfg["hooks"]; exists && !hooksExist {
 			return fmt.Errorf("Codex hooks configuration has unsupported type %T; refusing to replace it", cfg["hooks"])
 		}
-		if runtime.GOOS == "windows" {
-			// Upgrade away from the old user-scoped registration. Remove only
-			// provably owned handlers and trust records; the effective hook matrix
-			// now lives in managed_config.toml and is trusted by source.
+		if codexUsesManagedHookLayer(opts) {
+			// Remove only provably owned user-scoped handlers and trust records;
+			// the managed enterprise matrix lives in managed_config.toml and is
+			// trusted by source.
 			if hooksExist {
 				if _, err := removeOwnedCodexHooksAndState(hooks, configPath, hooksDir); err != nil {
 					return fmt.Errorf("remove legacy DefenseClaw Codex hooks: %w", err)
@@ -1639,7 +1660,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := toml.Unmarshal(out, &rendered); err != nil {
 			return fmt.Errorf("verify rendered codex config: %w", err)
 		}
-		if runtime.GOOS != "windows" {
+		if !codexUsesManagedHookLayer(opts) {
 			renderedHooks, ok := rendered["hooks"].(map[string]interface{})
 			if !ok {
 				return fmt.Errorf("verify rendered codex config: hooks has unsupported type %T", rendered["hooks"])
@@ -1719,7 +1740,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := toml.Unmarshal(persisted, &persistedConfig); err != nil {
 			return fmt.Errorf("parse persisted codex config for trust verification: %w", err)
 		}
-		if runtime.GOOS != "windows" {
+		if !codexUsesManagedHookLayer(opts) {
 			persistedHooks, ok := persistedConfig["hooks"].(map[string]interface{})
 			if !ok {
 				return fmt.Errorf("verify persisted codex config: hooks has unsupported type %T", persistedConfig["hooks"])
@@ -2965,8 +2986,10 @@ func inferTrustedCodexManagedHookCommands(
 ) (map[string]struct{}, error) {
 	managed := map[string]struct{}{}
 	if runtime.GOOS == "windows" {
-		// Windows installs the active matrix in managed_config.toml, where source
-		// provenance replaces user-scoped positional trust state.
+		// No earlier Windows release shipped a trusted user-scoped matrix to
+		// infer: they registered in managed_config.toml, where source
+		// provenance replaces positional trust state. Owned Windows handlers
+		// are still recognized by their marker-bearing hook command.
 		return managed, nil
 	}
 	state, exists := hooks["state"].(map[string]interface{})

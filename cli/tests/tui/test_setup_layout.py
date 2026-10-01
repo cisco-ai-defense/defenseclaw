@@ -193,7 +193,7 @@ def test_status_line_has_no_debug_text(hermetic) -> None:
     assert "hints=" not in app._status_text()  # noqa: SLF001
 
 
-def test_every_tab_fits_at_80_columns_with_unread_badges() -> None:
+def test_every_tab_fits_at_80_columns_with_unread_badges(monkeypatch) -> None:
     # 80 columns, no title: 80 - 2 (padding) - 12 (the : and ? buttons).
     unread = {"alerts": 2, "logs": 2, "audit": 1, "activity": 1, "ai": 2}
     for active in ("overview", "policies", "setup"):
@@ -203,3 +203,8 @@ def test_every_tab_fits_at_80_columns_with_unread_badges() -> None:
             assert labels[name].startswith(key)
     # Letter-only tabs keep their badge, as superscript digits.
     assert fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)["logs"] == "8²"
+    # Windows consoles draw most superscript digits wrong; use a plain badge.
+    monkeypatch.setattr("defenseclaw.tui.widgets.tab_fit._PLAIN_BADGE", True)
+    labels = fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)
+    assert labels["logs"] == "8(2)"
+    assert strip_width(tuple(labels.values())) <= 66
