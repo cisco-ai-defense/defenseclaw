@@ -103,13 +103,20 @@ func TestWindowsWSLClaudeDesktopGate(t *testing.T) {
 
 	t.Run("an empty key needs create and must not drop user policy", func(t *testing.T) {
 		// A REG_QWORD is invisible to Claude Desktop, so the key holds no
-		// machine policy.
+		// machine policy. Nothing turns WSL sessions on, so Claude Desktop's
+		// managed-device default applies: verify passes and says how to make
+		// the gate explicit.
 		reg := &fakeWSLRegistry{machine: map[string][]RegValue{ClaudeDesktopPolicyKey: {{Name: "rolloutRing", Type: RegQWORD, Number: 2}}}}
 		opts := withFakeWSLRegistry(t, reg)
 		state, _ := PublishWindowsWSL(opts)
-		if state.Covered || claudeGate(reg) != nil || !strings.Contains(strings.Join(state.Conflicts, "\n"), "claude_desktop_key: create") {
-			t.Fatalf("merge must not create machine policy: %+v", state)
+		if !state.Covered || claudeGate(reg) != nil || !strings.Contains(strings.Join(state.Pending, "\n"), "claude_desktop_key: create") {
+			t.Fatalf("merge must not create machine policy, and must not fail verify for it: %+v", state)
 		}
+		reg.open = true
+		if state, _ := VerifyWindowsWSL(opts, nil); state.Covered {
+			t.Fatalf("a key a standard account can change must fail verify: %+v", state)
+		}
+		reg.open = false
 		opts.WSL.ClaudeDesktopKey = config.WSLClaudeDesktopKeyCreate
 		reg.users = map[string]map[string][]RegValue{ClaudeDesktopPolicyKey: {"S-1-5-21-1-2-3-1001": {adminPolicy}}}
 		if state, _ := PublishWindowsWSL(opts); state.Covered || claudeGate(reg) != nil {

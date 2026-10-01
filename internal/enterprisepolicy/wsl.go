@@ -331,7 +331,7 @@ func reconcileWSL(opts Options, homes []string, write bool) (State, error) {
 	if err != nil {
 		return state, errors.Join(err, save())
 	}
-	var gaps []string
+	var gaps []wslGap
 	blocked, err := reconcileClaudeDesktopGate(opts, reg, policy, record, ours, write, &dirty, &state, &gaps)
 	if err != nil {
 		return state, errors.Join(err, save())
@@ -342,23 +342,25 @@ func reconcileWSL(opts Options, homes []string, write bool) (State, error) {
 	accepted := policy.AgentSessions == config.WSLAgentSessionsAllow
 	inherit, inheritErr := wslInheritSources(opts, reg)
 	if inheritErr != nil {
-		gaps = append(gaps, fmt.Sprintf("cannot check wslInheritsWindowsSettings: %v", inheritErr))
+		gaps = append(gaps, wslGap{text: fmt.Sprintf("cannot check wslInheritsWindowsSettings: %v", inheritErr)})
 	}
 	for _, source := range inherit {
 		if blocked || platformOff {
 			state.detail("%s sets wslInheritsWindowsSettings; it has no effect while WSL sessions are off", source)
 		} else {
-			gaps = append(gaps, fmt.Sprintf("%s sets wslInheritsWindowsSettings: WSL Claude Code sessions read the Windows managed settings, whose DefenseClaw hook commands do not run inside WSL", source))
+			gaps = append(gaps, wslGap{text: fmt.Sprintf("%s sets wslInheritsWindowsSettings: WSL Claude Code sessions read the Windows managed settings, whose DefenseClaw hook commands do not run inside WSL", source)})
 		}
 	}
 	for _, gap := range gaps {
 		switch {
 		case platformOff:
-			state.detail("%s (WSL is off, so no WSL session starts)", gap)
+			state.detail("%s (WSL is off, so no WSL session starts)", gap.text)
 		case accepted:
-			state.detail("%s (accepted: agent_sessions is allow)", gap)
+			state.detail("%s (accepted: agent_sessions is allow)", gap.text)
+		case gap.advisory:
+			state.Pending = append(state.Pending, gap.text)
 		default:
-			state.conflict("%s", gap)
+			state.conflict("%s", gap.text)
 		}
 	}
 	if !platformOff && !accepted {
@@ -445,7 +447,15 @@ func reconcileWSLPlatform(reg WSLRegistry, policy config.EnterpriseWindowsWSLPol
 	return true, nil
 }
 
-func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.EnterpriseWindowsWSLPolicy, record *wslOwnershipRecord, ours func(string, *RegValue, string) bool, write bool, dirty *bool, state *State, gaps *[]string) (bool, error) {
+// wslGap is one way agent sessions in WSL can escape DefenseClaw. A gap
+// fails verify unless it is advisory: nothing known turns WSL sessions on,
+// and DefenseClaw only declined to add its own explicit gate.
+type wslGap struct {
+	text     string
+	advisory bool
+}
+
+func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.EnterpriseWindowsWSLPolicy, record *wslOwnershipRecord, ours func(string, *RegValue, string) bool, write bool, dirty *bool, state *State, gaps *[]wslGap) (bool, error) {
 	values, keyExists, err := reg.MachineValues(ClaudeDesktopPolicyKey)
 	if err != nil {
 		return false, fmt.Errorf("read HKLM\\%s: %w", ClaudeDesktopPolicyKey, err)
@@ -497,9 +507,9 @@ func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.Ent
 			}
 			return true, nil
 		case known:
-			*gaps = append(*gaps, fmt.Sprintf("administrator policy %s=%s turns Claude Desktop WSL sessions on, and DefenseClaw hooks do not run inside WSL (set agent_sessions: allow to accept this)", path, describeRegValue(*current)))
+			*gaps = append(*gaps, wslGap{text: fmt.Sprintf("administrator policy %s=%s turns Claude Desktop WSL sessions on, and DefenseClaw hooks do not run inside WSL; remove the value, or set enterprise.machine_policy.windows_wsl.agent_sessions: allow to accept this", path, describeRegValue(*current))})
 		default:
-			*gaps = append(*gaps, fmt.Sprintf("%s has registry type %d, which Claude Desktop does not read; deliver it as REG_SZ true", path, current.Type))
+			*gaps = append(*gaps, wslGap{text: fmt.Sprintf("%s has registry type %d, which Claude Desktop does not read; deliver it as REG_SZ true", path, current.Type)})
 		}
 		return false, nil
 	}
@@ -508,11 +518,19 @@ func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.Ent
 		return false, err
 	}
 	switch {
-	case refusal != "":
+	case refusal.text != "" && refusal.advisory:
+		// Unset, the gate falls back to Claude Desktop's own default, which
+		// keeps WSL sessions off on devices it treats as organization-managed.
+		// Nothing known turns them on, so this is reported with the step that
+		// makes the gate explicit, not as a verify failure.
+		refusal.text = fmt.Sprintf("%s is not set, so Claude Desktop's default applies (WSL sessions off on devices it treats as organization-managed): %s", path, refusal.text)
+		*gaps = append(*gaps, refusal)
+		return false, nil
+	case refusal.text != "":
 		*gaps = append(*gaps, refusal)
 		return false, nil
 	case !write:
-		*gaps = append(*gaps, fmt.Sprintf("%s is not set; the guardian writes it at its next pass", path))
+		*gaps = append(*gaps, wslGap{text: fmt.Sprintf("%s is not set; the guardian writes it at its next pass", path)})
 		return false, nil
 	}
 	value := RegValue{Name: ClaudeDesktopWSLValue, Type: RegSZ, String: "true"}
@@ -538,8 +556,24 @@ func withoutRegValue(values []RegValue, name string) []RegValue {
 }
 
 // claudeDesktopGateRefusal says why DefenseClaw must not add
-// disableWslSessions to HKLM\SOFTWARE\Policies\Claude, or returns "".
-func claudeDesktopGateRefusal(reg WSLRegistry, policy config.EnterpriseWindowsWSLPolicy, values []RegValue, keyExists bool) (string, error) {
+// disableWslSessions to HKLM\SOFTWARE\Policies\Claude, or returns an empty
+// gap. The refusal is advisory when DefenseClaw only declines so it does not
+// displace other Claude Desktop policy the administrator did not ask it to
+// override (merge); an unmet claude_desktop_key: create, or a key a standard
+// account can change, fails verify.
+func claudeDesktopGateRefusal(reg WSLRegistry, policy config.EnterpriseWindowsWSLPolicy, values []RegValue, keyExists bool) (wslGap, error) {
+	create := policy.ClaudeDesktopKey == config.WSLClaudeDesktopKeyCreate
+	// A key a standard account can change lets that account turn WSL
+	// sessions on whatever DefenseClaw writes.
+	if keyExists {
+		open, err := reg.MachineKeyWritableByUsers(ClaudeDesktopPolicyKey)
+		if err != nil {
+			return wslGap{}, fmt.Errorf("inspect HKLM\\%s: %w", ClaudeDesktopPolicyKey, err)
+		}
+		if open {
+			return wslGap{text: `HKLM\` + ClaudeDesktopPolicyKey + ` grants write access beyond Administrators, SYSTEM and TrustedInstaller, so a standard account can turn Claude Desktop WSL sessions on; restrict the key to those principals`}, nil
+		}
+	}
 	present, appBehaviorOnly := false, true
 	for _, value := range values {
 		if !claudeDesktopVisible(value) {
@@ -550,13 +584,13 @@ func claudeDesktopGateRefusal(reg WSLRegistry, policy config.EnterpriseWindowsWS
 			appBehaviorOnly = false
 		}
 	}
-	if !present && policy.ClaudeDesktopKey != config.WSLClaudeDesktopKeyCreate {
-		return `HKLM\` + ClaudeDesktopPolicyKey + ` holds no machine policy, and any value there makes Claude Desktop ignore every account's HKCU policy and local third-party configuration; deliver ` + ClaudeDesktopWSLValue + ` with the organization's Claude Desktop policy, or set claude_desktop_key: create`, nil
+	if !present && !create {
+		return wslGap{advisory: true, text: `HKLM\` + ClaudeDesktopPolicyKey + ` holds no machine policy, and any value there makes Claude Desktop ignore every account's HKCU policy and local third-party configuration; to set the gate explicitly, deploy the output of "defenseclaw enterprise policy export --connector wsl" with the organization's Claude Desktop policy, or set enterprise.machine_policy.windows_wsl.claude_desktop_key: create`}, nil
 	}
 	if !present {
 		users, err := reg.UserValues(ClaudeDesktopPolicyKey)
 		if err != nil {
-			return "", fmt.Errorf("read user Claude Desktop policy: %w", err)
+			return wslGap{}, fmt.Errorf("read user Claude Desktop policy: %w", err)
 		}
 		count := 0
 		for _, userValues := range users {
@@ -568,38 +602,29 @@ func claudeDesktopGateRefusal(reg WSLRegistry, policy config.EnterpriseWindowsWS
 			}
 		}
 		if count > 0 {
-			return fmt.Sprintf("%d signed-in account(s) have HKCU Claude Desktop policy that a new HKLM value would override; move it to HKLM first", count), nil
+			return wslGap{text: fmt.Sprintf("claude_desktop_key is create, but %d signed-in account(s) have HKCU Claude Desktop policy that a new HKLM value would override; move it to HKLM first", count)}, nil
 		}
 	}
 	if appBehaviorOnly {
 		homes, err := reg.ProfileHomes()
 		if err != nil {
-			return "", fmt.Errorf("list profiles: %w", err)
+			return wslGap{}, fmt.Errorf("list profiles: %w", err)
 		}
 		count := 0
 		for _, home := range homes {
 			entries, err := os.ReadDir(filepath.Join(home, "AppData", "Local", "Claude-3p", "configLibrary"))
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return "", err
+				return wslGap{}, err
 			}
 			if len(entries) > 0 {
 				count++
 			}
 		}
 		if count > 0 {
-			return fmt.Sprintf("%d account(s) have local Claude Desktop third-party configuration (Claude-3p\\configLibrary) that Claude Desktop ignores once HKLM sets a key other than its app-behavior keys; move it to machine policy first", count), nil
+			return wslGap{advisory: !create, text: fmt.Sprintf("%d account(s) have local Claude Desktop third-party configuration (Claude-3p\\configLibrary) that Claude Desktop ignores once HKLM sets a key other than its app-behavior keys; move it to machine policy first, and the guardian then adds the gate", count)}, nil
 		}
 	}
-	if keyExists {
-		open, err := reg.MachineKeyWritableByUsers(ClaudeDesktopPolicyKey)
-		if err != nil {
-			return "", fmt.Errorf("inspect HKLM\\%s: %w", ClaudeDesktopPolicyKey, err)
-		}
-		if open {
-			return `HKLM\` + ClaudeDesktopPolicyKey + ` grants write access beyond Administrators, SYSTEM and TrustedInstaller; DefenseClaw does not write a gate a standard account can remove`, nil
-		}
-	}
-	return "", nil
+	return wslGap{}, nil
 }
 
 // wslInheritSources names the Claude Code managed sources that set
