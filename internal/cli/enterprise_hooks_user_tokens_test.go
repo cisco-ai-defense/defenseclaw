@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -112,18 +114,40 @@ func TestEnterpriseHookUserScopedTokensDeriveFromTheProtectedKey(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("key custody: %v %v", info, err)
 	}
-	// While a credential rotation has staged the next key, rendering and
-	// verification both derive from it and leave the committed key alone.
+	// A staged next key alone is never rendered from: rendering and
+	// verification derive from it only while the guardian's root-only
+	// prepare record names it as next and the committed key as previous,
+	// and never from the committed key's bytes.
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	staged := strings.Repeat("ab", 32)
 	if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".user-scoped-token.key.next"), []byte(staged+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	authDir := managed.HookGuardianAuthorizationDir(dataDir)
+	if err := os.Mkdir(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	wantStaged, _ := connector.UserScopedHookAPIToken(staged, "codex", "1001")
-	for name, derive := range map[string]func(string, string, string) (string, string, error){
-		"mint": enterpriseHookUserScopedTokens, "load": loadEnterpriseHookUserScopedTokens,
-	} {
-		if got, _, err := derive(dataDir, "codex", "1001"); err != nil || got != wantStaged {
-			t.Fatalf("%s with a staged key: derived from it=%v err=%v", name, got == wantStaged, err)
+	for _, phase := range []string{"", enterprisehooks.CredentialPhaseRollback, enterprisehooks.CredentialPhasePrepare} {
+		if phase != "" {
+			record, _ := json.Marshal(enterprisehooks.CredentialTransaction{
+				Version: enterprisehooks.CredentialTransactionVersion, OperationID: strings.Repeat("0", 32), Phase: phase,
+				ManifestSHA256: strings.Repeat("d", 64), PreviousKeyID: connector.UserScopedTokenKeyFingerprint(key), NextKeyID: connector.UserScopedTokenKeyFingerprint(staged),
+			})
+			if err := os.WriteFile(filepath.Join(authDir, managed.HookGuardianCredentialTransactionFile), record, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want := hook
+		if phase == enterprisehooks.CredentialPhasePrepare {
+			want = wantStaged
+		}
+		for name, derive := range map[string]func(string, string, string) (string, string, error){
+			"mint": enterpriseHookUserScopedTokens, "load": loadEnterpriseHookUserScopedTokens,
+		} {
+			if got, _, err := derive(dataDir, "codex", "1001"); err != nil || got != want {
+				t.Fatalf("%s with a staged key and record %q: derived from the staged key=%v err=%v", name, phase, got == wantStaged, err)
+			}
 		}
 	}
 	if committed, err := connector.LoadUserScopedTokenKey(dataDir); err != nil || committed != key {

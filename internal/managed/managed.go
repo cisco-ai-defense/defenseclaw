@@ -31,6 +31,11 @@ const (
 	// did to each target and which per-user credential key it rendered from
 	// (enterprisehooks.CredentialAttestation).
 	HookGuardianCredentialAttestationFile = "credential-attestation.json"
+	// HookGuardianCredentialTransactionFile, next to the ledger, is the
+	// root-only record of the per-user credential rotation in progress
+	// (enterprisehooks.CredentialTransaction). The standalone Unix guardian
+	// renders from a staged key only while it names that key.
+	HookGuardianCredentialTransactionFile = "credential-transaction.json"
 	// HookGuardianReconcileLockFile, next to the ledger, serializes the
 	// standalone Unix guardian's reconciles with each other and with a
 	// credential rotation staging or committing a key.
