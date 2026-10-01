@@ -1145,6 +1145,7 @@ def _apply_first_run_choices(
         )
     elif severity and selected_pc is not None and selected_pc.hilt is not None:
         selected_pc.hilt.min_severity = cfg.guardrail.hilt.min_severity
+    pin_cursor_posture(cfg.guardrail, connector)
 
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
@@ -1162,6 +1163,31 @@ def _apply_first_run_choices(
         cfg.cisco_ai_defense.endpoint = options.cisco_endpoint.strip()
     if options.cisco_api_key_env:
         cfg.cisco_ai_defense.api_key_env = options.cisco_api_key_env.strip()
+
+
+def pin_cursor_posture(gc, primary: str = "") -> None:
+    """Pin Cursor's fail mode to its guardrail mode and turn approvals off.
+
+    Cursor's hook contract ties failures to the mode (action fails closed)
+    and has no native approval prompt; ``setup cursor`` already forces both,
+    and doctor fails any other persisted combination.
+    """
+    from defenseclaw.config import HILTConfig
+
+    connectors = getattr(gc, "connectors", None) or {}
+    key = next((k for k in connectors if _normalize_connector(str(k)) == "cursor"), "")
+    if not key and _normalize_connector(primary or gc.connector or "") != "cursor":
+        return
+    fail_mode = "closed" if gc.effective_mode("cursor").strip().lower() == "action" else "open"
+    hilt = gc.effective_hilt("cursor")
+    if key:
+        pc = connectors[key]
+        pc.hook_fail_mode = fail_mode
+        if hilt.enabled:
+            pc.hilt = HILTConfig(enabled=False, min_severity=hilt.min_severity or "HIGH")
+    else:
+        gc.hook_fail_mode = fail_mode
+        gc.hilt.enabled = False
 
 
 def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) -> None:

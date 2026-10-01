@@ -3285,19 +3285,25 @@ class TestMultiConnectorInit(unittest.TestCase):
                 {"connector": "codex", "profile": "observe", "fail_mode": "open",
                  "human_approval": None, "hilt_min_severity": None},
                 [{"connector": "claudecode", "profile": "action", "fail_mode": "closed",
-                  "human_approval": True, "hilt_min_severity": "MEDIUM"}],
+                  "human_approval": True, "hilt_min_severity": "MEDIUM"},
+                 {"connector": "cursor", "profile": "action", "fail_mode": "open",
+                  "human_approval": True, "hilt_min_severity": None}],
                 start_gateway=False,
             )
-            self.assertEqual(active, ["claudecode", "codex"])
+            self.assertEqual(active, ["claudecode", "codex", "cursor"])
             # Gateway start not requested → no sidecar step to fold into report.
             self.assertIsNone(sidecar_step)
 
             reloaded = cfg_mod.load()
             gc = reloaded.guardrail
-            self.assertEqual(sorted(gc.connectors), ["claudecode", "codex"])
+            self.assertEqual(sorted(gc.connectors), ["claudecode", "codex", "cursor"])
             self.assertNotIn("hermes", gc.connectors)
             self.assertEqual(gc.judge.hook_connectors, ["codex"])
-            self.assertEqual(reloaded.active_connectors(), ["claudecode", "codex"])
+            self.assertEqual(reloaded.active_connectors(), ["claudecode", "codex", "cursor"])
+            # Cursor action fails closed and has no native approval prompt,
+            # the same posture `setup cursor` writes and doctor requires.
+            self.assertEqual(gc.effective_hook_fail_mode("cursor"), "closed")
+            self.assertFalse(gc.effective_hilt("cursor").enabled)
             cc = gc.connectors["claudecode"]
             self.assertEqual(cc.mode, "action")
             self.assertEqual(cc.hook_fail_mode, "closed")

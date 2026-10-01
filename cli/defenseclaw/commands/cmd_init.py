@@ -1789,6 +1789,7 @@ def _activate_additional_connectors(
     instead of the stale "not started" placeholder written while the start was
     deferred."""
     from defenseclaw import config as cfg_mod
+    from defenseclaw.bootstrap import pin_cursor_posture
     from defenseclaw.commands.cmd_setup import (
         _check_connector_version_supported_for_setup,
     )
@@ -1928,6 +1929,7 @@ def _activate_additional_connectors(
                 min_severity=(s["hilt_min_severity"] or "HIGH").upper(),
             )
         gc.connectors[key] = pc
+    pin_cursor_posture(gc, primary_name)
 
     gate = list(gc.judge.hook_connectors or [])
     if gate != ["*"]:
