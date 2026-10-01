@@ -4927,6 +4927,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_GUARDIAN_WATCH_SIGNAL_ROOT",
+      "category": "test_fixture",
+      "purpose": "Passes an isolated guardian state root to the Unix SIGTERM watch-loop subprocess fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute temporary directory path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_watch_signal_unix_test.go",
+          "description": "Unix guardian SIGTERM test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT",
       "category": "test_fixture",
       "purpose": "Selects the native watchdog original-handle wait fixture.",
