@@ -104,6 +104,18 @@ func glyph(unicode, ascii string) string {
 	return unicode
 }
 
+// asciiTextReplacer maps the punctuation the gateway puts in status text.
+var asciiTextReplacer = strings.NewReplacer("—", "-", "–", "-", "…", "...", "→", "->", "’", "'", "“", "\"", "”", "\"")
+
+// asciiText returns server-provided text with ASCII punctuation when
+// presentation glyphs need ASCII stand-ins.
+func asciiText(text string) string {
+	if asciiGlyphs() {
+		return asciiTextReplacer.Replace(text)
+	}
+	return text
+}
+
 // Bold wraps text in bold SGR (no color change).
 func Bold(text string) string {
 	return Style(text, "bold")
