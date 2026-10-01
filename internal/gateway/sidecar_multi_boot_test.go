@@ -2182,6 +2182,7 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 	if runtime.GOOS == "windows" {
 		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
 	}
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
 	dir := t.TempDir()
 	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
 	prevCodex := connector.CodexConfigPathOverride
