@@ -2333,12 +2333,19 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		extraHeaders["api-key"] = apiKey
 	}
 
-	// Use VLLM provider for Azure-style endpoints — VLLM sends to
-	// {base_url}/chat/completions without the /v1/ prefix that OpenAI adds.
-	// For native OpenAI endpoints, use OpenAI provider.
+	// Bifrost provider selection: use VLLM for chat/completions-only
+	// providers (Azure, custom like Cisco), OpenAI for native Responses API.
 	bfProvider := schemas.OpenAI
-	if strings.ToLower(strings.TrimSpace(decision.Provider)) == "azure" {
+	decisionProvider := strings.ToLower(strings.TrimSpace(decision.Provider))
+	if decisionProvider == "azure" || decisionProvider == "vllm" || decisionProvider == "custom" {
 		bfProvider = schemas.VLLM
+	}
+
+	extraBody := map[string]string{}
+	if decision.ExtraBody != nil {
+		for k, v := range decision.ExtraBody {
+			extraBody[k] = v
+		}
 	}
 
 	bp := &bifrostProvider{
@@ -2347,6 +2354,7 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		apiKey:       apiKey,
 		baseURL:      baseURL,
 		extraHeaders: extraHeaders,
+		extraBody:    extraBody,
 	}
 
 	fmt.Fprintf(os.Stderr, "[responses-api] bifrost provider=%s model=%s base=%s\n",

@@ -45,6 +45,7 @@ type bifrostProvider struct {
 	baseURL      string
 	tls          tlsOverrides
 	extraHeaders map[string]string
+	extraBody    map[string]string
 	// Effective per-provider sub-blocks (role wins, overlay fills
 	// blanks; see NewProviderForLLMConfig). Pointer-typed so an
 	// absent block contributes nothing to the Bifrost Key.
@@ -699,12 +700,39 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 		}
 	}
 
+	// Inject extra_body fields (like user appkey) into raw body
+	// so they're forwarded to the upstream provider.
+	if len(bp.extraBody) > 0 {
+		var bodyMap map[string]json.RawMessage
+		if json.Unmarshal(rawBody, &bodyMap) == nil {
+			for k, v := range bp.extraBody {
+				bodyMap[k] = json.RawMessage(`"` + v + `"`)
+			}
+			rawBody, _ = json.Marshal(bodyMap)
+		}
+	}
+
 	bReq := &schemas.BifrostResponsesRequest{
 		Provider: bp.providerKey,
 		Model:    bp.model,
 		Input:    input,
 	}
 	bCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
+	// Override the URL path — Cisco uses /chat/completions without /v1/ prefix
+	bCtx.SetValue(schemas.BifrostContextKeyURLPath, "/chat/completions")
+	// Inject extra_body fields (like user appkey) via ExtraParams
+	if len(bp.extraBody) > 0 {
+		bCtx.SetValue(schemas.BifrostContextKeyPassthroughExtraParams, true)
+		if bReq.Params == nil {
+			bReq.Params = &schemas.ResponsesParameters{}
+		}
+		if bReq.Params.ExtraParams == nil {
+			bReq.Params.ExtraParams = make(map[string]interface{})
+		}
+		for k, v := range bp.extraBody {
+			bReq.Params.ExtraParams[k] = v
+		}
+	}
 
 	stream, bErr := client.ResponsesStreamRequest(bCtx, bReq)
 	if bErr != nil {
