@@ -918,6 +918,9 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		if err := managed.ValidateTrustedServiceRuntimeDir(dir, label, serviceAccount); err != nil {
 			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
 		}
+		if err := managed.ValidateServiceCanReadTree(dir, label, serviceAccount); err != nil {
+			return fmt.Errorf("config: managed standalone %w", err)
+		}
 		return nil
 	}
 	if err := check("policy_dir", cfg.PolicyDir); err != nil {
