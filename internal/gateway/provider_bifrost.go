@@ -672,16 +672,51 @@ func (bp *bifrostProvider) ResponsesStreamRaw(ctx context.Context, rawBody []byt
 		return err
 	}
 
+	// Parse the Responses API request body into Bifrost's types
+	var parsed struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(rawBody, &parsed); err != nil {
+		return fmt.Errorf("parse responses request: %w", err)
+	}
+
+	var input []schemas.ResponsesMessage
+	if err := json.Unmarshal(parsed.Input, &input); err != nil {
+		// input might be a string
+		var textInput string
+		if json.Unmarshal(parsed.Input, &textInput) == nil {
+			msgType := schemas.ResponsesMessageTypeMessage
+			role := schemas.ResponsesInputMessageRoleUser
+			input = []schemas.ResponsesMessage{{
+				Type: &msgType,
+				Role: &role,
+				Content: &schemas.ResponsesMessageContent{
+					ContentStr: &textInput,
+				},
+			}}
+		} else {
+			return fmt.Errorf("parse responses input: %w", err)
+		}
+	}
+
 	bReq := &schemas.BifrostResponsesRequest{
-		Provider:       bp.providerKey,
-		Model:          bp.model,
-		RawRequestBody: rawBody,
+		Provider: bp.providerKey,
+		Model:    bp.model,
+		Input:    input,
 	}
 	bCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
-	bCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 
 	stream, bErr := client.ResponsesStreamRequest(bCtx, bReq)
 	if bErr != nil {
+		errStr := ""
+		if bErr.Error != nil {
+			errStr = bErr.Error.Message
+		}
+		code := 0
+		if bErr.StatusCode != nil {
+			code = *bErr.StatusCode
+		}
+		fmt.Fprintf(os.Stderr, "[bifrost] responses stream error: code=%d error=%s\n", code, errStr)
 		return bifrostErrorToGo(bErr)
 	}
 

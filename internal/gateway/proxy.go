@@ -2235,30 +2235,103 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Decompress zstd if needed
+	originalBody := body
 	if isZstdBody(body) {
 		if dec, decErr := decompressZstd(body); decErr == nil {
 			body = dec
 		}
 	}
 
-	// Try to resolve a provider through the direct-provider path or routing
-	provider := p.resolveConfiguredProvider(&ChatRequest{RawBody: body})
-	if provider == nil {
-		// Fall through to passthrough handler
-		r.Body = io.NopCloser(bytes.NewReader(body))
+	// If no model router, fall through to passthrough
+	if p.modelRouter == nil {
+		r.Body = io.NopCloser(bytes.NewReader(originalBody))
 		p.handlePassthrough(w, r)
 		return
 	}
 
-	bp, ok := provider.(*bifrostProvider)
-	if !ok {
-		r.Body = io.NopCloser(bytes.NewReader(body))
+	// Extract messages from the Responses API input for routing classification
+	var partial struct {
+		Model string          `json:"model"`
+		Input json.RawMessage `json:"input,omitempty"`
+	}
+	_ = json.Unmarshal(body, &partial)
+	messages := extractResponsesAPIMessages(partial.Input)
+
+	requestModel := strings.TrimSpace(partial.Model)
+	routerInput := &ModelRouterInput{
+		Model:        requestModel,
+		RequestModel: requestModel,
+		Messages:     messages,
+		Metadata: map[string]interface{}{
+			"defenseclaw.connector": p.connectorName(),
+		},
+	}
+
+	var decision *ModelRouterDecision
+	if detailed, ok := p.modelRouter.(detailedModelRouter); ok {
+		outcome := detailed.RouteDetailed(r.Context(), routerInput)
+		decision = outcome.Decision
+	} else {
+		decision = p.modelRouter.Route(r.Context(), routerInput)
+	}
+
+	if decision == nil {
+		fmt.Fprintf(os.Stderr, "[responses-api] no routing decision, falling through to passthrough\n")
+		r.Body = io.NopCloser(bytes.NewReader(originalBody))
 		p.handlePassthrough(w, r)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[guardrail] responses-api: routing via bifrost provider=%s model=%s\n",
-		bp.providerKey, bp.model)
+	fmt.Fprintf(os.Stderr, "[responses-api] routing decision: provider=%s model=%s base=%s apiKeyLen=%d\n",
+		decision.Provider, decision.Model, decision.TargetURL, len(decision.APIKey))
+
+	// Build a bifrostProvider from the routing decision
+	providerKey, mapErr := mapProviderKey(decision.Provider)
+	if mapErr != nil {
+		fmt.Fprintf(os.Stderr, "[responses-api] unknown provider %q, falling through\n", decision.Provider)
+		r.Body = io.NopCloser(bytes.NewReader(originalBody))
+		p.handlePassthrough(w, r)
+		return
+	}
+
+	apiKey := decision.APIKey
+	baseURL := decision.TargetURL
+
+	// For Azure, extract the base endpoint (without /openai/deployments/<model>)
+	azureEndpoint := baseURL
+	if providerKey == schemas.Azure {
+		if idx := strings.Index(baseURL, "/openai/"); idx > 0 {
+			azureEndpoint = baseURL[:idx]
+		}
+	}
+
+	bp := &bifrostProvider{
+		providerKey:  providerKey,
+		model:        decision.Model,
+		apiKey:       apiKey,
+		baseURL:      baseURL,
+		extraHeaders: map[string]string{"api-key": apiKey},
+	}
+	if providerKey == schemas.Azure {
+		bp.azure = &config.AzureKeyConfig{
+			Endpoint: azureEndpoint,
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[responses-api] bifrost provider=%s model=%s base=%s\n",
+		bp.providerKey, bp.model, bp.baseURL)
+
+	// Patch the model and inject appkey user field
+	if decision.Model != "" && decision.Model != requestModel {
+		body = patchModelInBody(body, decision.Model)
+	}
+	// Inject user appkey for Cisco AI Gateway
+	var bodyMap map[string]json.RawMessage
+	if json.Unmarshal(body, &bodyMap) == nil {
+		bodyMap["user"] = json.RawMessage(`"{\"appkey\":\"egai-prd-other-020122827-other-1790804579247\"}"`)
+		delete(bodyMap, "stream")
+		body, _ = json.Marshal(bodyMap)
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -2272,7 +2345,7 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 		}
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] responses-api error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[responses-api] bifrost error: %v\n", err)
 	}
 }
 
