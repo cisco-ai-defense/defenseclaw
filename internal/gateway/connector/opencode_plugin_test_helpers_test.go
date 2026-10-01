@@ -91,9 +91,12 @@ func openCodePluginTestData(t *testing.T, server *httptest.Server) templateData 
 	}
 }
 
-// nodeHarnessTimeout bounds one node run of a plugin harness. It covers
-// node's start, which on a busy Windows runner can take many seconds when
-// it is the job's first node process.
+// nodeHarnessTimeout bounds one node run of a plugin harness, and each step
+// of an interactive harness session. It covers node's start, which on a busy
+// Windows runner can take many seconds when it is the job's first node
+// process, and a first request, which pays one-time costs of its own (the
+// process's first socket and token file open) on top of the plugin's 10s
+// gateway timeout.
 const nodeHarnessTimeout = 60 * time.Second
 
 // nodeForTest returns the node binary, or skips the test when there is none.
@@ -127,15 +130,12 @@ func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 // plugins are loaded and it reads requests from stdin.
 const nodeHarnessReady = "harness-ready"
 
-// nodeHarnessReplyTimeout bounds one reply of a ready harness. It covers
-// the plugin's own 10s gateway timeout with room to spare.
-const nodeHarnessReplyTimeout = 30 * time.Second
-
 // nodeHarnessSession is a running interactive harness: each request line
-// written to it is answered with one stdout line. Node's start is bounded
-// apart from the replies (the first node.exe launch on a fresh Windows
-// runner pays the image load and antivirus scan), and a failure reports
-// the step, how node exited, and its whole stderr.
+// written to it is answered with one stdout line. Node's start, each reply
+// and the exit are bounded separately (the first node.exe launch on a fresh
+// Windows runner pays the image load and antivirus scan, and its first
+// request the first socket), and a failure reports the step, how node
+// exited, and its whole stderr.
 type nodeHarnessSession struct {
 	t      *testing.T
 	cmd    *exec.Cmd
@@ -192,7 +192,7 @@ func (s *nodeHarnessSession) request(step, line string) string {
 	if _, err := io.WriteString(s.stdin, line+"\n"); err != nil {
 		s.t.Fatalf("%s: write request: %v; %s", step, err, s.stop())
 	}
-	return s.next(step, nodeHarnessReplyTimeout)
+	return s.next(step, nodeHarnessTimeout)
 }
 
 // close ends the session, failing if the harness printed more or exited
@@ -207,8 +207,8 @@ func (s *nodeHarnessSession) close() {
 		if ok {
 			s.t.Fatalf("exit: node printed unexpected %q; %s", line, s.stop())
 		}
-	case <-time.After(nodeHarnessReplyTimeout):
-		s.t.Fatalf("exit: node did not exit within %s of stdin closing; %s", nodeHarnessReplyTimeout, s.stop())
+	case <-time.After(nodeHarnessTimeout):
+		s.t.Fatalf("exit: node did not exit within %s of stdin closing; %s", nodeHarnessTimeout, s.stop())
 	}
 	if report, ok := s.wait(); !ok || s.err != nil {
 		s.t.Fatalf("exit: %s", report)
@@ -249,9 +249,9 @@ func (s *nodeHarnessSession) wait() (report string, ok bool) {
 	select {
 	case <-s.exited:
 		return fmt.Sprintf("node ended with %v; stderr=%q", s.cmd.ProcessState, s.stderr.String()), true
-	case <-time.After(nodeHarnessReplyTimeout):
+	case <-time.After(nodeHarnessTimeout):
 		_ = s.cmd.Process.Kill()
-		return fmt.Sprintf("node did not exit within %s", nodeHarnessReplyTimeout), false
+		return fmt.Sprintf("node did not exit within %s", nodeHarnessTimeout), false
 	}
 }
 
