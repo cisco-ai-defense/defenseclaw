@@ -3485,7 +3485,8 @@ threading.Event().wait()
         '\$openCodePath = Join-Path \$openCodeBin ''opencode\.exe''' -and
         $agentFixtureFunction -match 'OpenCodeVersionFixture' -and
         $agentFixtureFunction -match 'opencode 1\.18\.11' -and
-        $agentFixtureFunction -match "(?s)foreach \(\`$attempt in 1\.\.3\).*?\`$openCodePath @\('--version'\) -TimeoutSeconds 2" -and
+        $agentFixtureFunction -match "\`$openCodePath @\('--version'\) -TimeoutSeconds 30" -and
+        $agentFixtureFunction -notmatch "\`$openCodePath @\('--version'\) -TimeoutSeconds [0-9]\b" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
         $agentFixtureFunction -match 'New-WizardFixtureExecutable \$fixture\.ClassName \$fixture\.Source \$fixture\.Path' -and
         $agentFixtureFunction -notmatch 'csc\.exe' -and

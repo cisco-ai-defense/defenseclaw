@@ -4069,11 +4069,14 @@ public static class OpenCodeVersionFixture {
         if ($hermesVersion.StdOut.Trim() -ne 'Hermes Agent v0.20.0 (2026.8.3)') {
             throw "Hermes fixture returned an unexpected version: $($hermesVersion.StdOut)"
         }
-        foreach ($attempt in 1..3) {
-            $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 2
-            if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
-                throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
-            }
+        # Like its siblings, this only validates the fixture before setup uses
+        # it. Product OpenCode discovery owns its own version-probe budget
+        # (longer than the generic one, because the authentic packaged binary
+        # starts slowly under on-access scanning), so a tighter fixture-side
+        # deadline would assert a start-up speed the product never requires.
+        $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 30
+        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+            throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
         }
         Assert-WizardCodexPolicyFixture $codexPath
         return [pscustomobject]@{
