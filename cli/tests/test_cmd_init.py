@@ -4158,6 +4158,9 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
         summary = json.loads(result.output)
         self.assertEqual(sorted(summary.get("connectors", [])), ["claudecode", "codex"])
+        # The summary covers the whole set, not only the primary connector.
+        guardrail = [s for s in summary["setup"] if s["name"] == "Guardrail"]
+        self.assertEqual(guardrail[0]["detail"], "2 connectors: claudecode=observe, codex=observe")
         cfg = self._load_cfg()
         self.assertNotIn("openclaw", cfg["guardrail"].get("connectors", {}) or {})
 

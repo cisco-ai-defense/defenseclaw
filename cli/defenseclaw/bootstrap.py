@@ -1392,10 +1392,13 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
                     "defenseclaw-gateway restart",
                 )
             if result.returncode == 0:
+                active = cfg.active_connectors()
                 return StepResult(
                     "Sidecar",
                     "pass",
-                    f"restarted (was {running}, now {desired})",
+                    f"restarted (was {running}, now {desired})"
+                    if len(active) <= 1
+                    else f"restarted to load the {len(active)} selected connectors",
                 )
             detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(

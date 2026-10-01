@@ -4916,7 +4916,8 @@ def _check_connector_version_supported_for_setup(
         probe_error = signal.error or ""
 
     compatibility = resolve_connector_contract(connector, raw_version)
-    version_display = raw_version or "(not probed)"
+    # Some CLIs end their version banner with a period ("... 1.0.90.").
+    version_display = raw_version.rstrip(".") or "(not probed)"
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:

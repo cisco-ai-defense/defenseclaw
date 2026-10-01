@@ -769,7 +769,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # the now-started gateway. _next_commands only reads cfg.data_dir,
             # which the report already exposes.
             report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
-        elif not start_gateway and len(activated) > 1:
+        if len(activated) > 1:
+            _describe_connector_set(report, activated)
+        if sidecar_step is None and not start_gateway and len(activated) > 1:
             # Extra connectors get their hooks from the gateway's reconcile on
             # the next start; say so instead of leaving Doctor to report
             # "no hooks registered" with no explanation.
@@ -807,7 +809,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             payload["connector_mode_warnings"] = mode_warnings
         click.echo(json.dumps(payload, indent=2))
         return
-    _render_first_run_report(report, CLIRenderer())
+    _render_first_run_report(report, CLIRenderer(), connectors=activated)
     if len(activated) > 1:
         click.echo()
         click.echo("  Configured connectors: " + ", ".join(activated))
@@ -1855,6 +1857,20 @@ def _activate_additional_connectors(
     # `guardrail status`.
     gc.connectors = {primary_name: PerConnectorGuardrailConfig()}
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_trusted_path_prompt else None
+    if (
+        allow_trusted_path_prompt
+        and (primary.get("profile") or "").lower() == "action"
+        and not (primary_name == "opencode" and platform_support.host_os() == "windows")
+    ):
+        # First-run gated the primary without output; print its compatibility
+        # line next to the extras so every action connector has one.
+        _check_connector_version_supported_for_setup(
+            primary_name,
+            mode="observe",
+            emit=True,
+            data_dir=getattr(cfg, "data_dir", None),
+            _allow_prompt=False,
+        )
 
     for s in extras:
         key = connector_paths.normalize(s["connector"])
@@ -2065,8 +2081,39 @@ def _internal_antigravity_setup_parent_matches() -> bool:
     )
 
 
-def _render_first_run_report(report, renderer) -> None:
-    subtitle = f"status={report.status} connector={report.connector} profile={report.profile}"
+def _describe_connector_set(report, connectors: list[str]) -> None:
+    """Make the first-run Guardrail and Connector rows cover every connector.
+
+    run_first_run sets up only the primary connector, so with several
+    selected its rows named that one connector alone.
+    """
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.bootstrap import _connector_readiness, _next_commands, _rollup_status
+
+    try:
+        cfg = cfg_mod.load(data_dir=report.data_dir)
+    except Exception:  # noqa: BLE001 - keep the primary-only rows.
+        return
+    modes = ", ".join(f"{name}={cfg.guardrail.effective_mode(name)}" for name in connectors)
+    for step in report.setup:
+        if step.name == "Guardrail" and step.status == "pass":
+            step.detail = f"{len(connectors)} connectors: {modes}"
+    readiness: list = []
+    for step in report.readiness:
+        if step.name != "Connector":
+            readiness.append(step)
+        elif not any(item.name == "Connector" for item in readiness):
+            readiness.extend(_connector_readiness(cfg, name) for name in connectors)
+    report.readiness = readiness
+    report.status = _rollup_status(report.setup, report.readiness)
+    report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
+
+
+def _render_first_run_report(report, renderer, *, connectors: list[str] | None = None) -> None:
+    target = (
+        f"connectors={len(connectors)}" if connectors and len(connectors) > 1 else f"connector={report.connector}"
+    )
+    subtitle = f"status={report.status} {target} profile={report.profile}"
     renderer.title("DefenseClaw First-Run", subtitle)
     renderer.section("Setup")
     for step in report.setup:
