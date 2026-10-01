@@ -1,0 +1,51 @@
+config_version: 8
+
+routing:
+  enabled: true
+  port: 8888
+  models:
+    - name: fast
+      provider: ollama
+      model: smollm2:1.7b
+      base_url: http://localhost:11434
+      weight: 1
+      capabilities: [chat]
+      cost_per_1k_tokens: 0.01
+    - name: code
+      provider: ollama
+      model: qwen3:4b
+      base_url: http://localhost:11434
+      weight: 2
+      capabilities: [chat, code]
+      cost_per_1k_tokens: 0.05
+    - name: reasoning
+      provider: ollama
+      model: qwen3:8b
+      base_url: http://localhost:11434
+      weight: 3
+      capabilities: [chat, code, reasoning]
+      cost_per_1k_tokens: 0.10
+  signals:
+    keywords:
+      - name: code_task
+        keywords: [code, function, debug, refactor, implement, class, method, api, endpoint]
+        operator: OR
+      - name: complex_task
+        keywords: [analyze, compare, synthesize, step by step, tradeoffs, explain why]
+        operator: OR
+  decisions:
+    - name: code_route
+      priority: 100
+      conditions:
+        - type: keyword
+          name: code_task
+      model_refs: [code]
+    - name: reasoning_route
+      priority: 90
+      conditions:
+        - type: keyword
+          name: complex_task
+      model_refs: [reasoning]
+    - name: default_route
+      priority: 10
+      model_refs: [fast]

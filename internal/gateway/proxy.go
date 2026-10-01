@@ -1390,6 +1390,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Forward verbatim to real upstream: reassemble original URL.
 	upstreamURL := strings.TrimRight(targetOrigin, "/") + r.URL.RequestURI()
+	// Azure-style endpoints use /chat/completions, not /responses.
+	if routerDecision != nil && strings.ToLower(strings.TrimSpace(routerDecision.Provider)) == "azure" {
+		if strings.HasSuffix(upstreamURL, "/responses") {
+			upstreamURL = strings.TrimSuffix(upstreamURL, "/responses") + "/chat/completions"
+		}
+	}
 	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, scrubURLSecrets(upstreamURL))
 
 	// Resolve the key to use for the upstream provider.
@@ -1513,16 +1519,20 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.recordProxyForwardedHeadersV8(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
 	}
 	// Set the single resolved auth header for the upstream provider.
+	// When a routing decision overrides the target, use the decision's
+	// provider for auth header selection.
+	effectiveProvider := provider
+	if routerDecision != nil && routerDecision.Provider != "" {
+		effectiveProvider = strings.ToLower(strings.TrimSpace(routerDecision.Provider))
+	}
 	if upstreamAuth != "" {
 		key := strings.TrimPrefix(upstreamAuth, "Bearer ")
-		// Anthropic Messages (including Bedrock's /anthropic compatibility
-		// route) wants x-api-key + anthropic-version, not Authorization.
-		if passthroughUsesAnthropicAPIKey(provider, upstreamURL) {
+		if passthroughUsesAnthropicAPIKey(effectiveProvider, upstreamURL) {
 			upstreamReq.Header.Set("x-api-key", key)
 			if strings.TrimSpace(upstreamReq.Header.Get("anthropic-version")) == "" {
 				upstreamReq.Header.Set("anthropic-version", "2023-06-01")
 			}
-		} else if provider == "azure" {
+		} else if effectiveProvider == "azure" {
 			upstreamReq.Header.Set("api-key", key)
 		} else {
 			upstreamReq.Header.Set("Authorization", upstreamAuth)
@@ -2305,37 +2315,30 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	fmt.Fprintf(os.Stderr, "[responses-api] routing decision: provider=%s model=%s base=%s apiKeyLen=%d\n",
 		decision.Provider, decision.Model, decision.TargetURL, len(decision.APIKey))
 
-	// Build a bifrostProvider from the routing decision
-	providerKey, mapErr := mapProviderKey(decision.Provider)
-	if mapErr != nil {
-		fmt.Fprintf(os.Stderr, "[responses-api] unknown provider %q, falling through\n", decision.Provider)
-		r.Body = io.NopCloser(bytes.NewReader(originalBody))
-		p.handlePassthrough(w, r)
-		return
-	}
-
+	// Build a bifrostProvider using OpenAI provider type which has the
+	// built-in Responses API → chat/completions bridge. The baseURL
+	// points at the target's chat/completions endpoint. For Azure-style
+	// endpoints, extra_headers injects the api-key header.
 	apiKey := decision.APIKey
 	baseURL := decision.TargetURL
 
-	// For Azure, extract the base endpoint (without /openai/deployments/<model>)
-	azureEndpoint := baseURL
-	if providerKey == schemas.Azure {
-		if idx := strings.Index(baseURL, "/openai/"); idx > 0 {
-			azureEndpoint = baseURL[:idx]
+	extraHeaders := map[string]string{}
+	if decision.ExtraHeaders != nil {
+		for k, v := range decision.ExtraHeaders {
+			extraHeaders[k] = v
 		}
+	}
+	// Azure-style endpoints need api-key header instead of Authorization
+	if strings.ToLower(strings.TrimSpace(decision.Provider)) == "azure" && apiKey != "" {
+		extraHeaders["api-key"] = apiKey
 	}
 
 	bp := &bifrostProvider{
-		providerKey:  providerKey,
+		providerKey:  schemas.OpenAI,
 		model:        decision.Model,
 		apiKey:       apiKey,
 		baseURL:      baseURL,
-		extraHeaders: map[string]string{"api-key": apiKey},
-	}
-	if providerKey == schemas.Azure {
-		bp.azure = &config.AzureKeyConfig{
-			Endpoint: azureEndpoint,
-		}
+		extraHeaders: extraHeaders,
 	}
 
 	fmt.Fprintf(os.Stderr, "[responses-api] bifrost provider=%s model=%s base=%s\n",

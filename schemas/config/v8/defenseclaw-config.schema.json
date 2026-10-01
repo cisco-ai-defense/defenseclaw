@@ -3569,6 +3569,16 @@
               "api_key_env": {
                 "$ref": "#/$defs/envName"
               },
+              "extra_headers": {
+                "type": "object",
+                "description": "Additional HTTP headers to set on the upstream request (e.g. api-key for Azure-compatible endpoints).",
+                "additionalProperties": { "type": "string" }
+              },
+              "extra_body": {
+                "type": "object",
+                "description": "Additional fields to inject into the upstream request body (e.g. user appkey).",
+                "additionalProperties": { "type": "string" }
+              },
               "capabilities": {
                 "$ref": "#/$defs/stringList"
               }

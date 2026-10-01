@@ -1,0 +1,31 @@
+guardrail:
+  connector: claudecode
+  proxy_mode: hybrid
+  port: 4000
+  allow_unknown_llm_domains: true
+  enabled: true
+  detection_strategy: regex_judge
+  detection_strategy_prompt: regex_judge
+  detection_strategy_completion: regex_judge
+  scanner_mode: local
+  judge:
+    enabled: true
+    hook_connectors:
+      - claudecode
+  connectors:
+    claudecode:
+      mode: action
+      hook_fail_mode: open
+llm:
+  base_url: https://bedrock-runtime.us-east-1.amazonaws.com
+  api_key_env: AWS_BEARER_TOKEN_BEDROCK
+  model: global.anthropic.claude-opus-4-6-v1
+  provider: anthropic
+config_version: 8
+gateway:
+  token_env: DEFENSECLAW_GATEWAY_TOKEN
+claw:
+  mode: claudecode
+observability: {}
+routing:
+  enabled: false
