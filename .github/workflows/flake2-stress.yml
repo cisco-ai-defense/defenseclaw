@@ -1,0 +1,75 @@
+# Temporary stress run for the Windows hook adapter deadline tests (wip branch only).
+name: flake2 adapter deadline stress
+
+on:
+  push:
+    branches: [wip/flake-2-stress]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  stress:
+    name: ${{ matrix.variant }} / rep ${{ matrix.rep }}
+    runs-on: windows-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: before, rep: 1 }
+          - { variant: before, rep: 2 }
+          - { variant: before-adapters-new-test, rep: 1 }
+          - { variant: after, rep: 1 }
+          - { variant: after, rep: 2 }
+          - { variant: after, rep: 3 }
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Select variant
+        run: |
+          $hooks = @('internal/gateway/connector/hooks/copilot-hook.ps1', 'internal/gateway/connector/hooks/cursor-hook.ps1')
+          switch ('${{ matrix.variant }}') {
+            'before' { git checkout 9bc625507 -- @hooks 'internal/gateway/connector/cursor_hook_adapter_windows_test.go' }
+            'before-adapters-new-test' { git checkout 9bc625507 -- @hooks }
+            default { }
+          }
+          git status --short
+      - name: Build connector test binary
+        run: go test -c -o "$env:RUNNER_TEMP\conn.test.exe" ./internal/gateway/connector
+      - name: Run deadline tests under CPU load
+        run: |
+          $burners = @()
+          $n = [int]$env:NUMBER_OF_PROCESSORS
+          for ($b = 0; $b -lt $n; $b++) {
+            $burners += Start-Process -FilePath 'pwsh.exe' -ArgumentList '-NoProfile', '-Command', 'while ($true) { $x = 1; for ($i = 0; $i -lt 100000; $i++) { $x = ($x * 7) % 1000003 } }' -WindowStyle Hidden -PassThru
+          }
+          Write-Host "started $n CPU load processes"
+          $log = Join-Path $env:RUNNER_TEMP 'stress.log'
+          $run = '^(TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen|TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed)$'
+          try {
+            & "$env:RUNNER_TEMP\conn.test.exe" '-test.v' '-test.count=4' '-test.cpu=1,2,8' '-test.timeout=45m' "-test.run=$run" *>&1 | Tee-Object -FilePath $log | Out-Null
+            Write-Host "test exit code $LASTEXITCODE"
+          }
+          finally {
+            foreach ($bp in $burners) { Stop-Process -Id $bp.Id -Force -ErrorAction SilentlyContinue }
+          }
+          $text = Get-Content -LiteralPath $log
+          $text | Select-String -Pattern '^\s*--- (PASS|FAIL)|adapter (finished|exceeded)|read helper PID' | ForEach-Object { $_.Line.Trim() }
+          foreach ($name in @('TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen', 'TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed')) {
+            $pass = @($text | Select-String -Pattern "--- PASS: $name").Count
+            $fail = @($text | Select-String -Pattern "--- FAIL: $name").Count
+            Write-Host "SUMMARY variant=${{ matrix.variant }} rep=${{ matrix.rep }} $name pass=$pass fail=$fail"
+          }
+          $text | Select-Object -Last 5
+          exit 0
