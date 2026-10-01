@@ -109,6 +109,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 	if err != nil {
 		return nil, err
 	}
+	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
 	if normalizeHookFailMode(failMode) != "closed" {
 		return nil, fmt.Errorf("Windows Cursor enterprise hooks must use fail mode closed")
 	}
@@ -135,7 +136,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 			}
 			continue
 		}
-		filtered := removeCursorHookCommands(entries, command, legacyCommand)
+		filtered := removeCursorHookCommands(entries, command, legacyCommand, previousEncodedCommand)
 		if len(filtered) != len(entries) {
 			hooks[event] = filtered
 		}
@@ -154,10 +155,22 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 // VerifyWindowsCursorEnterpriseHooks validates exact writer/reader parity for
 // the protected machine configuration while allowing unrelated hook entries.
 func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) error {
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, false)
+}
+
+// VerifyWindowsCursorEnterpriseHooksForMigration accepts the exact encoded
+// command written by the immediately preceding release while reading a
+// protected policy before upgrade. New policies use strict verification.
+func VerifyWindowsCursorEnterpriseHooksForMigration(existing []byte, adapterPath, failMode string) error {
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, true)
+}
+
+func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string, allowPrevious bool) error {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return err
 	}
+	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
 	if normalizeHookFailMode(failMode) != "closed" {
 		return fmt.Errorf("Windows Cursor enterprise hooks must use fail mode closed")
 	}
@@ -173,6 +186,7 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		return err
 	}
 
+	selectedCommand := ""
 	for _, event := range cursorHookEvents {
 		entries, ok := cursorHookEntryList(hooks[event])
 		if !ok {
@@ -184,13 +198,20 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 			if entryCommand == legacyCommand {
 				return fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
 			}
-			if entryCommand != command {
+			if entryCommand == previousEncodedCommand && !allowPrevious {
+				return fmt.Errorf("Cursor hooks event %q still has the previous encoded DefenseClaw command", event)
+			}
+			if entryCommand != command && !(allowPrevious && entryCommand == previousEncodedCommand) {
 				continue
 			}
 			owned++
-			if !isExactWindowsCursorEnterpriseHookEntry(raw, command) {
+			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand) {
 				return fmt.Errorf("Cursor hooks event %q has a drifted DefenseClaw entry", event)
 			}
+			if selectedCommand != "" && selectedCommand != entryCommand {
+				return fmt.Errorf("Cursor hooks event %q mixes DefenseClaw command versions", event)
+			}
+			selectedCommand = entryCommand
 		}
 		if owned != 1 {
 			return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want exactly 1", event, owned)
@@ -206,7 +227,7 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		}
 		for _, entry := range entries {
 			entryCommand := cursorHookCommand(entry)
-			if entryCommand == command || entryCommand == legacyCommand {
+			if entryCommand == command || entryCommand == legacyCommand || entryCommand == previousEncodedCommand {
 				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event)
 			}
 		}
@@ -223,6 +244,7 @@ func RemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]
 	if err != nil {
 		return nil, err
 	}
+	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
 	cfg, err := decodeCursorHooksJSON(existing)
 	if err != nil {
 		return nil, err
@@ -237,7 +259,7 @@ func RemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]
 		if !ok {
 			continue
 		}
-		filtered := removeCursorHookCommands(entries, command, legacyCommand)
+		filtered := removeCursorHookCommands(entries, command, legacyCommand, previousEncodedCommand)
 		if len(filtered) == len(entries) {
 			continue
 		}
@@ -369,16 +391,32 @@ func windowsCursorEnterpriseHookCommands(adapterPath string) (string, string, er
 	// host. Windows PowerShell decodes $input before an encoded command can set
 	// Console.InputEncoding, so reading $input would corrupt non-ASCII Cursor
 	// JSON on machines whose OEM code page is not UTF-8. Read the inherited
-	// standard-input stream as strict UTF-8 instead, then pass the decoded JSON
-	// to the managed adapter as one PowerShell pipeline object.
+	// standard-input stream as strict UTF-8 instead. Remove a leading UTF-8 BOM
+	// when present. An outer Windows PowerShell host can also consume the first
+	// opening brace before the child reads stdin; restore it only when the next
+	// character begins a JSON object key. The gateway still validates the JSON.
+	powerShell := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/")
+	script := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
+		"[Text.UTF8Encoding]::new($false,$true),$false);" +
+		"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
+		"if($payload.StartsWith([string][char]0xFEFF)){$payload=$payload.Substring(1)};" +
+		"if($payload.TrimStart().StartsWith([string][char]0x22)){$payload=([string][char]0x7B)+$payload};" +
+		"$payload | & " + powershellQuoteLiteral(adapterPath)
+	command := powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+	legacyCommand := "& " + powershellQuoteLiteral(adapterPath)
+	return command, legacyCommand, nil
+}
+
+// previousWindowsCursorEnterpriseHookCommand reconstructs the exact
+// shell-neutral command installed before leading UTF-8 BOM handling was added.
+// It is recognized only for protected-policy migration and removal.
+func previousWindowsCursorEnterpriseHookCommand(adapterPath string) string {
 	powerShell := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/")
 	script := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
 		"[Text.UTF8Encoding]::new($false,$true),$false);" +
 		"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
 		"$payload | & " + powershellQuoteLiteral(adapterPath)
-	command := powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
-	legacyCommand := "& " + powershellQuoteLiteral(adapterPath)
-	return command, legacyCommand, nil
+	return powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
 func validateAbsoluteLocalWindowsPath(label, value string) error {
