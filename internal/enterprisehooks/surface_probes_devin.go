@@ -34,6 +34,31 @@ type desktopSurfaceProbe func(goos, home, programFiles string, present func(stri
 // desktopSurfaceProbes are the desktop apps that run a connector's agent.
 var desktopSurfaceProbes = map[string]desktopSurfaceProbe{
 	"devin": devinDesktopSurface,
+	"kiro":  kiroInstallSurface,
+}
+
+// kiroInstallSurface finds a Windows Kiro install whose version discovery
+// can fail: kiro-cli.exe before its first run (the run folder names the
+// version) and the Kiro IDE (its product.json). Unix discovery reads the
+// kiro-cli and IDE versions directly.
+func kiroInstallSurface(goos, home, programFiles string, present func(string) bool) string {
+	if goos != "windows" {
+		return ""
+	}
+	product := filepath.Join("Kiro", "resources", "app", "product.json")
+	candidates := []string{
+		filepath.Join(home, "AppData", "Local", "Kiro-Cli", "kiro-cli.exe"),
+		filepath.Join(home, "AppData", "Local", "Programs", product),
+	}
+	if programFiles != "" {
+		candidates = append(candidates, filepath.Join(programFiles, product))
+	}
+	for _, candidate := range candidates {
+		if present(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func devinDesktopSurface(goos, home, programFiles string, present func(string) bool) string {

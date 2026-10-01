@@ -63,6 +63,7 @@ func RegisterWindowsStandalonePerUserConnectors(registry *connector.Registry) {
 	registry.RegisterBuiltin(connector.NewAntigravityConnector())
 	registry.RegisterBuiltin(connector.NewDevinConnector())
 	registry.RegisterBuiltin(connector.NewHermesConnector())
+	registry.RegisterBuiltin(connector.NewKiroConnector())
 	registry.RegisterBuiltin(connector.NewOpenCodeConnector())
 	registry.RegisterBuiltin(connector.NewAMPConnector())
 }

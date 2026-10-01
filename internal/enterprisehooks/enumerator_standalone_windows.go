@@ -157,6 +157,9 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	if row == nil {
 		return false
 	}
+	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; !known || prev.IsEnabled() {
+		rowContext.reportKiroIDEBelowFloor(row)
+	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
 		// A disabled row is an administrator decision the guardian never
 		// installs; keep it so rediscovery cannot re-enable it.

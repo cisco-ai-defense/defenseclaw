@@ -4572,6 +4572,7 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.kiro/settings/cli.json and ~/.kiro/settings/mcp.json are discovery-only",
         "Kiro IDE and Kiro CLI share .kiro/hooks; setup writes ~/.kiro/hooks/defenseclaw.json",
         "CLI 2.x uses a defenseclaw agent (built-in kiro_default cannot carry hooks); /agent swap defenseclaw",
+        "A custom chat.defaultAgent also gets the hooks, and Kiro IDE hides agents with hooks; doctor reports it",
         "Optional ACP enforcement is configured with `defenseclaw acp setup --agent kiro`",
     ),
 }

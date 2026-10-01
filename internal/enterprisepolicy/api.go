@@ -189,8 +189,6 @@ func kiroRouteDetail(route string, state *State) {
 	switch route {
 	case RoutePerUser:
 		state.detail("kiro: the guardian writes each enrolled user's ~/.kiro/hooks/defenseclaw.json (Kiro IDE, kiro-cli --v3) and the CLI 2.x defenseclaw agent; `defenseclaw-gateway enterprise acp` stays available for editors that start Kiro over ACP")
-	case RouteACP:
-		state.detail("kiro: the Windows guardian does not enroll Kiro; protect it with `defenseclaw-gateway enterprise acp`")
 	}
 }
 

@@ -4395,6 +4395,59 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
     )
 
 
+_KIRO_BUILT_IN_AGENTS = frozenset({"kiro_default", "kiro_help", "kiro_planner"})
+
+
+def _check_kiro_custom_default_agent(r: _DoctorResult) -> None:
+    """Report a custom Kiro CLI default agent and whether it carries hooks.
+
+    ``~/.kiro/hooks/defenseclaw.json`` is DefenseClaw's authoritative Kiro
+    registration: Kiro IDE 1.0.182+ and ``kiro-cli --v3`` read it for every
+    agent. Bare ``kiro-cli`` 2.x instead runs the agent ``chat.defaultAgent``
+    names. A per-user setup adds DefenseClaw's hooks to a custom default agent,
+    and Kiro IDE hides agents whose config holds ``hooks`` (the field is CLI
+    only); a managed install never edits that agent, so bare ``kiro-cli`` runs
+    it without DefenseClaw's hooks. Both are reported, never changed here.
+    """
+    home = connector_home("kiro")
+    try:
+        with open(os.path.join(home, "settings", "cli.json"), encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except (OSError, ValueError):
+        return
+    name = settings.get("chat.defaultAgent") if isinstance(settings, dict) else None
+    if not isinstance(name, str):
+        return
+    name = name.strip()
+    if name in ("", "defenseclaw", ".", "..") or name in _KIRO_BUILT_IN_AGENTS or "/" in name or "\\" in name:
+        return
+    agent = os.path.join(home, "agents", name + ".json")
+    if _file_references_marker(agent, _HOOK_HEALTH_FALLBACK["kiro"][1]):
+        _emit(
+            "warn",
+            "Kiro default agent",
+            f"custom agent {name!r} ({agent}) carries DefenseClaw hooks for bare kiro-cli, so Kiro IDE "
+            "hides it (the IDE ignores agents that contain hooks); IDE sessions use "
+            "~/.kiro/hooks/defenseclaw.json",
+            r=r,
+            reason_code="kiro_custom_agent_hooked",
+            remediation=(
+                "Keep the agent for kiro-cli, or use `kiro-cli --v3` / `kiro-cli --agent defenseclaw` "
+                "and remove the hooks from the agent to show it in the IDE again"
+            ),
+        )
+        return
+    _emit(
+        "warn",
+        "Kiro default agent",
+        f"bare kiro-cli runs custom agent {name!r} ({agent}), which carries no DefenseClaw hooks; "
+        "~/.kiro/hooks/defenseclaw.json covers Kiro IDE and kiro-cli --v3",
+        r=r,
+        reason_code="kiro_custom_agent_unhooked",
+        remediation="Run `kiro-cli --v3` or `kiro-cli --agent defenseclaw`",
+    )
+
+
 def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     """Report whether the file at ``path`` contains any ``markers`` substring.
 
@@ -9997,6 +10050,8 @@ def _check_connector_inventory(
         _check_kiro_global_scope(r)
     else:
         _emit("pass", "Connector scope", "global user config", r=r)
+    if connector == "kiro":
+        _check_kiro_custom_default_agent(r)
 
     # Skill dirs (scoped to this connector so a multi-connector loop
     # inventories each connector's own layout, not just the primary's).

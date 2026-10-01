@@ -269,17 +269,11 @@ func RouteFor(connector, goos string) string {
 	case "kiro":
 		// Kiro has no vendor mechanism that delivers hooks from a machine
 		// location (its managed-settings.json carries permission rules
-		// only), so on Linux and macOS the standalone guardian registers
-		// the hook in each enrolled user's global ~/.kiro/hooks, which Kiro
-		// IDE and kiro-cli --v3 merge with every other scope, plus the CLI
-		// 2.x agent. The Windows guardian does not enroll Kiro: kiro-cli.exe
-		// records its version nowhere DefenseClaw can read without running
-		// it, and Windows discovery runs nothing. Kiro there is protected
-		// through `defenseclaw-gateway enterprise acp`, which stays
-		// available on every OS for editors that start Kiro over ACP.
-		if goos == "windows" {
-			return RouteACP
-		}
+		// only), so the standalone guardian registers the hook in each
+		// enrolled user's global ~/.kiro/hooks, which Kiro IDE and kiro-cli
+		// --v3 merge with every other scope, plus the CLI 2.x agent.
+		// `defenseclaw-gateway enterprise acp` stays available on every OS
+		// for editors that start Kiro over ACP.
 		return RoutePerUser
 	case "openclaw", "zeptoclaw":
 		return RouteUnsupported

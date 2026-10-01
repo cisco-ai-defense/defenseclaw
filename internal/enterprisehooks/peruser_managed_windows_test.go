@@ -327,12 +327,12 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 	}
 
 	// The managed runtime accepts exactly the per-user connector names.
-	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "opencode", "amp"} {
+	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "kiro", "opencode", "amp"} {
 		if got, err := canonicalWindowsManagedRuntimeConnector(name); err != nil || got != name {
 			t.Fatalf("%s canonical = %q err=%v", name, got, err)
 		}
 	}
-	for _, name := range []string{"Copilot", "openhands", "kiro"} {
+	for _, name := range []string{"Copilot", "openhands", "Kiro"} {
 		if _, err := canonicalWindowsManagedRuntimeConnector(name); err == nil {
 			t.Fatalf("%s accepted as a managed runtime connector", name)
 		}
@@ -354,7 +354,7 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 		version, _ := standaloneWindowsAgentVersionExplain(home, name)
 		return version
 	}
-	for _, name := range []string{"copilot", "opencode", "amp", "devin", "hermes", "antigravity"} {
+	for _, name := range []string{"copilot", "opencode", "amp", "devin", "hermes", "antigravity", "kiro"} {
 		if got := discover(name); got != "" {
 			t.Fatalf("%s on an empty profile = %q", name, got)
 		}
@@ -392,5 +392,29 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 	}
 	if got := discover("antigravity"); got != "" {
 		t.Fatalf("antigravity without agy.exe = %q", got)
+	}
+
+	// Kiro: an IDE at or above the global-hooks floor enrolls a user whose
+	// kiro-cli has not run yet; the run copy matching kiro-cli.exe wins.
+	ide := filepath.Join(home, "AppData", "Local", "Programs", "Kiro", "resources", "app", "product.json")
+	write(ide, `{"nameShort":"Kiro","applicationName":"kiro","version":"1.0.170"}`)
+	if got := discover("kiro"); got != "" {
+		t.Fatalf("kiro with an IDE below the floor = %q", got)
+	}
+	write(ide, `{"nameShort":"Kiro","applicationName":"kiro","version":"1.0.190"}`)
+	kiroCLI := filepath.Join(home, "AppData", "Local", "Kiro-Cli")
+	write(filepath.Join(kiroCLI, "kiro-cli.exe"), "MZ-current")
+	if got := discover("kiro"); got != "1.0.190"+KiroIDEVersionSuffix {
+		t.Fatalf("kiro IDE only = %q", got)
+	}
+	write(filepath.Join(kiroCLI, "run", "chat-cli-2.24.1.exe"), "MZ-current")
+	write(filepath.Join(kiroCLI, "run", "chat-cli-2.30.0.exe"), "MZ-other")
+	if got := discover("kiro"); got != "2.24.1" {
+		t.Fatalf("kiro-cli version = %q, want the run copy matching kiro-cli.exe", got)
+	}
+	for version, admitted := range map[string]bool{"2.24.1": true, "2.20.0": false, "1.0.190" + KiroIDEVersionSuffix: true, "1.0.170" + KiroIDEVersionSuffix: false} {
+		if ok, reason := windowsStandaloneHookContractAdmitted("kiro", version); ok != admitted {
+			t.Fatalf("kiro %s admitted = %v (%s), want %v", version, ok, reason, admitted)
+		}
 	}
 }

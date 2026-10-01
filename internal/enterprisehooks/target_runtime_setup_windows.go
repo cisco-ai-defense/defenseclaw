@@ -603,6 +603,11 @@ var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCle
 		backups:    []string{"config.yaml.json", "shell-hooks-allowlist.json.json"},
 		generation: true,
 	},
+	"kiro": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("kiro", append([]string{"kiro-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"hooks-global.json", "agent-defenseclaw.json", "settings-cli.json"},
+		generation: true,
+	},
 	"opencode": {
 		root:       []string{"agent_selection.json", "agent_selection.json.lock", ".hook-api-token-publish.lock"},
 		hooks:      windowsManagedRuntimeRuntimeLeaves("opencode"),

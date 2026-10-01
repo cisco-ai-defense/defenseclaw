@@ -1673,6 +1673,13 @@ func teardownWindowsGenericManagedTarget(
 				return fmt.Errorf("enterprise hooks: inspect connector %s plugin %s after teardown: %w", name, path, err)
 			}
 		}
+	} else if name == "kiro" {
+		// Kiro's Windows hook command carries the hook binary inside an
+		// encoded PowerShell bridge, which the generic command needles
+		// cannot find; its own check reads every file it registers in.
+		if err := target.conn.VerifyClean(target.setup); err != nil {
+			return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration: %w", name, err)
+		}
 	} else {
 		var err error
 		if remaining, err = connector.OwnedHookConfigReferences(target.conn, target.setup); err != nil {

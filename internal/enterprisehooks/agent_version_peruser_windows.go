@@ -65,6 +65,8 @@ func discoverWindowsStandalonePerUserAgentVersion(profileHome, connectorName str
 		return discoverWindowsHermesAgentVersion(profileHome)
 	case "antigravity":
 		return discoverWindowsAntigravityAgentVersion(profileHome)
+	case "kiro":
+		return discoverWindowsKiroAgentVersion(profileHome)
 	default:
 		return ""
 	}
