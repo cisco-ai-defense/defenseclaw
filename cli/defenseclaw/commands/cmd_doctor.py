@@ -5731,6 +5731,9 @@ def _windows_command_line_argv(command_line: str) -> tuple[str, ...] | None:
 
 
 _HERMES_HOST_EXECUTABLES = frozenset({"hermes", "hermes-agent"})
+_HERMES_LAUNCHERS = frozenset(
+    {"uv", "uvx", "pipx", "env", "poetry", "pdm", "hatch", "rye", "pixi", "conda", "mamba", "micromamba"}
+)
 
 
 def _hermes_host_running() -> bool | None:
@@ -5762,8 +5765,16 @@ def _hermes_host_running() -> bool | None:
         if len(fields) < 3 or fields[1] != uid or fields[0] in own:
             continue
         args = fields[2:]
+        program = os.path.basename(args[0]).lower()
+        if program in _HERMES_HOST_EXECUTABLES:
+            return True
+        # Only an interpreter or launcher can run Hermes under another name.
+        # Any other program (an agent whose prompt mentions Hermes, an
+        # editor) is not a Hermes host, whatever words its arguments hold.
+        if not (program.startswith("python") or program in _HERMES_LAUNCHERS):
+            continue
         # A script launcher puts the interpreter first: python .../bin/hermes.
-        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in args[:2]):
+        if len(args) > 1 and os.path.basename(args[1]).lower() in _HERMES_HOST_EXECUTABLES:
             return True
         # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
         # that is not proof of absence.
