@@ -557,6 +557,28 @@ rights must be administrator-controlled, the module leaf must have no
 untrusted write-like ACE, and Authenticode must be valid unless a disposable
 test run explicitly uses `-AllowUnsigned`.
 
+A valid signature is not sufficient on its own. The module, the installer, and
+every payload executable and library must be signed by a certificate whose
+subject has exactly one common name (CN), and that common name is exactly
+`Cisco Systems, Inc.`. The CN attribute itself is compared, not the Windows
+display name, which shows the OU or O instead when a certificate has no CN.
+An organization that re-signs the payload with its own code-signing
+certificate names that certificate with
+`-AdditionalTrustedSignerSha256 <sha256>[,<sha256>...]` (CLI:
+`--additional-trusted-signer-sha256`, repeatable) on every lifecycle action for
+that deployment, including `Status`, `Repair`, and `Uninstall`. Each value is
+the SHA-256 of the DER-encoded signing certificate, for example
+`(Get-FileHash -Algorithm SHA256 .\signer.cer).Hash`. A 40-character SHA-1
+thumbprint is rejected, and the parameter cannot be combined with
+`-AllowUnsigned`.
+
+When the CMID broker adopts `cmidapi.dll`, it verifies the embedded
+Authenticode signature and requires exactly one subject common name,
+`Cisco Systems, Inc.`. The broker keeps the verified file open without write
+or delete sharing until the first refresh loads it. A missing or rejected
+library leaves the broker running and managed inspection unavailable; later
+requests retry discovery after Cloud Management is installed or repaired.
+
 The unsigned exception is itself fail-closed before module import. It is valid
 only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`,
 `Reconcile`, `Status`, `Verify`, `Uninstall`), and only when the service names
