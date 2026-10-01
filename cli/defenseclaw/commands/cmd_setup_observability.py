@@ -260,12 +260,12 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     click.echo(f"  {mode}{preset.display_name}: {changed}")
     echo_setup_notes(preset, warnings)
 
-    if app.logger and not dry_run:
-        app.logger.log_action(
-            ACTION_SETUP_OBSERVABILITY,
-            "config",
-            f"action=add-v8 preset={preset.id}",
-        )
+    if not dry_run:
+        # The shared setup audit says plainly, without a traceback, when the
+        # gateway is down (for example after a failed auto-restart).
+        from defenseclaw.commands.cmd_setup import _log_setup_action
+
+        _log_setup_action(app, ACTION_SETUP_OBSERVABILITY, f"action=add-v8 preset={preset.id}", allow_offline=False)
 
 
 # ---------------------------------------------------------------------------

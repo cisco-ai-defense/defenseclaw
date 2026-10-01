@@ -365,10 +365,7 @@ func TestWindowsManagedRuntimeFinalizeNeverReplacesCollision(t *testing.T) {
 	}
 }
 
-// Content cleanup did not write is never deleted, and it no longer leaves the
-// rollback pending: the root holding it is kept aside under
-// .defenseclaw.rollback-<random> (WIN-R1-20).
-func TestWindowsManagedRuntimeCleanupKeepsUnexpectedContentAside(t *testing.T) {
+func TestWindowsManagedRuntimeCleanupRejectsUnexpectedContent(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -389,22 +386,17 @@ func TestWindowsManagedRuntimeCleanupKeepsUnexpectedContentAside(t *testing.T) {
 	if err := os.WriteFile(unexpected, []byte("preserve"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	claims, err = CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
-	if err != nil {
-		t.Fatalf("cleanup with unexpected target content stayed pending: %v", err)
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
+		t.Fatal("cleanup deleted or accepted unexpected target content")
 	}
-	if len(claims) != 1 || claims[0].State != windowsManagedRuntimeStateAbsent {
-		t.Fatalf("cleanup claims = %+v, want the managed root absent", claims)
-	}
-	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
-		t.Fatalf("managed root still in place: %v", err)
-	}
-	kept, err := filepath.Glob(filepath.Join(home, windowsManagedRuntimeRollbackPrefix+"*", "user-owned.txt"))
-	if err != nil || len(kept) != 1 {
-		t.Fatalf("kept content = %v (err=%v), want one root kept aside", kept, err)
-	}
-	if data, err := os.ReadFile(kept[0]); err != nil || string(data) != "preserve" {
+	if data, err := os.ReadFile(unexpected); err != nil || string(data) != "preserve" {
 		t.Fatalf("unexpected target content changed: data=%q err=%v", data, err)
+	}
+	if err := os.Remove(unexpected); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
+		t.Fatalf("cleanup after removing unexpected content: %v", err)
 	}
 }
 
@@ -565,26 +557,14 @@ func TestWindowsManagedRuntimeCleanupReportsPartialMultiRootFailureConservativel
 		t.Fatal(err)
 	}
 	request.Claims = final
-	// A live handle on the second root makes its cleanup fail and retry.
-	extendedRoot, err := winpath.Extended(plan.Roots[1].DataDir)
-	if err != nil {
+	unexpected := filepath.Join(plan.Roots[1].DataDir, "preserve-me.txt")
+	if err := os.WriteFile(unexpected, []byte("user evidence"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	rootPtr, err := windows.UTF16PtrFromString(extendedRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootWriter, err := windows.CreateFile(rootPtr, windows.FILE_WRITE_DATA|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err != nil {
-		t.Fatalf("open live second-root handle: %v", err)
 	}
 
 	partial, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
 	if err == nil {
-		_ = windows.CloseHandle(rootWriter)
-		t.Fatal("multi-root cleanup proceeded past a live root handle")
+		t.Fatal("multi-root cleanup accepted unexpected content")
 	}
 	if len(partial) != 2 || partial[0].State != windowsManagedRuntimeStateAbsent {
 		t.Fatalf("partial cleanup report = %+v, want first root verified absent", partial)
@@ -592,17 +572,17 @@ func TestWindowsManagedRuntimeCleanupReportsPartialMultiRootFailureConservativel
 	if partial[1].State != windowsManagedRuntimeStateCanonical || partial[1].Identity != final[1].Identity || !partial[1].Created {
 		t.Fatalf("failed root was falsely reported absent: got %+v want canonical identity %s", partial[1], final[1].Identity)
 	}
-	if _, statErr := os.Lstat(plan.Roots[1].DataDir); statErr != nil {
-		t.Fatalf("second root changed by its failed cleanup: %v", statErr)
+	if data, readErr := os.ReadFile(unexpected); readErr != nil || string(data) != "user evidence" {
+		t.Fatalf("unexpected content changed: data=%q err=%v", data, readErr)
 	}
 	if _, statErr := os.Lstat(plan.Roots[0].DataDir); !os.IsNotExist(statErr) {
 		t.Fatalf("first root was not removed before second-root failure: %v", statErr)
 	}
-	if err := windows.CloseHandle(rootWriter); err != nil {
+	if err := os.Remove(unexpected); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
-		t.Fatalf("finish multi-root cleanup after the handle closed: %v", err)
+		t.Fatalf("finish multi-root cleanup after preserving evidence: %v", err)
 	}
 }
 
@@ -673,8 +653,26 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 		known = append(known, path)
 	}
 
-	// Unknown content is kept aside instead; see
-	// TestWindowsManagedRuntimeCleanupKeepsUnexpectedContentAside.
+	// An unknown nested file must reject the entire tree before even one exact
+	// root/lock/token/script artifact is deleted.
+	unexpected := filepath.Join(plan.Roots[0].DataDir, "hooks", "user-evidence.txt")
+	if err := os.WriteFile(unexpected, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
+		t.Fatal("cleanup accepted an unknown post-reconcile hook file")
+	}
+	for _, path := range known {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("full-tree preflight deleted %s before rejecting unknown content: %v", path, err)
+		}
+	}
+	if data, err := os.ReadFile(unexpected); err != nil || string(data) != "preserve" {
+		t.Fatalf("unknown nested evidence changed: data=%q err=%v", data, err)
+	}
+	if err := os.Remove(unexpected); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
 		t.Fatalf("cleanup exact multi-connector fresh footprint: %v", err)
 	}
@@ -1016,14 +1014,20 @@ func TestWindowsManagedRuntimeCleanupRejectsHardlinkedReservedFile(t *testing.T)
 	if err := os.Link(outside, linked); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
-		t.Fatalf("cleanup with a hardlinked reserved name stayed pending: %v", err)
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
+		t.Fatal("cleanup accepted a hardlinked reserved inventory name")
 	}
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "outside" {
 		t.Fatalf("outside hardlink target changed: data=%q err=%v", data, err)
 	}
-	if kept, err := filepath.Glob(filepath.Join(home, windowsManagedRuntimeRollbackPrefix+"*", "inventory.db")); err != nil || len(kept) != 1 {
-		t.Fatalf("hardlinked evidence was not kept aside: %v (err=%v)", kept, err)
+	if _, err := os.Lstat(linked); err != nil {
+		t.Fatalf("hardlinked evidence was deleted: %v", err)
+	}
+	if err := os.Remove(linked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
+		t.Fatalf("cleanup after hardlink evidence removal: %v", err)
 	}
 }
 
@@ -1571,9 +1575,82 @@ func withWindowsManagedRuntimeRestrictedTarget(t *testing.T, fn func()) {
 	safeUnlock = true
 }
 
+// withWindowsStandaloneProcess runs the test as the standalone profile, the
+// only profile whose rollback keeps refused content aside (WIN-R1-20).
+func withWindowsStandaloneProcess(t *testing.T) {
+	t.Helper()
+	previous := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+}
+
+// On the standalone profile a root the cleanup refuses (content it did not
+// write, or a root DACL the account rewrote) is kept aside under
+// .defenseclaw.rollback-<random> with nothing deleted, and the rollback
+// finishes instead of staying pending (WIN-R1-20).
+func TestWindowsManagedRuntimeStandaloneCleanupKeepsRefusedRootAside(t *testing.T) {
+	withWindowsStandaloneProcess(t)
+	target := currentWindowsTestSID(t)
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(root string) error{
+		"unexpected content": func(root string) error {
+			return os.WriteFile(filepath.Join(root, "user-owned.txt"), []byte("preserve"), 0o600)
+		},
+		"rewritten root DACL": func(root string) error {
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+				windowsManagedRuntimeTestAccess(target, 0x001f01ff),
+				windowsManagedRuntimeTestAccess(users, 0x001200a9),
+			}, nil)
+			if err != nil {
+				return err
+			}
+			return windows.SetNamedSecurityInfo(root, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := newWindowsTargetOwnedTestHome(t, target)
+			manifest := windowsManagedRuntimeTestManifest(home, target)
+			digest := strings.Repeat("f", 64)
+			plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := StageWindowsManagedRuntimeRoots(plan, manifest, digest, func([]WindowsManagedRuntimeClaim) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := WindowsManagedRuntimeRequest{SchemaVersion: WindowsManagedRuntimeRequestSchemaVersion, Plan: plan, Claims: claims}
+			if request.Claims, err = FinalizeWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(home, ".defenseclaw")
+			if err := change(root); err != nil {
+				t.Fatal(err)
+			}
+			claims, err = CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
+			if err != nil {
+				t.Fatalf("refused root left the rollback pending: %v", err)
+			}
+			if len(claims) != 1 || claims[0].State != windowsManagedRuntimeStateAbsent {
+				t.Fatalf("cleanup claims = %+v, want the managed root absent", claims)
+			}
+			if _, err := os.Lstat(root); !os.IsNotExist(err) {
+				t.Fatalf("managed root still in place: %v", err)
+			}
+			if kept, err := filepath.Glob(filepath.Join(home, windowsManagedRuntimeRollbackPrefix+"*")); err != nil || len(kept) != 1 {
+				t.Fatalf("kept roots = %v (err=%v), want one root kept aside", kept, err)
+			}
+		})
+	}
+}
+
 // A hook file whose DACL a guardian retry rewrote must not wedge the
-// rollback (WIN-R1-20): the hook contract accepts it, the backup one still
-// requires its exact DACL.
+// standalone rollback (WIN-R1-20); the Secure Client profile and connector
+// backups still require the exact DACL.
 func TestWindowsManagedRuntimeCleanupAcceptsHookFileWithRewrittenDACL(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	path := filepath.Join(t.TempDir(), "kiro-hook.sh")
@@ -1612,6 +1689,10 @@ func TestWindowsManagedRuntimeCleanupAcceptsHookFileWithRewrittenDACL(t *testing
 	}
 	defer windows.CloseHandle(handle)
 	info := windowsManagedRuntimeTarget{sid: target}
+	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupHookFile, path); err == nil {
+		t.Fatal("Secure Client profile accepted a hook file with a rewritten DACL")
+	}
+	withWindowsStandaloneProcess(t)
 	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupHookFile, path); err != nil {
 		t.Fatalf("hook file with a rewritten DACL was refused: %v", err)
 	}

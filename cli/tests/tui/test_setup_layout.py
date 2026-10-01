@@ -202,6 +202,7 @@ def test_every_tab_fits_at_80_columns_with_unread_badges(monkeypatch) -> None:
         for name, key, _label in FIFTEEN_PANELS:
             assert labels[name].startswith(key)
     # Letter-only tabs keep their badge, as superscript digits.
+    monkeypatch.setattr("defenseclaw.tui.widgets.tab_fit._PLAIN_BADGE", False)
     assert fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)["logs"] == "8²"
     # Windows consoles draw most superscript digits wrong; use a plain badge.
     monkeypatch.setattr("defenseclaw.tui.widgets.tab_fit._PLAIN_BADGE", True)

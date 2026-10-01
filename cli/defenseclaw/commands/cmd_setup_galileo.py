@@ -222,8 +222,15 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float) -> None:
             timeout=timeout,
         )
     except TraceCanaryError as exc:
+        hint = ""
+        if exc.failure_class == "gateway_rejected":
+            hint = (
+                ". Galileo did not accept the export: check that the API key and project belong to "
+                "this deployment. For a dedicated or self-hosted deployment, run 'defenseclaw setup "
+                "galileo --deployment self-hosted --trace-endpoint <url>'"
+            )
         raise click.ClickException(
-            f"Galileo runtime canary failed ({exc.failure_class}): {exc.message}"
+            f"Galileo runtime canary failed ({exc.failure_class}): {exc.message}{hint}"
         ) from exc
     click.echo(f"  {result.destination}: runtime canary acknowledged")
     click.echo(f"  trace_id={result.trace_id}; generation={result.generation}")
