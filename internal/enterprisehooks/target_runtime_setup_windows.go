@@ -264,11 +264,14 @@ func planWindowsManagedRuntimeRoots(
 		Roots:          make([]WindowsManagedRuntimeRootPlan, 0, len(targets)),
 	}
 	pendingAllowed := validation && windowsEnterpriseStandaloneProcess()
+	// Only a standalone install plan re-protects a folder a standalone purge
+	// kept; a validation plan never changes a folder.
+	adoptPurgeKept := !validation && windowsEnterpriseStandaloneProcess()
 	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
 			key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
-			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key])
+			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept)
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -689,8 +692,10 @@ func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target wi
 // planWindowsManagedRuntimeRoot inspects one target root. With pendingAllowed
 // (a standalone validation plan of a profile whose rows are all deferred), an
 // absent data directory, or one the account created itself before enrollment,
-// is planned pending instead of absent or refused.
-func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed bool) (WindowsManagedRuntimeRootPlan, error) {
+// is planned pending instead of absent or refused. With adoptPurgeKept (a
+// standalone install plan), a data directory left by a standalone uninstall
+// with purge is given the canonical DACL again and planned canonical.
+func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept bool) (WindowsManagedRuntimeRootPlan, error) {
 	parent, err := openWindowsManagedRuntimeProfile(target)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
@@ -711,7 +716,17 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
-		if err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid); err != nil {
+		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		if err != nil && adoptPurgeKept {
+			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
+			if adoptErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: restore the managed DACL on the folder a purge kept: %w", adoptErr)
+			}
+			if adopted {
+				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			}
+		}
+		if err != nil {
 			if !pendingAllowed || !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
 				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
 			}
@@ -736,6 +751,54 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 	}
 	root.MarkerSID = marker.String()
 	return root, nil
+}
+
+// adoptWindowsManagedRuntimePurgeKeptRoot restores the canonical DACL on a
+// data directory that a standalone uninstall with purge kept. The purge keeps
+// the disabled hook scripts and returns what it keeps to the owner-private
+// shape (LocalSystem and OWNER RIGHTS full control) so that a later per-user
+// install can protect its own folder. A later managed install then found 2
+// ACEs instead of the canonical 7 and refused the folder, and only deleting
+// it as LocalSystem let the machine enroll again. Only a plain, target-owned
+// directory whose DACL is exactly that owner-private shape changes, through a
+// second handle bound to the same inode; its hooks folder, which the purge
+// relaxed the same way, gets the canonical DACL too. It reports whether it
+// changed the folder.
+func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, target windowsManagedRuntimeTarget) (bool, error) {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(target.sid) {
+		return false, err
+	}
+	if relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
+		return false, err
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return false, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return false, err
+	}
+	if _, err := windowsRecoverSetupRelaxedHookDirectory(target.data, target.sid); err != nil && !windowsManagedRuntimeRootMissing(err) {
+		return true, err
+	}
+	return true, nil
 }
 
 func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, journal func(WindowsManagedRuntimeClaim) error) (WindowsManagedRuntimeClaim, error) {

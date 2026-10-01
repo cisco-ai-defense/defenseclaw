@@ -436,7 +436,11 @@ def test_windows_registration_freshness_uses_authenticated_packaged_root(
 
     assert _WINDOWS_REGISTRATION_FRESHNESS(cfg, "codex") is None
     assert observed["install_root"] == str(install_root)
-    assert observed["config_path"] == str(codex_home / "managed_config.toml")
+    # Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
+    # per-user install is checked at config.toml and a managed-layer
+    # registration is reported stale.
+    assert observed["config_path"] == str(codex_home / "config.toml")
+    assert observed["codex_per_user"] is True
 
 
 def test_windows_registration_freshness_surfaces_codex_effective_policy_block(

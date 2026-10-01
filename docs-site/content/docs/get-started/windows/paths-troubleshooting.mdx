@@ -18,6 +18,7 @@ intact when diagnosing a problem.
 | Default location | Purpose | Manual editing |
 | --- | --- | --- |
 | `%USERPROFILE%\.local\bin\defenseclaw.cmd` | CLI/TUI launcher for the installed Python environment. | Do not replace or wrap; re-run the installer to repair it. |
+| `%USERPROFILE%\.local\bin\defenseclaw` | The same launcher for Git Bash, which does not run `.cmd` files by bare name. cmd.exe and PowerShell ignore it. | Do not replace; re-run the installer to repair it. |
 | `%USERPROFILE%\.local\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
 | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` | No-console hook runner that connector registrations record. | Do not invoke with fabricated credentials or replace. |
 | `%USERPROFILE%\.local\bin\defenseclaw-acp.exe` | ACP guard. | Do not replace. |
@@ -35,8 +36,7 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.defenseclaw\quarantine\` | DefenseClaw-owned quarantined skills/plugins and provenance. | Use `skill restore` or `plugin restore`; do not drag files back. |
 | `%USERPROFILE%\.defenseclaw\gateway.pid`, `watchdog.pid` | Protected process identity records, not bare kill instructions. | Do not delete while a process may be running. |
 | `%USERPROFILE%\.defenseclaw\gateway.jsonl` | Optional JSONL destination only when explicitly configured there. | Not a default log; manage through observability configuration. |
-| `%CODEX_HOME%\managed_config.toml` | Effective native Windows Codex hook policy. Default home is `%USERPROFILE%\.codex`. | Do not edit DefenseClaw-managed hooks; use setup/remove. |
-| `%CODEX_HOME%\config.toml` | Codex user config plus DefenseClaw-marked OTLP/notify fields. | Other Codex settings are user-owned; use DefenseClaw teardown to remove managed fields. |
+| `%CODEX_HOME%\config.toml` | Codex user config plus the DefenseClaw hook matrix, its hook trust entries, and DefenseClaw-marked OTLP/notify fields. Default home is `%USERPROFILE%\.codex`. | Other Codex settings are user-owned; do not edit DefenseClaw-managed hooks, use setup/remove. |
 | `%CLAUDE_CONFIG_DIR%\settings.json` | Claude Code user config plus DefenseClaw-marked hooks/OTLP environment entries. Default is `%USERPROFILE%\.claude`. | Do not remove individual managed entries by hand; use setup/remove. |
 | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` | DefenseClaw-managed Amp TypeScript system-policy plugin with a connector-scoped credential. | **Never print, copy, or hand-edit.** Use setup/remove; operator-owned sibling plugins are separate. |
 | `%USERPROFILE%\.gemini\config\hooks.json` | Google Antigravity's native hook configuration. | Do not remove individual managed entries by hand; use setup/remove. Setup changes only this document, not other files under `%USERPROFILE%\.gemini`. |

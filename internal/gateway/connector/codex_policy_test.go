@@ -65,14 +65,18 @@ func TestEnforceCodexUserHookPolicy(t *testing.T) {
 			Source:                `C:\ProgramData\OpenAI\Codex\requirements.toml`,
 		}, nil
 	}
+	// Per-user installs register in config.toml on every platform (current
+	// Codex ignores CODEX_HOME/managed_config.toml on Windows), so a
+	// managed-only policy must refuse them everywhere.
 	err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{})
-	if runtime.GOOS == "windows" {
-		if err != nil {
-			t.Fatalf("managed-only Windows policy rejected source-trusted registration: %v", err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), "allow_managed_hooks_only") ||
+	if err == nil || !strings.Contains(err.Error(), "allow_managed_hooks_only") ||
 		!strings.Contains(err.Error(), `C:\ProgramData\OpenAI\Codex\requirements.toml`) {
 		t.Fatalf("blocked user-hook policy error = %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		if err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{ManagedEnterprise: true}); err != nil {
+			t.Fatalf("managed-only policy rejected the managed enterprise registration: %v", err)
+		}
 	}
 
 	blocked = false

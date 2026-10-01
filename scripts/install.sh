@@ -166,7 +166,7 @@ Options:
   --rollback               Restore the install that the last upgrade replaced
   --connector NAME         First install only: agent to guard (${CONNECTOR_CHOICES// /, })
   --no-openclaw            First install only: do not install OpenClaw
-  --quickstart             First install only: run 'defenseclaw quickstart' afterwards
+  --quickstart             Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   --quickstart-mode MODE   observe or action (implies --quickstart)
   --sandbox                Deprecated no-op (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
@@ -648,8 +648,14 @@ fi
 
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
+elif [[ "${RUN_QUICKSTART}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # Installed but never set up, so the asked-for quickstart is still the first run.
+    first_install_extras
 elif [[ "${RUN_QUICKSTART}" == true ]]; then
-    warn "Skipped --quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+    QUICKSTART_HINT="defenseclaw quickstart"
+    [[ -n "${CONNECTOR}" && "${CONNECTOR}" != "none" ]] && QUICKSTART_HINT+=" --connector ${CONNECTOR}"
+    [[ -n "${QUICKSTART_MODE}" ]] && QUICKSTART_HINT+=" --mode ${QUICKSTART_MODE}"
+    warn "Skipped --quickstart: DefenseClaw is already configured. To run it now: ${QUICKSTART_HINT}"
 fi
 rm -rf "${STAGING}"
 ensure_path_hint

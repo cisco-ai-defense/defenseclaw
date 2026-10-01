@@ -38,11 +38,20 @@ func init() {
 // windowsCopilotVSCodeUser places, checks (verify) or removes DefenseClaw's
 // VS Code Local hook file and Copilot plugin in home, from the loaded
 // config. The install and remove calls run under the target user's
-// impersonation.
+// impersonation. The uninstall's teardown runs without a loaded config, so a
+// standalone removal falls back to the deployment's own hook launcher, the
+// one the files were rendered for.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	opts, _, standalone, err := windowsStandaloneGuardianOptions()
 	if !standalone {
-		return nil
+		if !remove || verify || !enterprisehooks.WindowsStandaloneProcess() {
+			return nil
+		}
+		layout, _, _, layoutErr := standaloneEnterprisePolicyLayout()
+		if layoutErr != nil {
+			return layoutErr
+		}
+		opts, err = enterprisepolicy.Options{HookBinary: enterprisepolicy.HookBinaryPath(layout)}, nil
 	}
 	if err != nil {
 		return err

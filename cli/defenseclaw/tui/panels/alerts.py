@@ -754,6 +754,11 @@ class AlertsPanelModel:
 
         return sum(1 for row in self.filtered if row.kind != "scan_finding")
 
+    def total_count(self) -> int:
+        """Return every top-level Alerts row, ignoring the active filter."""
+
+        return sum(1 for row in self.flat_rows() if row.kind != "scan_finding")
+
     def critical_count(self) -> int:
         counts = self.severity_counts()
         return counts["CRITICAL"] + counts["HIGH"]

@@ -126,6 +126,15 @@ class BuildPlanTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(bin_dir / "defenseclaw"))
         self.assertTrue((bin_dir / "defenseclaw-gateway").is_file())
 
+    def test_windows_git_bash_launcher_is_bound_to_the_data_dir(self):
+        data_dir = Path(self._tmp.name) / "data"
+        launcher = Path(self._tmp.name) / "defenseclaw"
+        exe = os.path.join(os.path.normcase(os.path.abspath(data_dir)), ".venv", "Scripts", "defenseclaw.exe")
+        launcher.write_text(f'#!/bin/sh\nexec "{exe.replace(os.sep, "/")}" "$@"\n', encoding="utf-8")
+        self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
+        launcher.write_text('#!/bin/sh\nexec "/opt/other/defenseclaw" "$@"\n', encoding="utf-8")
+        self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
+
     def test_non_windows_gateway_path_preserves_path_resolution(self):
         with patch.object(cmd_uninstall.shutil, "which", return_value="/usr/local/bin/defenseclaw-gateway"):
             plan = cmd_uninstall._build_plan(
@@ -247,6 +256,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             tuple(Path(path).name for path in plan.binary_targets),
             (
                 "defenseclaw.cmd",
+                "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",

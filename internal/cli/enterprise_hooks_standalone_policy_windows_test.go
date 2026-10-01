@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // A Windows user whose connectors are all machine policy (Cursor, Codex,
@@ -116,5 +117,45 @@ func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	}
 	if wslCalls != 1 || !strings.Contains(log.String(), "WSL agent sessions: registry denied") {
 		t.Fatalf("the WSL policy must be reconciled every pass and its failure reported: %d %q", wslCalls, log.String())
+	}
+}
+
+// The uninstall's teardown loads no config, so a standalone removal of
+// DefenseClaw's VS Code Local hook file must not depend on it.
+func TestWindowsCopilotVSCodeUserRemovalWithoutLoadedConfig(t *testing.T) {
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = nil
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, err := enterprisepolicy.RenderCopilotVSCodeLocalHooks("windows", enterprisepolicy.HookBinaryPath(layout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	if err := os.MkdirAll(filepath.Dir(hookFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookFile, hooks, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	if err := windowsCopilotVSCodeUser(home, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(hookFile); err != nil {
+		t.Fatalf("a Secure Client removal touched the hook file: %v", err)
+	}
+
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	if err := windowsCopilotVSCodeUser(home, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(hookFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("standalone removal kept DefenseClaw's hook file: %v", err)
 	}
 }
