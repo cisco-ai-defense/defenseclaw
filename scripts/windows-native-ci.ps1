@@ -3841,7 +3841,7 @@ function Assert-PackagedAntigravitySupportedAvailability(
 function New-WizardFixtureExecutable([string]$AssemblyName, [string]$Source, [string]$OutputPath) {
     # Fixture executables are test setup, not code under test. Compile them
     # in-process with the Roslyn compiler that ships with PowerShell 7 instead
-    # of launching the legacy .NET Framework csc.exe: a cold csc.exe start
+    # of launching the legacy .NET Framework compiler executable: a cold start
     # loads dozens of default references and, on a saturated hosted runner,
     # repeatedly crossed a fatal per-process deadline. An in-process emit has
     # no child process, pipes, or deadline to race. The fixtures reference only
