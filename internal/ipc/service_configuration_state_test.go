@@ -145,10 +145,10 @@ func TestCurrentHealthOmitsConfigurationStateForNonManaged(t *testing.T) {
 	}
 }
 
-// TestCodesignStateLabel pins the four-row table in
-// codesignStateLabel: Windows always reports deferred_windows;
-// linux/darwin report "enabled" when ANY require flag or
-// allowlist is set, and "disabled" otherwise. See
+// TestCodesignStateLabel pins the table in codesignStateLabel:
+// Windows always reports "enabled" because its accept path always
+// authenticates the peer; linux/darwin report "enabled" when ANY
+// require flag or allowlist is set, and "disabled" otherwise. See
 // docs/specs/004-windows-ui-ipc/requirements.md REQ-09.
 func TestCodesignStateLabel(t *testing.T) {
 	tests := []struct {
@@ -159,8 +159,8 @@ func TestCodesignStateLabel(t *testing.T) {
 		allowlistTotal         int
 		want                   string
 	}{
-		{"windows managed_enterprise, all defaults", "windows", true, true, 3, codesignStateDeferredWindows},
-		{"windows dev, everything off", "windows", false, false, 0, codesignStateDeferredWindows},
+		{"windows managed_enterprise, all defaults", "windows", true, true, 3, codesignStateEnabled},
+		{"windows dev, everything off", "windows", false, false, 0, codesignStateEnabled},
 		{"darwin managed_enterprise", "darwin", true, true, 3, codesignStateEnabled},
 		{"darwin partial: only allowlist populated", "darwin", false, false, 1, codesignStateEnabled},
 		{"darwin dev, everything off", "darwin", false, false, 0, codesignStateDisabled},

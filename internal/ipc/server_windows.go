@@ -18,7 +18,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -43,9 +42,8 @@ const windowsSocketParentDirMode = os.FileMode(0o750)
 // fail-closed boundary in every production Windows binary.
 var allowUnsafeSocketOverrideForTest bool
 
-// bindListenerForOS is the Windows bind block for the spec 004
-// initial-cut deferred-auth IPC surface. Differences from
-// server_unix.go's sibling:
+// bindListenerForOS is the Windows bind block for the spec 004 IPC
+// surface. Differences from server_unix.go's sibling:
 //
 //   - Skips os.Chmod on the socket file (Windows Chmod only touches
 //     the read-only bit — Unix mode bits don't map to Windows DACLs).
@@ -56,10 +54,9 @@ var allowUnsafeSocketOverrideForTest bool
 //     ProgramData cannot silently over-permit (spec 004 REQ-03
 //     through REQ-05).
 //
-// Returns the raw net.Listener; the caller wraps it in the codesign
-// validating listener (a passthrough on Windows — the Windows
-// codesign validator in peerauth_windows.go returns the inner
-// listener verbatim under the initial-cut posture).
+// Returns the raw net.Listener; the caller wraps it with
+// wrapPeerAuthListener, which authenticates every peer process before
+// gRPC sees the connection.
 func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// Refuse an operator override that points the socket at a
 	// pre-existing path outside our dedicated dir. Applying
@@ -128,11 +125,11 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 //     an override that points at a shared directory's existing file.
 //  3. Parent directory basename is "ipc" — cheap shape check.
 //  4. Cleaned parent equals `<TrustedProgramData>\<managed-IPC-relative>`
-//     (case-insensitive on Windows). Refuses an override that lives
-//     under a user-writable ancestor like `C:\Users\<user>\ipc\` —
-//     otherwise a local user could plant the socket file (or a
-//     junction) there before the daemon starts and have the DACL
-//     rewritten under their control.
+//     (ASCII case-insensitive, see sameWindowsPath). Refuses an
+//     override that lives under a user-writable ancestor like
+//     `C:\Users\<user>\ipc\` — otherwise a local user could plant the
+//     socket file (or a junction) there before the daemon starts and
+//     have the DACL rewritten under their control.
 //
 // Tests in this package that legitimately need to scratch-dir the
 // IPC surface can set allowUnsafeSocketOverrideForTest to true for
@@ -161,7 +158,7 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 	parent := filepath.Clean(filepath.Dir(clean))
 	// Shape anchor: the socket must live under an "ipc" directory. In
 	// production this is fully subsumed by the trusted-root check below,
-	// which requires an exact case-insensitive match against
+	// which requires an exact ASCII case-insensitive match against
 	// TrustedProgramFiles/…/ipc — check 3 can only fire for inputs check 4
 	// would also reject. It IS load-bearing under the test hook
 	// (allowUnsafeSocketOverrideForTest) which short-circuits check 4:
@@ -194,11 +191,35 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 	if trustedParent == "" {
 		return fmt.Errorf("ipc: trusted managed IPC directory is unresolved; refusing to bind IPC surface")
 	}
-	if !strings.EqualFold(parent, trustedParent) {
+	// sameWindowsPath, not strings.EqualFold: Unicode folding would
+	// accept a user-created look-alike of the Program Files root.
+	if !sameWindowsPath(parent, trustedParent) {
 		return fmt.Errorf(
 			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",
 			trustedParent, parent,
 		)
 	}
 	return nil
+}
+
+// wrapPeerAuthListener authenticates every accepted Windows peer: the
+// process behind the AF_UNIX connection must be an allowed Secure
+// Client GUI executable inside the Cisco Secure Client install
+// directory under a trusted Program Files root, and WinVerifyTrust
+// must accept its embedded Authenticode signature from an allowed
+// signer. The socket DACL admits any authenticated user so the GUI can
+// connect from each interactive session; this check is what limits
+// the stream to the Secure Client GUI. There is no passthrough mode.
+func (s *Server) wrapPeerAuthListener(inner net.Listener) (net.Listener, error) {
+	return newWindowsSecureClientListener(inner,
+		s.allowedWindowsImages,
+		s.allowedWindowsSigners,
+		s.logWindowsReject)
+}
+
+// logWindowsReject logs a Windows peer-auth rejection. The session and
+// executable path identify which process was refused; neither is a
+// secret.
+func (s *Server) logWindowsReject(id windowsPeerIdentity, reason string) {
+	s.opts.Logf("peer rejected: pid=%d session=%d image=%q reason=%s", id.PID, id.SessionID, id.ImagePath, reason)
 }

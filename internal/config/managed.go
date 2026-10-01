@@ -11,7 +11,10 @@
 package config
 
 import (
-	"runtime"
+	"fmt"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // ManagedIPCConfig controls the local UDS gRPC server that external
@@ -43,6 +46,14 @@ import (
 //     non-UDS transport is rejected. Operator config can override
 //     one or more of the three allowlists per-list; unset lists
 //     fall back to the compiled defaults.
+//
+// On Windows the socket DACL admits Authenticated Users, and the
+// accept path authenticates the peer process instead: its PID comes
+// from SIO_AF_UNIX_GETPEERPID, its executable must be one of
+// AllowedWindowsImages inside the Cisco Secure Client install
+// directory under the trusted Program Files roots, and WinVerifyTrust
+// must accept that executable's embedded Authenticode signature from
+// a signer in AllowedWindowsSigners.
 //
 // Socket path and mode are resolved at server start when left empty;
 // the resolver in internal/ipc/paths.go picks per-platform defaults
@@ -80,6 +91,26 @@ type ManagedIPCConfig struct {
 	// applied on darwin — Linux peers have no bundle id concept
 	// and the check is skipped there.
 	AllowedBundleIDs []string `mapstructure:"allowed_bundle_ids" yaml:"allowed_bundle_ids,omitempty"`
+
+	// AllowedWindowsSigners is the Authenticode signer allowlist for
+	// Windows IPC peers. A peer passes only when WinVerifyTrust accepts
+	// the embedded signature of its executable and the subject common
+	// name (and every subject organization) of the signing leaf
+	// certificate is in this list. Empty means "use
+	// DefaultSecureClientPolicy's Cisco signer"; non-empty replaces the
+	// default entirely. Only applied on Windows.
+	AllowedWindowsSigners []string `mapstructure:"allowed_windows_signers" yaml:"allowed_windows_signers,omitempty"`
+
+	// AllowedWindowsImages lists the Secure Client GUI executables
+	// admitted on Windows, as backslash-separated paths relative to the
+	// Cisco Secure Client install directory under the trusted Program
+	// Files or Program Files (x86) root (for example `UI\csc_ui.exe`).
+	// Entries are relative by construction, so config can narrow or
+	// rename the admitted executable but never move it outside the
+	// administrator-owned Secure Client tree. Empty means "use
+	// DefaultSecureClientPolicy's GUI image"; non-empty replaces the
+	// default entirely. Only applied on Windows.
+	AllowedWindowsImages []string `mapstructure:"allowed_windows_images" yaml:"allowed_windows_images,omitempty"`
 }
 
 // ManagedIPCEnabled reports whether the local UDS gRPC server should
@@ -111,54 +142,200 @@ const SecureClientSigningID = "com.cisco.secureclient.gui"
 // enclosing .app / Contents/Info.plist at accept time.
 const SecureClientBundleID = "com.cisco.secureclient.gui"
 
+// SecureClientWindowsSigner is the Authenticode signer subject
+// (common name and organization) of Cisco Secure Client binaries on
+// Windows. It matches the publisher the Windows packaging already
+// requires for Cisco-signed payloads.
+const SecureClientWindowsSigner = "Cisco Systems, Inc."
+
+// SecureClientWindowsGUIImage is the Cisco Secure Client GUI
+// executable, relative to the Secure Client install directory
+// (`<Program Files (x86)>\Cisco\Cisco Secure Client`, or the same
+// directory under Program Files).
+const SecureClientWindowsGUIImage = `UI\csc_ui.exe`
+
 // DefaultSecureClientPolicy is the compiled-in peer-auth allowlist
 // applied to every managed_enterprise install that has not
 // overridden AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs
-// in config.yaml. Only the Cisco Secure Client GUI matches all
-// three fields; every other codesign identity is rejected at
-// accept-time.
+// (macOS) or AllowedWindowsSigners / AllowedWindowsImages (Windows)
+// in config.yaml. Only the Cisco Secure Client GUI matches; every
+// other peer is rejected at accept-time.
 func DefaultSecureClientPolicy() ManagedIPCConfig {
 	return ManagedIPCConfig{
-		AllowedTeamIDs:    []string{SecureClientTeamID},
-		AllowedSigningIDs: []string{SecureClientSigningID},
-		AllowedBundleIDs:  []string{SecureClientBundleID},
+		AllowedTeamIDs:        []string{SecureClientTeamID},
+		AllowedSigningIDs:     []string{SecureClientSigningID},
+		AllowedBundleIDs:      []string{SecureClientBundleID},
+		AllowedWindowsSigners: []string{SecureClientWindowsSigner},
+		AllowedWindowsImages:  []string{SecureClientWindowsGUIImage},
 	}
 }
 
-// Peer-auth Kind literals. Duplicated here (rather than imported
-// from internal/ipc/peerauth_unix.go) to avoid an import cycle: the
-// ipc package imports internal/config, so a config → ipc edge would
-// break the build. The values MUST stay in sync — the value lookup
-// helpers (peerauth_unix.go / peerauth_windows.go) are the runtime
-// sources; this file's role is to surface the effective KIND to
-// callers that need to compose diagnostic output BEFORE the ipc
-// server is constructed (e.g. spec 004's startup log line).
-const (
-	peerAuthKindUnixPeer                = "UnixPeer"
-	peerAuthKindUnixPeerUnauthenticated = "UnixPeerUnauthenticated"
-)
+// maxWindowsPeerAuthEntryLength bounds a single Windows signer or image
+// allowlist entry. Both are compared verbatim, so a longer value can
+// only be a mistake.
+const maxWindowsPeerAuthEntryLength = 256
+
+// ValidateWindowsSecureClientSigner reports whether name is an
+// acceptable AllowedWindowsSigners entry: a non-empty, unpadded
+// certificate subject name without control characters.
+func ValidateWindowsSecureClientSigner(name string) error {
+	if name == "" || strings.TrimSpace(name) != name {
+		return fmt.Errorf("signer name must be non-empty and unpadded")
+	}
+	if len(name) > maxWindowsPeerAuthEntryLength {
+		return fmt.Errorf("signer name exceeds %d bytes", maxWindowsPeerAuthEntryLength)
+	}
+	if strings.IndexFunc(name, isControlRune) >= 0 {
+		return fmt.Errorf("signer name contains a control character")
+	}
+	return nil
+}
+
+// ValidateWindowsSecureClientImage reports whether rel is an acceptable
+// AllowedWindowsImages entry. The entry must be a canonical relative
+// Windows path to an .exe: backslash separators only, no drive,
+// stream, UNC or rooted prefix, no empty, "." or ".." segment, no
+// segment the Win32 layer would silently rewrite (trailing dot or
+// space, DOS device names), and no wildcard characters. The checks are
+// string-only so they behave identically on every build platform.
+func ValidateWindowsSecureClientImage(rel string) error {
+	if rel == "" || strings.TrimSpace(rel) != rel {
+		return fmt.Errorf("image path must be non-empty and unpadded")
+	}
+	if len(rel) > maxWindowsPeerAuthEntryLength {
+		return fmt.Errorf("image path exceeds %d bytes", maxWindowsPeerAuthEntryLength)
+	}
+	if strings.IndexFunc(rel, isControlRune) >= 0 {
+		return fmt.Errorf("image path contains a control character")
+	}
+	if strings.ContainsAny(rel, `/:*?"<>|`) {
+		return fmt.Errorf("image path must be relative and use only backslash separators")
+	}
+	if strings.HasPrefix(rel, `\`) {
+		return fmt.Errorf("image path must be relative to the Secure Client install directory")
+	}
+	segments := strings.Split(rel, `\`)
+	for _, segment := range segments {
+		switch {
+		case segment == "":
+			return fmt.Errorf("image path has an empty segment")
+		case segment == "." || segment == "..":
+			return fmt.Errorf("image path must not contain %q segments", segment)
+		case strings.HasSuffix(segment, ".") || strings.HasSuffix(segment, " "):
+			return fmt.Errorf("image path segment %q ends in a dot or space", segment)
+		case isWindowsReservedDeviceName(segment):
+			return fmt.Errorf("image path segment %q is a reserved device name", segment)
+		}
+	}
+	last := segments[len(segments)-1]
+	if len(last) <= len(".exe") || !strings.EqualFold(last[len(last)-len(".exe"):], ".exe") {
+		return fmt.Errorf("image path must name an .exe file")
+	}
+	return nil
+}
+
+func isControlRune(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// isWindowsReservedDeviceName reports whether a path segment names a
+// DOS device (CON, NUL, COM1, ...) once Win32 drops its extension.
+func isWindowsReservedDeviceName(segment string) bool {
+	base := segment
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) {
+		return base[3] >= '0' && base[3] <= '9'
+	}
+	return false
+}
+
+// validateManagedIPCPeerAuthKnobs checks the managed_enterprise IPC
+// peer-auth allowlists against the platform whose accept path will
+// enforce them. Each platform authenticates the Secure Client GUI with
+// its own identity model — codesign team / signing / bundle ids on
+// macOS, the Authenticode signer and install-relative image path on
+// Windows — so an allowlist for the other platform would be silently
+// ignored. Refusing it keeps config honest: an operator who sets a
+// list expecting it to take effect learns at load time that it would
+// not. Windows entries are also shape-checked here; the IPC server
+// validates them again before use.
+func validateManagedIPCPeerAuthKnobs(cfg *Config, goos string) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	var offending []string
+	if goos == "windows" {
+		if len(cfg.Managed.AllowedTeamIDs) != 0 {
+			offending = append(offending, "managed.allowed_team_ids")
+		}
+		if len(cfg.Managed.AllowedSigningIDs) != 0 {
+			offending = append(offending, "managed.allowed_signing_ids")
+		}
+		if len(cfg.Managed.AllowedBundleIDs) != 0 {
+			offending = append(offending, "managed.allowed_bundle_ids")
+		}
+		if len(offending) != 0 {
+			return fmt.Errorf(
+				"config: %s cannot be set on Windows: these are macOS code-signing "+
+					"identities and would be ignored. The Windows IPC peer check uses "+
+					"managed.allowed_windows_signers and managed.allowed_windows_images.",
+				strings.Join(offending, ", "),
+			)
+		}
+		for index, signer := range cfg.Managed.AllowedWindowsSigners {
+			if err := ValidateWindowsSecureClientSigner(signer); err != nil {
+				return fmt.Errorf("config: managed.allowed_windows_signers[%d]: %w", index, err)
+			}
+		}
+		for index, image := range cfg.Managed.AllowedWindowsImages {
+			if err := ValidateWindowsSecureClientImage(image); err != nil {
+				return fmt.Errorf("config: managed.allowed_windows_images[%d]: %w", index, err)
+			}
+		}
+		return nil
+	}
+	if len(cfg.Managed.AllowedWindowsSigners) != 0 {
+		offending = append(offending, "managed.allowed_windows_signers")
+	}
+	if len(cfg.Managed.AllowedWindowsImages) != 0 {
+		offending = append(offending, "managed.allowed_windows_images")
+	}
+	if len(offending) != 0 {
+		return fmt.Errorf(
+			"config: %s only apply on Windows and would be ignored on %s; "+
+				"remove them from config.yaml.",
+			strings.Join(offending, ", "),
+			goos,
+		)
+	}
+	return nil
+}
+
+// peerAuthKindUnixPeer is the peer-auth Kind literal the IPC accept
+// path reports. Duplicated here (rather than imported from
+// internal/ipc) to avoid an import cycle: the ipc package imports
+// internal/config. The value MUST stay in sync with ipc.KindUnixPeer.
+const peerAuthKindUnixPeer = "UnixPeer"
 
 // EffectivePeerAuthKind reports which peer-auth kind the IPC accept
 // path will report for peers on the current runtime, given a config.
 // Returns "" when ManagedIPCEnabled() is false — no IPC server, no
 // peer-auth surface.
 //
-//   - macOS + Linux managed_enterprise: `"UnixPeer"` (codesign +
-//     LOCAL_PEERCRED path in peerauth_unix.go / peerauth_darwin.go).
-//   - Windows managed_enterprise: `"UnixPeerUnauthenticated"` — the
-//     initial-cut deferred-auth posture (spec 004 REQ-06 / REQ-11).
-//     The socket-file DACL is the access boundary; full peer-auth is
-//     a follow-up spec per parity-plan §4.4.
-//
-// The GA release-gate at internal/ipc/authposture_gagate.go refuses
-// a release-candidate build in which this helper can still return
-// "UnixPeerUnauthenticated" (spec 004 REQ-18 + REQ-19).
+// Every platform reports "UnixPeer": the identity is read from the
+// live AF_UNIX connection (LOCAL_PEERPID / LOCAL_PEERCRED on macOS,
+// SO_PEERCRED on Linux, SIO_AF_UNIX_GETPEERPID on Windows) and then
+// checked against the platform's Secure Client signing policy
+// (codesign on macOS, Authenticode signer plus install-relative image
+// path on Windows). There is no unauthenticated kind.
 func (c *Config) EffectivePeerAuthKind() string {
 	if !c.ManagedIPCEnabled() {
 		return ""
-	}
-	if runtime.GOOS == "windows" {
-		return peerAuthKindUnixPeerUnauthenticated
 	}
 	return peerAuthKindUnixPeer
 }

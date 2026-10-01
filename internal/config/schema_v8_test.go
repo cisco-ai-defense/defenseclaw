@@ -69,6 +69,29 @@ managed:
 	}
 }
 
+func TestConfigV8SchemaAcceptsManagedWindowsPeerAuthFields(t *testing.T) {
+	raw := []byte(`config_version: 8
+managed:
+  allowed_windows_signers:
+    - Cisco Systems, Inc.
+  allowed_windows_images:
+    - 'UI\csc_ui.exe'
+`)
+	if _, err := ParseV8YAML("managed-windows-v8.yaml", raw); err != nil {
+		t.Fatalf("ParseV8YAML rejected the Windows IPC peer-auth fields: %v", err)
+	}
+	var parsed Config
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Managed.AllowedWindowsImages; len(got) != 1 || got[0] != `UI\csc_ui.exe` {
+		t.Fatalf("managed.allowed_windows_images = %q", got)
+	}
+	if got := parsed.Managed.AllowedWindowsSigners; len(got) != 1 || got[0] != "Cisco Systems, Inc." {
+		t.Fatalf("managed.allowed_windows_signers = %q", got)
+	}
+}
+
 func TestConfigV8SchemaAcceptsClawRollbackCustodyField(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw

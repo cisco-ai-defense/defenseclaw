@@ -56,4 +56,30 @@ package ipc
 // authpostureGAApproved and lands the real peer-auth mechanism.
 // See CR spec-004:PRRT_kwDORuAK-s6ankzo for the primary/diagnostic
 // split.
+//
+// Status: the Windows peer authentication has landed
+// (winpeer_auth.go + peerauth_windows.go: SIO_AF_UNIX_GETPEERPID,
+// install-relative image allowlist, WinVerifyTrust signer allowlist),
+// and the unauthenticated peer kind no longer exists. The symbol is
+// defined in peerauth_windows.go and, for linux/darwin builds, in
+// peerauth_unix.go, so `go build -tags ga` now succeeds on every OS.
+// The release-time assertion on the reported kind is
+// TestEffectivePeerAuthKindManagedEnterprise in internal/config.
+//
+// Open items not covered by this gate:
+//
+//   - Peer auth admits the Secure Client GUI executable, not a
+//     particular interactive user, so every admitted GUI instance on a
+//     multi-session host receives the same machine-wide notification,
+//     stats and health stream (macOS behaves the same way). Per-session
+//     scoping needs the originating session on block events, which the
+//     gateway does not record yet.
+//   - On Windows, peer auth binds a connection to the image its peer
+//     process was created from, checked once at accept, not to the code
+//     running in it. A process of the same user can start csc_ui.exe
+//     and control it, or duplicate an admitted socket, and read the
+//     same read-only stream; macOS prevents this with the hardened
+//     runtime. Closing it needs a credential the GUI proves after
+//     connecting (for example one issued through the Secure Client
+//     agent service). See the winpeer_auth.go header.
 var _ = authpostureGAApproved
