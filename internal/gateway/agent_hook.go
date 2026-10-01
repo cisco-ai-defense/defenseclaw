@@ -168,6 +168,33 @@ func hookSourceReason(resp agentHookResponse) string {
 	return resp.Reason
 }
 
+// agentHookDisconnectGrace bounds how long an accepted hook keeps working
+// after its client has gone away.
+const agentHookDisconnectGrace = 30 * time.Second
+
+// agentHookCompletionContext keeps the request's values, but not its
+// cancellation: a hook client that hangs up after its own budget (while the
+// gateway waits on the local store, say) used to cancel the persistence of a
+// verdict the gateway had enforced anyway, so the verdict lost its audit row and
+// hook_decision. The work is cancelled agentHookDisconnectGrace after the
+// disconnect, or when the handler returns.
+func agentHookCompletionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, func() {
+		grace := time.NewTimer(agentHookDisconnectGrace)
+		defer grace.Stop()
+		select {
+		case <-grace.C:
+			cancel()
+		case <-ctx.Done():
+		}
+	})
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -306,7 +333,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			}
 		}
-		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(r.Context(), profile, req, b)
+		// From here on the hook is accepted: its verdict is enforced, so its
+		// correlation, hook_decision and audit row must not depend on the client
+		// waiting for the response.
+		ctx, cancelCompletion := agentHookCompletionContext(r.Context())
+		defer cancelCompletion()
+		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for export, not for policy
 			// enforcement. The hook must still be evaluated if the local ledger is
