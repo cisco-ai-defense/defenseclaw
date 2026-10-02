@@ -300,7 +300,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
-	if err := missingObservabilitySecretError("start", cfgLoadErr); err != nil {
+	if err := daemonConfigLoadError("start", cfgLoadErr); err != nil {
 		return err
 	}
 	if rotationTransaction {
@@ -679,7 +679,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	// Refuse before stopping anything: the new gateway could not start.
-	if err := missingObservabilitySecretError("restart", cfgLoadErr); err != nil {
+	if err := daemonConfigLoadError("restart", cfgLoadErr); err != nil {
 		return err
 	}
 	var cfgErr error
@@ -905,6 +905,28 @@ func missingObservabilitySecretError(verb string, err error) error {
 		"cannot %s the gateway: observability destination %q needs %s, which is not set. "+
 			"Set it with: defenseclaw keys set %s (or disable that destination), then run: defenseclaw-gateway %s",
 		verb, secretErr.Destination, secretErr.Reference, secretErr.Reference, verb,
+	)
+}
+
+// daemonConfigLoadError refuses start and restart when config.yaml does not
+// load. The gateway child would exit on the same error, and the default
+// configuration loadDaemonConfig falls back to points at the default port, so
+// continuing used to stop a healthy gateway and then blame that port's holder
+// (GAP-1174).
+func daemonConfigLoadError(verb string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if secretErr := missingObservabilitySecretError(verb, err); secretErr != nil {
+		return secretErr
+	}
+	untouched := ""
+	if verb == "restart" {
+		untouched = " The running gateway was left as it is."
+	}
+	return fmt.Errorf(
+		"cannot %s the gateway: %s does not load: %w.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
+		verb, config.ConfigPath(), err, untouched, verb,
 	)
 }
 
