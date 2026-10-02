@@ -1373,7 +1373,7 @@ def discover_plugin_directories(
         claimed.add_directory(plugin, root)
     if (connector or "").casefold().replace("-", "") != "opencode":
         for entry, path in _child_directories(root):
-            if entry == "cache" or entry.startswith(".") or (
+            if entry in {"cache", "__pycache__"} or entry.startswith(".") or (
                 claude_root and entry == "marketplaces"
             ):
                 continue
