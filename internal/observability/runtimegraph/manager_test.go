@@ -687,9 +687,10 @@ func TestInitializationFailureReverseCleansPartialResourcesAndReportsOldGraph(t 
 	}
 }
 
-// GAP-1295: a config-file reload that the gateway's own shutdown cancels (a
-// restart racing the watcher) keeps the old graph and must not raise a
-// degraded-health alert; a real build failure still does.
+// GAP-1295, GAP-1698: a config-file reload that the gateway's own shutdown
+// cancels (a restart racing the watcher) keeps the old graph and records
+// neither a degraded-health alert nor a config.reload.rejected entry; a real
+// build failure still does.
 func TestCancelledReloadIsComplianceOnlyNotDegradedHealth(t *testing.T) {
 	log := &lifecycleLog{}
 	initial := testConfig(t, "shared", 90, true)
@@ -715,7 +716,7 @@ func TestCancelledReloadIsComplianceOnlyNotDegradedHealth(t *testing.T) {
 			compliance++
 		}
 	}
-	if health != 0 || compliance != 1 {
+	if health != 0 || compliance != 0 {
 		t.Fatalf("cancelled reload reports health=%d compliance=%d", health, compliance)
 	}
 }

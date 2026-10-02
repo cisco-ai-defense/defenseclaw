@@ -244,7 +244,10 @@ def _api_port_free(host: str, port: int) -> bool:
             if platform_support.host_os() == "windows":
                 # On Windows SO_REUSEADDR lets a bind succeed over another
                 # account's listener, so ask for the port exclusively instead.
-                sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", -5), 1)
+                # Only Windows sockets have the option; elsewhere a plain bind.
+                exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                if exclusive is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
             else:
                 # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
                 # connection does not count as a holder.
@@ -258,41 +261,86 @@ def _api_port_free(host: str, port: int) -> bool:
 # A per-user gateway start leaves an empty file owned by its account here for
 # its API port (internal/cli/gateway_port_claim_unix.go). A stopped or crashed
 # gateway frees its port, so init on another account checks these claims too
-# (GAP-1261). A claim by a deleted account is ignored.
+# (GAP-1261). A claim left by a deleted account counts too: nobody else can
+# remove it (GAP-1704). On Windows the claims are in %ProgramData% and hold
+# the claiming account's SID (gateway_port_claim_windows.go, GAP-1569).
 _API_PORT_CLAIM_DIR = "/var/tmp"
 _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
+_WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
+
+
+def _windows_port_claims() -> bool:
+    return platform_support.host_os() == "windows"
+
+
+def _api_port_claim_dir() -> str:
+    if _windows_port_claims():
+        return os.environ.get("ProgramData") or r"C:\ProgramData"
+    return _API_PORT_CLAIM_DIR
+
+
+def _windows_claim_sid(path: str) -> str:
+    """The account SID a Windows claim names, or ""."""
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
+            return ""
+        with open(path, encoding="ascii") as handle:
+            sid = handle.read().strip()
+    except (OSError, ValueError):
+        return ""
+    return sid if _WINDOWS_CLAIM_SID.fullmatch(sid) else ""
+
+
+def _windows_own_sid() -> str:
+    try:
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        return _windows_current_user_sid()
+    except OSError:
+        return ""
 
 
 def _api_port_claimed_by_other_account(port: int) -> bool:
+    path = os.path.join(_api_port_claim_dir(), f"{_API_PORT_CLAIM_PREFIX}{port}")
+    if _windows_port_claims():
+        sid = _windows_claim_sid(path)
+        own = _windows_own_sid()
+        return bool(sid and own) and sid.upper() != own.upper()
     if os.name == "nt":
         return False
     try:
-        info = os.lstat(os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"))
+        info = os.lstat(path)
     except OSError:
         return False
-    if not stat.S_ISREG(info.st_mode) or info.st_uid == os.getuid():
-        return False
-    try:
-        import pwd
-
-        pwd.getpwuid(info.st_uid)
-    except (ImportError, KeyError):
-        return False
-    return True
+    # No standard account can remove or replace another uid's claim in the
+    # sticky /var/tmp, even a deleted account's. Skipping only live owners'
+    # claims let two accounts take the same port: the first one's gateway
+    # could not claim it, so the next init picked it again (GAP-1704).
+    return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
 
 
 def remove_own_api_port_claims() -> None:
     """Drop this account's port claims (``uninstall --all``). Best effort."""
-    if os.name == "nt":
+    windows = _windows_port_claims()
+    if os.name == "nt" and not windows:
         return
+    claim_dir = _api_port_claim_dir()
     try:
-        names = os.listdir(_API_PORT_CLAIM_DIR)
+        names = os.listdir(claim_dir)
     except OSError:
         return
+    own = _windows_own_sid() if windows else ""
     for name in names:
         if not name.startswith(_API_PORT_CLAIM_PREFIX):
             continue
-        path = os.path.join(_API_PORT_CLAIM_DIR, name)
+        path = os.path.join(claim_dir, name)
+        if windows:
+            sid = _windows_claim_sid(path)
+            if own and sid.upper() == own.upper():
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+            continue
         try:
             info = os.lstat(path)
             if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
@@ -305,6 +353,31 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
+def _reserve_api_port(port: int) -> bool:
+    """Claim ``port`` for this account now, as its gateway start would.
+
+    Two accounts running init at the same time could otherwise both pick a
+    port neither gateway listens on yet (GAP-1462). O_EXCL makes the claim
+    atomic; False only when another account claimed the port first. Windows
+    claims carry the account SID and are left to the gateway start.
+    """
+    if os.name == "nt" or _windows_port_claims():
+        return True
+    try:
+        os.close(
+            os.open(
+                os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        )
+    except FileExistsError:
+        return not _api_port_claimed_by_other_account(port)
+    except OSError:
+        return True  # a claim is only a hint
+    return True
+
+
 def suggest_free_api_port(host: str, port: int) -> int:
     """A port after ``port``, in the first-run steps, this account can use now; 0 if none."""
     host = (host or "127.0.0.1").strip("[]")
@@ -312,7 +385,15 @@ def suggest_free_api_port(host: str, port: int) -> int:
         host = "127.0.0.1"
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         candidate = port + step * _FIRST_RUN_API_PORT_STEP
-        if candidate + 2 <= 65535 and _api_port_available(host, candidate):
+        # Like the gateway's own suggestion (freeGatewayAPIPort), the two
+        # sandbox ports next to it must be free too, so doctor, status and
+        # start name the same port (GAP-1706).
+        if (
+            candidate + 2 <= 65535
+            and _api_port_available(host, candidate)
+            and _api_port_free(host, candidate + 1)
+            and _api_port_free(host, candidate + 2)
+        ):
             return candidate
     return 0
 
@@ -334,11 +415,11 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT):
+    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port):
+        if _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
@@ -347,6 +428,38 @@ def choose_first_run_api_port(cfg: Config) -> str:
     return (
         f"{host}:{_DEFAULT_API_PORT} is in use; choose a free port with "
         "`defenseclaw setup gateway --api-port <free port> --non-interactive`"
+    )
+
+
+_DEFAULT_GUARDRAIL_PORT = 4000
+
+
+def choose_first_run_guardrail_port(cfg: Config) -> str:
+    """Move a new config's guardrail proxy port off 4000 when something holds it.
+
+    Like the API port: a second account's proxy (OpenClaw) on the same host
+    could not listen on the first account's 4000, so its gateway never
+    started (GAP-1701). Returns a line for the first-run output, or "".
+    """
+    gc = cfg.guardrail
+    if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
+        return ""
+    host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+    if host.lower() in {"", "localhost", "::1"}:
+        host = "127.0.0.1"
+    if _api_port_free(host, _DEFAULT_GUARDRAIL_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _api_port_free(host, port):
+            gc.port = port
+            return (
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
+                f"proxy), so this account's guardrail proxy uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use; choose a free guardrail proxy port with "
+        "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
 
 
@@ -573,6 +686,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
+        proxy_note = choose_first_run_guardrail_port(cfg)
+        if proxy_note:
+            status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
+            setup.append(StepResult("Guardrail proxy port", status, proxy_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
@@ -974,6 +1091,9 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
                 "defenseclaw-gateway status" if not running else "",
             )
         )
+        runtime_step = _connector_runtime_readiness(cfg, connector) if running else None
+        if runtime_step is not None:
+            steps.append(runtime_step)
 
     llm = cfg.resolve_llm("guardrail")
     if cfg.guardrail.enabled and llm.is_local_provider():
@@ -1450,20 +1570,9 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
 def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
-    if connector == "openclaw":
-        oc_path = os.path.expanduser(app.cfg.claw.config_file)
-        if not os.path.isfile(oc_path):
-            try:
-                app.cfg.save()
-            except OSError:
-                pass
-            return StepResult(
-                "Guardrail",
-                "warn",
-                f"OpenClaw config not found at {app.cfg.claw.config_file}; saved config but skipped connector patch",
-                "defenseclaw setup guardrail",
-            )
-
+    # OpenClaw needs no openclaw.json yet: the gateway registers its plugin
+    # there (creating the file) when it starts, as for every connector. This
+    # step used to skip with a warning that Readiness then contradicted (GAP-1523).
     buf = io.StringIO()
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(buf)
     try:
@@ -1527,6 +1636,44 @@ def _running_connector_from_state_file(data_dir: str) -> str | None:
     return name or None
 
 
+def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | None:
+    """Read back whether the running gateway guards *connector* (GAP-1589).
+
+    Setup and "Sidecar already running" only prove the config was written and
+    some gateway is up. The gateway can still have refused the connector, or
+    its hook files can have drifted, which ``status`` shows as DEGRADED and
+    ``doctor`` as a failed hook row. Use the same checks here so first run
+    does not report the agent as guarded when it is not.
+    """
+
+    if connector in ("", "none"):
+        return None
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    roster = _running_connectors_from_state_file(cfg.data_dir)
+    if roster is not None and connector not in roster:
+        return StepResult(
+            "Connector runtime",
+            "warn",
+            f"the running gateway has not loaded {label}, so it is not guarded yet",
+            "defenseclaw-gateway restart",
+        )
+    try:
+        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the doctor hook rows report unreadable state.
+        return None
+    if not problems:
+        return None
+    return StepResult(
+        "Connector runtime",
+        "warn",
+        f"{label} is not guarded: {problems[0]}",
+        setup_command(connector),
+    )
+
+
 def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
     """Return the sorted connector roster the running sidecar booted with.
 
@@ -1550,10 +1697,11 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
     return [single] if single else None
 
 
-# `defenseclaw-gateway start|restart` waits for READY itself (240 s on
+# `defenseclaw-gateway start|restart` waits for READY itself (600 s on
 # Windows, 60 s elsewhere) and only then starts the watchdog, so wait past
-# that: killing it earlier left the gateway without its watchdog (GAP-1346).
-_GATEWAY_START_TIMEOUT = 300 if os.name == "nt" else 90
+# that: killing it earlier left the gateway without its watchdog (GAP-1346,
+# GAP-1556).
+_GATEWAY_START_TIMEOUT = 660 if os.name == "nt" else 90
 
 
 def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
@@ -1770,6 +1918,14 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
+        if not shutil.which("openclaw"):
+            # The gateway writes openclaw.json even without OpenClaw (GAP-1523).
+            return StepResult(
+                "Connector",
+                "warn",
+                "OpenClaw is not installed (openclaw is not on PATH)",
+                "defenseclaw setup openclaw",
+            )
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):
             return StepResult("Connector", "pass", f"OpenClaw config found: {cfg.claw.config_file}")

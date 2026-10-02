@@ -76,7 +76,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
-        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-restart-gateway \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
@@ -153,6 +153,7 @@ all: _source-install-dev-preflight
 	@$(HOST_PYTHON) ./scripts/keep-pre-1.0-audit-history.py
 	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory source-migrate
+	@$(MAKE) --no-print-directory source-restart-gateway
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
@@ -187,6 +188,18 @@ source-migrate: _source-install-preflight
 		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" migrate; then \
 			echo "  Could not migrate the existing config — fix the error above, then re-run: defenseclaw migrate"; \
 			exit 1; \
+		fi; \
+	fi
+
+# A running gateway keeps the binary it started with after make all replaced
+# it, so the CLI and the gateway differed and doctor called the old process a
+# stranger on the port (GAP-1575). Restart it to load this build.
+source-restart-gateway: _source-install-preflight
+	@if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
+		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" restart >/dev/null 2>&1; then \
+			echo "  ✓ Restarted the running gateway so it runs this build"; \
+		else \
+			echo "  ! Could not restart the running gateway; it still runs the previous build. Run: defenseclaw-gateway restart"; \
 		fi; \
 	fi
 
@@ -698,11 +711,9 @@ endif
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
 	@# On Unix, a running sidecar kept the old inode; tell the operator so
 	@# they know a restart is needed to pick up the new build.
-	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
-	@# matches this very make invocation ("make gateway-install") and
-	@# any editor/tail window with the binary path on its cmdline, so
-	@# it would fire a false "sidecar is running" hint on every build.
-	@if [ "$(OS)" != "Windows_NT" ] && pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+	@# Ask this account's gateway, not pgrep: `pgrep -f` matches this make
+	@# invocation, and macOS truncates the name `pgrep -x` sees (GAP-1575).
+	@if [ "$(OS)" != "Windows_NT" ] && "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
 		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi

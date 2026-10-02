@@ -1767,6 +1767,30 @@ func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 	}
 }
 
+// GAP-1587: a connector whose agent version probe ran out of time keeps its
+// existing hooks; only a real setup failure rolls them back.
+func TestSetupConnectorsIsolated_SlowVersionProbeKeepsExistingHooks(t *testing.T) {
+	s := multiBootSidecar(t)
+	slow := &bootStubConnector{
+		stubConnector: stubConnector{name: "claudecode"},
+		setupErr:      fmt.Errorf("Hermes executable admission: fresh version probe failed: %w", connector.ErrAgentVersionProbeTimeout),
+	}
+	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	got, err := s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{slow, peer},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
+	if want := []string{"codex"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("survivors=%v, want %v", got, want)
+	}
+	if slow.teardownCalls != 0 {
+		t.Fatalf("slow-probe connector teardownCalls=%d, want 0 (keep its hooks)", slow.teardownCalls)
+	}
+}
+
 // TestSetupConnectorsIsolated_AllFailReturnsEmpty confirms that when every
 // connector fails the result is empty (the caller turns this into a loud boot
 // failure rather than idling on a gateway that protects nothing).

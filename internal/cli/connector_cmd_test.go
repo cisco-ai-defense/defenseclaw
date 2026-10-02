@@ -628,6 +628,39 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 }
 
+func TestConnectorReconcileRecordsConnectorInActiveRoster(t *testing.T) {
+	// GAP-1650: an offline reconcile before the first gateway start must leave
+	// the roster the gateway needs to reconcile that lock entry later.
+	dataDir := testenv.PrivateTempDir(t)
+	seedCodexSelectionForTest(t, dataDir)
+	codexPath := filepath.Join(testenv.PrivateTempDir(t), ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalCodexPath := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = originalCodexPath })
+	defer withConnectorState(t, dataDir, "codex")()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	names, err := connector.LoadProtectedActiveConnectors(dataDir)
+	if err != nil || len(names) != 1 || names[0] != "codex" {
+		t.Fatalf("protected roster after first reconcile = %v, %v; want [codex]", names, err)
+	}
+
+	if err := connector.SaveActiveConnectors(dataDir, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	if got := connector.LoadActiveConnectors(dataDir); strings.Join(got, ",") != "claudecode,codex" {
+		t.Fatalf("roster after reconcile = %v; want claudecode and codex", got)
+	}
+}
+
 func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)

@@ -36,6 +36,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 
 if TYPE_CHECKING:
@@ -2210,8 +2211,7 @@ def _scan_one_local_skill(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    if app.logger:
-        app.logger.log_scan(result, connector=connector)
+    _record_scan(app.logger, result, connector=connector)
 
     payload: dict[str, Any] | None = None
     if as_json:
@@ -3365,8 +3365,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
 
         result = _build_skill_scanner(app).scan(skill_dir)
 
-        if app.logger:
-            app.logger.log_scan(result)
+        _record_scan(app.logger, result)
 
         if as_json:
             click.echo(result.to_json())
@@ -3491,8 +3490,7 @@ def _scan_from_http(
 
         result = _build_skill_scanner(app).scan(skill_dir)
 
-        if app.logger:
-            app.logger.log_scan(result)
+        _record_scan(app.logger, result)
 
         if as_json:
             click.echo(result.to_json())
@@ -5234,8 +5232,7 @@ def _scan_installed_skill_for_connector(
         )
         raise SystemExit(1)
 
-    if app.logger:
-        app.logger.log_scan(result, connector=connector)
+    _record_scan(app.logger, result, connector=connector)
 
     _print_result(skill_name, result)
 

@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -640,6 +641,11 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	select {
 	case err := <-errCh:
 		p.health.SetGuardrail(StateError, err.Error(), nil)
+		if errors.Is(err, syscall.EADDRINUSE) {
+			// GAP-1701: name the setting to change.
+			return fmt.Errorf("proxy: listen %s: %w (another program or account holds this port; "+
+				"move this account's guardrail proxy with: defenseclaw setup guardrail --port <free port> --non-interactive)", addr, err)
+		}
 		return fmt.Errorf("proxy: listen %s: %w", addr, err)
 	case <-time.After(200 * time.Millisecond):
 		p.health.SetGuardrail(StateRunning, "", map[string]interface{}{

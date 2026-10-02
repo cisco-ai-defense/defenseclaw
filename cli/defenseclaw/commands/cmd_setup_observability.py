@@ -249,6 +249,9 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             resolved_inputs,
             name=name or "",
         )
+        if not non_interactive and not allow_private_networks:
+            # GAP-1643: ask here instead of failing after every prompt.
+            allow_private_networks, plaintext = _confirm_private_endpoint(preset, resolved_inputs, plaintext)
         _require_v8_operator_status(app.cfg.data_dir)
         destination_name = _destination_name(preset, name, _resolve_inputs(preset, resolved_inputs))
         # Only picks "added" or "updated" for the summary line. A missing or
@@ -277,9 +280,11 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     except ValueError as exc:
         message = str(exc)
         if "set allow_private_networks" in message and not allow_private_networks:
-            message += (
-                "\nTo send to a collector you run on this computer or a private network, add "
-                "--allow-private-networks (or use the local-otlp preset for the local stack)."
+            # One plain line; the v8 schema path means nothing to the user.
+            message = (
+                "This endpoint is on this computer or a private network. To send to a collector you "
+                "run yourself, add --allow-private-networks (or use the local-otlp preset for the "
+                "local stack)."
             )
         raise click.ClickException(message) from exc
     mode = "DRY-RUN " if dry_run else ""
@@ -358,10 +363,12 @@ def disable_cmd(app: AppContext, name: str) -> None:
 @pass_ctx
 def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
     """Delete an optional canonical destination."""
+    _require_v8_operator_status(app.cfg.data_dir)
+    # GAP-1707: reject an unknown name before asking to remove it.
+    _v8_source_destination_index(app.cfg.data_dir, name)
     if not yes and not click.confirm(f"  Remove destination {name!r}?", default=False):
         click.echo("  Aborted.")
         return
-    _require_v8_operator_status(app.cfg.data_dir)
     _remove_v8_destination(app.cfg.data_dir, name, "")
 
 
@@ -755,6 +762,54 @@ def _print_v8_destination_list(status, *, emit_json: bool) -> None:
     )
     click.echo(f"  Plan digest: {status.plan_digest}")
     click.echo()
+
+
+def _endpoint_is_private(raw: str) -> bool:
+    """True when ``raw`` (host:port or URL) names this computer or a private network."""
+
+    from urllib.parse import urlsplit
+
+    from defenseclaw.observability.v8_config import (
+        ENDPOINT_HOST_LOCALHOST,
+        ENDPOINT_HOST_PRIVATE,
+        classify_endpoint_host,
+    )
+
+    raw = (raw or "").strip()
+    if not raw:
+        return False
+    try:
+        host = urlsplit(raw if "://" in raw else "//" + raw).hostname or ""
+    except ValueError:
+        return False
+    return bool(host) and classify_endpoint_host(host) in {ENDPOINT_HOST_LOCALHOST, ENDPOINT_HOST_PRIVATE}
+
+
+def _confirm_private_endpoint(
+    preset: Preset,
+    resolved_inputs: dict[str, str],
+    plaintext: bool,
+) -> tuple[bool, bool]:
+    """Interactive add: ask before writing a loopback/private endpoint.
+
+    Returns ``(allow_private_networks, plaintext)``.  A "no" stops with one
+    plain line, before anything is written.
+    """
+
+    if preset.otel_tls_insecure:
+        return False, plaintext  # the local-stack preset already allows loopback
+    endpoint = resolved_inputs.get("endpoint") or resolved_inputs.get("host", "")
+    if not _endpoint_is_private(endpoint):
+        return False, plaintext
+    click.echo(f"  {endpoint} is on this computer or a private network.")
+    if not click.confirm("  Is this a collector you run yourself?", default=True):
+        raise click.ClickException(
+            "Not saved. Use a public collector endpoint, or the local-otlp preset for the local stack."
+        )
+    kind = preset.adapter_kind or "otlp"
+    if kind == "otlp" and not plaintext and "://" not in endpoint:
+        plaintext = not click.confirm("  Does this collector use TLS?", default=False)
+    return True, plaintext
 
 
 def _gate_local_preset(

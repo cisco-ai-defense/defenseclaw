@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,6 +107,11 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("doctor on a managed Windows computer: %v", err)
 	}
+	// GAP-1719: `upgrade` was a bare unknown command.
+	root.SetArgs([]string{"upgrade"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "upgrades are installed by your organization") {
+		t.Fatalf("upgrade on a managed Windows computer: %v", err)
+	}
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
 	missing := fmt.Errorf("read v8 config C:\\Users\\u\\.defenseclaw\\config.yaml: %w", fs.ErrNotExist)
@@ -146,6 +152,16 @@ func TestManagedUnixConfigLoadErrorNamesTheManagedDeployment(t *testing.T) {
 		!strings.Contains(err.Error(), "`status` has no per-user gateway") ||
 		!strings.Contains(err.Error(), "enterprise ") {
 		t.Fatalf("status on a managed unix host: %v", err)
+	}
+	// GAP-1196: audit export names its administrator form.
+	audit := &cobra.Command{Use: "audit"}
+	export := &cobra.Command{Use: "export"}
+	root.AddCommand(audit)
+	audit.AddCommand(export)
+	err = managedWindowsConfigLoadError(export, missing)
+	if err == missing || !strings.Contains(err.Error(), "`audit export` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "defenseclaw-gateway audit export`") {
+		t.Fatalf("audit export on a managed unix host: %v", err)
 	}
 }
 
@@ -405,8 +421,18 @@ func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, "")
 	newRoot := func() *cobra.Command {
 		root := &cobra.Command{Use: "defenseclaw-gateway", Long: "per-user sidecar"}
-		for _, name := range []string{"start", "stop", "restart", "watchdog", "sandbox", "status", "enterprise", "audit"} {
+		for _, name := range []string{"start", "stop", "restart", "watchdog", "sandbox", "status", "enterprise", "audit", "connector"} {
 			root.AddCommand(&cobra.Command{Use: name, Run: func(*cobra.Command, []string) {}})
+		}
+		for _, command := range root.Commands() {
+			switch command.Name() {
+			case "connector":
+				command.PersistentFlags().String("connector", "", "resolved from guardrail.connector / openclaw")
+			case "enterprise":
+				for _, platform := range []string{"linux", "macos", "windows", "policy"} {
+					command.AddCommand(&cobra.Command{Use: platform, Run: func(*cobra.Command, []string) {}})
+				}
+			}
 		}
 		return root
 	}
@@ -439,6 +465,30 @@ func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
 		}
 		if command.Name() == "status" && command.Short != managedHostStatusShort {
 			t.Fatalf("managed status row = %q", command.Short)
+		}
+	}
+	// GAP-1719: the subcommand help describes the managed deployment too.
+	sub := map[string]*cobra.Command{}
+	for _, command := range root.Commands() {
+		sub[command.Name()] = command
+	}
+	for _, name := range []string{"status", "enterprise"} {
+		if !strings.Contains(sub[name].Long, "enterprise windows status --profile standalone") ||
+			strings.Contains(sub[name].Long, "sidecar") || strings.Contains(sub[name].Long, "root/MDM/systemd") {
+			t.Fatalf("managed %s help:\n%s", name, sub[name].Long)
+		}
+	}
+	for _, unwanted := range []string{"defenseclaw setup", "defenseclaw.yaml", "openclaw", "S7"} {
+		if strings.Contains(sub["connector"].Long, unwanted) {
+			t.Fatalf("managed connector help mentions %q:\n%s", unwanted, sub["connector"].Long)
+		}
+	}
+	if flag := sub["connector"].PersistentFlags().Lookup("connector"); strings.Contains(flag.Usage, "openclaw") {
+		t.Fatalf("managed --connector usage = %q", flag.Usage)
+	}
+	for _, platform := range sub["enterprise"].Commands() {
+		if platform.Hidden != managedHostOtherPlatforms()[platform.Name()] {
+			t.Fatalf("enterprise %s hidden=%t on %s", platform.Name(), platform.Hidden, runtime.GOOS)
 		}
 	}
 	// GAP-1359: the record path is on a line of its own, and the prose

@@ -291,6 +291,25 @@ class TestRegistryRemove(RegistryCommandTestBase):
         ids = [s.id for s in self.app.cfg.registries.sources]
         self.assertNotIn("corp-skills", ids)
 
+    def test_remove_accepts_yes_like_other_confirm_commands(self):
+        result = self.invoke(["remove", "corp-skills", "--yes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("corp-skills", [s.id for s in self.app.cfg.registries.sources])
+
+    def test_remove_with_stopped_gateway_warns_without_traceback(self):
+        from unittest.mock import patch
+
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        with patch.object(
+            self.app.logger, "log_action", side_effect=CanonicalObservabilityUnavailableError("no gateway")
+        ):
+            result = self.runner.invoke(registry, ["remove", "corp-skills", "--yes"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("The gateway isn't running, so the audit event was not recorded", result.output)
+        self.assertIn("Removed registry source", result.output)
+        self.assertIsNone(result.exception)
+
     def test_remove_clears_associated_asset_policy_rules(self):
         from defenseclaw.config import AssetPolicyRule
 
@@ -362,8 +381,8 @@ class TestRegistrySync(RegistryCommandTestBase):
                     result = self.invoke(["sync", "corp-skills"])
         self.assertEqual(result.exit_code, 0, result.output)
         logger.log_action.assert_any_call(
-            "registry-sync", "config",
-            "id=corp-skills fetched=1 scanned=1 promoted_skills=1 promoted_mcps=0 "
+            "registry-edit", "config",
+            "sync id=corp-skills fetched=1 scanned=1 promoted_skills=1 promoted_mcps=0 "
             "blocked=0 errors=0 promote=on",
         )
 
@@ -501,9 +520,12 @@ class TestRegistryRequire(RegistryCommandTestBase):
             with patch.object(self.app, "logger", MagicMock()) as logger:
                 result = self.invoke(["require", "--type", "mcp", flag, "--connector", "openhands"])
             self.assertEqual(result.exit_code, 0, result.output)
-            actions = [c.args for c in logger.log_action.call_args_list if c.args[0] == "registry-require"]
+            actions = [
+                c.args for c in logger.log_action.call_args_list
+                if c.args[0] == "registry-edit" and c.args[2].startswith("require ")
+            ]
             self.assertEqual(len(actions), 1, actions)
-            self.assertIn(f"scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
+            self.assertIn(f"require scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
 
     def test_require_plugin_rejected(self):
         # OTHER-5: --type plugin is no longer a valid choice. Nothing can

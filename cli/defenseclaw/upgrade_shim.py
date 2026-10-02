@@ -225,6 +225,16 @@ def _rollback(*, yes: bool) -> int:
             f"no saved installer at {installer}; download {name} from the release you want and run it "
             "with --rollback"
         )
+    previous = os.path.join(home, "previous")
+    if os.name == "nt" and os.path.isdir(os.path.join(previous, "legacy-setup")):
+        # install.ps1 refuses this rollback in its own window, which a terminal
+        # without a desktop never sees; refuse here with the same way back.
+        try:
+            with open(os.path.join(previous, "VERSION"), encoding="utf-8-sig") as handle:
+                back_to = handle.read().strip()
+        except OSError:
+            back_to = "0.8.x"
+        raise ShimError(legacy_setup_rollback_refusal(back_to, previous, os.environ.get(REPO_ENV) or DEFAULT_REPO))
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
@@ -235,6 +245,16 @@ def _rollback(*, yes: bool) -> int:
             raise ShimError(f"could not copy the saved installer {installer}: {exc}") from None
         raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
+
+
+def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str:
+    """Why a rollback to DefenseClaw Setup (0.8.7-0.8.10) is manual, and how (install.ps1 says the same)."""
+    return (
+        f"The previous install is DefenseClaw Setup {back_to}, which cannot be restored automatically. "
+        f"To go back to it, run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from "
+        f"https://github.com/{repo}/releases/tag/{back_to} and run it in your desktop session. "
+        f"Its files and your data from before the upgrade are in {previous}"
+    )
 
 
 def _run_installer(path: str, args: list[str], workdir: str) -> int:

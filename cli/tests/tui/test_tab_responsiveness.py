@@ -257,8 +257,11 @@ async def test_native_windows_high_volume_tab_ack_under_150ms(
             # Repository-backed snapshots are loaded off the Textual event
             # loop.  Panel rendering can settle before that first immutable
             # snapshot is applied, so wait for the data boundary explicitly.
+            # Loading 500 rows is not the measured latency; slow Windows
+            # runners need more than the default wait for it.
             await _wait_until(
-                lambda: len(alerts.audit_events) == 500 and len(audit.items) == 500
+                lambda: len(alerts.audit_events) == 500 and len(audit.items) == 500,
+                timeout=30.0,
             )
             assert len(alerts.audit_events) == 500
             assert len(audit.items) == 500

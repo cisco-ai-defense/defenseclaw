@@ -61,6 +61,7 @@ import click
 
 from defenseclaw import config as config_module
 from defenseclaw import legacy_connector, ux
+
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
@@ -1437,7 +1438,10 @@ def _turn_guardrail_off(data_dir: str) -> None:
         cfg.guardrail.enabled = False
         cfg.save()
     except Exception as exc:  # noqa: BLE001 - the hooks are already gone
-        ux.warn(f"could not turn the guardrail off in the kept config ({exc}); run: defenseclaw setup guardrail --disable")
+        ux.warn(
+            f"could not turn the guardrail off in the kept config ({exc}); "
+            "run: defenseclaw setup guardrail --disable"
+        )
         return
     ux.ok("guardrail turned off in the kept config (guardrail.enabled = false)")
 

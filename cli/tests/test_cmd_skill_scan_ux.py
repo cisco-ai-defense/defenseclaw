@@ -211,6 +211,28 @@ class TestSingleTargetUX(_SkillScanUXBase):
         mock_sidecar.return_value.disable_skill.assert_called_once_with("demo-skill")
 
 
+    @patch("defenseclaw.commands._scan_ui._SCAN_NOT_RECORDED_NOTED", False)
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_gateway_not_running_still_prints_the_result(self, mock_cls, _mock_info) -> None:
+        # GAP-1672: before the first gateway start the scan printed only a traceback, rc=1.
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        mock_cls.return_value.scan.return_value = self._blocked_result(self.skill_dir)
+        self.app.logger.log_scan = MagicMock(
+            side_effect=CanonicalObservabilityUnavailableError("gateway authentication is unavailable"),
+        )
+        runner = make_separate_stderr_runner()
+        result = runner.invoke(
+            skill, ["scan", "demo-skill", "--path", self.skill_dir], obj=self.app, catch_exceptions=False,
+        )
+        self.assertNotIsInstance(result.exception, CanonicalObservabilityUnavailableError)
+        self.assertIn("Suspicious shell invocation", result.stdout)
+        self.assertIn("HIGH", result.stdout)
+        self.assertIn("gateway isn't running, so this scan result was not recorded", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
 class TestPathTargetUX(_SkillScanUXBase):
     """GAP-1599: ``skill scan <folder>`` outside every connector's skill dirs."""
 
@@ -229,6 +251,19 @@ class TestPathTargetUX(_SkillScanUXBase):
         self.assertIn("the policy would refuse this skill at install.", result.output)
         self.assertNotIn("stays loaded", result.output)
         self.assertIn("Block it: defenseclaw skill block demo-skill\n", result.output)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_with_no_connector_is_adhoc_not_openclaw(self, mock_cls) -> None:
+        # GAP-1715: after "init --connector none" the banner must not say "on openclaw".
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+        self.app.cfg.claw.mode = ""
+        mock_cls.return_value.scan.return_value = self._clean_result(self.skill_dir)
+        result = self.invoke(["scan", self.skill_dir])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 skill at a path (not from a connector config)", result.output)
+        self.assertNotIn("on openclaw", result.output)
 
 
 def test_skill_finding_line_counts_front_matter(tmp_path) -> None:

@@ -266,8 +266,7 @@ def create(
     ux.ok(f"Policy '{name}' created at {dest}")
     click.echo(f"  {ux.dim('Activate with:')} defenseclaw policy activate {name}")
 
-    if app.logger:
-        app.logger.log_action("policy-create", name, f"path={dest}")
+    _log_policy_action(app, "policy-create", name, f"path={dest}", done="Policy created")
 
 
 # ---------------------------------------------------------------------------
@@ -470,22 +469,10 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     (POST /policy/reload) so the change takes effect immediately. If the
     gateway isn't running, it loads the policy when it next starts.
     """
-    from defenseclaw.logger import CanonicalObservabilityUnavailableError
-
     before = _restart_only_config(app.cfg)
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
-    if app.logger:
-        try:
-            app.logger.log_action("policy-activate", name, f"source={path}")
-        except CanonicalObservabilityUnavailableError:
-            # Same offline-staging rule as setup: the policy is saved for the
-            # next gateway start, but the audit event can't be admitted now.
-            click.echo(
-                "  ⚠ Policy saved, but the gateway runtime is unavailable; the audit event "
-                "was not recorded.",
-                err=True,
-            )
+    _log_policy_action(app, "policy-activate", name, f"source={path}", done="Policy saved")
     # The policy's guardrail thresholds are not the tool-call block level
     # (GAP-1228).
     click.echo(
@@ -495,6 +482,29 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     if not reload_gateway:
         return
     _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
+
+
+def _log_policy_action(app: AppContext, action: str, name: str, details: str, *, done: str) -> None:
+    """Record a finished policy change; a stopped gateway only skips the audit event.
+
+    The policy file is already written, so a stopped or refusing gateway prints
+    one plain warning instead of a traceback and rc=1 (GAP-1651), like
+    ``setup webhook`` and ``guardrail fail-mode``.
+    """
+    if not app.logger:
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        app.logger.log_action(action, name, details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded "
+            "(start it with: defenseclaw-gateway start).",
+            err=True,
+        )
+    except CanonicalObservabilityError as exc:
+        click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _restart_only_config(cfg) -> tuple[str, ...]:  # noqa: ANN001 - Config, imported lazily
@@ -791,8 +801,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
         # GAP-1458: drop the user copy that shadowed the built-in.
         os.remove(real_path)
         ux.ok(f"Removed your edited copy of built-in policy '{name}'; the built-in version is back.")
-        if app.logger:
-            app.logger.log_action("policy-delete", name, "reverted edited built-in")
+        _log_policy_action(app, "policy-delete", name, "reverted edited built-in", done="Copy removed")
         if is_active:
             _activate_policy(app, name)
         return
@@ -808,8 +817,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
 
     os.remove(real_path)
     ux.ok(f"Policy '{name}' deleted.")
-    if app.logger:
-        app.logger.log_action("policy-delete", name, "")
+    _log_policy_action(app, "policy-delete", name, "", done="Policy deleted")
 
     # N1: the live data.json still names the just-deleted policy. Re-point
     # it at the default built-in so the gateway never keeps enforcing a
@@ -980,9 +988,11 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
 def edit() -> None:
     """Edit policy sections (guardrail, firewall, scanner, actions).
 
-    Editing the active policy also syncs OPA data.json and, by default, asks
-    the running gateway to reload it (``--no-reload`` to skip). Editing any
-    other policy only saves the draft.
+    Each edit changes the active policy unless --policy-name (-p) names
+    another one; the result line names the policy it changed. Editing the
+    active policy also syncs OPA data.json and, by default, asks the running
+    gateway to reload it (``--no-reload`` to skip). Editing any other policy
+    only saves the draft.
     """
 
 
@@ -1038,7 +1048,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         # updates them the same way. A draft edit leaves them alone.
         app.cfg.skill_actions = _skill_actions_from_policy(data)
         app.cfg.save()
-    ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
+    ux.ok(f"Updated {severity.upper()} actions of {_edited_policy_label(app, name)}: {', '.join(changed)}")
     _reload_after_edit(
         app,
         name,
@@ -1078,7 +1088,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             if not scanner_ovr:
                 del overrides[scanner_type]
             synced = _save_and_maybe_sync(app, path, data, name)
-            ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
+            ux.ok(f"Removed {scanner_type}/{severity.upper()} override from {_edited_policy_label(app, name)}.")
             _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
@@ -1103,7 +1113,10 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
+    ux.ok(
+        f"Updated scanner override {scanner_type}/{severity.upper()} in {_edited_policy_label(app, name)}: "
+        f"{', '.join(changed)}"
+    )
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
@@ -1132,6 +1145,8 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
     They govern LLM traffic through the guardrail proxy only. Tool calls
     from hook connectors (Claude Code, Codex, ...) are blocked at the level
     set with 'defenseclaw guardrail block-at' / 'alert-at' instead.
+
+    Edits the active policy unless --policy-name names another one.
     """
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -1140,10 +1155,10 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 
     if block_threshold is not None:
         guardrail["block_threshold"] = block_threshold
-        changed.append(f"block_threshold={block_threshold}")
+        changed.append(f"block_threshold={_severity_rank_label(block_threshold)}")
     if alert_threshold is not None:
         guardrail["alert_threshold"] = alert_threshold
-        changed.append(f"alert_threshold={alert_threshold}")
+        changed.append(f"alert_threshold={_severity_rank_label(alert_threshold)}")
     if cisco_trust_level is not None:
         guardrail["cisco_trust_level"] = cisco_trust_level
         changed.append(f"cisco_trust_level={cisco_trust_level}")
@@ -1175,7 +1190,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Guardrail updated: {', '.join(changed)}")
+    ux.ok(f"Guardrail of {_edited_policy_label(app, name)} updated: {', '.join(changed)}")
     if block_threshold is not None or alert_threshold is not None:
         click.echo(
             "  Note: these thresholds apply to LLM traffic through the guardrail proxy. "
@@ -1245,7 +1260,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Firewall updated: {', '.join(changed)}")
+    ux.ok(f"Firewall of {_edited_policy_label(app, name)} updated: {', '.join(changed)}")
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
@@ -1434,6 +1449,12 @@ def _reload_after_edit(
     """After editing the active policy, reload it like ``policy activate``."""
     if synced and reload_gateway:
         _reload_and_report(app, name, needs_restart=needs_restart)
+
+
+def _edited_policy_label(app: AppContext, name: str) -> str:
+    """"policy 'strict' (active)": the result line of an edit names the policy it changed (GAP-1667)."""
+    state = "active" if name == _get_active_policy_name(app) else "draft"
+    return f"policy '{name}' ({state})"
 
 
 def _opa_runtime_action(runtime: str) -> str:

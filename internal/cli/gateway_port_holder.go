@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -84,15 +85,43 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 // shared machine the holder is often another account's gateway on the same
 // default port, so it names the command that moves this account's gateway
 // and, when one is free, a port to use.
+//
+// status, start, restart and policy reload all use this text, so they give
+// the same command; another account's process is not this account's to stop
+// (GAP-1706).
 func foreignGatewayListenerFix(cfg *config.Config) string {
-	port := "<port>"
-	if free := freeGatewayAPIPort(gatewayClientHost(cfg), cfg.Gateway.APIPort); free > 0 {
+	return foreignGatewayListenerFixAt(gatewayClientHost(cfg), cfg.Gateway.APIPort)
+}
+
+// foreignGatewayListenerFixAt is foreignGatewayListenerFix for the API
+// listener at host:apiPort (the observability-v8 helpers, GAP-1670).
+func foreignGatewayListenerFixAt(host string, apiPort int) string {
+	port := "<free port>"
+	if free := freeGatewayAPIPort(host, apiPort); free > 0 {
 		port = strconv.Itoa(free)
 	}
-	return fmt.Sprintf(
-		"Stop that process, or move this account's gateway to a free port with: defenseclaw setup gateway --api-port %s, then run: defenseclaw-gateway start",
+	move := fmt.Sprintf(
+		"move this account's gateway to a free port with: defenseclaw setup gateway --api-port %s --non-interactive, then run: defenseclaw-gateway start",
 		port,
 	)
+	if gatewayPortHeldByOtherAccount(host, apiPort) {
+		return "That process belongs to another account, so " + move
+	}
+	return "Stop that process, or " + move
+}
+
+// gatewayPortHeldByOtherAccount reports whether another account's process
+// holds host:port. An unnamed holder on Linux and macOS counts as another
+// account's: lsof does not list other accounts' sockets. A seam for tests.
+var gatewayPortHeldByOtherAccount = func(host string, port int) bool {
+	if runtime.GOOS == "windows" {
+		return gatewayListenerOfAnotherAccount(host, port, "")
+	}
+	holder, err := gatewayPortHolder(host, port)
+	if err != nil {
+		return true
+	}
+	return holder.UID >= 0 && holder.UID != os.Getuid()
 }
 
 // gatewayAPIPortStep keeps a suggested API port clear of the sandbox ingress

@@ -438,12 +438,29 @@ func runWindowsEnterpriseLifecycle(
 					"or omit --cli-binary",
 			))
 		}
+		if windowsEnterpriseStandalone(opts) &&
+			windowsEnterpriseInstalledNonCLIUninstallCaller(action, script, executable) {
+			return failPreflight(windowsEnterpriseInvalidArguments(
+				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
+					"in use, so the uninstall would stop halfway. Run defenseclaw.exe from the same bin "+
+					"folder (defenseclaw.exe enterprise windows uninstall --profile standalone) "+
+					"or DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+				filepath.Base(executable),
+			))
+		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
 			action,
 			script,
 			executable,
 			os.Getpid(),
 		); ok {
+			if windowsEnterpriseStandalone(opts) {
+				if err := windowsEnterpriseLeaveInstallRoot(
+					filepath.Dir(filepath.Dir(executable)),
+				); err != nil {
+					return failPreflight(err)
+				}
+			}
 			args = append(
 				args,
 				"-SelfUninstallCallerPID",
@@ -613,6 +630,69 @@ func windowsEnterpriseSelfUninstallCaller(
 		return 0, false
 	}
 	return uint32(processID), true
+}
+
+// windowsEnterpriseInstalledNonCLIUninstallCaller reports an uninstall that
+// runs from an installed image other than bin\defenseclaw.exe, such as
+// bin\defenseclaw-gateway.exe. Only the installed CLI hands its running image
+// to the detached self-uninstall finalizer; any other running image inside
+// InstallRoot keeps the folder from being retired, so the uninstall committed
+// and then failed 1603 halfway (GAP-1679).
+func windowsEnterpriseInstalledNonCLIUninstallCaller(action, installer, executable string) bool {
+	if !strings.EqualFold(strings.TrimSpace(action), "uninstall") {
+		return false
+	}
+	cleanInstaller, err := filepath.Abs(strings.TrimSpace(installer))
+	if err != nil ||
+		!strings.EqualFold(filepath.Base(cleanInstaller), "install-enterprise.ps1") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(cleanInstaller)), "libexec") {
+		return false
+	}
+	cleanExecutable, err := filepath.Abs(strings.TrimSpace(executable))
+	if err != nil {
+		return false
+	}
+	installRoot := filepath.Dir(filepath.Dir(cleanInstaller))
+	if !windowsEnterprisePathWithin(cleanExecutable, installRoot) {
+		return false
+	}
+	return !strings.EqualFold(
+		filepath.Clean(cleanExecutable),
+		filepath.Join(installRoot, "bin", "defenseclaw.exe"),
+	)
+}
+
+// windowsEnterprisePathWithin reports whether path is root or inside it.
+func windowsEnterprisePathWithin(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// windowsEnterpriseUninstallWorkingDirectory is replaceable in tests.
+var windowsEnterpriseUninstallWorkingDirectory = trustedWindowsEnterpriseWorkingDirectory
+
+// windowsEnterpriseLeaveInstallRoot moves the CLI's working directory out of
+// installRoot before a self-uninstall. A working directory inside InstallRoot
+// (the MDM uninstall script started the CLI in its bin folder, or an
+// administrator ran it from there) is an open handle that keeps the folder
+// from being renamed aside, so the uninstall committed and then failed 1603
+// (GAP-1684).
+func windowsEnterpriseLeaveInstallRoot(installRoot string) error {
+	current, err := os.Getwd()
+	if err != nil || !windowsEnterprisePathWithin(current, installRoot) {
+		return nil
+	}
+	directory, err := windowsEnterpriseUninstallWorkingDirectory()
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(directory); err != nil {
+		return fmt.Errorf("leave the install folder before the uninstall: %w", err)
+	}
+	return nil
 }
 
 func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifecycleOptions) []string {

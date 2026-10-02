@@ -19,13 +19,10 @@
 package notify
 
 import (
-	"io"
-	"os"
 	"os/exec"
 	"strings"
 )
 
-var fallbackWriter io.Writer = os.Stderr
 var osascriptRun = func(args ...string) error {
 	return exec.Command("osascript", args...).Run()
 }

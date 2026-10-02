@@ -19902,6 +19902,44 @@ function Ensure-DefenseClawSelfUninstallHelper {
     return $Layout.SelfUninstallHelperPath
 }
 
+function Set-DefenseClawSelfUninstallReceiptCaller {
+    # Binds a prepared self-uninstall receipt to the installed CLI that
+    # retries it once the caller that prepared it has exited. Only the
+    # process identity changes: the image is the same installed CLI file
+    # the receipt recorded.
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)]$Receipt,
+        [Parameter(Mandatory)][int]$CallerPID
+    )
+    if ([string]$Receipt.phase -cne 'prepared_install_retirement') {
+        throw 'only a prepared self-uninstall receipt can take a new caller'
+    }
+    $identity = Get-DefenseClawSelfUninstallCallerIdentity `
+        -Layout $Layout `
+        -CallerPID $CallerPID
+    if ([string]$identity.file_identity -cne [string]$Receipt.caller_file_identity -or
+        [string]$identity.sha256 -cne [string]$Receipt.caller_sha256) {
+        throw 'the retrying CLI is not the installed CLI the self-uninstall receipt recorded'
+    }
+    $Receipt.caller_pid = [int64]$identity.pid
+    $Receipt.caller_creation_filetime = [int64]$identity.creation_filetime
+    Write-DefenseClawJsonAtomic `
+        -Value $Receipt `
+        -Path $Layout.SelfUninstallReceiptPath
+    Set-DefenseClawPathAcl `
+        -Path $Layout.SelfUninstallReceiptPath `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    return Get-DefenseClawSelfUninstallReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Required
+}
+
 function Set-DefenseClawSelfUninstallReceiptCommitted {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -20563,7 +20601,8 @@ function Invoke-DefenseClawSelfUninstallRecovery {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$Purge
+        [switch]$Purge,
+        [int]$SelfUninstallCallerPID
     )
     $receipt = Get-DefenseClawSelfUninstallReceipt `
         -Layout $Layout `
@@ -20575,6 +20614,8 @@ function Invoke-DefenseClawSelfUninstallRecovery {
             result = $null
         }
     }
+    $reboundCaller = $false
+    $finalization = $null
     $canonicalExists = Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.InstallRoot `
         -PathType Container
@@ -20631,10 +20672,28 @@ function Invoke-DefenseClawSelfUninstallRecovery {
             if ($actualTombstoneHash -cne [string]$receipt.tombstone_sha256) {
                 throw 'prepared self-uninstall recovery found changed tombstone'
             }
-            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            # A standalone retry by the installed CLI after the first caller
+            # exited (its rename of InstallRoot failed, GAP-1684) now runs
+            # from InstallRoot itself. Bind the receipt to it so the detached
+            # finalizer waits for it instead of deleting its running image.
+            if ($SelfUninstallCallerPID -gt 0 -and
+                $Action -eq 'Uninstall' -and
+                (Test-DefenseClawStandaloneProfile) -and
+                -not (Test-DefenseClawSelfUninstallCallerRunning `
+                    -Layout $Layout `
+                    -Receipt $receipt)) {
+                $receipt = Set-DefenseClawSelfUninstallReceiptCaller `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -Receipt $receipt `
+                    -CallerPID $SelfUninstallCallerPID
+                $reboundCaller = $true
+            }
+            $finalization = Complete-DefenseClawCommittedManagedHooksFinalization `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName)
+                -GuardianServiceName $GuardianServiceName
             $retiredRoot = [string]$receipt.retired_install_root
             [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
             if ((Microsoft.PowerShell.Management\Test-Path `
@@ -20697,11 +20756,28 @@ function Invoke-DefenseClawSelfUninstallRecovery {
                     "the installed CLI to exit; retry $Action after it exits"
                 )
             }
-            $result = Get-DefenseClawLifecycleStatus `
-                -Action 'Uninstall' `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+            if ($reboundCaller) {
+                # The retry finishes what the first run left: the committed
+                # cleanup, and for standalone the machine-state purge.
+                $result = Invoke-DefenseClawCommittedUninstallCleanup `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -Purge:$Purge
+                if ($null -ne $finalization) {
+                    $result = Add-DefenseClawUserRegistrationCleanupResult `
+                        -Result $result `
+                        -Layout $Layout `
+                        -Finalization $finalization
+                }
+            }
+            else {
+                $result = Get-DefenseClawLifecycleStatus `
+                    -Action 'Uninstall' `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName
+            }
             if ([bool]$receipt.purge_requested -and
                 -not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $Layout.StateRoot)) {
@@ -21944,7 +22020,8 @@ function Invoke-DefenseClawPreLayoutRecovery {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$Purge,
         [string]$RequestedCertificationCodexHome,
-        [switch]$RequestedCoreHardeningCertification
+        [switch]$RequestedCoreHardeningCertification,
+        [int]$SelfUninstallCallerPID
     )
     # A self-uninstall receipt can be the final surviving authority after both
     # canonical InstallRoot retirement and StateRoot purge. Recover it before
@@ -21954,7 +22031,8 @@ function Invoke-DefenseClawPreLayoutRecovery {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -Purge:$Purge
+        -Purge:$Purge `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
     if ([bool]$selfUninstallRecovery.handled) {
         return $selfUninstallRecovery
     }
@@ -24444,7 +24522,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -Purge:$Purge `
             -RequestedCertificationCodexHome $resolvedCertificationCodexHome `
-            -RequestedCoreHardeningCertification:$CoreHardeningCertification
+            -RequestedCoreHardeningCertification:$CoreHardeningCertification `
+            -SelfUninstallCallerPID $SelfUninstallCallerPID
         if ([bool]$preLayoutRecovery.handled) {
             return $preLayoutRecovery.result
         }

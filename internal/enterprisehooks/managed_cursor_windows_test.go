@@ -555,3 +555,53 @@ func TestWindowsCursorManagedStateAcceptsAnEarlierReleaseAdapter(t *testing.T) {
 		t.Fatal("an adapter that does not run the recorded hook executable was accepted")
 	}
 }
+
+// GAP-1567: the purge removes the allow-only tombstone the default uninstall
+// keeps in ProgramData\Cursor, and only that exact file.
+func TestPurgeWindowsCursorManagedTombstoneRemovesOnlyTheTombstone(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Cursor")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalRoot := windowsCursorManagedRootResolver
+	windowsCursorManagedRootResolver = func() (string, error) { return root, nil }
+	t.Cleanup(func() { windowsCursorManagedRootResolver = originalRoot })
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, body []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := purgeWindowsCursorManagedTombstoneUnlocked(); err != nil {
+		t.Fatalf("purge with nothing there: %v", err)
+	}
+	write(paths.Adapter, windowsCursorManagedTombstone())
+	if err := purgeWindowsCursorManagedTombstoneUnlocked(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(paths.Adapter); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the tombstone stayed: %v", err)
+	}
+
+	write(paths.Adapter, []byte("# an administrator's own Cursor hook\r\n"))
+	if err := purgeWindowsCursorManagedTombstoneUnlocked(); err == nil {
+		t.Fatal("a file that is not the tombstone was accepted")
+	}
+	if _, err := os.Stat(paths.Adapter); err != nil {
+		t.Fatalf("a file that is not the tombstone was removed: %v", err)
+	}
+
+	write(paths.Adapter, windowsCursorManagedTombstone())
+	write(paths.State, []byte("{}"))
+	if err := purgeWindowsCursorManagedTombstoneUnlocked(); err == nil {
+		t.Fatal("the tombstone was removed while managed ownership state remains")
+	}
+	if _, err := os.Stat(paths.Adapter); err != nil {
+		t.Fatalf("the tombstone was removed while managed ownership state remains: %v", err)
+	}
+}

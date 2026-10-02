@@ -20,8 +20,8 @@ import (
 // could take it and lock the first account out (GAP-1261). Each start
 // therefore leaves an empty claim file owned by this account in the shared
 // sticky /var/tmp, which init on another account skips (bootstrap.py reads
-// the same names). Only the owner can remove a claim; a claim is a hint, never
-// an authorization.
+// the same names), also when the claim's account was deleted (GAP-1704). Only
+// the owner can remove a claim; a claim is a hint, never an authorization.
 var gatewayPortClaimDir = "/var/tmp"
 
 const gatewayPortClaimPrefix = "defenseclaw-api-port-"

@@ -25,7 +25,10 @@ def test_windows_launcher_timeout_outlasts_the_gateway_readiness_wait():
     readiness = _go_seconds("daemon_readiness_windows.go")
     # 240 s still stopped a start that was admitting connectors (GAP-1206).
     assert readiness >= 600
-    assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS > readiness + 20
+    # GAP-1556: connector setup progress may extend that wait by this factor.
+    text = (_REPO / "internal" / "cli" / "daemon_readiness_windows.go").read_text(encoding="utf-8")
+    factor = int(re.search(r"startReadinessProgressFactor = (\d+)", text).group(1))
+    assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS > readiness * factor + 20
     assert _go_seconds("daemon_readiness_other.go") == 60
 
 

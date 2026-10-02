@@ -54,6 +54,10 @@ const (
 	// (first-run scanning of the new image), so the readiness wait after a
 	// spawn is longer (GAP-1053). It returns as soon as the lock is taken.
 	watchdogSpawnReadyTimeout = 45 * time.Second
+	// watchdogProbeTimeout bounds one /health probe. A gateway on a loaded
+	// Windows host missed 5 s twice in a row and was reported down while it
+	// kept running (GAP-1642).
+	watchdogProbeTimeout = 15 * time.Second
 )
 
 type watchdogState int
@@ -376,12 +380,12 @@ func watchdogHealthURL(cfg *config.Config) string {
 func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, requirements watchdogHealthRequirements, webhooks *gateway.WebhookDispatcher, recovery watchdogRecoveryRecorder) {
 	dataDir := config.DefaultDataPath()
 	current := loadWatchdogState(dataDir)
-	failCount := 0
+	// Degraded and down probes debounce separately: a shared count let one
+	// slow probe after a run of degraded ones report "protection down ...
+	// unreachable" for a gateway that answered (GAP-1642).
+	degradedCount, downCount := 0, 0
 	pendingRecovery := false
-	if current != stateHealthy {
-		failCount = debounce // carry over so first healthy probe triggers recovery
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: watchdogProbeTimeout}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -395,7 +399,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 
 			switch assessment.state {
 			case stateHealthy:
-				failCount = 0
+				degradedCount, downCount = 0, 0
 				if current != stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
 					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
@@ -414,8 +418,9 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				}
 
 			case stateDegraded:
-				failCount++
-				if failCount >= debounce && current == stateHealthy {
+				degradedCount++
+				downCount = 0
+				if degradedCount >= debounce && current == stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] protection degraded: %s\n", assessment.details)
 					_ = notify.Send("DefenseClaw", assessment.notification)
 					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
@@ -424,9 +429,10 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				}
 
 			default: // stateDown
-				failCount++
-				if failCount >= debounce && current != stateDown {
-					fmt.Fprintf(os.Stderr, "[watchdog] protection down (after %d failures): %s\n", failCount, assessment.details)
+				downCount++
+				degradedCount = 0
+				if downCount >= debounce && current != stateDown {
+					fmt.Fprintf(os.Stderr, "[watchdog] protection down (after %d failures): %s\n", downCount, assessment.details)
 					_ = notify.Send("DefenseClaw", assessment.notification)
 					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
 					current = stateDown

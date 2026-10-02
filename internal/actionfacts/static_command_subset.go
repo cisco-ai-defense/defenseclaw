@@ -49,7 +49,8 @@ var shellStateBuiltins = map[string]bool{
 // (semantic.Program.StaticCommandSubsetSafe); a non-match proves nothing.
 //
 // A kept command is a POSIX process whose every argument is static, whose
-// execution is certain, and whose parent commands are kept too. The view is
+// execution is certain or only depends on a plain && or || list (which a
+// complete parse counts as well), and whose parent commands are kept too. The view is
 // unavailable when the only issues are not runtime-expanded words and
 // unsupported constructs, when the command defines a function, or when a
 // dropped command is a shell builtin that could change what the kept ones
@@ -121,6 +122,10 @@ func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, partial
 			}
 		}
 		command.Redirects = redirects
+		// As in ShortCircuitListReduction, a block stops the whole call, so
+		// an && or || list member is judged as if it runs.
+		command.ControlFlowUncertain = false
+		command.ControlFlowOperator = ControlFlowOperatorNone
 		if static {
 			kept[command.ID] = true
 			command.ArgvComplete = true
@@ -179,7 +184,7 @@ func partialArgvPOSIXProcess(command CommandFact) bool {
 	if command.Dialect != DialectPOSIX ||
 		(command.Kind != CommandKindProcess && command.Kind != "") ||
 		(command.Effect != EffectExecute && command.Effect != EffectUncertain) ||
-		command.ControlFlowUncertain || command.Background ||
+		!certainOrListMember(command) || command.Background ||
 		len(command.Argv) == 0 || command.Argv[0] == "" ||
 		command.Executable == "" || command.Program == "" ||
 		len(command.Arguments) != len(command.Argv) ||
@@ -201,7 +206,7 @@ func partialArgvPOSIXProcess(command CommandFact) bool {
 func staticCertainPOSIXProcess(command CommandFact) bool {
 	if command.Dialect != DialectPOSIX ||
 		(command.Kind != CommandKindProcess && command.Kind != "") ||
-		command.Effect != EffectExecute || command.ControlFlowUncertain ||
+		command.Effect != EffectExecute || !certainOrListMember(command) ||
 		command.Background || len(command.Argv) == 0 || command.Argv[0] == "" ||
 		command.Executable == "" || command.Program == "" ||
 		len(command.Arguments) != len(command.Argv) {
@@ -213,6 +218,18 @@ func staticCertainPOSIXProcess(command CommandFact) bool {
 		}
 	}
 	return true
+}
+
+// certainOrListMember reports whether command runs unconditionally or only
+// as a member of a plain && or || list (`echo marker $USER && echo done`,
+// `true && echo marker $USER`). A complete parse counts a match on such a
+// list member too, so a runtime-expanded word elsewhere must not make the
+// same match detection-only (GAP-0029). Commands under if, while, for, case,
+// a function, a subshell, a negation or a mixed &&/|| list stay uncertain.
+func certainOrListMember(command CommandFact) bool {
+	return !command.ControlFlowUncertain ||
+		command.ControlFlowOperator == ControlFlowOperatorAnd ||
+		command.ControlFlowOperator == ControlFlowOperatorOr
 }
 
 // definesFunction reports whether source fails to parse or declares a shell

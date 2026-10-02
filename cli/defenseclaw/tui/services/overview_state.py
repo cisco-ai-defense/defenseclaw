@@ -1808,7 +1808,7 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.codex/config.toml ([mcp_servers]; trusted projects only)",
         ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
-        ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
+        ("hermes", "mcps"): (f"{hermes_config} (mcp_servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
         ("devin", "mcps"): (
             *tuple(devin_configs),

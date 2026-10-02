@@ -141,7 +141,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		warn = cmd.ErrOrStderr()
 	}
 	applyManagedStandaloneAdminEnv(warn)
-	if err := loadGatewayCommandConfigOnly(); err != nil {
+	if err := loadGatewayCommandConfigFor(cmd); err != nil {
 		return err
 	}
 	return checkManagedAuditExportDatabase()
@@ -210,6 +210,9 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
 	defer db.Close()
+	// A reader that stops early (| head -1, | Select-Object -First 1) is
+	// not an export failure (GAP-1694).
+	defer func() { err = quietClosedOutputPipe(err) }()
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {

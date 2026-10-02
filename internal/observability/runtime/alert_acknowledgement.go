@@ -29,5 +29,9 @@ func (runtime *Runtime) ApplyAlertAcknowledgement(
 	if graph == nil || !ok || !typeOK || component == nil || component.digest != graph.Digest() {
 		return audit.AlertAcknowledgementResult{}, &Error{code: ErrorComponentUnavailable}
 	}
-	return component.applyAlertAcknowledgement(ctx, command)
+	result, outcome, applyErr := component.applyAlertAcknowledgement(ctx, command)
+	if applyErr == nil && (len(outcome.OptionalWork()) > 0 || len(outcome.OptionalFailures()) > 0) {
+		runtime.dispatchOptional(lease, graph, outcome)
+	}
+	return result, applyErr
 }

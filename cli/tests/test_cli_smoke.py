@@ -17,6 +17,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import unittest
@@ -93,6 +94,11 @@ class CliSmokeTests(unittest.TestCase):
             self.assertFalse((home / "audit.db").exists())
 
     def test_trusted_path_bootstrap_survives_init_and_authorizes_codex_receipt(self):
+        # setup gateway refuses a port another process holds, so use one
+        # that is free now instead of a fixed port a parallel job may own.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            api_port = probe.getsockname()[1]
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands.cmd_config import ValidationResult
         from defenseclaw.main import cli
@@ -176,7 +182,7 @@ class CliSmokeTests(unittest.TestCase):
                         "setup",
                         "gateway",
                         "--api-port",
-                        "19091",
+                        str(api_port),
                         "--non-interactive",
                         "--no-verify",
                     ],
@@ -195,8 +201,8 @@ class CliSmokeTests(unittest.TestCase):
                 document["ai_discovery"]["trusted_binary_prefixes"],
                 [expected_root],
             )
-            self.assertEqual(document["gateway"]["api_port"], 19091)
-            self.assertEqual(json.loads(shown.output)["gateway"]["api_port"], 19091)
+            self.assertEqual(document["gateway"]["api_port"], api_port)
+            self.assertEqual(json.loads(shown.output)["gateway"]["api_port"], api_port)
             initialized_selection = initialized_receipt["selections"]["codex"]
             self.assertEqual(initialized_selection["executable"], expected_codex)
             receipt = json.loads((home / "agent_selection.json").read_text())

@@ -511,6 +511,44 @@ def _force_utf8_io() -> None:
     sys.stderr = ux.ascii_safe_redirected_stream(sys.stderr)
 
 
+def _attached_console_width() -> int:
+    """Columns of the terminal this process runs in, even when stdout is piped; 0 if none."""
+    for fd in (0, 1, 2):
+        try:
+            return os.get_terminal_size(fd).columns
+        except (OSError, ValueError):
+            continue
+    if os.name != "nt":
+        return 0
+    try:
+        # CONOUT$ is the console screen buffer even when every standard
+        # stream is redirected (PowerShell '2>&1 | Select ...').
+        with open("CONOUT$", "w") as console:
+            return os.get_terminal_size(console.fileno()).columns
+    except (OSError, ValueError):
+        return 0
+
+
+def _keep_console_width_when_piped() -> None:
+    """Keep the terminal's width for tables when stdout is piped (GAP-1682).
+
+    Rich and Click fall back to 80 columns when stdout is not a terminal.
+    Rich on Windows asks only stdout and stderr, so in a 220-column
+    PowerShell ``defenseclaw skill list 2>&1 | Select -First 50`` cut every
+    table to 80 ASCII columns ('St...', 'Se...'). Export the console's width
+    as COLUMNS, which both honour, unless the user already set it.
+    """
+    stdout = sys.__stdout__
+    try:
+        if os.environ.get("COLUMNS") or stdout is None or stdout.isatty():
+            return
+    except (OSError, ValueError):
+        return
+    width = _attached_console_width()
+    if width > 0:
+        os.environ["COLUMNS"] = str(width)
+
+
 def _output_pipe_closed(exc: OSError) -> bool:
     """Whether *exc* means the reader of stdout went away.
 
@@ -544,10 +582,27 @@ def _silence_closed_stdout() -> None:
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
+    _keep_console_width_when_piped()
     _force_utf8_io()
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
     try:
         if not _try_launch_tui():
             cli()
+    except CanonicalObservabilityUnavailableError as exc:
+        # The command's audit event needs the gateway (for example after
+        # init --no-start-gateway): one line with the fix, no traceback
+        # (GAP-1689).
+        click.echo(
+            f"Error: the audit event was not recorded: {exc}. Start the gateway with "
+            "'defenseclaw-gateway start' (or run 'defenseclaw setup gateway' to configure it), "
+            "then run the command again.",
+            err=True,
+        )
+        sys.exit(1)
+    except CanonicalObservabilityError as exc:
+        click.echo(f"Error: the gateway did not confirm the audit event: {exc}", err=True)
+        sys.exit(1)
     except OSError as exc:
         if not _output_pipe_closed(exc):
             raise

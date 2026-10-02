@@ -875,3 +875,31 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     assert "(hermes): already open; saved as its own setting" in result.output
     assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: the change list shows the installed runtime value that
+    # guardrail status shows, and Cursor in action mode stays fail-closed.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "", "cursor": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "observe"
+    cfg.guardrail.connectors["cursor"].mode = "action"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    stale = SimpleNamespace(runtime="closed", desired="open", current=False, drift=("installed hook",))
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=stale),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    assert "(codex): closed → open" in result.output
+    assert "(codex): already open" not in result.output
+    assert "(cursor): stays closed" in result.output
+    assert "Cursor action mode keeps hook failures closed" in result.output

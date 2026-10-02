@@ -37,17 +37,21 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 		kept int
 		// programs are the view's commands, in order.
 		programs []string
+		// homeExact is set for a lone command whose only dynamic word is a
+		// "~/" target: with an active home its analysis is complete
+		// (rewriteTrustedPOSIXHomeTilde), so there is nothing to reduce.
+		homeExact bool
 	}{
-		{name: "tilde target", command: "echo dc-block-marker > ~/dc-x.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "tilde target", command: "echo dc-block-marker > ~/dc-x.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}, homeExact: true},
 		{name: "HOME target", command: "echo dc-block-marker > $HOME/dc-x.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "quoted HOME append", command: `echo dc-block-marker >> "$HOME/dc-x.txt"`, static: "echo dc-block-marker >> " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "glob target", command: "echo dc-block-marker > dc-*.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
-		{name: "static stderr kept", command: "echo dc-block-marker 2>/dev/null > ~/dc-x.txt", static: "echo dc-block-marker 2>/dev/null > " + staticRedirectTarget, reduced: true, kept: 1, programs: []string{"echo"}},
+		{name: "static stderr kept", command: "echo dc-block-marker 2>/dev/null > ~/dc-x.txt", static: "echo dc-block-marker 2>/dev/null > " + staticRedirectTarget, reduced: true, kept: 1, programs: []string{"echo"}, homeExact: true},
 		{name: "pipeline", command: "echo dc-block-marker | cat > ~/dc-x.txt", static: "echo dc-block-marker | cat > " + staticRedirectTarget, reduced: true, programs: []string{"echo", "cat"}},
 		// A complete analysis expands these wrappers; the view has their
 		// child commands, as the static-target form does.
-		{name: "shell wrapper", command: "bash -c 'echo hi' > ~/x.txt", static: "bash -c 'echo hi' > " + staticRedirectTarget, reduced: true, programs: []string{"bash", "echo"}},
-		{name: "sudo wrapper", command: "sudo systemctl status sshd > ~/x.txt", static: "sudo systemctl status sshd > " + staticRedirectTarget, reduced: true, programs: []string{"sudo", "systemctl"}},
+		{name: "shell wrapper", command: "bash -c 'echo hi' > ~/x.txt", static: "bash -c 'echo hi' > " + staticRedirectTarget, reduced: true, programs: []string{"bash", "echo"}, homeExact: true},
+		{name: "sudo wrapper", command: "sudo systemctl status sshd > ~/x.txt", static: "sudo systemctl status sshd > " + staticRedirectTarget, reduced: true, programs: []string{"sudo", "systemctl"}, homeExact: true},
 
 		{name: "static directory with a parameter", command: "echo dc-block-marker > /tmp/dc-x-$USER.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "quoted static directory with a parameter", command: `echo dc-block-marker > "/tmp/dc-x-${USER}.txt"`, static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
@@ -88,6 +92,12 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 				facts := Analyze(input)
 				before := Analyze(input)
 				reduced, twin, ok := DynamicRedirectTargetReduction(input, facts)
+				if test.homeExact && home != "" {
+					if !facts.Authoritative() || ok {
+						t.Fatalf("parse=%+v reduced=%t, want a complete analysis and no reduction", facts.Parse, ok)
+					}
+					return
+				}
 				if ok != test.reduced {
 					t.Fatalf("reduced = %t, want %t; parse=%+v commands=%+v",
 						ok, test.reduced, facts.Parse, facts.Commands)

@@ -1300,6 +1300,41 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertIn("restored the prior connector configuration and runtime", result.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
+    def test_rollback_after_failed_gateway_start_keeps_its_guidance(self):
+        # GAP-1705: setup guardrail / setup claude-code whose gateway start
+        # failed (port held by another account) showed only a fixed reference.
+        self._seed_map("codex")
+        snapshot = replace(
+            cmd_setup._capture_setup_config_snapshot(self.app.cfg),
+            applied_runtime=cmd_setup._SetupAppliedRuntimeEvidence(
+                lifecycle="stopped",
+                generation=None,
+                invariants=(),
+            ),
+        )
+        try:
+            cmd_setup._fail_if_restart_failed(["defenseclaw-gateway"])
+        except click.ClickException as exc:
+            cause = exc
+        with (
+            patch("defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._verify_restored_setup_runtime", return_value=[]),
+            patch("defenseclaw.commands.cmd_setup._capture_failed_setup_registration_locations", return_value=()),
+            patch(
+                "defenseclaw.commands.cmd_setup._capture_protected_setup_file",
+                return_value=(False, b"", None),
+            ),
+            patch("defenseclaw.commands.cmd_setup._verify_preserved_setup_hook_contract_lock", return_value=[]),
+            patch("defenseclaw.commands.cmd_setup._restore_setup_hook_contract_lock_snapshot"),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = raised.exception.format_message()
+        self.assertIn("the agents may not be", message)
+        self.assertIn("Setup restored the prior connector configuration and runtime", message)
+        self.assertNotIn("[ref ", message)
+
     # D3=A: --no-restart does NOT bounce and warns teardown is deferred.
     def test_remove_no_restart_defers_teardown(self):
         self._seed_map("codex", "cursor")
@@ -2020,6 +2055,26 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertEqual(persistence.call_count, 2)
         runtime.assert_called_once()
 
+    def test_gateway_that_cannot_start_is_not_reported_as_incomplete_rollback(self):
+        # GAP-1139: the config was restored; the gateway fails to start again
+        # for the same reason, which is not an incomplete rollback.
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        self.assertIsNone(snapshot.applied_runtime)
+        cause = click.ClickException("gateway restart/readiness failed for: defenseclaw-gateway.")
+        with (
+            patch("defenseclaw.commands.cmd_setup._restore_setup_config_snapshot"),
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_restored_connector_runtime",
+                side_effect=click.ClickException(str(cause.message)),
+            ),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = str(raised.exception)
+        self.assertNotIn("rollback was incomplete", message)
+        self.assertIn("gateway still cannot start for the same reason", message)
+
     def test_persistence_exception_does_not_skip_remaining_verification(self):
         snapshot = replace(
             cmd_setup._capture_setup_config_snapshot(self.app.cfg),
@@ -2216,7 +2271,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             self._lock_body({"codex": {"locations": {"hook_config_paths": [failed_path]}}}),
         )
 
-        def reconcile(_app, _snapshot):
+        def reconcile(_app, _snapshot, _failed_locations=()):
             os.remove(failed_path)
 
         with (
@@ -2242,7 +2297,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             open(os.path.join(self.app.cfg.data_dir, "hook_contract_lock.json"), "rb").read(),
             prior_lock,
         )
-        lifecycle.assert_called_once_with(self.app, snapshot)
+        self.assertEqual(lifecycle.call_args.args[:2], (self.app, snapshot))
         self.assertEqual(runtime.call_count, 2)
         self.assertTrue(all(item.args[0] is self.app.cfg for item in runtime.call_args_list))
         self.assertTrue(all(len(item.args[1]) == 1 for item in runtime.call_args_list))
@@ -2261,7 +2316,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         )
         samples = 0
 
-        def reconcile(_app, _snapshot):
+        def reconcile(_app, _snapshot, _failed_locations=()):
             os.remove(failed_path)
 
         def capture_final(_cfg, required):
@@ -2313,7 +2368,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         )
         samples = 0
 
-        def reconcile(_app, _snapshot):
+        def reconcile(_app, _snapshot, _failed_locations=()):
             os.remove(failed_path)
 
         def capture_final(_cfg, required):
@@ -2415,7 +2470,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             self._lock_body({"codex": {"locations": {"hook_config_paths": [reused_path]}}}),
         )
 
-        def reconcile(_app, _snapshot):
+        def reconcile(_app, _snapshot, _failed_locations=()):
             atomic_write_private_bytes(reused_path, prior_reused)
 
         with (
@@ -2672,6 +2727,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
                 "defenseclaw.commands.cmd_setup._restart_restored_connector_runtime",
                 side_effect=readiness_error,
             ),
+            patch("defenseclaw.commands.cmd_setup._verify_restored_setup_runtime", return_value=["residue"]),
             patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", return_value=trust),
             patch("defenseclaw.commands.cmd_setup._stop_defense_gateway_native") as stop,
             patch(
@@ -2686,6 +2742,24 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         stop.assert_not_called()
         reactivated.assert_called_once_with(self.app.cfg.data_dir, ("cursor",))
         teardown.assert_called_once_with(self.app.cfg.data_dir, ("cursor",))
+
+    def test_restore_prior_stopped_lifecycle_skips_restart_when_failed_start_left_nothing(self):
+        # GAP-1705: the start never ran (another account held the port), so
+        # nothing needs reconciling; a second start would fail the same way.
+        snapshot = replace(
+            cmd_setup._capture_setup_config_snapshot(self.app.cfg),
+            applied_runtime=self._evidence(lifecycle="stopped", generation=None),
+        )
+        trust = MagicMock(trusted=False, code="missing")
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_restored_connector_runtime") as reconcile,
+            patch("defenseclaw.commands.cmd_setup._verify_restored_setup_runtime", return_value=[]),
+            patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", return_value=trust),
+        ):
+            result = cmd_setup._restore_prior_setup_lifecycle(self.app, snapshot)
+
+        self.assertIsNone(result)
+        reconcile.assert_not_called()
 
     def test_stopped_snapshot_inactive_connectors_rejects_contradictory_or_unknown_evidence(self):
         self.app.cfg.guardrail.connectors = {"cursor": PerConnectorGuardrailConfig()}
@@ -2943,7 +3017,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
 
         self.assertIn("restored the prior connector configuration and runtime", str(raised.exception))
         self.assertEqual(persistence.call_count, 2)
-        lifecycle.assert_called_once_with(self.app, snapshot)
+        lifecycle.assert_called_once_with(self.app, snapshot, ())
         self.assertEqual(runtime.call_count, 2)
         runtime.assert_has_calls(
             [
@@ -2961,7 +3035,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         atomic_write_private_bytes(lock_path, failed_lock)
         observed: list[bytes] = []
 
-        def reconcile(_app, _snapshot):
+        def reconcile(_app, _snapshot, _failed_locations=()):
             with open(lock_path, "rb") as handle:
                 observed.append(handle.read())
             atomic_write_private_bytes(lock_path, prior_lock)

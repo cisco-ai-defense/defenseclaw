@@ -116,7 +116,8 @@ def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> N
     extra = sorted(name for name in stored if name not in gateway_tokens)
     if managed:
         click.echo(
-            f"  {ux.bold('Managed by DefenseClaw')} {ux.dim('(gateway auth token, do not remove):')} {', '.join(managed)}"
+            f"  {ux.bold('Managed by DefenseClaw')} {ux.dim('(gateway auth token, do not remove):')} "
+            f"{', '.join(managed)}"
         )
     if not extra:
         return

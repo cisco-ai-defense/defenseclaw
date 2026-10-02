@@ -91,6 +91,25 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 			},
 		})
 	}
+	hasUpgrade := false
+	for _, command := range root.Commands() {
+		if command.Name() == "upgrade" {
+			hasUpgrade = true
+		}
+	}
+	if !hasUpgrade {
+		// `upgrade` was a bare "unknown command" rc 2 here (GAP-1719).
+		root.AddCommand(&cobra.Command{
+			Use:                "upgrade",
+			Hidden:             true,
+			DisableFlagParsing: true,
+			SilenceUsage:       true,
+			Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+			RunE: func(_ *cobra.Command, _ []string) error {
+				return managedWindowsUpgradeAnswer(where)
+			},
+		})
+	}
 	for _, command := range root.Commands() {
 		if command.Name() == "setup" {
 			return
@@ -120,6 +139,15 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
 		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed",
 		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccount())
+}
+
+// managedWindowsUpgradeAnswer tells a user on a managed Windows computer that
+// the organization installs DefenseClaw upgrades.
+func managedWindowsUpgradeAnswer(where string) error {
+	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so upgrades are installed "+
+		"by your organization, not with `upgrade`; there is nothing for you to do. Your administrator can check "+
+		"the installed version %s. Nothing was changed",
+		where, managedWindowsAdminStatusHint())
 }
 
 // managedWindowsAdminCLI is the managed CLI an administrator runs on a
@@ -162,9 +190,9 @@ func addManagedHostHelp(root *cobra.Command) {
 	managedHostHelpInstalled = true
 	defaultHelp := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		if cmd == root {
-			applyManagedHostHelp(root)
-		}
+		// Subcommand help inherits this function, so `status --help` and
+		// the others get the managed wording too (GAP-1719).
+		applyManagedHostHelp(root)
 		defaultHelp(cmd, args)
 	})
 }
@@ -210,7 +238,65 @@ Managed deployment record:
 			command.Short = managedHostStatusShort
 		}
 	}
+	applyManagedHostSubcommandHelp(root, adminLead, admin)
 	return true
+}
+
+// managedHostOtherPlatforms are the `enterprise` subcommands for other
+// operating systems, hidden from a managed computer's help.
+func managedHostOtherPlatforms() map[string]bool {
+	other := map[string]bool{"linux": true, "macos": true, "windows": true}
+	switch runtime.GOOS {
+	case "windows":
+		delete(other, "windows")
+	case "darwin":
+		delete(other, "macos")
+	default:
+		delete(other, "linux")
+	}
+	return other
+}
+
+// applyManagedHostSubcommandHelp rewrites the subcommand help a user reads
+// on a managed computer. It described the per-user sidecar, the
+// 'defenseclaw setup' flow and defenseclaw.yaml, and listed the enterprise
+// commands of the other operating systems (GAP-1719).
+func applyManagedHostSubcommandHelp(root *cobra.Command, adminLead, admin string) {
+	for _, command := range root.Commands() {
+		switch command.Name() {
+		case "status":
+			command.Long = fmt.Sprintf(`Show the health of the managed gateway service: gateway connection, skill
+watcher and API server. Your organization runs the gateway as a system
+service on this computer; nothing here starts or stops it.
+
+%s
+  %s`, adminLead, admin)
+		case "connector":
+			command.Long = `Low-level connector lifecycle commands for administrators.
+
+Your organization sets up and removes the agent connectors on this
+computer, so you don't need these commands for normal use. An administrator
+uses them to inspect or repair one connector's state.
+
+Each subcommand accepts an optional --connector flag. When it is omitted,
+the active connector recorded by the gateway service is used.`
+			if flag := command.PersistentFlags().Lookup("connector"); flag != nil {
+				flag.Usage = "Connector name (defaults to the active connector recorded by the gateway service)"
+			}
+		case "enterprise":
+			command.Long = fmt.Sprintf(`Maintenance commands for this computer's managed DefenseClaw deployment.
+They are for administrators, not for standard users.
+
+%s
+  %s`, adminLead, admin)
+			other := managedHostOtherPlatforms()
+			for _, sub := range command.Commands() {
+				if other[sub.Name()] {
+					sub.Hidden = true
+				}
+			}
+		}
+	}
 }
 
 // managedHostStatusShort is the status row of the managed root help, which
@@ -250,10 +336,16 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		if !unixPresent {
 			return err
 		}
+		// GAP-1196: name the administrator's form of the command too, so
+		// `audit export` reads as an administrator command here.
+		asAdmin := ""
+		if command != "this command" {
+			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
+		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
-			"per-user gateway to check; an administrator can check the managed deployment with "+
+			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
 			"`sudo %s enterprise %s status`. Nothing was changed",
-			record, command, managedHostGatewayCommand(), managedHostPlatform())
+			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
 }

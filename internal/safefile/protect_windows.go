@@ -34,30 +34,28 @@ func protectDirectory(path string) error {
 		return err
 	}
 	if safe {
-		protected, err := daclIsProtected(path)
+		protected, err := windowsDACLProtected(path)
 		if err != nil {
 			return err
 		}
 		if protected {
-			// Nothing to change. Writing the DACL back anyway makes Windows
-			// re-propagate it to every file under the directory: with an
-			// upgrade's previous/ snapshot (about 30,000 files) each private
-			// write into the data directory took a minute on a loaded host,
-			// so the watchdog missed its 45 s start window (GAP-1310).
+			// Writing a directory DACL makes Windows re-propagate it to every
+			// file below. On a long-lived data dir (.venv, .uv, backups,
+			// rollback copies) each gateway command spent minutes there, so
+			// the gateway missed its startup deadline (GAP-1687, GAP-1348).
 			return nil
 		}
-		return reapplyDirectoryProtection(path)
+		return preserveDirectoryProtection(path, path)
 	}
 	return setPrivateDACL(path, true)
 }
 
-// reapplyDirectoryProtection writes a safe directory DACL back with inheritance
-// from the parent blocked; a test seam.
-var reapplyDirectoryProtection = func(path string) error { return preserveExistingProtection(path, path) }
+// preserveDirectoryProtection is preserveExistingProtection; tests count calls.
+var preserveDirectoryProtection = preserveExistingProtection
 
-// daclIsProtected reports whether path's DACL already blocks inheritance
-// from its parent (SE_DACL_PROTECTED).
-func daclIsProtected(path string) (bool, error) {
+// windowsDACLProtected reports whether path's DACL already blocks
+// inheritance from its parent.
+func windowsDACLProtected(path string) (bool, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return false, err

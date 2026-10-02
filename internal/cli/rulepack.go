@@ -52,9 +52,8 @@ var rulePackCmd = &cobra.Command{
 	Use:   "rulepack",
 	Short: "Inspect a guardrail rule pack without starting the gateway",
 	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
-config. Enterprise packages ship no defenseclaw CLI; administrators validate
-a custom pack with this command before pointing guardrail.rule_pack_dir at
-it.`,
+config. Administrators validate a custom pack with this command before
+pointing guardrail.rule_pack_dir at it.`,
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
