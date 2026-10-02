@@ -1534,9 +1534,8 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
               help="Flip asset_policy.<type>.registry_required")
 @click.option(
     "--connector", "connector", default="", metavar="C",
-    help="Set the requirement for one connector only "
-         "(asset_policy.connectors[C].<type>.registry_required). Omit to set "
-         "it for every connector (asset_policy.<type>.registry_required).",
+    help="Set the requirement for connector C only (its per-connector "
+         "override). Omit to set it for every connector.",
 )
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
@@ -1555,12 +1554,11 @@ def require_cmd(
     the gateway: an empty registry list with require=on means "no
     asset is approved".
 
-    With ``--connector C`` only that connector's override is changed. Without
-    ``--connector``, the global default is changed and every active connector
-    is reconciled to inherit it, so a stale opposite override cannot defeat
-    broad operator intent. Inactive connector overrides are preserved for
-    future activation. Registry rule lists stay global and continue to be
-    filtered by ``rule.connector`` at match time.
+    With --connector C, only that connector's override changes. Without it,
+    the global default changes and every active connector is reset to inherit
+    it, so an older opposite override cannot undo the change. Overrides of
+    inactive connectors are kept. Registry rule lists stay global; each rule
+    still applies only to its own connector, if it names one.
     """
     cfg = _require_cfg(app)
     asset = asset_type.lower()
