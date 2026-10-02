@@ -3,7 +3,6 @@ non-interactive flags as ``init`` / ``setup guardrail`` (``--non-interactive``,
 ``--accept-defaults``) as aliases of ``--yes``."""
 
 import click
-
 from defenseclaw.commands.cmd_setup import setup
 
 CONNECTOR_COMMANDS = (

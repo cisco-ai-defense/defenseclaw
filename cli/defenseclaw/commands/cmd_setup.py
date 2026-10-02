@@ -5185,7 +5185,6 @@ def _record_windows_setup_agent_selections(
     from defenseclaw.agent_selection import (
         publish_setup_agent_selections,
         record_setup_agent_selections,
-        setup_agent_selection_connectors,
     )
 
     selected = _protected_selection_targets(connectors)

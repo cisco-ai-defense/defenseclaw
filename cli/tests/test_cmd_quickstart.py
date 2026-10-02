@@ -107,8 +107,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         first_run.assert_not_called()
 
     def test_explicit_connector_matching_existing_roster_is_allowed(self):
-        from defenseclaw.commands import cmd_quickstart
         from defenseclaw import config as cfg_mod
+        from defenseclaw.commands import cmd_quickstart
 
         with patch.object(cmd_quickstart, "_configured_quickstart_connectors", return_value=["claudecode"]):
             self.assertIsNone(cmd_quickstart._refuse_roster_narrowing(cfg_mod, "claudecode"))
