@@ -505,6 +505,29 @@ class TestScanAllUX(_SkillScanUXBase):
         mock_cls.return_value.scan.assert_not_called()
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_reports_skipped_vendor_bundled_skills(self, mock_cls) -> None:
+        """GAP-1085: 'No skills found' while skill list showed bundled skills."""
+        self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [self.tmp_dir]  # type: ignore[method-assign]
+        listing = {
+            "skills": [
+                {"name": "arxiv", "baseDir": os.path.join(self.tmp_dir, "arxiv"), "bundled": True},
+                {"name": "notes", "baseDir": os.path.join(self.tmp_dir, "notes"), "bundled": True},
+            ]
+        }
+        with patch(
+            "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+            return_value=listing,
+        ):
+            result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("No skills found", result.output)
+        self.assertIn("2 vendor-bundled skill(s) skipped for connector='hermes'", result.output)
+        mock_cls.return_value.scan.assert_not_called()
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scoped_empty_connector_lists_checked_dirs(self, mock_cls) -> None:
         empty = os.path.join(self.tmp_dir, "omnigent-skills")
         os.makedirs(empty, exist_ok=True)
