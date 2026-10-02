@@ -2533,9 +2533,25 @@ def _foreign_gateway_port_holder(cfg) -> str:
     return holder
 
 
-def _foreign_gateway_port_remediation(cfg, then: str = "start") -> str:
+def _holder_is_other_account(holder: str) -> bool:
+    """Whether the named port holder is another account's process (GAP-1706)."""
+    if "another account" in holder:
+        return True
+    match = re.search(r", ([^,()]+)\)$", holder)
+    if sys.platform == "win32" and match and "\\" in match.group(1):
+        account = match.group(1).rsplit("\\", 1)[-1].strip().lower()
+        return account != (os.environ.get("USERNAME") or "").strip().lower()
+    return False
+
+
+def _foreign_gateway_port_remediation(cfg, then: str = "start", holder: str = "") -> str:
+    # The same command as defenseclaw-gateway status and start; another
+    # account's process is not this account's to stop (GAP-1706).
+    lead = "That process belongs to another account, so move" if _holder_is_other_account(holder) else (
+        "Stop that process, or move"
+    )
     return (
-        "Stop that process, or move this account's gateway with "
+        f"{lead} this account's gateway to a free port with "
         f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
         f"then run `defenseclaw-gateway {then}`"
     )
@@ -2544,7 +2560,7 @@ def _foreign_gateway_port_remediation(cfg, then: str = "start") -> str:
 def _foreign_gateway_port_detail(cfg, holder: str) -> str:
     return (
         f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
-        + _foreign_gateway_port_remediation(cfg)
+        + _foreign_gateway_port_remediation(cfg, holder=holder)
     )
 
 
@@ -2607,7 +2623,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 "Sidecar API",
                 f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
                 r=r,
-                remediation=_foreign_gateway_port_remediation(cfg),
+                remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
             r.gateway_down = "foreign"
             return None
@@ -2748,7 +2764,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             "Sidecar API",
             _foreign_gateway_port_detail(cfg, holder),
             r=r,
-            remediation=_foreign_gateway_port_remediation(cfg),
+            remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
         )
         r.gateway_down = "foreign"
     else:
@@ -3773,7 +3789,9 @@ def _check_windows_gateway_diagnostics(
         _emit(
             "fail",
             "Gateway listener owner",
-            "configured API port is owned by " + (holder or "an unexpected process") + ", not by this account's gateway",
+            "configured API port is owned by "
+            + (holder or "an unexpected process")
+            + ", not by this account's gateway",
             r=r,
         )
     elif not identity_ok:
@@ -12791,7 +12809,12 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
         # The gateway's own start refusal (for example a port held by another
         # process) is fixed, secret-free text; pass it through.
         for line in output.getvalue().splitlines():
-            for marker in ("cannot start the gateway: ", "cannot restart the gateway: "):
+            for marker in (
+                "cannot start the gateway: ",
+                "cannot restart the gateway: ",
+                "start daemon readiness: ",
+                "restart daemon readiness: ",
+            ):
                 if marker in line:
                     reason = line[line.index(marker):].strip()[:400]
                     break
@@ -12803,7 +12826,9 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
         if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
             reason = f"{loose} can be written by other accounts; run `chmod go-w {shlex.quote(loose)}`"
     if not repaired and not reason:
-        reason = "managed lifecycle did not reach verified readiness; see the failed rows above"
+        reason = (
+            "managed lifecycle did not reach verified readiness; run `defenseclaw-gateway start` to see why"
+        )
     return repaired, reason
 
 

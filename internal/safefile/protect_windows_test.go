@@ -61,6 +61,30 @@ func TestWriteWindowsRemovesInheritedUnauthorizedWriter(t *testing.T) {
 	assertNoUnauthorizedWindowsWriter(t, dir)
 }
 
+func TestProtectDirectoryWindowsLeavesAProtectedPrivateDirectoryAlone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := ProtectDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	previous := preserveDirectoryProtection
+	t.Cleanup(func() { preserveDirectoryProtection = previous })
+	rewrites := 0
+	preserveDirectoryProtection = func(source, destination string) error {
+		rewrites++
+		return previous(source, destination)
+	}
+	// Rewriting the DACL re-propagates it to every file below (GAP-1687).
+	if err := ProtectDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	if rewrites != 0 {
+		t.Fatalf("ProtectDirectory rewrote an already protected private DACL %d time(s)", rewrites)
+	}
+	if safe, err := privateDACLIsSafe(dir); err != nil || !safe {
+		t.Fatalf("private DACL safe = %v, %v", safe, err)
+	}
+}
+
 func TestPrivateDACLRejectsExtendedAndUnknownACETypes(t *testing.T) {
 	const (
 		accessAllowedObjectACE         = 0x05

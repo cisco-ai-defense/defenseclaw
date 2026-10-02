@@ -256,7 +256,13 @@ def _toggle_connector_guardrail(
     word = "Enabling" if enable else "Disabling"
     click.echo(f"  {ux.bold(f'{word} guardrail')} for {label} ({key}) only")
     action = "setup" if enable else "teardown"
-    if restart:
+    if restart and not _gateway_running(app):
+        # GAP-1370: say plainly that a stopped gateway gets started.
+        ux.subhead(
+            f"The gateway is stopped; it will be started so the {label} connector {action} runs now.",
+            indent="  ",
+        )
+    elif restart:
         ux.subhead(
             f"Will restart the gateway so the {label} connector {action} runs immediately.",
             indent="  ",
@@ -1415,6 +1421,8 @@ def fail_mode_cmd(
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
             elif normalize_connector(_name) == "hermes":
                 _eff = f"open (Hermes upstream; configured provenance: {_eff})"
+            elif _cursor_stays_fail_closed(gc, _name):
+                _eff = "closed (Cursor hooks always fail closed in action mode)"
             if _eff.startswith("open") and normalize_connector(_name) != "hermes":
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
@@ -1494,9 +1502,18 @@ def fail_mode_cmd(
         for name in fail_mode_targets:
             old = target_modes.get(name, current)
             # Show what guardrail status shows: an observe connector without
-            # its own value already runs fail-open (GAP-1370).
+            # its own value already runs fail-open, and a hook-installed
+            # connector shows its installed runtime value (GAP-1370).
             shown = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else old
-            if old != mode and shown == mode:
+            installed = getattr(runtime_states[name], "runtime", None)
+            if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS and installed:
+                shown = installed
+            if _cursor_stays_fail_closed(gc, name) and mode == "open":
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): stays closed; Cursor hooks always fail "
+                    "closed in action mode (open is saved for observe mode)"
+                )
+            elif old != mode and shown == mode:
                 click.echo(f"      - {_connector_label(name)} ({name}): already {mode}; saved as its own setting")
             elif old != mode:
                 click.echo(f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}")
@@ -2696,6 +2713,16 @@ def _assign_rule_pack(app: AppContext, connector_key: str | None, path: str, *, 
     else:
         _connector_block_for_write(gc, connector_key).rule_pack_dir = path
     return cleared
+
+
+def _cursor_stays_fail_closed(gc, name: str) -> bool:
+    """Cursor's hook contract fails closed in action mode whatever is saved."""
+    if normalize_connector(name) != "cursor":
+        return False
+    try:
+        return (gc.effective_mode(name) or "").strip().lower() == "action"
+    except Exception:  # noqa: BLE001 — an unknown connector keeps the saved value.
+        return False
 
 
 def _gateway_running(app: AppContext) -> bool:

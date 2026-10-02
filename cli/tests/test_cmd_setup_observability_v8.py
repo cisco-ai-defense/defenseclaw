@@ -164,6 +164,7 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     refused = CliRunner().invoke(observability, args, obj=_setup_app(tmp_path))
     assert refused.exit_code != 0
     assert "--allow-private-networks" in refused.output
+    assert "$.observability" not in refused.output  # GAP-1643: one plain line
 
     result = CliRunner().invoke(
         observability, [*args, "--allow-private-networks"], obj=_setup_app(tmp_path), catch_exceptions=False
@@ -184,6 +185,29 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     assert result.exit_code == 0, result.output
     source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
     assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
+
+
+def test_setup_v8_interactive_loopback_otlp_asks_instead_of_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1643: the wizard asks about a private endpoint and keeps the answers.
+    _stub_canonical_v8_gateway(monkeypatch)
+    args = ["add", "otlp", "--name", "local"]
+    # endpoint, protocol, "collector you run yourself?" yes, "uses TLS?" no
+    result = CliRunner().invoke(
+        observability, args, obj=_setup_app(tmp_path), input="127.0.0.1:14318\n\ny\nn\n", catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    assert "is on this computer or a private network" in result.output
+    destination = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source["observability"]["destinations"][0]
+    assert destination["network_safety"] == {"allow_private_networks": True}
+    assert destination["tls"] == {"insecure": True}
+
+    refused = CliRunner().invoke(observability, args, obj=_setup_app(tmp_path), input="10.0.0.5:4317\n\nn\n")
+    assert refused.exit_code == 1
+    assert "Not saved." in refused.output
+    assert "$.observability" not in refused.output
 
 
 def test_setup_v8_add_environment_tags_gateway_telemetry(
@@ -270,6 +294,29 @@ def test_offline_setup_note_is_not_repeated_by_the_setup_callback(tmp_path: Path
     assert "Gateway is not running" in run(offline_note=False)
     noted = run(offline_note=True)
     assert "noted" in noted and "Gateway is not running" not in noted
+
+
+def test_failed_setup_auto_restart_exits_non_zero(tmp_path: Path) -> None:
+    # GAP-1573: a restart that fails after a config change (for example a new
+    # API port the running gateway cannot move to) used to exit 0.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+
+    @click.command()
+    @click.pass_context
+    def probe(ctx: click.Context) -> None:
+        ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+        (tmp_path / "config.yaml").write_text("x: 1\n")
+        cmd_setup._auto_restart_sidecar_after_setup()
+
+    with (
+        patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=False),
+    ):
+        result = CliRunner().invoke(probe, [], obj=app)
+    assert result.exit_code == 1, result.output
+    assert "the agents may not be" in result.output and "defenseclaw-gateway start" in result.output
 
 
 def test_setup_v8_explicit_token_takes_precedence_over_environment(

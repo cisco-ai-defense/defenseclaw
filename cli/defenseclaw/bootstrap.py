@@ -258,16 +258,78 @@ def _api_port_free(host: str, port: int) -> bool:
 # A per-user gateway start leaves an empty file owned by its account here for
 # its API port (internal/cli/gateway_port_claim_unix.go). A stopped or crashed
 # gateway frees its port, so init on another account checks these claims too
-# (GAP-1261). A claim by a deleted account is ignored.
+# (GAP-1261). A claim by a deleted account is ignored. On Windows the claims
+# are in %ProgramData% and hold the claiming account's SID
+# (gateway_port_claim_windows.go, GAP-1569).
 _API_PORT_CLAIM_DIR = "/var/tmp"
 _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
+_WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
+
+
+def _windows_port_claims() -> bool:
+    return platform_support.host_os() == "windows"
+
+
+def _api_port_claim_dir() -> str:
+    if _windows_port_claims():
+        return os.environ.get("ProgramData") or r"C:\ProgramData"
+    return _API_PORT_CLAIM_DIR
+
+
+def _windows_claim_sid(path: str) -> str:
+    """The account SID a Windows claim names, or ""."""
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
+            return ""
+        with open(path, encoding="ascii") as handle:
+            sid = handle.read().strip()
+    except (OSError, ValueError):
+        return ""
+    return sid if _WINDOWS_CLAIM_SID.fullmatch(sid) else ""
+
+
+def _windows_own_sid() -> str:
+    try:
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        return _windows_current_user_sid()
+    except OSError:
+        return ""
+
+
+def _windows_account_exists(sid: str) -> bool:
+    """False only when Windows says no account has ``sid`` (a deleted account)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        raw = ctypes.c_void_p()
+        if not advapi32.ConvertStringSidToSidW(ctypes.c_wchar_p(sid), ctypes.byref(raw)):
+            return True
+        try:
+            name_len, domain_len, use = wintypes.DWORD(0), wintypes.DWORD(0), wintypes.DWORD(0)
+            advapi32.LookupAccountSidW(
+                None, raw, None, ctypes.byref(name_len), None, ctypes.byref(domain_len), ctypes.byref(use)
+            )
+            return ctypes.get_last_error() != 1332  # ERROR_NONE_MAPPED
+        finally:
+            ctypes.windll.kernel32.LocalFree(raw)
+    except Exception:  # noqa: BLE001 - an unverifiable claim still counts
+        return True
 
 
 def _api_port_claimed_by_other_account(port: int) -> bool:
+    path = os.path.join(_api_port_claim_dir(), f"{_API_PORT_CLAIM_PREFIX}{port}")
+    if _windows_port_claims():
+        sid = _windows_claim_sid(path)
+        own = _windows_own_sid()
+        return bool(sid and own) and sid.upper() != own.upper() and _windows_account_exists(sid)
     if os.name == "nt":
         return False
     try:
-        info = os.lstat(os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"))
+        info = os.lstat(path)
     except OSError:
         return False
     if not stat.S_ISREG(info.st_mode) or info.st_uid == os.getuid():
@@ -283,16 +345,25 @@ def _api_port_claimed_by_other_account(port: int) -> bool:
 
 def remove_own_api_port_claims() -> None:
     """Drop this account's port claims (``uninstall --all``). Best effort."""
-    if os.name == "nt":
+    windows = _windows_port_claims()
+    if os.name == "nt" and not windows:
         return
+    claim_dir = _api_port_claim_dir()
     try:
-        names = os.listdir(_API_PORT_CLAIM_DIR)
+        names = os.listdir(claim_dir)
     except OSError:
         return
+    own = _windows_own_sid() if windows else ""
     for name in names:
         if not name.startswith(_API_PORT_CLAIM_PREFIX):
             continue
-        path = os.path.join(_API_PORT_CLAIM_DIR, name)
+        path = os.path.join(claim_dir, name)
+        if windows:
+            sid = _windows_claim_sid(path)
+            if own and sid.upper() == own.upper():
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+            continue
         try:
             info = os.lstat(path)
             if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
@@ -310,9 +381,10 @@ def _reserve_api_port(port: int) -> bool:
 
     Two accounts running init at the same time could otherwise both pick a
     port neither gateway listens on yet (GAP-1462). O_EXCL makes the claim
-    atomic; False only when another account claimed the port first.
+    atomic; False only when another account claimed the port first. Windows
+    claims carry the account SID and are left to the gateway start.
     """
-    if os.name == "nt":
+    if os.name == "nt" or _windows_port_claims():
         return True
     try:
         os.close(
@@ -336,7 +408,15 @@ def suggest_free_api_port(host: str, port: int) -> int:
         host = "127.0.0.1"
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         candidate = port + step * _FIRST_RUN_API_PORT_STEP
-        if candidate + 2 <= 65535 and _api_port_available(host, candidate):
+        # Like the gateway's own suggestion (freeGatewayAPIPort), the two
+        # sandbox ports next to it must be free too, so doctor, status and
+        # start name the same port (GAP-1706).
+        if (
+            candidate + 2 <= 65535
+            and _api_port_available(host, candidate)
+            and _api_port_free(host, candidate + 1)
+            and _api_port_free(host, candidate + 2)
+        ):
             return candidate
     return 0
 
@@ -1610,10 +1690,11 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
     return [single] if single else None
 
 
-# `defenseclaw-gateway start|restart` waits for READY itself (240 s on
+# `defenseclaw-gateway start|restart` waits for READY itself (600 s on
 # Windows, 60 s elsewhere) and only then starts the watchdog, so wait past
-# that: killing it earlier left the gateway without its watchdog (GAP-1346).
-_GATEWAY_START_TIMEOUT = 300 if os.name == "nt" else 90
+# that: killing it earlier left the gateway without its watchdog (GAP-1346,
+# GAP-1556).
+_GATEWAY_START_TIMEOUT = 660 if os.name == "nt" else 90
 
 
 def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
