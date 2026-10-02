@@ -26,6 +26,10 @@ import (
 // and DefenseClaw's Copilot machine policy hooks are in force: the machine
 // policy hook evaluates the same event. VS Code's own deliveries (its
 // extension host is never an executable named copilot) are unchanged.
+//
+// VS Code's Copilot CLI agent host ("forwarded to the @agent-host-copilotcli
+// coding agent") runs the same engine as copilot-runtime.exe from VS Code's
+// copilot-sdk, which loads both files too (GAP-1779, managed Windows).
 
 // hookCopilotCLIMachinePolicyInForce is replaceable in tests.
 var hookCopilotCLIMachinePolicyInForce = copilotCLIMachinePolicyInForce
@@ -36,7 +40,9 @@ func copilotCLIRunsVSCodeLocalHook(connectorName, surface string, enterpriseMana
 		return false
 	}
 	engine := strings.ToLower(filepath.Base(strings.ReplaceAll(hookAgentExecutable(), `\`, "/")))
-	if strings.TrimSuffix(engine, ".exe") != "copilot" {
+	switch strings.TrimSuffix(engine, ".exe") {
+	case "copilot", "copilot-runtime":
+	default:
 		return false
 	}
 	return hookCopilotCLIMachinePolicyInForce()
