@@ -1412,8 +1412,83 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		})
 	}
 
+	signals = s.dropUnbackedSharedSurfaceSignals(signals)
 	sortAISignals(signals)
 	return signals, stats
+}
+
+// sharedSurfaceDetectors are the path detectors whose catalog paths several
+// products list.
+var sharedSurfaceDetectors = map[string]bool{"config": true, "skill": true, "rule": true, "plugin": true}
+
+// dropUnbackedSharedSurfaceSignals drops the signals of a product that rest
+// only on a path several catalog products list (the cross-agent
+// ~/.agents/skills, where DefenseClaw's own CodeGuard skill goes, or
+// ~/.claude/skills) when that product has no evidence of its own. A shell
+// history mention is not such evidence. Without this, one CodeGuard install
+// made Cursor, Devin, Amp, Antigravity, Copilot and OpenHands "seen" for a
+// user who has none of them (GAP-1378).
+func (s *ContinuousDiscoveryService) dropUnbackedSharedSurfaceSignals(signals []AISignal) []AISignal {
+	owners := map[string]map[string]bool{}
+	for _, sig := range s.catalog {
+		id := normalizeAIID(sig.ID)
+		for _, list := range [][]string{sig.ConfigPaths, sig.SkillPaths, sig.RulePaths, sig.PluginPaths} {
+			for _, candidate := range list {
+				candidate = strings.TrimSpace(candidate)
+				if candidate == "" || id == "" {
+					continue
+				}
+				if owners[candidate] == nil {
+					owners[candidate] = map[string]bool{}
+				}
+				owners[candidate][id] = true
+			}
+		}
+	}
+	shared := map[string]bool{}
+	for candidate, ids := range owners {
+		if len(ids) < 2 {
+			continue
+		}
+		for _, path := range s.expandCandidatePath(candidate) {
+			shared[hashPath(path)] = true
+		}
+	}
+	if len(shared) == 0 {
+		return signals
+	}
+	onSharedSurface := func(sig AISignal) bool {
+		if !sharedSurfaceDetectors[sig.Detector] {
+			return false
+		}
+		for _, ev := range sig.Evidence {
+			if ev.Type == sig.Detector && shared[ev.PathHash] {
+				return true
+			}
+		}
+		return false
+	}
+	backedAll, backedUser := map[string]bool{}, map[string]bool{}
+	for _, sig := range signals {
+		if sig.Detector == "shell_history" || onSharedSurface(sig) {
+			continue
+		}
+		id := normalizeAIID(sig.SignatureID)
+		if sig.UserID == "" {
+			backedAll[id] = true
+		} else {
+			backedUser[id+"\x00"+sig.UserID] = true
+		}
+	}
+	out := signals[:0]
+	for _, sig := range signals {
+		id := normalizeAIID(sig.SignatureID)
+		if onSharedSurface(sig) && !backedAll[id] && !backedUser[id+"\x00"+sig.UserID] {
+			continue
+		}
+		out = append(out, sig)
+	}
+	return out
 }
 
 func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, start time.Time, signals []AISignal, stats scanStats, prev aiStateFile, full bool) AIDiscoveryReport {
