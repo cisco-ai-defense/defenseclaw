@@ -18,6 +18,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -1151,14 +1152,55 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 			)
 		}
 	}
-	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
+	status, err := fetchListenerIdentityStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
 	if err != nil {
+		if isHTTPTimeout(err) {
+			// GAP-1668: a busy host's gateway answered after the 1 s readiness
+			// poll timeout, and the slow answer was called an auth failure.
+			return false, 0, fmt.Errorf(
+				"gateway PID %d did not answer its status check within %s (%d tries); the host may be busy: retry, or check it with: defenseclaw-gateway status",
+				managedPID, listenerIdentityHTTPTimeout, listenerIdentityAttempts,
+			)
+		}
 		return false, 0, fmt.Errorf("managed gateway listener authentication failed: %w", err)
 	}
 	if err := verifyGatewayRuntimeIdentity(status, managedPID, cfg.DataDir); err != nil {
 		return false, 0, err
 	}
 	return true, managedPID, nil
+}
+
+const (
+	listenerIdentityHTTPTimeout = 10 * time.Second
+	listenerIdentityAttempts    = 3
+)
+
+// fetchListenerIdentityStatus reads a running gateway's authenticated status
+// before start or restart act on it. It allows a loaded host's gateway
+// longer than a readiness poll and retries only timeouts.
+func fetchListenerIdentityStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
+	probe := &http.Client{Timeout: listenerIdentityHTTPTimeout}
+	if client != nil {
+		copied := *client
+		if copied.Timeout > 0 && copied.Timeout < listenerIdentityHTTPTimeout {
+			copied.Timeout = listenerIdentityHTTPTimeout
+		}
+		probe = &copied
+	}
+	var status gatewayStatusEnvelope
+	var err error
+	for attempt := 0; attempt < listenerIdentityAttempts; attempt++ {
+		status, err = fetchSidecarStatus(probe, addr, token)
+		if err == nil || !isHTTPTimeout(err) {
+			return status, err
+		}
+	}
+	return status, err
+}
+
+func isHTTPTimeout(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }
 
 func waitForConfiguredPortFree(cfg *config.Config, stoppedPID int, timeout, pollInterval time.Duration) error {
