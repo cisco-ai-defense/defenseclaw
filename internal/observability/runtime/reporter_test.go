@@ -82,10 +82,10 @@ func TestReloadReporterPersistsExactGraphAndDeduplicatesStableDelivery(t *testin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = manager.Close(context.Background())
-		_ = manager.WaitReporter(context.Background())
+		_ = manager.Close(lifecycleTestContext(t))
+		_ = manager.WaitReporter(lifecycleTestContext(t))
 	})
-	if err := manager.FlushReports(t.Context()); err != nil {
+	if err := manager.FlushReports(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -268,7 +268,7 @@ func TestReloadReporterRejectsInvalidIdentityAndBoundsStorageFailure(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.FlushReports(t.Context()); err != nil {
+	if err := manager.FlushReports(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
 	}
 	invalid := runtimegraph.Report{
@@ -300,5 +300,5 @@ func TestReloadReporterRejectsInvalidIdentityAndBoundsStorageFailure(t *testing.
 		strings.Contains(err.Error(), directory) || strings.Contains(err.Error(), auditPath) {
 		t.Fatalf("storage failure was not bounded: %v", err)
 	}
-	_ = manager.Close(context.Background())
+	_ = manager.Close(lifecycleTestContext(t))
 }

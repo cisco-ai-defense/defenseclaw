@@ -1803,6 +1803,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 				err,
 			)
 		}
+		s.applyAIDiscoveryHistoryRetention(s.aiDiscoverySnapshot())
 	}
 
 	// Canonical v8 redaction is selected per destination, so there is no
@@ -1901,6 +1902,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if aiRestart {
 		if nextAIDiscovery != nil {
 			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter()))
+			// Before the swap, so the restart worker never runs the
+			// replacement with a stale scan-history window.
+			s.applyAIDiscoveryHistoryRetention(nextAIDiscovery)
 		}
 		oldDiscovery := s.swapAIDiscovery(nextAIDiscovery)
 		if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
