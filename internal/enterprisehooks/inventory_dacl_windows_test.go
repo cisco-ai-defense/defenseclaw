@@ -168,3 +168,21 @@ func TestEnsureInventoryListACEGrantsTheFolderOnly(t *testing.T) {
 		}
 	}
 }
+
+// Copilot CLI and Devin CLI keep their hook files on the guardian's protected
+// path, so, like Kiro CLI, they are discovered through list-only grants on
+// their install folders (GAP-1739). Those folders are never on a hook path.
+func TestInventoryListOnlyDirsCoverGuardianProtectedAgents(t *testing.T) {
+	want := map[string]bool{`AppData\Local\Kiro-Cli`: true, `AppData\Local\copilot\pkg`: true, `AppData\Local\devin\cli`: true}
+	for _, dir := range inventoryDACLListOnlyDirs {
+		delete(want, dir)
+		for _, dotdir := range inventoryDACLDotdirs {
+			if strings.EqualFold(dir, dotdir) {
+				t.Fatalf("%s has both an inherited and a list-only grant", dir)
+			}
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("list-only grants miss %v", want)
+	}
+}
