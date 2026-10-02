@@ -326,9 +326,11 @@ func (s *Service) Run(ctx context.Context) error {
 // sensor helper listens again; the first dial error then stayed until the
 // gateway restarted (GAP-1255). Other start failures (a refused local
 // source, a stream that ended later) are reported, not retried. Only Run
-// calls it, so the consumer runs on Run's context.
+// calls it, so the consumer runs on Run's context. A nil host plane means
+// Plane C is not selected (a per-user install without the sensor helper):
+// there is nothing to start, so every tick returns here (GAP-1810).
 func (s *Service) startHostPlane(ctx context.Context) {
-	if s.hostPlaneTried && !s.hostPlaneRetry {
+	if s.hostPlane == nil || (s.hostPlaneTried && !s.hostPlaneRetry) {
 		return
 	}
 	s.hostPlaneTried = true

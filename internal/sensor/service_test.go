@@ -272,6 +272,38 @@ func TestRunPollsImmediatelyThenStops(t *testing.T) {
 	}
 }
 
+// GAP-1810: with Plane C not selected the host plane is nil, and the
+// GAP-1255 retry called startHostPlane on every tick, so the first tick
+// dereferenced nil and took the gateway down. A panic in Run's goroutine
+// aborts the test binary.
+func TestRunTicksWithoutAHostPlane(t *testing.T) {
+	service := newTestService(t, config.AIRuntimeConfig{Enabled: true, Planes: []string{"a", "b"}, PollIntervalSec: 1}, nil)
+	if service.hostPlane != nil {
+		t.Fatal("planes a and b built a host plane")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+
+	var scans []time.Time
+	deadline := time.After(20 * time.Second)
+	for len(scans) < 3 {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("Run() polled %d times, want 3 (two ticks)", len(scans))
+		case <-time.After(50 * time.Millisecond):
+		}
+		if at := service.Snapshot().ScannedAt; !at.IsZero() && (len(scans) == 0 || !at.Equal(scans[len(scans)-1])) {
+			scans = append(scans, at)
+		}
+	}
+	cancel()
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("Run() returned %v, want a context cancellation", err)
+	}
+}
+
 // countingResolver records how many lookups a poll performed and how long the
 // caller was willing to wait, so the naming budget can be observed rather than
 // assumed.
