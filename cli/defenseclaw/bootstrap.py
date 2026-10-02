@@ -36,6 +36,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -254,6 +255,56 @@ def _api_port_free(host: str, port: int) -> bool:
     return True
 
 
+# A per-user gateway start leaves an empty file owned by its account here for
+# its API port (internal/cli/gateway_port_claim_unix.go). A stopped or crashed
+# gateway frees its port, so init on another account checks these claims too
+# (GAP-1261). A claim by a deleted account is ignored.
+_API_PORT_CLAIM_DIR = "/var/tmp"
+_API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
+
+
+def _api_port_claimed_by_other_account(port: int) -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        info = os.lstat(os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"))
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_uid == os.getuid():
+        return False
+    try:
+        import pwd
+
+        pwd.getpwuid(info.st_uid)
+    except (ImportError, KeyError):
+        return False
+    return True
+
+
+def remove_own_api_port_claims() -> None:
+    """Drop this account's port claims (``uninstall --all``). Best effort."""
+    if os.name == "nt":
+        return
+    try:
+        names = os.listdir(_API_PORT_CLAIM_DIR)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(_API_PORT_CLAIM_PREFIX):
+            continue
+        path = os.path.join(_API_PORT_CLAIM_DIR, name)
+        try:
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+                os.unlink(path)
+        except OSError:
+            continue
+
+
+def _api_port_available(host: str, port: int) -> bool:
+    return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
+
+
 def choose_first_run_api_port(cfg: Config) -> str:
     """Move a new config off the default API port when something holds it.
 
@@ -271,14 +322,14 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_free(host, _DEFAULT_API_PORT):
+    if _api_port_available(host, _DEFAULT_API_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_free(host, port):
+        if _api_port_available(host, port):
             cfg.gateway.api_port = port
             return (
-                f"{host}:{_DEFAULT_API_PORT} is in use (often another account's DefenseClaw gateway), "
+                f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
                 f"so this account's gateway uses port {port}"
             )
     return (
