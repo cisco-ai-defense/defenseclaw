@@ -932,7 +932,38 @@ func judgeProblem(details map[string]interface{}) string {
 	if lastError != "" {
 		lead += "; last error: " + lastError
 	}
+	if judgeErrorIsNetwork(lastError) {
+		return lead + "; " + judgeNetworkNextStep
+	}
 	return lead + "; run 'defenseclaw doctor' and 'defenseclaw setup llm --role judge'"
+}
+
+// judgeNetworkNextStep is the next step for a judge that cannot reach its
+// provider or credential source. Re-running 'setup llm' cannot fix a dead
+// proxy or a blocked network (GAP-1669).
+const judgeNetworkNextStep = "the judge cannot reach its provider or credential source: check the network and " +
+	"the gateway's proxy settings (HTTPS_PROXY, NO_PROXY; an instance role also needs 169.254.169.254 in NO_PROXY), " +
+	"then restart the gateway (defenseclaw-gateway restart) and run 'defenseclaw doctor'"
+
+// judgeNetworkErrorMarkers are lower-case fragments of transport and
+// credential-fetch failures (Go net errors, proxies, AWS credential chain).
+var judgeNetworkErrorMarkers = []string{
+	"proxyconnect", "proxy", "connection refused", "connection reset", "no such host",
+	"network is unreachable", "i/o timeout", "dial tcp", "tls handshake",
+	"failed to retrieve aws credentials", "failed to refresh cached credentials",
+	"ec2 imds", "no route to host",
+}
+
+// judgeErrorIsNetwork reports whether a judge error is a transport or
+// credential-fetch failure rather than a configuration or auth error.
+func judgeErrorIsNetwork(lastError string) bool {
+	text := strings.ToLower(lastError)
+	for _, marker := range judgeNetworkErrorMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatDetailValue(v interface{}) (string, bool) {
