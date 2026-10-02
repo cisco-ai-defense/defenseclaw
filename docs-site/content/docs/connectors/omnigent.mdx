@@ -121,8 +121,9 @@ For `llm_request`, the bridge inspects both separately labeled
 `system_prompt_preview` and `last_user_message` fields within fixed bounds.
 It also forwards bounded cumulative token usage and cost, model, harness,
 actor client ID, and label metadata. Oversized or invalid label projections are
-marked partial. OmniGent v0.7 policy callbacks expose no session identifier, so
-the bridge records that field as unavailable rather than inventing correlation.
+marked partial. OmniGent policy callbacks (0.7 through at least 0.16) expose no
+session identifier, so the bridge records that field as unavailable rather than
+inventing correlation.
 
 The official extension is an awaited in-process Python function. It does not
 read policy events from stdin, write verdicts to stdout, or communicate an
@@ -133,6 +134,17 @@ governs transport and invalid-response handling inside the bridge.
 ## Telemetry
 
 Policy evaluations always produce DefenseClaw hook logs, counters, and spans. When OmniGent has an active OpenTelemetry span, the bridge forwards its W3C `traceparent`; otherwise the gateway starts a new trace.
+
+Because policy events carry no session identifier, the gateway does not build
+an `invoke_agent omnigent` root span for them, unlike the other connectors.
+With the policy bridge alone, each tool call is its own root
+`execute_tool <tool>` trace (for example `execute_tool sys_os_shell`), and a
+block is its own trace. With a native harness such as `--harness claude`,
+the agent's turns appear under that harness's connector (`invoke_agent
+claudecode`) when that connector is also set up. OmniGent's own
+`invoke_agent` spans reach DefenseClaw only through native OTLP (below). With
+native OTLP on, OmniGent has an active span, so the bridge forwards its
+`traceparent` and the hook spans join OmniGent's trace.
 
 OmniGent also supports native OTLP through standard process environment
 variables. This channel is **not active after setup**: DefenseClaw does not
