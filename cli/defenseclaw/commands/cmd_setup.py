@@ -9046,6 +9046,17 @@ def _apply_hook_connector_setup(
     # second observe-mode setup call, and pruning only after that save leaves
     # a stale gate on disk that the restarted gateway immediately reloads.
     _prune_judge_gate_to_action_scope(gc, [connector])
+    _judge_gate = [normalize_connector(str(c)) for c in (getattr(gc.judge, "hook_connectors", None) or [])]
+    if enable_judge and "*" not in _judge_gate and normalize_connector(connector) not in _judge_gate:
+        # GAP-1333: the gate drops observe-mode connectors; say so instead
+        # of exiting 0 with the judge silently left off.
+        ux.warn(
+            f"--enable-judge was not applied: the LLM judge reviews {connector} hook calls only in "
+            f"action mode, and {connector} is in observe mode. Enable it with: "
+            f"defenseclaw setup {'claude-code' if connector == 'claudecode' else connector} "
+            "--mode action --enable-judge --yes",
+            indent="  ",
+        )
 
     if not preserve_global_settings:
         gc.scanner_mode = "local"
@@ -10635,7 +10646,8 @@ def _hook_guardrail_options(fn):
             default=None,
             help=(
                 "Enable LLM judge scanning for this connector and bump "
-                "the detection strategy off regex_only. --no-enable-judge "
+                "the detection strategy off regex_only (action mode only; "
+                "observe-mode connectors are not judged). --no-enable-judge "
                 "opts this connector out of a concrete hook-lane gate while "
                 "leaving the global judge switch alone. Configure the judge "
                 "model via `setup guardrail` / `setup llm`."
