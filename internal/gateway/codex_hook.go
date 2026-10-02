@@ -490,6 +490,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	additional := codexAdditionalContext(rawAction, severity, safeReason, mode, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,

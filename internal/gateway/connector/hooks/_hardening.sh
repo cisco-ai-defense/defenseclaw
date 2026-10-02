@@ -884,8 +884,12 @@ defenseclaw_should_fail_closed_on_unreachable() {
 defenseclaw_emit_unreachable_stderr() {
   local subject="${1:-tool}"
   local reason="${2:-unknown}"
+  # The lead already says "gateway unreachable": name the cause and the next
+  # step after the colon instead of repeating it (GAP-1204).
   if [ "$reason" = "gateway unreachable" ]; then
-    reason="${reason}$(defenseclaw_unreachable_next_step)"
+    local next=""
+    next="$(defenseclaw_unreachable_next_step)"
+    [ -z "$next" ] || reason="$next"
   fi
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
@@ -907,6 +911,8 @@ defenseclaw_unreachable_notice_json() {
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/gateway.stopped" ]; then
     text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
+  elif defenseclaw_own_gateway_alive; then
+    text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection.'
   else
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection.'
   fi
@@ -924,10 +930,33 @@ defenseclaw_unreachable_next_step() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/gateway.stopped" ]; then
-    printf '%s' ' (the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection)'
+    printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
   elif defenseclaw_own_gateway_stopped; then
-    printf '%s' ' (this account'"'"'s gateway is not running; run `defenseclaw-gateway start`)'
+    printf '%s' 'this account'"'"'s gateway is not running; run `defenseclaw-gateway start`'
+  elif defenseclaw_own_gateway_alive; then
+    # A frozen or hung gateway keeps its listener: the request timed out.
+    printf '%s' 'the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`'
   fi
+}
+
+# defenseclaw_own_gateway_alive returns 0 when this account's per-user
+# gateway.pid names a live process (frozen or hung if it did not answer).
+defenseclaw_own_gateway_alive() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  local pid_file="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.pid"
+  local data="" pid=""
+  [ -e "$pid_file" ] || return 1
+  IFS= read -r -n 4096 data < "$pid_file" 2>/dev/null || [ -n "$data" ] || return 1
+  if [[ "$data" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    pid="${BASH_REMATCH[1]}"
+  elif [[ "$data" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+    pid="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null
 }
 
 # defenseclaw_handle_missing_token is the shared early-exit branch

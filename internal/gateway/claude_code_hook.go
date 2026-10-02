@@ -423,6 +423,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
