@@ -35,7 +35,8 @@ func TestFirstGuardrailDocsTestRuleBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, rest, found := strings.Cut(string(doc), "<<'EOF'\n")
+	// A Windows checkout has CRLF line endings.
+	_, rest, found := strings.Cut(strings.ReplaceAll(string(doc), "\r\n", "\n"), "<<'EOF'\n")
 	rule, _, closed := strings.Cut(rest, "\nEOF\n")
 	if !found || !closed {
 		t.Fatal("first-guardrail.mdx has no test rule heredoc")

@@ -901,4 +901,5 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
     restart.assert_not_called()
     assert "(codex): closed → open" in result.output
     assert "(codex): already open" not in result.output
-    assert "(cursor): stays closed; Cursor hooks always fail closed in action mode" in result.output
+    assert "(cursor): stays closed" in result.output
+    assert "Cursor action mode keeps hook failures closed" in result.output
