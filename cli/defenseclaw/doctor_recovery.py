@@ -33,6 +33,7 @@ import os
 import sqlite3
 import stat
 import tempfile
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -47,7 +48,8 @@ _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
 # well under a second, so a size cap flagged healthy long-running installs.
 # A walk that runs past the budget is interrupted and reported as unverified.
 _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS = 5.0
-_AUDIT_INTEGRITY_PROGRESS_OPCODES = 10_000
+_AUDIT_PREFETCH_CHUNK_BYTES = 4 * 1024 * 1024
+_AUDIT_INTERRUPT_RETRY_SECONDS = 0.05
 
 
 class RecoveryKind(str, Enum):
@@ -158,34 +160,71 @@ class RecoveryPublicationError(OSError):
         super().__init__(code)
 
 
-def _bounded_quick_check(connection: sqlite3.Connection) -> tuple[tuple[object, ...], bool]:
-    """Run PRAGMA quick_check(1) within the time budget.
+def _prefetch_audit_db(path: str | os.PathLike[str], deadline: float) -> None:
+    """Read the file once, in order, until the deadline.
 
-    Returns the first result row and whether the walk finished. A walk stopped
-    by the budget returns ``(("ok",), False)``: nothing was found, but the file
-    was not fully checked.
+    quick_check visits pages in b-tree order, which is random on disk. On a
+    cold page cache each page is a separate small read, so a few hundred MiB
+    took 30 s or more on a cloud disk (SWEEP-10), while one sequential read of
+    the same file took under a second. Warming the cache first lets the walk
+    finish inside the budget. Errors are ignored: the walk reports them.
     """
 
-    deadline = time.monotonic() + _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS
-    stopped = False
-
-    def _progress() -> int:
-        nonlocal stopped
-        if time.monotonic() >= deadline:
-            stopped = True
-            return 1
-        return 0
-
-    connection.set_progress_handler(_progress, _AUDIT_INTEGRITY_PROGRESS_OPCODES)
+    buffer = bytearray(_AUDIT_PREFETCH_CHUNK_BYTES)
     try:
-        row = connection.execute("PRAGMA quick_check(1)").fetchone()
+        with open(path, "rb", buffering=0) as handle:
+            while time.monotonic() < deadline and handle.readinto(buffer):
+                pass
+    except OSError:
+        return
+
+
+def _bounded_quick_check(connection: sqlite3.Connection, deadline: float) -> tuple[tuple[object, ...], bool]:
+    """Run PRAGMA quick_check(1) and stop it at the deadline.
+
+    Returns the first result row and whether the walk finished. A walk stopped
+    at the deadline returns ``(("ok",), False)``: nothing was found, but the
+    file was not fully checked.
+
+    A watcher thread calls ``connection.interrupt()`` at the deadline and
+    again every 50 ms until the walk returns: an interrupt that lands before
+    the statement is active is a no-op in SQLite, so one call could miss. SQLite
+    polls the interrupt flag at every b-tree cell of the walk, so the stop is
+    prompt even when each page read is slow. A progress handler counted in
+    VDBE steps is not: the walk ran 29-46 s past a 5 s budget on a cold cache
+    (SWEEP-10).
+    """
+
+    lock = threading.Lock()
+    done = threading.Event()
+    interrupted = threading.Event()
+
+    def _watch() -> None:
+        if done.wait(max(deadline - time.monotonic(), 0.0)):
+            return
+        while True:
+            with lock:
+                if done.is_set():
+                    return
+                interrupted.set()
+                connection.interrupt()
+            if done.wait(_AUDIT_INTERRUPT_RETRY_SECONDS):
+                return
+
+    watcher = threading.Thread(target=_watch, name="audit-db-quick-check-deadline", daemon=True)
+    watcher.start()
+    try:
+        rows = connection.execute("PRAGMA quick_check(1)").fetchall()
     except sqlite3.OperationalError:
-        if not stopped:
+        if not interrupted.is_set():
             raise
         return ("ok",), False
     finally:
-        connection.set_progress_handler(None, 0)
-    return tuple(row or ()), True
+        # Under the lock, so no interrupt can reach the statements that follow.
+        with lock:
+            done.set()
+        watcher.join()
+    return tuple(rows[0] if rows else ()), True
 
 
 def inspect_audit_db(
@@ -214,6 +253,8 @@ def inspect_audit_db(
         uri = Path(os.path.abspath(plan.target)).as_uri() + "?" + urllib.parse.urlencode(
             {"mode": "ro"}
         )
+        deadline = time.monotonic() + _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS
+        _prefetch_audit_db(plan.target, deadline)
         connection = sqlite3.connect(uri, uri=True, timeout=0.1)
         try:
             connection.execute("PRAGMA query_only=ON")
@@ -222,7 +263,7 @@ def inspect_audit_db(
             freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
             file_bytes = page_count * page_size
             freelist_bytes = freelist * page_size
-            quick_check, integrity_scanned = _bounded_quick_check(connection)
+            quick_check, integrity_scanned = _bounded_quick_check(connection, deadline)
             tables = {
                 str(row[0])
                 for row in connection.execute(

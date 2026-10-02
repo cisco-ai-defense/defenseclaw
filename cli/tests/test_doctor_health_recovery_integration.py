@@ -676,8 +676,7 @@ def test_upgraded_install_with_large_audit_db_and_legacy_key_gets_next_steps(tmp
     with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value=""):
         tag, detail = cmd_doctor._fix_audit_db_recovery(cfg, assume_yes=True)
     assert tag == "pass", detail
-    monkeypatch.setattr(doctor_recovery, "_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS", 0.0)
-    monkeypatch.setattr(doctor_recovery, "_AUDIT_INTEGRITY_PROGRESS_OPCODES", 1)
+    monkeypatch.setattr(doctor_recovery, "_bounded_quick_check", lambda *_a, **_k: (("ok",), False))
     monkeypatch.setattr(
         doctor_recovery,
         "inspect_device_key",
