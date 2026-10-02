@@ -383,6 +383,33 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         self.assertIn("defenseclaw setup remove claude-code", result.output)
         self.assertNotIn("defenseclaw setup claudecode", result.output)
 
+    def test_mode_flag_skips_interactive_mode_prompt(self):
+        """GAP-1097: on a TTY, --mode action answers the mode question."""
+        with (
+            patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True),
+            patch(
+                "defenseclaw.commands.cmd_setup._prompt_connector_mode",
+                side_effect=AssertionError("mode prompt shown although --mode was given"),
+            ),
+            patch("defenseclaw.commands.cmd_setup._prompt_enable_judge", return_value=False),
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = CliRunner().invoke(
+                setup_group,
+                ["claude-code", "--mode", "action", "--no-restart"],
+                obj=self.app,
+                input="y\n" * 10,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Select mode", result.output)
+        self.assertEqual(self.app.cfg.guardrail.effective_mode("claudecode"), "action")
+
 
 class TestSetupNewConnectorAliases(unittest.TestCase):
     """The hook-first connectors expose the same observability alias contract."""

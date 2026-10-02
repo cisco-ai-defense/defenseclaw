@@ -47,6 +47,11 @@ const (
 	maxWatchdogPIDFileBytes = 16 << 10
 	watchdogStartTimeout    = 15 * time.Second
 	watchdogStartInterval   = 25 * time.Millisecond
+	// A freshly installed watchdog binary can take longer than
+	// watchdogStartTimeout to take its ownership lock on a busy Windows host
+	// (first-run scanning of the new image), so the readiness wait after a
+	// spawn is longer (GAP-1053). It returns as soon as the lock is taken.
+	watchdogSpawnReadyTimeout = 45 * time.Second
 )
 
 type watchdogState int
@@ -607,8 +612,11 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("watchdog: start background: %w", err)
 	}
 	_ = logFile.Close()
-	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogStartTimeout, watchdogStartInterval); err != nil {
-		return fmt.Errorf("watchdog: start readiness: %w", err)
+	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogSpawnReadyTimeout, watchdogStartInterval); err != nil {
+		return fmt.Errorf(
+			"watchdog: start readiness: %w (PID %d may still be starting; check with 'defenseclaw-gateway watchdog status')",
+			err, cmd.pid,
+		)
 	}
 
 	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)

@@ -9584,6 +9584,7 @@ def _setup_observability_alias(
                 "connector to that folder."
             )
 
+    mode_from_flag = mode is not None
     if mode is None:
         # Doctor's repair advice is `setup <connector> --yes`: leaving
         # --mode out must not turn an action install into observe.
@@ -9594,11 +9595,12 @@ def _setup_observability_alias(
 
     # SU-06: interactive observe/action prompt. Asked before the banner so the
     # banner + the "configure now?" confirm reflect the chosen mode. Only runs
-    # on a real TTY without --yes; a piped run keeps the flag default. The
-    # prompt is per-connector-meaningful here (this alias configures exactly one
+    # on a real TTY without --yes and without --mode (GAP-1097: the flag
+    # already answered it); a piped run keeps the flag default. The prompt is
+    # per-connector-meaningful here (this alias configures exactly one
     # connector), unlike the global `setup guardrail` wizard which skips it on
     # multi-connector installs.
-    if interactive:
+    if interactive and not mode_from_flag:
         normalized_mode = _prompt_connector_mode(connector, default_mode=normalized_mode)
 
     _print_connector_observability_banner(connector, mode=normalized_mode)

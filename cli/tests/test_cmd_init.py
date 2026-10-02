@@ -608,7 +608,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 fail_mode="open",
                 human_approval=False,
                 hilt_min_severity="HIGH",
-                start_gateway=False,
+                start_gateway=None,
                 verify=False,
                 rescan_agents=False,
                 data_dir=self.tmp_dir,
@@ -1072,7 +1072,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 llm_base_url="",
             )
 
-        self.assertEqual(got, ("openai", "gpt-4o", "", "OPENAI_API_KEY", "https://api.example/v1"))
+        self.assertEqual(got, ("openai", "gpt-4o", "", "OPENAI_API_KEY", "https://api.example/v1", {}))
         provider.assert_called_once()
         model.assert_called_once()
         key_env.assert_called_once()
@@ -1096,8 +1096,37 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 llm_base_url="",
             )
 
-        self.assertEqual(got, ("ollama", "qwen3.5:9b-mlx", "", "", "http://127.0.0.1:11434"))
+        self.assertEqual(got, ("ollama", "qwen3.5:9b-mlx", "", "", "http://127.0.0.1:11434", {}))
         local_runtime.assert_called_once()
+
+    def test_interactive_judge_llm_config_bedrock_asks_auth_before_key(self):
+        """GAP-0047: Bedrock asks region and auth mode; instance-role skips the key."""
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "confirm", return_value=True), \
+                patch("defenseclaw.commands._llm_picker.pick_provider", return_value="bedrock"), \
+                patch("defenseclaw.commands._llm_picker.pick_model", return_value="bedrock/claude"), \
+                patch("defenseclaw.commands._llm_picker.pick_region", return_value="us-east-1"), \
+                patch("defenseclaw.commands._llm_picker.pick_auth_mode", return_value="instance_role"), \
+                patch("defenseclaw.commands._llm_picker.pick_key_env") as key_env, \
+                patch("defenseclaw.commands.cmd_setup._prompt_and_save_secret") as save_secret, \
+                patch.object(cmd_init.click, "prompt", return_value=""):
+            got = cmd_init._prompt_first_run_judge_llm_config(
+                data_dir=self.tmp_dir,
+                llm_provider="",
+                llm_model="",
+                llm_api_key="",
+                llm_api_key_env="",
+                llm_base_url="",
+            )
+
+        self.assertEqual(
+            got,
+            ("bedrock", "bedrock/claude", "", "", "",
+             {"bedrock_region": "us-east-1", "bedrock_auth_mode": "instance_role"}),
+        )
+        key_env.assert_not_called()
+        save_secret.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
@@ -3462,7 +3491,7 @@ class TestMultiConnectorInit(unittest.TestCase):
             settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
                 connector=None, profile=None, scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
-                start_gateway=False, verify=None, rescan_agents=False,
+                start_gateway=None, verify=None, rescan_agents=False,
             )
 
         by_name = {s["connector"]: s for s in settings}
@@ -3510,7 +3539,7 @@ class TestMultiConnectorInit(unittest.TestCase):
                     settings, _scanner, with_judge, _judge, _start, _verify = cmd_init._prompt_first_run(
                         connector=None, profile=None, scanner_mode="local", with_judge=False,
                         fail_mode=None, human_approval=None, hilt_min_severity=None,
-                        start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                        start_gateway=None, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
                     )
 
                 output = "\n".join(emitted)
@@ -3562,7 +3591,7 @@ class TestMultiConnectorInit(unittest.TestCase):
                     settings, _scanner, with_judge, judge_connectors, _start, _verify = cmd_init._prompt_first_run(
                         connector="none", profile=profile, scanner_mode="local", with_judge=False,
                         fail_mode=None, human_approval=None, hilt_min_severity=None,
-                        start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                        start_gateway=None, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
                     )
 
                 self.assertEqual(checkbox_calls, [])
@@ -3600,7 +3629,7 @@ class TestMultiConnectorInit(unittest.TestCase):
             settings, _scanner, with_judge, judge_connectors, _start, _verify = cmd_init._prompt_first_run(
                 connector=None, profile=None, scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
-                start_gateway=False, verify=None, rescan_agents=False,
+                start_gateway=None, verify=None, rescan_agents=False,
             )
 
         by_name = {s["connector"]: s for s in settings}
@@ -3635,11 +3664,65 @@ class TestMultiConnectorInit(unittest.TestCase):
             settings, _scanner, _judge, _judge_connectors, _start, _verify = cmd_init._prompt_first_run(
                 connector=None, profile=None, scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
-                start_gateway=False, verify=None, rescan_agents=False,
+                start_gateway=None, verify=None, rescan_agents=False,
             )
 
         self.assertTrue(all(s["profile"] == "observe" for s in settings))
         self.assertEqual({s["connector"] for s in settings}, {"codex", "claudecode"})
+
+    def test_prompt_trust_protected_executables_offers_uv_tool_openhands(self):
+        """GAP-1058: macOS init offers to trust a uv-tool OpenHands instead of skipping it."""
+        from defenseclaw.commands import cmd_init
+
+        real = "/Users/u/.local/share/uv/tools/openhands/bin/openhands"
+        parent = os.path.dirname(real)
+        cache: dict[str, bool] = {}
+        with patch.object(cmd_init.platform_support, "host_os", return_value="darwin"), \
+                patch("defenseclaw.agent_selection.untrusted_setup_executable", return_value=real), \
+                patch.object(cmd_init.agent_discovery, "validate_trusted_prefix", return_value=(parent, "")), \
+                patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix", return_value=True) as add, \
+                patch.object(cmd_init.click, "confirm", return_value=True) as confirm:
+            cmd_init._prompt_trust_protected_executables(
+                ["codex", "openhands"], data_dir=self.tmp_dir, trusted_prompt_cache=cache
+            )
+            # Already answered: no second prompt in the same run.
+            cmd_init._prompt_trust_protected_executables(
+                ["openhands"], data_dir=self.tmp_dir, trusted_prompt_cache=cache
+            )
+        add.assert_called_once_with(parent, self.tmp_dir)
+        confirm.assert_called_once()
+
+    def test_prompt_first_run_start_gateway_flag_and_default(self):
+        """GAP-1089/GAP-1097: --no-start-gateway answers the question; with no
+        flag the wizard offers to start the gateway by default."""
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex"})
+        for flag, expect_prompt in ((False, False), (None, True)):
+            asked: list[tuple[str, object]] = []
+
+            def confirm(text, default=None, **_kw):
+                asked.append((str(text), default))
+                return bool(default)
+
+            with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                    patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                    patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=[["codex"], []]), \
+                    patch.object(cmd_init.click, "prompt", return_value="local"), \
+                    patch.object(cmd_init.click, "confirm", side_effect=confirm):
+                *_rest, start, _verify = cmd_init._prompt_first_run(
+                    connector=None, profile=None, scanner_mode="local", with_judge=False,
+                    fail_mode=None, human_approval=None, hilt_min_severity=None,
+                    start_gateway=flag, verify=None, rescan_agents=False,
+                )
+
+            gateway_prompts = [d for text, d in asked if "Start gateway after setup?" in text]
+            if expect_prompt:
+                self.assertEqual(gateway_prompts, [True])
+                self.assertTrue(start)
+            else:
+                self.assertEqual(gateway_prompts, [])
+                self.assertFalse(start)
 
     def test_prompt_action_connectors_intersects_with_configured(self):
         from defenseclaw.commands import cmd_init
@@ -3724,7 +3807,7 @@ class TestMultiConnectorInit(unittest.TestCase):
             settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
                 connector="hermes", profile="action", scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
-                start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                start_gateway=None, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
             )
 
         self.assertEqual(scanner_mode, "local")
@@ -3780,7 +3863,7 @@ class TestMultiConnectorInit(unittest.TestCase):
             settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
                 connector="hermes", profile="action", scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
-                start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                start_gateway=None, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
             )
 
         self.assertEqual(scanner_mode, "local")
@@ -3838,6 +3921,29 @@ class TestMultiConnectorInit(unittest.TestCase):
                 empty_ok=False,
             )
         self.assertEqual(got, ["codex", "claudecode"])
+
+    def test_checkbox_selector_handles_keys_that_arrive_together(self):
+        """GAP-1096: one getchar read can hold several keys (fast typing,
+        auto-repeat); each one moves or toggles once."""
+        from defenseclaw import terminal_checkbox
+        from defenseclaw.commands import cmd_init
+
+        self.assertEqual(
+            terminal_checkbox.split_checkbox_keys("\x1b[B\x1bOBjj \r\n\xe0P"),
+            ["\x1b[B", "\x1bOB", "j", "j", " ", "\r", "\xe0P"],
+        )
+        # Down Down (one read) -> cursor; Space toggles it; k k Space Enter
+        # (one read) -> back to codex, toggle it, continue.
+        keys = iter(["\x1b[B\x1b[B", " ", "kk \r"])
+        with patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                patch.object(cmd_init, "_supports_terminal_redraw", return_value=True):
+            got = cmd_init._prompt_checkbox_selection(
+                ["codex", "claudecode", "cursor"],
+                default_selected=[],
+                title="Select connectors",
+                empty_ok=False,
+            )
+        self.assertEqual(got, ["codex", "cursor"])
 
     def test_checkbox_no_vt_stays_key_driven_without_reprinting_menu(self):
         from defenseclaw.commands import cmd_init

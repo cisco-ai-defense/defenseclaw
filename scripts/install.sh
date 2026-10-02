@@ -684,6 +684,19 @@ if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
     fi
 fi
+if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # An earlier install that was never initialized: say how to start, as a
+    # fresh install does, with the connector picked back then.
+    NEXT_CONNECTOR="${CONNECTOR}"
+    if [[ -z "${NEXT_CONNECTOR}" && -f "${DEFENSECLAW_HOME}/picked_connector" ]]; then
+        NEXT_CONNECTOR="$(head -n 1 "${DEFENSECLAW_HOME}/picked_connector" | tr -cd 'a-z0-9_-')"
+    fi
+    if [[ -n "${NEXT_CONNECTOR}" && "${NEXT_CONNECTOR}" != none ]]; then
+        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${NEXT_CONNECTOR}"
+    else
+        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init${NC}\n"
+    fi
+fi
 if [[ -n "${APP_RELAUNCH:-}" ]]; then
     open "${APP_PATH}" >/dev/null 2>&1 || true
 fi
