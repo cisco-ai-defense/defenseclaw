@@ -363,6 +363,28 @@ class TestRegistrySync(RegistryCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(self.app.cfg.asset_policy.skill.registry)
 
+    def test_sync_failed_entry_scan_is_an_error(self):
+        """GAP-1357: a failed entry scan is not a STATUS ok, rc=0 sync."""
+        manifest = _make_skill_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+
+        def _fetch(_source, *, allow_private=False):
+            return manifest, raw
+
+        def _fail(_src, entry):
+            raise RuntimeError(f"scan failed for {entry.name}: was cancelled")
+
+        with patch("defenseclaw.registries.sync.fetch_manifest", _fetch):
+            with patch(
+                "defenseclaw.commands.cmd_registry._make_scan_callback",
+                return_value=_fail,
+            ):
+                result = self.invoke(["sync", "corp-skills"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("error", result.output)
+        self.assertIn("was cancelled", result.output)
+        self.assertFalse(self.app.cfg.asset_policy.skill.registry)
+
     def test_sync_all_and_explicit_id_mutually_exclusive(self):
         result = self.invoke([
             "sync", "corp-skills", "--all",

@@ -864,8 +864,11 @@ def sync_cmd(  # noqa: PLR0913
 
     if emit_json:
         _emit_json([r.to_dict() for r in reports])
-        return
-    _print_sync_reports(reports)
+    else:
+        _print_sync_reports(reports)
+    if any(not r.ok() for r in reports):
+        # A failed fetch or entry scan is not a successful sync (GAP-1357).
+        raise SystemExit(1)
 
 
 def _promoted_label(skills: int, mcps: int) -> str:
@@ -1151,8 +1154,10 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
             )
         except SystemExit:
             return None
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            # The sync engine marks the entry ``error`` and the source
+            # STATUS error instead of leaving it silently pending (GAP-1357).
+            raise RuntimeError(f"MCP scan failed for {entry.name}: {exc}") from exc
     if not entry.url:
         return None
     # F-0344: validate generic registry MCP URLs through the central
@@ -1175,8 +1180,8 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
         return scanner.scan(entry.url, allow_private=allow_private)
     except SystemExit:
         return None
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"MCP scan failed for {entry.url}: {exc}") from exc
 
 
 def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
