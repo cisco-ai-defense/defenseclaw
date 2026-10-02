@@ -6050,6 +6050,15 @@ function Initialize-DefenseClawManagedIPCDirectory {
         # replacement so a certification service cannot seize a directory
         # owned by another live gateway SID. The current service is accepted
         # as owner for migration from a directory it created itself.
+        #
+        # Pass -SelfHealKind/-SelfHealGatewayServiceSID so an orphan
+        # NT SERVICE\<previous-service-name> ACE (left behind by a prior
+        # unsigned certification run with a different scoped service name)
+        # triggers the canonical ACL re-stamp instead of blocking install
+        # with "untrusted principal S-1-5-80-* has write-like access".
+        # The subsequent Set-DefenseClawPathAcl at line 6079 would strip
+        # that ACE anyway; without -SelfHealKind here, this pre-check
+        # fails first and strands the install.
         Assert-DefenseClawPathAcl `
             -Path $ipcDirectory `
             -AllowedWriterSIDs @(
@@ -6071,7 +6080,9 @@ function Initialize-DefenseClawManagedIPCDirectory {
                 $script:TrustedInstallerSID,
                 $gatewaySID
             ) `
-            -RejectUntrustedRead
+            -RejectUntrustedRead `
+            -SelfHealKind ManagedIPCDirectory `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     else {
         [void](New-DefenseClawProtectedDirectory -Path $ipcDirectory)
@@ -16762,23 +16773,34 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Kind ManagedIPCDirectory `
         -GatewayServiceSID $gatewaySID
 
+    # -SelfHealKind on every path below: an orphan NT SERVICE\<prior-service>
+    # ACE from a prior unsigned certification run (uninstalled with a
+    # different scoped service name) must self-heal via canonical re-stamp
+    # instead of blocking Verify/post-install validation. Mirrors the
+    # existing StateRoot self-heal below.
     foreach ($path in @($Layout.InstallRoot, $Layout.BinDirectory)) {
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
             -RequiredRights $serviceInstallRights `
-            -AllowUsersRead
+            -AllowUsersRead `
+            -SelfHealKind InstallDirectory `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     Assert-DefenseClawPathAcl `
         -Path $Layout.LibexecDirectory `
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $installRights `
-        -AllowUsersRead
+        -AllowUsersRead `
+        -SelfHealKind InstallDirectory `
+        -SelfHealGatewayServiceSID $gatewaySID
     Assert-DefenseClawPathAcl `
         -Path $Layout.GatewayPath `
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $serviceInstallRights `
-        -AllowUsersRead
+        -AllowUsersRead `
+        -SelfHealKind ServiceInstallFile `
+        -SelfHealGatewayServiceSID $gatewaySID
     $managedInstallFiles = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
         $Layout.HookPath,
@@ -16797,14 +16819,18 @@ function Assert-DefenseClawEnterpriseDeployment {
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
             -RequiredRights $installRights `
-            -AllowUsersRead
+            -AllowUsersRead `
+            -SelfHealKind InstallFile `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
         Assert-DefenseClawPathAcl `
             -Path $Layout.CLIPath `
             -AllowedWriterSIDs $adminWriters `
             -RequiredRights $installRights `
-            -AllowUsersRead
+            -AllowUsersRead `
+            -SelfHealKind InstallFile `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     $adminOnlyPaths = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
@@ -16840,12 +16866,21 @@ function Assert-DefenseClawEnterpriseDeployment {
         $adminOnlyPaths.Add([string]$Layout.CodexRequirementsAclBackupPath)
     }
     foreach ($path in $adminOnlyPaths) {
+        $kind = if (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $path `
+                    -PathType Container) {
+            'AdminDirectory'
+        } else {
+            'AdminFile'
+        }
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
             -AllowedReaderSIDs $adminReaders `
             -RequiredRights $adminRights `
-            -RejectUntrustedRead
+            -RejectUntrustedRead `
+            -SelfHealKind $kind `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     foreach ($journalPath in @(
         $Layout.ManagedHooksLifecycleJournalPath,
@@ -16859,7 +16894,9 @@ function Assert-DefenseClawEnterpriseDeployment {
                 -AllowedWriterSIDs $adminWriters `
                 -AllowedReaderSIDs $adminReaders `
                 -RequiredRights $adminRights `
-                -RejectUntrustedRead
+                -RejectUntrustedRead `
+                -SelfHealKind AdminFile `
+                -SelfHealGatewayServiceSID $gatewaySID
         }
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
@@ -16867,6 +16904,10 @@ function Assert-DefenseClawEnterpriseDeployment {
             -Path $ancestor `
             -GatewayServiceSID $gatewaySID
     }
+    # -SelfHealKind: parallels the StateRoot check below. An orphan
+    # NT SERVICE\<prior-service> ACE on the IPC directory (from a prior
+    # unsigned certification run that was uninstalled) is re-stamped out
+    # instead of blocking Verify/post-install validation.
     Assert-DefenseClawPathAcl `
         -Path $Layout.ManagedIPCDirectory `
         -AllowedWriterSIDs $runtimeWriters `
@@ -16878,7 +16919,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             $script:AuthenticatedUsersSID
         ) `
         -RequiredRights $managedIPCDirectoryRights `
-        -RejectUntrustedRead
+        -RejectUntrustedRead `
+        -SelfHealKind ManagedIPCDirectory `
+        -SelfHealGatewayServiceSID $gatewaySID
     # The state root is the one managed directory that lives directly inside the
     # shared Cisco Secure Client data tree, so AVC can re-ACL it after we stamp
     # the canonical DACL. Foreign access there is reported, not fatal
@@ -16901,19 +16944,25 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $configDirectoryRights `
-        -RejectUntrustedRead
+        -RejectUntrustedRead `
+        -SelfHealKind ConfigDirectory `
+        -SelfHealGatewayServiceSID $gatewaySID
     Assert-DefenseClawPathAcl `
         -Path $Layout.ConfigPath `
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $configRights `
-        -RejectUntrustedRead
+        -RejectUntrustedRead `
+        -SelfHealKind ConfigFile `
+        -SelfHealGatewayServiceSID $gatewaySID
     Assert-DefenseClawPathAcl `
         -Path $Layout.AuthorizationDirectory `
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $authorizationDirectoryRights `
-        -RejectUntrustedRead
+        -RejectUntrustedRead `
+        -SelfHealKind AuthorizationDirectory `
+        -SelfHealGatewayServiceSID $gatewaySID
     if (-not $AllowTransactionRecordedBrokerAbsence -or
         (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.BrokerStateDirectory)) {
@@ -16922,7 +16971,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             -AllowedWriterSIDs $adminWriters `
             -AllowedReaderSIDs $gatewayReaders `
             -RequiredRights $authorizationDirectoryRights `
-            -RejectUntrustedRead
+            -RejectUntrustedRead `
+            -SelfHealKind AuthorizationDirectory `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     foreach ($authorizationFile in @(
         $Layout.AuthorizationLedgerPath,
@@ -16938,16 +16989,29 @@ function Assert-DefenseClawEnterpriseDeployment {
                 -AllowedWriterSIDs $adminWriters `
                 -AllowedReaderSIDs $gatewayReaders `
                 -RequiredRights $authorizationFileRights `
-                -RejectUntrustedRead
+                -RejectUntrustedRead `
+                -SelfHealKind AuthorizationFile `
+                -SelfHealGatewayServiceSID $gatewaySID
         }
     }
     foreach ($path in @($Layout.RuntimeDirectory, $Layout.GatewayLogDirectory)) {
+        $runtimeKind = if ([string]::Equals(
+                [string]$path,
+                [string]$Layout.GatewayLogDirectory,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            'GatewayLogDirectory'
+        } else {
+            'RuntimeDirectory'
+        }
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $runtimeWriters `
             -AllowedReaderSIDs $gatewayReaders `
             -RequiredRights $runtimeRights `
-            -RejectUntrustedRead
+            -RejectUntrustedRead `
+            -SelfHealKind $runtimeKind `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayLogPath -PathType Leaf) {
         Assert-DefenseClawPathAcl `
@@ -16955,7 +17019,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             -AllowedWriterSIDs $runtimeWriters `
             -AllowedReaderSIDs $gatewayReaders `
             -RequiredRights $runtimeRights `
-            -RejectUntrustedRead
+            -RejectUntrustedRead `
+            -SelfHealKind RuntimeFile `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GuardianLogPath -PathType Leaf) {
         Assert-DefenseClawPathAcl `
@@ -16963,7 +17029,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             -AllowedWriterSIDs $adminWriters `
             -AllowedReaderSIDs $adminReaders `
             -RequiredRights $adminRights `
-            -RejectUntrustedRead
+            -RejectUntrustedRead `
+            -SelfHealKind AdminFile `
+            -SelfHealGatewayServiceSID $gatewaySID
     }
 
     $requiredHashes = [Collections.Generic.List[string]]::new()
