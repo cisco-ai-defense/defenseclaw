@@ -1551,9 +1551,10 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
 
 
 # `defenseclaw-gateway start|restart` waits for READY itself (240 s on
-# Windows, 60 s elsewhere) and only then starts the watchdog, so wait past
-# that: killing it earlier left the gateway without its watchdog (GAP-1346).
-_GATEWAY_START_TIMEOUT = 300 if os.name == "nt" else 90
+# Windows, extended up to 720 s while connector setup progresses; 60 s
+# elsewhere) and only then starts the watchdog, so wait past that: killing it
+# earlier left the gateway without its watchdog (GAP-1346, GAP-1556).
+_GATEWAY_START_TIMEOUT = 900 if os.name == "nt" else 90
 
 
 def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:

@@ -181,10 +181,11 @@ _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
 # for the port (up to 10 s), then waits for READY itself (240 s on Windows,
-# 60 s elsewhere) and only then starts the watchdog. Killing it earlier left a
-# slow Windows start without its watchdog and raced the setup rollback against
-# a gateway that was still coming up (GAP-1206, GAP-1396).
-_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 300
+# extended up to 720 s while connector setup progresses; 60 s elsewhere) and
+# only then starts the watchdog. Killing it earlier left a slow Windows start
+# without its watchdog and raced the setup rollback against a gateway that was
+# still coming up (GAP-1206, GAP-1396, GAP-1556, GAP-1659).
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 900
 _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS = _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS if os.name == "nt" else 30
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15

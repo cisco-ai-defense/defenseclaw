@@ -24,7 +24,10 @@ def test_windows_launcher_timeout_outlasts_the_gateway_readiness_wait():
     # then waits for READY before it starts the watchdog.
     readiness = _go_seconds("daemon_readiness_windows.go")
     assert readiness >= 180
-    assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS > readiness + 20
+    # GAP-1556: connector setup progress extends that wait by this factor.
+    text = (_REPO / "internal" / "cli" / "daemon_readiness_windows.go").read_text(encoding="utf-8")
+    factor = int(re.search(r"startReadinessProgressFactor = (\d+)", text).group(1))
+    assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS > readiness * factor + 20
     assert _go_seconds("daemon_readiness_other.go") == 60
 
 

@@ -29,6 +29,12 @@ import "time"
 // A gateway that exits is still reported at once.
 const platformStartReadinessTimeout = 240 * time.Second
 
+// startReadinessProgressFactor bounds how far connector setup progress may
+// extend that timeout: up to 12 minutes while a setup step finishes within
+// every 240 s window. A loaded dc-win2 needed 2 minutes for one connector
+// and over 4 for four (GAP-1556).
+const startReadinessProgressFactor = 3
+
 // startupRetriesSQLiteIO lets readiness wait out an event-history SQLite I/O
 // error as it does BUSY/LOCKED contention. On Windows an antivirus scan of a
 // large audit.db (just copied for the upgrade rollback) can hold the file past

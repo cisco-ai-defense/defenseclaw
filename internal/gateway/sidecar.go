@@ -4251,6 +4251,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// rule pack is loaded/validated through the shared cache so connectors
 	// sharing a profile read disk once.
 	cache := guardrail.NewRulePackCache()
+	setupSeed.publishSetupProgress = true
 	setupTransaction, setupErr := s.setupConnectorsIsolatedTransaction(
 		ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache, setupSeed,
 	)
@@ -4850,6 +4851,9 @@ type multiConnectorSetupTransaction struct {
 	// releaseRefused is set when a refusal came from this release's contract
 	// table for an agent an earlier release admitted.
 	releaseRefused bool
+	// publishSetupProgress reports each connector's setup step in guardrail
+	// health. Only the boot path sets it: a running guardrail stays running.
+	publishSetupProgress bool
 }
 
 func captureSingleConnectorRollbackAuthority(
@@ -5043,7 +5047,15 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 
 	transaction.succeeded = make([]string, 0, len(registrations))
 	transaction.applied = make([]multiConnectorSetupRollbackPoint, 0, len(registrations))
-	for _, registration := range registrations {
+	for index, registration := range registrations {
+		if transaction.publishSetupProgress {
+			// GAP-1556: start and restart keep waiting while this moves.
+			s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+				"setup_connector": registration.conn.Name(),
+				"setup_step":      index + 1,
+				"setup_total":     len(registrations),
+			})
+		}
 		previousLock := transaction.hookLockState.RawEntry(registration.conn.Name())
 		var pluginSnapshot *connector.PluginArtifactRegistrationSnapshot
 		var pluginLockSnapshot *connector.HookContractLockSnapshot

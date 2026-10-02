@@ -24,6 +24,10 @@ import "time"
 // launched gateway to report READY before stopping it.
 const platformStartReadinessTimeout = 60 * time.Second
 
+// startReadinessProgressFactor: see daemon_readiness_windows.go. Elsewhere
+// setup progress does not extend the readiness timeout.
+const startReadinessProgressFactor = 1
+
 // startupRetriesSQLiteIO: see daemon_readiness_windows.go. Elsewhere an
 // event-history I/O error stays an immediate startup failure.
 var startupRetriesSQLiteIO = false
