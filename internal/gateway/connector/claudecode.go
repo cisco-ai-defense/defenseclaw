@@ -1900,7 +1900,8 @@ func claudeCodeEnvValueIsOrphanedEarlierRelease(snapshot map[string]interface{},
 // telemetry key in snapshot is one an earlier DefenseClaw teardown can leave
 // of its own block (GAP-1107): OTLP endpoints on a loopback gateway and the
 // content-capture pins at "0" (or an earlier release's prompt flag), with at
-// least one of each and Claude telemetry itself not enabled. Without
+// least one of each (or DefenseClaw's full endpoint set alone) and Claude
+// telemetry itself not enabled. Without
 // CLAUDE_CODE_ENABLE_TELEMETRY those keys configure nothing, and an
 // operator's own telemetry setup also sets exporters, a protocol or headers.
 func claudeCodeEnvSnapshotIsOrphanedDefenseClawBlock(snapshot map[string]interface{}) bool {
@@ -1926,7 +1927,27 @@ func claudeCodeEnvSnapshotIsOrphanedDefenseClawBlock(snapshot map[string]interfa
 			return false
 		}
 	}
-	return endpoint && pin
+	return endpoint && (pin || claudeCodeEnvSnapshotHasDefenseClawEndpointSet(snapshot))
+}
+
+// claudeCodeEnvSnapshotHasDefenseClawEndpointSet reports whether snapshot
+// holds the four OTLP endpoints exactly as DefenseClaw writes them: a base
+// endpoint and its /v1/logs, /v1/metrics and /v1/traces paths. A teardown can
+// leave that set without the capture pins (GAP-1917); an operator rarely
+// spells out all four for one loopback port.
+func claudeCodeEnvSnapshotHasDefenseClawEndpointSet(snapshot map[string]interface{}) bool {
+	base, _ := snapshot["OTEL_EXPORTER_OTLP_ENDPOINT"].(string)
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		return false
+	}
+	for _, signal := range []string{"LOGS", "METRICS", "TRACES"} {
+		got, _ := snapshot["OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"].(string)
+		if got != base+"/v1/"+strings.ToLower(signal) {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeCodeLoopbackGatewayEndpoint reports whether value is a plain http

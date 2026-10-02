@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -34,6 +35,9 @@ _ALLOWED_BINARIES = {
     "uvx.exe",
     "uvw.exe",
 }
+# A copy of an owned binary that a source install renamed aside while it ran
+# (install_publish; GAP-1929).
+_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
 _LAUNCHER_WAIT_SECONDS = 15.0
@@ -142,7 +146,9 @@ def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
     for raw in plan.get("binary_targets", []):
         target = _norm(str(raw))
         name = os.path.basename(target).lower()
-        if name not in _ALLOWED_BINARIES or os.path.dirname(target) != install_root:
+        retired = _RETIRED_COPY_RE.fullmatch(name)
+        owned = name in _ALLOWED_BINARIES or (retired is not None and retired.group("name") in _ALLOWED_BINARIES)
+        if not owned or os.path.dirname(target) != install_root:
             raise ValueError(f"binary target is not product-owned: {raw}")
         if os.path.lexists(target) and _is_reparse(target):
             raise ValueError(f"binary target is a symlink or reparse point: {raw}")

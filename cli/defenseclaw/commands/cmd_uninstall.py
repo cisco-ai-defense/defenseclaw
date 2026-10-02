@@ -308,10 +308,21 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
     """
     if plan.remove_data_dir and plan.remove_binaries:
         return
+    # --all without --binaries removed the defenseclaw launcher with the data
+    # dir it runs, so nothing below may name a defenseclaw command (GAP-1923).
+    launcher_gone = bool(plan.data_bound_launchers) and not plan.remove_binaries
+    left = [
+        target
+        for target in plan.binary_targets
+        if launcher_gone and target not in plan.data_bound_launchers and os.path.lexists(target)
+    ]
     kept: list[str] = []
     if not plan.remove_data_dir and plan.data_dir:
         kept.append(f"{plan.data_dir}: config, audit log, policies and secrets")
-    if not plan.remove_binaries and plan.install_root:
+    if launcher_gone and left:
+        names = ", ".join(os.path.basename(target) for target in left)
+        kept.append(f"{plan.install_root}: {names} (the defenseclaw command went with the data)")
+    elif not plan.remove_binaries and plan.install_root and not launcher_gone:
         kept.append(f"{plan.install_root}: the DefenseClaw commands")
     if kept:
         ux.subhead("Kept:")
@@ -320,11 +331,6 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
     if plan.remove_binaries:
         _render_next_steps_without_commands(plan)
         return
-    ux.subhead("Next steps:")
-    if plan.remove_data_dir:
-        click.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
-    else:
-        click.echo("  • turn protection back on:   defenseclaw setup guardrail")
     # A Windows `make all` developer install refuses --binaries, so naming
     # that command sent the user to a refusal (GAP-1256).
     developer = (
@@ -332,6 +338,14 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
         if plan.platform_name == "win32" and not plan.remove_binaries
         else []
     )
+    if launcher_gone and not developer:
+        _render_next_steps_after_launcher_removal(plan, left)
+        return
+    ux.subhead("Next steps:")
+    if plan.remove_data_dir and not launcher_gone:
+        click.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
+    elif not plan.remove_data_dir:
+        click.echo("  • turn protection back on:   defenseclaw setup guardrail")
     if developer:
         if not plan.remove_data_dir:
             click.echo("  • remove the data too:       defenseclaw uninstall --all")
@@ -342,6 +356,19 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
 
 
 _INSTALL_URL = "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download"
+
+
+def _render_next_steps_after_launcher_removal(plan: UninstallPlan, left: list[str]) -> None:
+    """Next steps after --all removed the launcher with the data (GAP-1923)."""
+    ux.subhead("Next steps (the defenseclaw command was removed):")
+    if left and plan.platform_name == "win32":
+        click.echo("  • remove the rest (PowerShell):")
+        click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(left)}")
+    elif left:
+        import shlex
+
+        click.echo(f"  • remove the rest:           rm -f {' '.join(shlex.quote(path) for path in left)}")
+    _render_reinstall_step(plan)
 
 
 def _render_next_steps_without_commands(plan: UninstallPlan) -> None:
@@ -355,13 +382,20 @@ def _render_next_steps_without_commands(plan: UninstallPlan) -> None:
         import shlex
 
         click.echo(f"  • remove the kept data:      rm -rf {shlex.quote(plan.data_dir)}")
+    _render_reinstall_step(plan)
+
+
+def _render_reinstall_step(plan: UninstallPlan) -> None:
+    """Say how to get DefenseClaw back once its command is gone."""
+    windows = plan.platform_name == "win32"
     from defenseclaw.upgrade_shim import managed_deployment
 
     if managed_deployment():
         # The organization's deployment installs DefenseClaw and guards the
         # account; a per-user reinstall is not the way back.
         return
-    click.echo("  • use DefenseClaw again:     reinstall it, then run 'defenseclaw setup guardrail'")
+    then = "defenseclaw quickstart" if plan.remove_data_dir else "defenseclaw setup guardrail"
+    click.echo(f"  • use DefenseClaw again:     reinstall it, then run '{then}'")
     if windows:
         click.echo(f"      irm {_INSTALL_URL}/install.ps1 | iex")
     else:
@@ -916,10 +950,36 @@ def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str, uv_leftovers: 
         cache = _uv_default_dirs(platform_name)[0]
     if not cache or cache in uv_leftovers or not _plain_owned_dir(cache):
         return ""
-    patterns = ("archive-v*/*/defenseclaw-*.dist-info", "wheels-v*/*/defenseclaw", "wheels-v*/*/*/defenseclaw")
+    patterns = (
+        "archive-v*/*/defenseclaw-*.dist-info",
+        "wheels-v*/*/defenseclaw",
+        "wheels-v*/*/*/defenseclaw",
+        "sdists-v*/editable/*/*/defenseclaw-*.whl",
+    )
     if any(glob.glob(os.path.join(glob.escape(cache), pattern)) for pattern in patterns):
         return cache
     return ""
+
+
+def _uv_editable_leftovers(cache: str) -> list[str]:
+    """Return the uv cache entries of DefenseClaw editable builds (GAP-1873).
+
+    `uv cache clean defenseclaw` leaves the editable wheel a `make all` built
+    (sdists-v*/editable/<source>/) and the archive it unpacked into
+    (archive-v*/<id>/ with defenseclaw-<v>.dist-info and its .pth). Each
+    entry goes only when it holds nothing but DefenseClaw's build.
+    """
+    root = glob.escape(cache)
+    entries: list[str] = []
+    for source in sorted(glob.glob(os.path.join(root, "sdists-v*", "editable", "*"))):
+        wheels = glob.glob(os.path.join(glob.escape(source), "*", "*.whl"))
+        if wheels and all(os.path.basename(wheel).startswith("defenseclaw-") for wheel in wheels):
+            entries.append(source)
+    for archive in sorted(glob.glob(os.path.join(root, "archive-v*", "*"))):
+        infos = glob.glob(os.path.join(glob.escape(archive), "*.dist-info"))
+        if infos and all(os.path.basename(info).startswith("defenseclaw-") for info in infos):
+            entries.append(archive)
+    return [entry for entry in entries if os.path.isdir(entry) and not os.path.islink(entry)]
 
 
 def _clean_uv_cache_entries(plan: UninstallPlan) -> None:
@@ -947,6 +1007,13 @@ def _clean_uv_cache_entries(plan: UninstallPlan) -> None:
         return
     if result.returncode != 0:
         ux.warn(f"kept DefenseClaw's entries in uv's cache {cache} (uv exited {result.returncode}); run `{command}`")
+        return
+    # uv's clean does not reach editable builds; they go here (GAP-1873).
+    for entry in _uv_editable_leftovers(cache):
+        shutil.rmtree(entry, ignore_errors=True)
+    left = _uv_editable_leftovers(cache)
+    if left:
+        ux.warn(f"kept {len(left)} DefenseClaw entr{'y' if len(left) == 1 else 'ies'} in uv's cache: {', '.join(left)}")
         return
     ux.ok(f"removed DefenseClaw's entries from uv's cache {cache}")
 
@@ -1239,7 +1306,31 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "mcp-scanner-api",
             "litellm",
         )
-    return install_root, tuple(os.path.join(install_root, name) for name in names)
+    targets = tuple(os.path.join(install_root, name) for name in names)
+    return install_root, targets + _retired_source_install_copies(install_root, names)
+
+
+# install_publish renames a running binary aside to this name when `make all`
+# replaces it; a copy still mapped then stays until a later rebuild prunes it.
+_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+
+
+def _is_retired_source_install_copy(name: str, owned: tuple[str, ...] | set[str]) -> bool:
+    match = _RETIRED_COPY_RE.fullmatch(name)
+    return bool(match) and match.group("name").lower() in {item.lower() for item in owned}
+
+
+def _retired_source_install_copies(install_root: str, names: tuple[str, ...]) -> tuple[str, ...]:
+    """Name the copies of DefenseClaw's binaries a source install renamed aside (GAP-1929)."""
+    try:
+        entries = sorted(os.scandir(install_root), key=lambda entry: entry.name)
+    except OSError:
+        return ()
+    return tuple(
+        entry.path
+        for entry in entries
+        if _is_retired_source_install_copy(entry.name, names) and entry.is_file(follow_symlinks=False)
+    )
 
 
 def _owned_openclaw_candidate(data_dir: str, default_candidate: str) -> tuple[str, bool]:
@@ -1938,9 +2029,9 @@ def _validate_plan(plan: UninstallPlan) -> None:
             }
         )
         for target in plan.binary_targets:
-            if (
-                _normalized(os.path.dirname(target)) != install_root
-                or os.path.basename(target).lower() not in allowed_names
+            name = os.path.basename(target).lower()
+            if _normalized(os.path.dirname(target)) != install_root or (
+                name not in allowed_names and not _is_retired_source_install_copy(name, allowed_names)
             ):
                 raise click.ClickException(f"refusing unowned binary target: {target}")
             if plan.platform_name == "win32" and os.path.lexists(target) and _is_reparse_path(target):

@@ -394,3 +394,35 @@ def test_remove_created_dirs_keeps_folders_with_content(tmp_path: Path) -> None:
 
 def test_reset_keeps_the_installer_uv() -> None:
     assert ".uv" in cmd_uninstall._RESET_PRESERVED_ENTRIES
+
+
+@posix_only
+def test_all_binaries_removes_uv_editable_builds_of_defenseclaw(per_user_install) -> None:
+    # GAP-1873: `uv cache clean defenseclaw` leaves the editable build a
+    # `make all` made; uninstall removes it and keeps other projects' entries.
+    home, bin_dir = per_user_install.home, per_user_install.bin_dir
+    (per_user_install.data_dir / ".uv" / "cache").mkdir(parents=True)
+    cache = home / ".cache" / "uv"
+    editable = cache / "sdists-v9" / "editable" / "fd4b0bc0ea720841"
+    (editable / "PMWiJyLN").mkdir(parents=True)
+    (editable / "PMWiJyLN" / "defenseclaw-0.8.10-0.editable-py3-none-any.whl").write_bytes(b"whl")
+    (editable / "revision.rev").write_bytes(b"")
+    archive = cache / "archive-v0" / "SAh7Zu"
+    (archive / "defenseclaw-0.8.10.dist-info").mkdir(parents=True)
+    (archive / "__editable__.defenseclaw-0.8.10.pth").write_text("/gone/cli\n", encoding="utf-8")
+    other = cache / "archive-v0" / "Other1" / "click-8.1.7.dist-info"
+    other.mkdir(parents=True)
+    (bin_dir / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    with (
+        patch.dict(os.environ, {"PATH": str(bin_dir), "XDG_CACHE_HOME": ""}),
+        patch.object(cmd_uninstall, "_hook_temp_roots", return_value=()),
+    ):
+        os.environ.pop("UV_CACHE_DIR", None)
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not editable.exists()
+    assert not archive.exists()
+    assert other.is_dir()
+    assert "removed DefenseClaw's entries from uv's cache" in result.output
