@@ -95,15 +95,20 @@ does not run the skill or MCP scanners.`,
 }
 
 type enterpriseDiscoveryAccount struct {
-	User      string               `json:"user"`
-	UID       int                  `json:"uid"`
+	User string `json:"user"`
+	// UID is the Linux or macOS account; SID the Windows one.
+	UID       *int                 `json:"uid,omitempty"`
+	SID       string               `json:"sid,omitempty"`
 	UpdatedAt time.Time            `json:"updated_at"`
 	Result    string               `json:"result"`
 	Signals   []inventory.AISignal `json:"signals"`
 }
 
 type enterpriseDiscoveryReport struct {
-	Spool    string                       `json:"spool"`
+	// Spool is the guardian's per-user scan records (Linux, macOS);
+	// Gateway the gateway whose own scan was read (Windows).
+	Spool    string                       `json:"spool,omitempty"`
+	Gateway  string                       `json:"gateway,omitempty"`
 	Accounts []enterpriseDiscoveryAccount `json:"accounts"`
 	Errors   []string                     `json:"errors,omitempty"`
 	// Runtime is the gateway's runtime discovery snapshot; RuntimeError
@@ -146,18 +151,39 @@ type enterpriseRuntimeFinding struct {
 // runtimeCommand is the running discovery command, for the config load.
 var runtimeCommand *cobra.Command
 
+// enterpriseDiscoveryPinManagedEnv points the gateway reads at the managed
+// deployment's config and data dir; replaceable in tests. Without it an
+// administrator's shell read its own ~/.defenseclaw/config.yaml and the
+// runtime section said to run the command just run (GAP-1144).
+var enterpriseDiscoveryPinManagedEnv = pinEnterpriseDiscoveryEnv
+
 // fetchEnterpriseDiscoveryRuntime reads the runtime snapshot from the local
 // gateway with the deployment's gateway token, which root can read.
 func fetchEnterpriseDiscoveryRuntime() (*enterpriseRuntimeView, error) {
-	if err := loadGatewayCommandConfigFor(runtimeCommand); err != nil {
+	view := &enterpriseRuntimeView{}
+	host, err := enterpriseGatewayGet("/api/v1/ai-usage/runtime", view)
+	if err != nil {
 		return nil, err
+	}
+	view.Gateway = host
+	return view, nil
+}
+
+// enterpriseGatewayGet decodes one GET of the managed deployment's local
+// gateway API into out and returns the gateway's host:port.
+func enterpriseGatewayGet(path string, out any) (string, error) {
+	if err := enterpriseDiscoveryPinManagedEnv(); err != nil {
+		return "", err
+	}
+	if err := loadGatewayCommandConfigFor(runtimeCommand); err != nil {
+		return "", err
 	}
 	host := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+"/api/v1/ai-usage/runtime", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+path, nil)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	token := daemonGatewayToken(cfg)
 	if token == "" {
@@ -169,18 +195,80 @@ func fetchEnterpriseDiscoveryRuntime() (*enterpriseRuntimeView, error) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("the gateway at %s did not answer; check it with: defenseclaw-gateway status", host)
+		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s", host, enterpriseDiscoveryStatusHint())
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("the gateway at %s answered %s", host, resp.Status)
+		return "", fmt.Errorf("the gateway at %s answered %s", host, resp.Status)
 	}
-	view := &enterpriseRuntimeView{}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(view); err != nil {
-		return nil, fmt.Errorf("read the gateway's runtime snapshot: %w", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out); err != nil {
+		return "", fmt.Errorf("read the gateway's answer to %s: %w", path, err)
 	}
-	view.Gateway = host
-	return view, nil
+	return host, nil
+}
+
+// enterpriseDiscoveryStatusHint is the status command for this platform.
+func enterpriseDiscoveryStatusHint() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "defenseclaw enterprise windows status"
+	case "darwin":
+		return "defenseclaw-gateway enterprise macos status"
+	default:
+		return "defenseclaw-gateway enterprise linux status"
+	}
+}
+
+// enterpriseGatewayAIUsage is GET /api/v1/ai-usage: the gateway's own AI
+// Discovery report.
+type enterpriseGatewayAIUsage struct {
+	Enabled bool                         `json:"enabled"`
+	Summary inventory.AIDiscoverySummary `json:"summary"`
+	Signals []inventory.AISignal         `json:"signals"`
+}
+
+// enterpriseDiscoveryGatewayReport reads the gateway's AI Discovery report;
+// replaceable in tests.
+var enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+	var usage enterpriseGatewayAIUsage
+	host, err := enterpriseGatewayGet("/api/v1/ai-usage", &usage)
+	return usage, host, err
+}
+
+// writeWindowsEnterpriseDiscovery is `enterprise windows discovery`. On
+// Windows the gateway service scans every profile itself, so the inventory
+// is its own report, grouped by the account each signal was found in
+// (GAP-1964).
+func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) error {
+	usage, host, err := enterpriseDiscoveryGatewayReport()
+	if err != nil {
+		return fmt.Errorf("read the AI Discovery inventory: %w", err)
+	}
+	report := enterpriseDiscoveryReport{Gateway: host, Accounts: []enterpriseDiscoveryAccount{}}
+	byUser := map[string]int{}
+	for _, signal := range usage.Signals {
+		name := signal.UserName
+		if user != "" && !strings.EqualFold(user, name) && !strings.EqualFold(user, signal.UserID) {
+			continue
+		}
+		index, ok := byUser[strings.ToLower(name)]
+		if !ok {
+			index = len(report.Accounts)
+			byUser[strings.ToLower(name)] = index
+			report.Accounts = append(report.Accounts, enterpriseDiscoveryAccount{
+				User: name, SID: signal.UserID, UpdatedAt: usage.Summary.ScannedAt, Result: usage.Summary.Result,
+			})
+		}
+		report.Accounts[index].Signals = append(report.Accounts[index].Signals, signal)
+	}
+	sort.Slice(report.Accounts, func(i, j int) bool {
+		return strings.ToLower(report.Accounts[i].User) < strings.ToLower(report.Accounts[j].User)
+	})
+	if user != "" && len(report.Accounts) == 0 {
+		return fmt.Errorf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+	}
+	heading := fmt.Sprintf("AI Discovery inventory from the gateway's scan of each user profile (gateway %s)", host)
+	return writeEnterpriseDiscoveryReport(w, report, user, asJSON, heading)
 }
 
 func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error {
@@ -207,22 +295,30 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 		if user != "" && user != record.User && user != strconv.Itoa(record.UID) {
 			continue
 		}
+		accountUID := record.UID
 		report.Accounts = append(report.Accounts, enterpriseDiscoveryAccount{
-			User: record.User, UID: record.UID, UpdatedAt: record.UpdatedAt,
+			User: record.User, UID: &accountUID, UpdatedAt: record.UpdatedAt,
 			Result: record.Report.Summary.Result, Signals: record.Report.Signals,
 		})
 	}
-	sort.Slice(report.Accounts, func(i, j int) bool { return report.Accounts[i].UID < report.Accounts[j].UID })
+	sort.Slice(report.Accounts, func(i, j int) bool { return *report.Accounts[i].UID < *report.Accounts[j].UID })
 	if user != "" && len(report.Accounts) == 0 && len(report.Errors) == 0 {
 		return fmt.Errorf("no AI Discovery record for account %q in %s; the account is not enrolled or has not been scanned yet", user, dir)
 	}
+	return writeEnterpriseDiscoveryReport(w, report, user, asJSON,
+		fmt.Sprintf("AI Discovery inventory from the hook guardian's per-user scans (%s)", dir))
+}
+
+// writeEnterpriseDiscoveryReport adds the runtime discovery section to the
+// accounts' inventory and prints both.
+func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryReport, user string, asJSON bool, heading string) error {
 	if view, err := enterpriseDiscoveryRuntime(); err != nil {
 		report.RuntimeError = err.Error()
 	} else if view != nil {
 		if user != "" {
 			findings := view.Findings[:0]
 			for _, finding := range view.Findings {
-				if finding.User == user {
+				if strings.EqualFold(finding.User, user) {
 					findings = append(findings, finding)
 				}
 			}
@@ -235,13 +331,20 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	fmt.Fprintf(w, "AI Discovery inventory from the hook guardian's per-user scans (%s)\n", dir)
+	fmt.Fprintln(w, heading)
 	if len(report.Accounts) == 0 && len(report.Errors) == 0 {
 		fmt.Fprintln(w, "  no records yet: ai_discovery is off in the deployment config, no account is enrolled, or the first scan has not finished")
 	}
 	for _, account := range report.Accounts {
-		fmt.Fprintf(w, "%s (uid %d): scanned %s, result %s, %d signal(s)\n",
-			account.User, account.UID, account.UpdatedAt.UTC().Format(time.RFC3339), account.Result, len(account.Signals))
+		name := account.User
+		switch {
+		case name == "":
+			name = "machine-wide (no account)"
+		case account.UID != nil:
+			name = fmt.Sprintf("%s (uid %d)", name, *account.UID)
+		}
+		fmt.Fprintf(w, "%s: scanned %s, result %s, %d signal(s)\n",
+			name, account.UpdatedAt.UTC().Format(time.RFC3339), account.Result, len(account.Signals))
 		if user == "" {
 			counts := map[string]int{}
 			for _, signal := range account.Signals {
