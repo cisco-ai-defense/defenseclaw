@@ -592,6 +592,18 @@ func TestHookCoverage(t *testing.T) {
 		!strings.Contains(findings[0].Message, "Bash: Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT") {
 		t.Fatalf("finding events = %+v", findings)
 	}
+	// A blocked prompt is on the feed and counted, but is no tool call (GAP-1791).
+	prompt := d("UserPromptSubmit", "", "block")
+	prompt.Tool, prompt.Severity, prompt.Reason = "", "CRITICAL", "Blocked by DefenseClaw rule SEC-AWS-KEY: AWS access key."
+	e.m.ObserveHookDecision(prompt)
+	e.m.ObserveHookDecision(d("UserPromptSubmit", "", "allow"))
+	if h := e.get("hookbox").Hooks; h.ToolCalls != 4 || h.ToolBlocked != 1 || h.PromptBlocked != 1 {
+		t.Fatalf("hooks after a prompt block = %+v", h)
+	}
+	if got := e.events("hookbox", sandboxapi.ActivityHookBlocked, ""); len(got) != 1 || got[0].Severity != "CRITICAL" ||
+		got[0].Message != "✗ prompt blocked by DefenseClaw: "+prompt.Reason {
+		t.Fatalf("prompt blocks on the feed = %+v", got)
+	}
 }
 
 // Every verdict counts under its hook event, the harness's name for it, tool

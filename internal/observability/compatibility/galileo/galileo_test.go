@@ -824,6 +824,48 @@ func TestProjectPreservesCanonicalResourceAttributesAndDroppedCount(t *testing.T
 	}
 }
 
+// GAP-1189: Galileo drops the OTLP resource, so every span names its
+// deployment, host and user in the metadata Galileo shows as user_metadata.
+func TestProjectSpanMetadataNamesTheDeploymentAndUser(t *testing.T) {
+	t.Parallel()
+	resourceAttributes := canonicalResourceAttributes()
+	resourceAttributes["host.name"] = "EC2AMAZ-CLONE"
+	body := map[string]any{
+		"kind": "CLIENT",
+		"attributes": map[string]any{
+			"gen_ai.operation.name": "chat", "gen_ai.provider.name": "openai",
+			"gen_ai.input.messages":  messages("user", "safe"),
+			"gen_ai.output.messages": messages("assistant", "safe"),
+			"defenseclaw.user.name":  "dcw-std2",
+		},
+		"resource": map[string]any{"attributes": resourceAttributes},
+	}
+	result := Project(projectRecord(t, observability.BucketModelIO, "span.model.chat", "chat fixture", body, redaction.ProfileNone), Limits{})
+	if !result.Eligible() {
+		t.Fatalf("reason = %q", result.Reason())
+	}
+	raw, ok := resultAttributes(t, result)["metadata"].(string)
+	if !ok {
+		t.Fatal("span without a guardrail decision has no metadata")
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"deployment.environment.name": "test", "host.name": "EC2AMAZ-CLONE",
+		"defenseclaw.instance.id": "instance-1", "defenseclaw.user.name": "dcw-std2",
+	}
+	if len(metadata) != len(want) {
+		t.Fatalf("metadata = %v, want %v", metadata, want)
+	}
+	for key, value := range want {
+		if metadata[key] != value {
+			t.Errorf("metadata[%q] = %q, want %q", key, metadata[key], value)
+		}
+	}
+}
+
 func TestProjectRejectsForgedResourceAttributes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

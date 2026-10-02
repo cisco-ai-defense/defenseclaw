@@ -104,6 +104,9 @@ func hooksText(sb sandboxapi.Sandbox) string {
 	if sb.Hooks.ToolAsked > 0 {
 		s += fmt.Sprintf(", %d asked", sb.Hooks.ToolAsked)
 	}
+	if sb.Hooks.PromptBlocked > 0 {
+		s += ", " + plural(sb.Hooks.PromptBlocked, "prompt", "prompts") + " blocked"
+	}
 	if sb.Hooks.HookFailed > 0 {
 		s += fmt.Sprintf(", %d failed", sb.Hooks.HookFailed)
 	}
@@ -221,6 +224,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
 	if sb.Hooks.ToolAsked > 0 {
 		cov += fmt.Sprintf(", %d asked", sb.Hooks.ToolAsked)
+	}
+	if sb.Hooks.PromptBlocked > 0 {
+		cov += ", " + plural(sb.Hooks.PromptBlocked, "prompt", "prompts") + " blocked"
 	}
 	if sb.Hooks.HookFailed > 0 {
 		cov += fmt.Sprintf(", %d failed (fail closed)", sb.Hooks.HookFailed)

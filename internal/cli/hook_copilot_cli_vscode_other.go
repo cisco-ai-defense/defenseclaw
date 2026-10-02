@@ -8,10 +8,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package cli
 
-// copilotCLIMachinePolicyInForce: Windows keeps the gateway's Copilot
-// dedupe for the CLI's second delivery.
+// copilotCLIMachinePolicyInForce: other platforms have no Copilot machine
+// policy.
 func copilotCLIMachinePolicyInForce() bool { return false }

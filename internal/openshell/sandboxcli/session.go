@@ -359,7 +359,7 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.onUnblock(ev.Host)
 	case sandboxapi.ActivityEgressLargeUpload:
 		s.largeUploadNotice(ev)
-	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookFailed:
+	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookBlocked, sandboxapi.ActivityHookFailed:
 		// A hook of the session reached DefenseClaw.
 		s.sawHooks.Store(true)
 	case sandboxapi.ActivityFinding:
@@ -1084,7 +1084,7 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 		same := next.Egress.Destinations == after.Egress.Destinations && next.Egress.Blocked == after.Egress.Blocked &&
 			next.Egress.BlockedRequests == after.Egress.BlockedRequests &&
 			next.Hooks.ToolCalls == after.Hooks.ToolCalls && next.Hooks.ToolBlocked == after.Hooks.ToolBlocked &&
-			next.Hooks.HookFailed == after.Hooks.HookFailed
+			next.Hooks.PromptBlocked == after.Hooks.PromptBlocked && next.Hooks.HookFailed == after.Hooks.HookFailed
 		after = next
 		if same {
 			break
@@ -1156,6 +1156,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		tools += fmt.Sprintf(" (%d asked)", asked)
 	}
 	parts = append(parts, tools)
+	if prompts := after.Hooks.PromptBlocked - hooksBefore.PromptBlocked; prompts > 0 {
+		parts = append(parts, plural(prompts, "prompt", "prompts")+" blocked")
+	}
 	// A hook call DefenseClaw answered with an error failed closed: the
 	// harness's action was blocked without a verdict.
 	if failed := after.Hooks.HookFailed - hooksBefore.HookFailed; failed > 0 {

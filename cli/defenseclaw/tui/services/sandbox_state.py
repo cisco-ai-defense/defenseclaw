@@ -599,6 +599,7 @@ class ActivityRow:
             "approval.resolved": "·",
             "tool.blocked": "⊘",
             "tool.asked": "?",
+            "hook.blocked": "⊘",
             "hook.failed": "✗",
             "finding": "⚠",
             "sandbox.lifecycle": "·",

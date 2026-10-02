@@ -130,6 +130,8 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		if ev.Reason != "" {
 			b.WriteString(": " + truncate(ev.Reason, 120))
 		}
+	case sandboxapi.ActivityHookBlocked:
+		b.WriteString(a.style("✗", ansiRed) + " " + firstNonEmpty(strings.TrimPrefix(ev.Message, "✗ "), "prompt blocked by DefenseClaw"))
 	case sandboxapi.ActivityHookFailed:
 		msg := strings.TrimPrefix(ev.Message, "✗ ")
 		if msg == "" {

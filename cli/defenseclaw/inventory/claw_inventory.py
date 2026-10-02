@@ -68,7 +68,7 @@ INVENTORY_VERSION = 4
 
 # Keep AIBOM scan-finding evidence within the canonical Observability v8
 # ingress contract. The complete inventory remains in the command result;
-# only its audit-telemetry projection is summarized when a category is large.
+# only its audit-telemetry projection is summarized (item count, size, digest).
 _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES = 65_536
 _AIBOM_TELEMETRY_SUMMARY_SCHEMA = "defenseclaw.aibom.telemetry-summary.v1"
 
@@ -216,17 +216,17 @@ def build_claw_aibom(
 
 
 def _aibom_telemetry_description(payload: Any) -> str:
-    """Return a lossless small payload or a bounded, verifiable summary.
+    """Return a bounded, verifiable summary of one inventory category.
 
-    Canonical Observability v8 admits at most 65,536 UTF-8 bytes per finding
-    description. AIBOM remains the source of truth and is rendered in full to
-    the caller; this helper only bounds the scan finding sent to telemetry.
+    An inventory category is a snapshot, not a security finding, so the scan
+    finding sent to telemetry carries its item count, size and digest rather
+    than the listing itself (GAP-1822). AIBOM remains the source of truth and
+    is rendered in full to the caller. Canonical Observability v8 admits at
+    most 65,536 UTF-8 bytes per finding description.
     """
 
     rendered = json.dumps(payload, indent=2)
     rendered_bytes = rendered.encode("utf-8")
-    if len(rendered_bytes) <= _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES:
-        return rendered
 
     canonical = json.dumps(
         payload,
@@ -278,6 +278,9 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
                 location=target,
                 scanner="aibom-claw",
                 tags=["claw-aibom", key],
+                # One stable rule per category: the gateway would otherwise
+                # derive it from the title, which carries the item count.
+                rule_id=f"aibom-claw.inventory.{key}",
             ),
         )
     return ScanResult(

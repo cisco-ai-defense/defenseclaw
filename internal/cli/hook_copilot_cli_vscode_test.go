@@ -46,4 +46,13 @@ func TestCopilotCLIRunsVSCodeLocalHookOnlyForTheCLIUnderMachinePolicy(t *testing
 	if !copilotCLIRunsVSCodeLocalHook("copilot", "vscode-local", true) {
 		t.Error("copilot.exe is the CLI too")
 	}
+	// GAP-1779: VS Code's Copilot CLI agent host runs the same engine.
+	exe = `c:\Program Files\Microsoft VS Code\07f806f999\resources\app\node_modules.asar.unpacked\@github\copilot-sdk-win32-x64\prebuilds\win32-x64\copilot-runtime.exe`
+	if !copilotCLIRunsVSCodeLocalHook("copilot", "vscode-local", true) {
+		t.Error("the VS Code agent host's copilot-runtime.exe is the CLI engine too")
+	}
+	exe = `C:\Users\u\AppData\Local\Programs\Microsoft VS Code\Code.exe`
+	if copilotCLIRunsVSCodeLocalHook("copilot", "vscode-local", true) {
+		t.Error("VS Code itself must be evaluated")
+	}
 }
