@@ -176,6 +176,13 @@ class _ConnectorRuntimeReadiness:
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
+# `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
+# for the port (up to 10 s), then waits for READY itself (240 s on Windows,
+# 60 s elsewhere) and only then starts the watchdog. Killing it earlier left a
+# slow Windows start without its watchdog and raced the setup rollback against
+# a gateway that was still coming up (GAP-1206, GAP-1396).
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 300
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS = _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS if os.name == "nt" else 30
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
 _TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS = 120
@@ -8570,7 +8577,10 @@ def _rollback_failed_connector_application(
         if rollback_errors
         else "restored the prior connector configuration and runtime"
     )
-    failure = click.ClickException(f"connector setup did not converge {cause_text}; {outcome}")
+    failure = click.ClickException(
+        f"connector setup did not converge {cause_text}; {outcome}. "
+        "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
+    )
     if exact_runtime:
         raise failure from None
     raise failure from cause
@@ -14361,7 +14371,7 @@ def _restart_defense_gateway(
             shell=False,
             stdin=subprocess.DEVNULL,
             env=child_env,
-            timeout=30,
+            timeout=_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS,
         )
         if result.returncode == 0:
             if _wait_for_defense_gateway_api(

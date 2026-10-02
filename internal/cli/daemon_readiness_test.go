@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -48,8 +49,16 @@ func (fn readinessRoundTripFunc) RoundTrip(request *http.Request) (*http.Respons
 }
 
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
-	if defaultStartReadinessTimeout != 60*time.Second {
-		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	// A loaded Windows host took 142 s before the API listened (GAP-1206).
+	want := 60 * time.Second
+	if runtime.GOOS == "windows" {
+		want = 240 * time.Second
+	}
+	if defaultStartReadinessTimeout != want {
+		t.Fatalf("default start readiness timeout = %s, want %s", defaultStartReadinessTimeout, want)
+	}
+	if gatewayStartLockWait <= defaultStartReadinessTimeout {
+		t.Fatalf("start lock wait %s must exceed the readiness timeout %s", gatewayStartLockWait, defaultStartReadinessTimeout)
 	}
 }
 

@@ -48,7 +48,7 @@ import (
 
 const (
 	defaultStopTimeout               = 10 * time.Second
-	defaultStartReadinessTimeout     = 60 * time.Second
+	defaultStartReadinessTimeout     = platformStartReadinessTimeout
 	defaultReadinessPollInterval     = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout      = time.Second
 	gracefulShutdownHTTPTimeout      = 3 * time.Second
