@@ -212,6 +212,20 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         tags=["code-execution"],
         capability="child-process",
     ),
+    # Python plugins (Hermes): the subprocess/os counterparts of child_process.
+    SourcePatternRule(
+        id="SRC-PY-SUBPROCESS",
+        pattern=re.compile(
+            r"\b(?:subprocess\.(?:run|call|check_call|check_output|Popen|getoutput|getstatusoutput)"
+            r"|os\.(?:system|popen|spawn[lv]p?e?|exec[lv]p?e?))\s*\("
+        ),
+        title="Runs a subprocess (Python)",
+        severity="MEDIUM",
+        confidence=0.7,
+        profiles=["default", "strict"],
+        tags=["code-execution"],
+        capability="child-process",
+    ),
     SourcePatternRule(
         id="SRC-DENO-RUN",
         pattern=re.compile(r"\bDeno\.run\b"),

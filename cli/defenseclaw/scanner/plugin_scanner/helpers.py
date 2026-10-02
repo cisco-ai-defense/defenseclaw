@@ -103,6 +103,21 @@ def strip_comment(line: str) -> str:
     return line
 
 
+def strip_hash_comment(line: str) -> str:
+    """Strip a Python ``#`` comment from a line, ignoring ``#`` inside strings."""
+    in_string: str | None = None
+    for i, ch in enumerate(line):
+        prev = line[i - 1] if i > 0 else ""
+        if in_string:
+            if ch == in_string and prev != "\\":
+                in_string = None
+        elif ch in ('"', "'"):
+            in_string = ch
+        elif ch == "#":
+            return line[:i].rstrip()
+    return line
+
+
 def is_comment_line(line: str) -> bool:
     """Quick check if a raw line is a single-line comment."""
     stripped = line.lstrip()

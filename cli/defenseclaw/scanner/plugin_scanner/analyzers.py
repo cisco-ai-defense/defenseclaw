@@ -40,6 +40,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     make_finding,
     sanitise_evidence,
     strip_comment,
+    strip_hash_comment,
 )
 from defenseclaw.scanner.plugin_scanner.rules import (
     BINARY_EXTENSIONS,
@@ -463,7 +464,8 @@ def scan_source_files(
     # JSX/TSX) and point package.json `main`/`bin` at it; the legacy
     # extension list (.ts/.js/.mjs) skipped these executable entries
     # entirely. Add .cjs/.cts/.jsx/.tsx so source rules see them.
-    source_extensions = (".ts", ".tsx", ".js", ".jsx", ".cjs", ".cts", ".mjs")
+    # Hermes plugins are Python packages, so .py is source too (GAP-1736).
+    source_extensions = (".ts", ".tsx", ".js", ".jsx", ".cjs", ".cts", ".mjs", ".py")
     link_status, target_info = inspect_path_link(directory)
     single_file = (
         link_status is PathLinkStatus.PLAIN
@@ -537,7 +539,10 @@ def scan_source_files(
 
         in_test = is_test_path(rel_path)
         lines = content.split("\n")
-        code_lines = [strip_comment(line) for line in lines]
+        if file_path.casefold().endswith(".py"):
+            code_lines = [strip_hash_comment(line) for line in lines]
+        else:
+            code_lines = [strip_comment(line) for line in lines]
 
         if source_files_out is not None:
             source_files_out.append(
