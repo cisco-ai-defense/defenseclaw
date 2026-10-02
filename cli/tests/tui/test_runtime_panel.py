@@ -109,7 +109,7 @@ def test_plane_strip_is_always_present_and_expands_to_reasons() -> None:
     assert "shadow egress: idle" in collapsed
 
 
-def test_quiet_table_is_not_called_clean_while_a_plane_is_blind() -> None:
+def test_quiet_table_is_not_called_clean_while_coverage_is_degraded() -> None:
     # WIN2-U3-13: DEGRADED / "agent actions: blind" sat next to "a quiet table
     # is a clean host, not a blind sensor".
     model = RuntimePanelModel()

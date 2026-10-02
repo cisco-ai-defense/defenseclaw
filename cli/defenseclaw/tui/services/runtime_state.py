@@ -348,10 +348,10 @@ class RuntimePanelModel:
         )
 
     def _quiet_table_note(self) -> str:
-        """Only call a quiet table clean when no selected plane is blind."""
+        """Only call a quiet table clean when coverage is not DEGRADED."""
 
-        if any(plane.badge == "blind" and _selected_plane_gap(plane) for plane in self.snapshot.planes):
-            return "Some selected planes cannot see the host, so a quiet table is not proof of a clean host."
+        if self.snapshot.degraded:
+            return "Coverage is partial, so a quiet table is not proof of a clean host."
         return "A quiet table is a clean host, not a blind sensor."
 
     def inventory_unobserved_count(self) -> int:
