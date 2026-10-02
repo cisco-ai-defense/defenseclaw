@@ -74,7 +74,7 @@ def test_alert_finding_names_its_decision_on_first_load_and_in_observe_mode() ->
     model.cursor = 0
     info = model.get_detail_info()
     assert info is not None
-    assert dict(info.event.facts)["Decision"] == "would block (observe mode, allowed)"
+    assert dict(info.event.facts)["Decision"] == "would block (observe mode)"
 
 
 def test_audit_detail_filters_and_window() -> None:

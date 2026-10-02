@@ -78,6 +78,26 @@ _POST_TOOL_HOOK_EVENTS = frozenset({
 })
 
 
+# Hook events that only observe text already on screen: Claude Code runs
+# MessageDisplay async, so a finding there cannot block either (GAP-1531).
+_DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay"})
+
+POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
+DISPLAY_DECISION = "detected in the displayed reply (cannot block)"
+
+
+def detection_only_hook_label(event: str) -> str:
+    """Decision label of a finding on a hook event that cannot block, else "".
+
+    Accepts a bare event name or a ``connector:Event`` hook target."""
+    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
+    if name in _POST_TOOL_HOOK_EVENTS:
+        return POST_TOOL_DECISION
+    if name in _DISPLAY_HOOK_EVENTS:
+        return DISPLAY_DECISION
+    return ""
+
+
 def is_post_tool_hook_event(event: str) -> bool:
     """True for a hook event that runs after the tool call (PostToolUse, ...).
 

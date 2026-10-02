@@ -2826,7 +2826,9 @@ def use_pack_cmd(
         _preflight_config_write(app)
         block.rule_pack_dir = ""
         _save_use_pack(app, _finish, scope)
-        _log_use_pack(app, f"connector={connector_key} cleared=true")
+        # "pack: sf2pack -> default", not "connector: -> claudecode" (GAP-1511).
+        previous_name = policy_catalog.pack_name_for_path(app.cfg, previous)[0]
+        _log_use_pack(app, f"scope={connector_key} pack={fallback.pack} previous={previous_name}")
         outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
         _finish(
             ok=outcome != "restart_failed",
@@ -2916,6 +2918,7 @@ def use_pack_cmd(
                 )
 
     _preflight_config_write(app)
+    previous_pack = _current_pack_name(app, connector_key)
     cleared = _assign_rule_pack(app, connector_key, path, clear_overrides=True)
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack ({path})."
@@ -2925,7 +2928,11 @@ def use_pack_cmd(
         message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack ({path})."
 
     _save_use_pack(app, _finish, scope)
-    _log_use_pack(app, f"scope={scope} connector={connector_key or ''} pack={pack_name} cleared={','.join(cleared)}")
+    _log_use_pack(
+        app,
+        f"scope={connector_key or scope} pack={pack_name} previous={previous_pack}"
+        + (f" cleared={','.join(cleared)}" if cleared else ""),
+    )
     outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
     _finish(
         ok=outcome != "restart_failed",
@@ -2939,6 +2946,19 @@ def use_pack_cmd(
         gateway=outcome,
         message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
     )
+
+
+def _current_pack_name(app: AppContext, connector_key: str | None) -> str:
+    """The pack a scope enforces now: the connector override, else the global pack."""
+    from defenseclaw import policy_catalog
+
+    gc = app.cfg.guardrail
+    if connector_key:
+        block = (getattr(gc, "connectors", None) or {}).get(connector_key)
+        override = (getattr(block, "rule_pack_dir", "") or "").strip() if block is not None else ""
+        if override:
+            return policy_catalog.pack_name_for_path(app.cfg, override)[0]
+    return policy_catalog.global_pack(app.cfg).pack
 
 
 def _log_use_pack(app: AppContext, details: str) -> None:

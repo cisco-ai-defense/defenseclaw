@@ -240,16 +240,8 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
 
     _print_write_result(result, connector=connector_name)
 
-    if app.logger and not dry_run:
-        _record_audit(
-            "Webhook saved",
-            lambda: app.logger.log_action(
-                ACTION_SETUP_WEBHOOK,
-                "config",
-                f"action=add type={result.type} name={result.name}"
-                + (f" connector={connector_name}" if connector_name else ""),
-            ),
-        )
+    if not dry_run:
+        _record_webhook_change(app, "Webhook saved", result.name, connector_name, "added", "")
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +353,7 @@ def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
     _print_write_result(result, connector=connector_name)
+    _record_webhook_change(app, "Webhook enabled", name, connector_name, "enabled", "disabled")
 
 
 @webhook.command("disable")
@@ -379,6 +372,7 @@ def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
     _print_write_result(result, connector=connector_name)
+    _record_webhook_change(app, "Webhook disabled", name, connector_name, "disabled", "enabled")
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +401,7 @@ def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> 
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
     _print_write_result(result, connector=connector_name)
+    _record_webhook_change(app, "Webhook removed", name, connector_name, "removed", "configured")
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +521,24 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _record_webhook_change(
+    app: AppContext, done: str, name: str, connector: str, state: str, previous: str
+) -> None:
+    """Record a webhook change as an Activity mutation that names it (GAP-1511).
+
+    Activity showed only "defenseclaw config-update" with no field change for
+    add, enable, disable and remove: ``config:webhook:<name>`` and
+    ``webhook: enabled -> disabled`` say what changed.
+    """
+    if not app.logger:
+        return
+    scope = f"{connector}/{name}" if connector else name
+    _record_audit(
+        done,
+        lambda: app.logger.log_config_change("webhook", f"scope={scope} webhook={state} previous={previous}"),
+    )
 
 
 def _record_audit(done: str, record: Any) -> None:

@@ -154,6 +154,8 @@ class AlertFindingRowsTests(unittest.TestCase):
         table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
         self.assertIn("decision=detected after the tool ran (cannot block)", table.output)
         self.assertNotIn("observe mode", table.output)
+        # GAP-1535: a wide terminal shows the whole hook event, not "...tToolUse".
+        self.assertIn("| PostToolUse ", table.output.replace("\u2503", "|").replace("\u2502", "|"))
 
 
 def test_redacted_secret_title_uses_the_rule_pack_title():

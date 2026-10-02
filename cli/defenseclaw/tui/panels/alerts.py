@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -26,7 +27,12 @@ from defenseclaw.alert_semantics import (
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
-from defenseclaw.hook_metrics import connector_hook_decision, is_post_tool_hook_event, parse_detail_tokens
+from defenseclaw.hook_metrics import (
+    POST_TOOL_DECISION,
+    connector_hook_decision,
+    detection_only_hook_label,
+    parse_detail_tokens,
+)
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -277,7 +283,7 @@ def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
     return decisions
 
 
-_POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
+_POST_TOOL_DECISION = POST_TOOL_DECISION
 
 
 def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
@@ -347,10 +353,19 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     if not decision and decisions:
         decision = decisions.get(payload_text(payload, "defenseclaw.evaluation.id"), "")
     if decision and row.bucket == "security.finding" and decision.strip().lower() == "allow":
-        if is_post_tool_hook_event(target):
-            # Same wording as "defenseclaw alerts": a post-tool finding is
-            # reported after the call ran, so "allow" is not a choice (GAP-1423).
-            decision = _POST_TOOL_DECISION
+        if label := detection_only_hook_label(target):
+            # Same wording as "defenseclaw alerts": a post-tool or
+            # MessageDisplay finding cannot block, so "allow" is not a choice
+            # (GAP-1423, GAP-1531).
+            decision = label
+    if not decision and row.bucket == "security.finding" and payload_text(payload, "defenseclaw.sandbox.name"):
+        # A sandbox finding carries OpenShell's disposition in its evidence
+        # ("FINDING:BLOCKED ..."); the CLI shows it as decision=blocked (GAP-1532).
+        disposition = re.match(
+            r"FINDING:([A-Z_]+)\b", payload_text(payload, "defenseclaw.guardrail.evidence_summary").strip()
+        )
+        if disposition:
+            decision = disposition.group(1).lower().replace("_", " ")
     if decision:
         facts.append(("Decision", decision))
     severity = (row.severity or "INFO").upper()
@@ -1611,6 +1626,11 @@ def _finding_display_title(rule_id: str, title: str) -> str:
         return title
 
 
+def with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list[AlertEvent]:
+    """Public name for the shared read snapshot (GAP-1456, GAP-1560)."""
+    return _with_hook_decisions(store, events)
+
+
 def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list[AlertEvent]:
     """Give each hook-rule finding the decision of its hook call (GAP-1456).
 
@@ -1646,11 +1666,8 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
         raw_action = tokens.get("raw_action", "").strip().lower()
         observed_block = action == "allow" and raw_action == "block"
         if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
-            decision = (
-                _POST_TOOL_DECISION
-                if is_post_tool_hook_event(hook_target)
-                else "would block (observe mode, allowed)"
-            )
+            # The same label as "defenseclaw alerts" (GAP-1560).
+            decision = detection_only_hook_label(hook_target) or "would block (observe mode)"
         elif not decision and action:
             decision = "allowed" if action == "allow" else action
     return decision

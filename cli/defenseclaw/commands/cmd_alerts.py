@@ -207,7 +207,7 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     A post-tool finding (PostToolUse, ...) cannot block the call that already
     ran, so it is not labelled observe mode on an action-mode connector
     (GAP-1303)."""
-    from defenseclaw.hook_metrics import is_post_tool_hook_event  # noqa: PLC0415
+    from defenseclaw.hook_metrics import detection_only_hook_label  # noqa: PLC0415
 
     decision = ""
     for raw in hook_details:
@@ -219,11 +219,9 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
         # would_block=true; both are "would block" (GAP-1213).
         observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
         if kv.get("would_block", "").lower() == "true" or observed_block:
-            decision = (
-                "detected after the tool ran (cannot block)"
-                if is_post_tool_hook_event(hook_event)
-                else "would block (observe mode)"
-            )
+            # A post-tool or MessageDisplay finding cannot block, whatever
+            # the connector's mode (GAP-1303, GAP-1531).
+            decision = detection_only_hook_label(hook_event) or "would block (observe mode)"
         elif not decision and action:
             decision = action
     return decision
@@ -334,6 +332,14 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
     return facts
 
 
+def _short_hook_target(target: str, connector: str) -> str:
+    """``claudecode:PostToolUse`` -> ``PostToolUse``; Details already names the connector."""
+    prefix = f"{connector}:" if connector else ""
+    if prefix and target.lower().startswith(prefix.lower()) and len(target) > len(prefix):
+        return target[len(prefix):]
+    return target
+
+
 def _finding_details(facts: dict[str, str]) -> str:
     return " ".join(
         f"{key}={facts[key]}" for key in ("decision", "connector", "rule", "scanner", "sandbox") if facts.get(key)
@@ -376,7 +382,10 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
 
     console = Console()
     term_width = console.size.width
-    w_details = max(11, term_width - _OVERHEAD - _W_FIXED)
+    # A wide terminal shows the whole hook event (UserPromptSubmit,
+    # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
+    w_target = _W_TARGET if term_width < 100 else 18
+    w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
     table = Table(
@@ -409,12 +418,12 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(e.target or "", _W_TARGET)
+        target = _trunc_path(e.target or "", w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details)
         if facts is not None:
-            target = _trunc_path(facts["target"], _W_TARGET)
+            target = _trunc_path(_short_hook_target(facts["target"], facts.get("connector", "")), w_target)
             raw_details = _finding_details(facts)
         elif e.action == "scan" and scanner_name and e.target:
             findings = store.get_findings_for_target(e.target, scanner_name)

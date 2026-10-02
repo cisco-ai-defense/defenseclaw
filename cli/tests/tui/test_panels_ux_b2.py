@@ -46,7 +46,7 @@ def test_alert_ack_preview_is_a_mutation_and_finding_detail_names_the_decision()
     blocked = "connector=claudecode result=ok action=block raw_action=block severity=CRITICAL mode=action"
     observed = "connector=claudecode result=ok action=allow raw_action=block mode=observe would_block=true"
     assert _hook_decision_label(store([blocked]), "f1") == "blocked (action mode)"
-    assert _hook_decision_label(store([observed]), "f1") == "would block (observe mode, allowed)"
+    assert _hook_decision_label(store([observed]), "f1") == "would block (observe mode)"
     assert _hook_decision_label(store([]), "f1") == ""
 
 
