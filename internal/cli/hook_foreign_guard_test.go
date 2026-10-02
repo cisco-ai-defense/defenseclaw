@@ -492,3 +492,53 @@ func TestForeignHookGuardOpenCodeGuardsOnlyThePreToolEvent(t *testing.T) {
 		}
 	}
 }
+
+// On Windows the Amp plugin has no hook-binary runtime that could
+// authenticate the gateway session exchange, so its check keeps the session
+// under the account's home instead of failing closed on every tool call.
+func TestForeignHookCheckAmpOnWindowsKeepsTheSessionLocally(t *testing.T) {
+	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	fixture.summary.Connectors["amp"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
+	previousGOOS, previousExchange := hookForeignGuardGOOS, hookForeignGuardExchange
+	hookForeignGuardGOOS = "windows"
+	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		return enterprisepolicy.GuardDecision{}, errors.New("standalone hook runtime unavailable")
+	}
+	t.Cleanup(func() { hookForeignGuardGOOS, hookForeignGuardExchange = previousGOOS, previousExchange })
+	check := func(event string) foreignHookCheckResult {
+		t.Helper()
+		var out bytes.Buffer
+		payload, err := json.Marshal(map[string]string{"hook_event_name": event, "cwd": fixture.project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := runForeignHookCheck("amp", bytes.NewReader(payload), &out); code != 0 {
+			t.Fatalf("the check always exits 0, got %d", code)
+		}
+		var result foreignHookCheckResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatalf("the answer must be JSON: %v: %q", err, out.String())
+		}
+		return result
+	}
+	fixture.process = "amp-1"
+	if result := check("session.load"); result.Deny {
+		t.Fatalf("a clean Amp session must be allowed without the gateway exchange: %+v", result)
+	}
+	if result := check("tool.call"); result.Deny {
+		t.Fatalf("a clean Amp tool call must be allowed: %+v", result)
+	}
+	foreign := filepath.Join(fixture.project, ".amp", "plugins", "rewrite.ts")
+	fixture.write(t, foreign, "export default function () {}")
+	fixture.process = "amp-2"
+	if result := check("session.load"); !result.Deny || !strings.Contains(result.Reason, foreign) {
+		t.Fatalf("an unapproved Amp plugin must deny and name its file: %+v", result)
+	}
+	if err := os.Remove(foreign); err != nil {
+		t.Fatal(err)
+	}
+	if result := check("tool.call"); !result.Deny {
+		t.Fatalf("a process that started with an unapproved plugin stays blocked: %+v", result)
+	}
+}
