@@ -124,8 +124,14 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     # Set-Acl occasionally drops silently on Windows 10/11). It must not
     # appear anywhere else in the canonical setter: the setter still writes
     # bytes via Set-Acl and verifies via native GetFileSecurityDescriptor.
-    setter_without_assertion = setter.replace(assertion, "")
-    assert "$script:IcaclsExe" not in setter_without_assertion
+    raw_verifier = setter[
+        setter.index("function Assert-DefenseClawCanonicalRawPathAcl") : setter.index(
+            "function Test-DefenseClawCanonicalRawPathAcl"
+        )
+    ]
+    assert "$script:IcaclsExe" in raw_verifier
+    setter_without_raw_verifier = setter.replace(raw_verifier, "")
+    assert "$script:IcaclsExe" not in setter_without_raw_verifier
 
 
 def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None:

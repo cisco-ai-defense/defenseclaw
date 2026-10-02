@@ -13,8 +13,11 @@
 #   {"ok":false,"error":"untrusted principal S-1-5-80-... has write-like
 #   access to managed path: C:\Program Files\Cisco\Cisco Secure Client\
 #   DefenseClaw\ipc"}
-# Fixed by Set-DefenseClawPathAcl's icacls /inheritance:r post-stamp +
-# Assert-DefenseClawPathAcl's 'Access' verdict downgrade after re-stamp.
+# Fixed by Set-DefenseClawPathAcl's exact canonical DACL replacement
+# plus the icacls /inheritance:r self-heal inside
+# Assert-DefenseClawCanonicalRawPathAcl, which re-reads the descriptor
+# via native GetFileSecurityDescriptor and warns-and-continues if the
+# protected flag still cannot be set (bulldoze posture).
 
 [CmdletBinding()]
 param()
@@ -114,11 +117,20 @@ try {
             -Kind ManagedIPCDirectory `
             -GatewayServiceSID $script:AdministratorsSID
 
-        # Verify the orphan SID is gone AND SE_DACL_PROTECTED is set.
-        $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $ipcPath
+        # Verify the orphan SID is gone AND SE_DACL_PROTECTED is set. Read
+        # the descriptor via the same native helper the verifier uses - the
+        # paired contract test keeps Get-Acl out of the verifier because
+        # Get-Acl can strip SE_DACL_PROTECTED on some .NET revisions, and
+        # the same hazard applies to the post-stamp check here.
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
         $afterRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
-            $after.GetSecurityDescriptorBinaryForm(), 0
+            $nativeSecurity::GetFileSecurityDescriptor($ipcPath), 0
         )
+        # The .NET DirectorySecurity view is still used only to enumerate
+        # per-SID ACEs for the orphan check below (its listing walks the
+        # same DACL and the orphan detection does not depend on the
+        # protected-flag re-read above).
+        $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $ipcPath
         $orphanAfter = @(
             $after.Access |
                 Microsoft.PowerShell.Core\Where-Object {

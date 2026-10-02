@@ -159,17 +159,39 @@ func ReconcileWindowsCodexMachineRequirements(
 			// writes the canonical ACL (via Set-DefenseClawPathAcl's own self-heal
 			// chain) so the resulting trio is internally consistent.
 			//
-			// The managed-hook detector is still invoked for its diagnostic
-			// side effects, but its result is ignored: adoptable regardless.
-			_, _ = windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
+			// If an orphan canonical hook is already in requirements.toml, strip
+			// it from the preimage we persist. Otherwise an eventual uninstall
+			// would restore the preimage, see the canonical hook still present,
+			// and refuse to commit ("exact DefenseClaw Codex managed hooks
+			// would remain after removal"). The uninstall path invokes
+			// `removeWindowsCodexRequirementsOwnedChanges(current, baseline, ...)`
+			// to reduce the candidate to the baseline minus owned changes; we
+			// mirror the same cleanup here against an empty baseline so the
+			// preimage captures the user's non-DefenseClaw requirements only.
+			preimage := append([]byte(nil), requirements.data...)
+			contains, detectErr := windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
+			if detectErr != nil {
+				return fmt.Errorf("detect adopted Codex managed hooks: %w", detectErr)
+			}
+			if contains {
+				cleaned, _, cleanupErr := removeWindowsCodexRequirementsOwnedChanges(
+					requirements.data,
+					nil,
+					opts,
+				)
+				if cleanupErr != nil {
+					return fmt.Errorf("prepare adopted Codex requirements preimage: %w", cleanupErr)
+				}
+				preimage = cleaned
+			}
 			state = windowsCodexMachineOwnership{
 				SchemaVersion:    windowsCodexMachineRequirementsSchema,
 				RequirementsPath: opts.RequirementsPath,
 				ManagedDir:       opts.ManagedDir,
 				HookBinary:       opts.HookBinary,
 				PreimageExisted:  requirements.existed,
-				Preimage:         append([]byte(nil), requirements.data...),
-				PreimageSHA256:   windowsCodexMachineHash(requirements.data),
+				Preimage:         preimage,
+				PreimageSHA256:   windowsCodexMachineHash(preimage),
 			}
 		}
 		report.PreimageSHA256 = state.PreimageSHA256
