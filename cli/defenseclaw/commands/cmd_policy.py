@@ -683,6 +683,7 @@ def _activate_policy(app: AppContext, name: str) -> str:
     # never removes or rewrites the operator's own entries. The built-in
     # policies carry ``webhooks: []``, and replacing the list wholesale
     # silently deleted every webhook on each activate (GAP-1273).
+    webhook_notes: list[str] = []
     if "webhooks" in data:
         wh_raw = data.get("webhooks")
         if isinstance(wh_raw, list) and wh_raw:
@@ -713,14 +714,24 @@ def _activate_policy(app: AppContext, name: str) -> str:
             merged = list(app.cfg.webhooks or [])
             known = {str(getattr(w, "name", "") or "") for w in merged} - {""}
             known |= {str(getattr(w, "url", "") or "") for w in merged} - {""}
+            existing = {(str(getattr(w, "name", "") or ""), str(getattr(w, "url", "") or "")) for w in merged}
             for wh in new_webhooks:
+                label = str(getattr(wh, "name", "") or "") or str(getattr(wh, "url", "") or "")
                 keys = {str(getattr(wh, "name", "") or ""), str(getattr(wh, "url", "") or "")} - {""}
                 if keys and not keys & known:
                     merged.append(wh)
                     known |= keys
+                    webhook_notes.append(f"Added webhook {label} from the policy")
+                elif keys and (str(getattr(wh, "name", "") or ""), str(getattr(wh, "url", "") or "")) not in existing:
+                    # GAP-1585: say why a policy webhook was not added.
+                    webhook_notes.append(
+                        f"Skipped webhook {label}: a webhook with that name or URL is already configured"
+                    )
             app.cfg.webhooks = merged
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
+    for note in webhook_notes:
+        click.echo(f"  {note}")
 
     _sync_opa_data(app, data)
     return path

@@ -255,6 +255,31 @@ class TestPolicyActivate(PolicyCommandTestBase):
             raw = yaml.safe_load(f)
         self.assertEqual([w.get("name") for w in raw.get("webhooks") or []], ["ops"])
 
+    def test_activate_names_the_webhooks_it_added_and_skipped(self):
+        """GAP-1585: activation says which policy webhooks it added or skipped."""
+        import yaml
+        from defenseclaw.config import WebhookConfig
+
+        self.app.cfg.webhooks = [WebhookConfig(name="gen", url="https://hooks.example.com/gen", enabled=True)]
+        self.app.cfg.save()
+        self.assertEqual(self.invoke(["create", "whpol"]).exit_code, 0)
+        path = os.path.join(self.app.cfg.policy_dir, "whpol.yaml")
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        data["webhooks"] = [
+            {"name": "polwh", "url": "https://hooks.example.com/polwh", "enabled": True},
+            {"name": "gen", "url": "https://hooks.example.com/other", "enabled": False},
+        ]
+        with open(path, "w") as f:
+            yaml.safe_dump(data, f)
+        result = self.invoke(["activate", "whpol"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Added webhook polwh from the policy", result.output)
+        self.assertIn("Skipped webhook gen: a webhook with that name or URL is already configured", result.output)
+        again = self.invoke(["activate", "whpol"])
+        self.assertNotIn("Added webhook", again.output)
+        self.assertNotIn("Skipped webhook polwh", again.output)
+
     def test_activate_logs_action(self):
         self.invoke(["activate", "default"])
         events = self.app.store.list_events(10)
