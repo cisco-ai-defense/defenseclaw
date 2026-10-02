@@ -173,7 +173,8 @@ func TestEnsureInventoryListACEGrantsTheFolderOnly(t *testing.T) {
 // path, so, like Kiro CLI, they are discovered through list-only grants on
 // their install folders (GAP-1739). Those folders are never on a hook path.
 func TestInventoryListOnlyDirsCoverGuardianProtectedAgents(t *testing.T) {
-	want := map[string]bool{`AppData\Local\Kiro-Cli`: true, `AppData\Local\copilot\pkg`: true, `AppData\Local\devin\cli`: true}
+	want := map[string]bool{`AppData\Local\Kiro-Cli`: true, `AppData\Local\copilot\pkg`: true, `AppData\Local\devin\cli`: true,
+		`AppData\Roaming\npm\node_modules\@ampcode\cli`: true, `AppData\Local\cursor-agent`: true}
 	for _, dir := range inventoryDACLListOnlyDirs {
 		delete(want, dir)
 		for _, dotdir := range inventoryDACLDotdirs {

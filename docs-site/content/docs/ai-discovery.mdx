@@ -307,6 +307,8 @@ enabled:
 - Administrators read the per-user records on the host with
   `defenseclaw-gateway enterprise linux discovery` or
   `enterprise macos discovery` (root, read-only; `--user`, `--json`).
+  On Windows, `defenseclaw.exe enterprise windows discovery` (elevated,
+  read-only) shows the gateway's scan the same way.
 - Skills and MCP servers found this way are inventoried only: the managed
   gateway does not run the skill or MCP scanners on them.
 
@@ -320,10 +322,14 @@ it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
 `%APPDATA%\devin` for Devin. Kiro CLI is then found by its install folder
 `%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache
-`%LOCALAPPDATA%\copilot\pkg` and Devin CLI by `%LOCALAPPDATA%\devin\cli`,
+`%LOCALAPPDATA%\copilot\pkg`, Devin CLI by `%LOCALAPPDATA%\devin\cli` and
+Amp by its npm install `%APPDATA%\npm\node_modules\@ampcode\cli`,
 folders the service may list but not read, and Antigravity CLI by
-`.gemini\antigravity-cli`; Amp and OpenCode are found by
-their other signals, such as a running agent process. Each signal found in a profile, and each agent
+`.gemini\antigravity-cli`; OpenCode is found by its folders outside
+`.config`, such as `~\.opencode`. Cursor's hooks are machine-level on a managed
+computer, so a user without `~\.cursor\mcp.json` is found by cursor-agent's
+install folder `%LOCALAPPDATA%\cursor-agent`, which the service may also
+list but not read. Each signal found in a profile, and each agent
 process started from one, carries that profile's account (`user.id` is the
 account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 `defenseclaw.user.name` the account name). Folders outside the granted ones,
