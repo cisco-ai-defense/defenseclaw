@@ -344,6 +344,10 @@ def cli(ctx: click.Context) -> None:
         result = validate_config()
         if not result.ok:
             timed_out = getattr(result, "timed_out", False)
+            # GAP-1788: status is read-only and config.yaml loaded, so it
+            # still shows the gateway and connectors, flags the problem, and
+            # exits 1 at the end.
+            status_continues = invoked == "status" and not timed_out and not result.parse_error
             ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
             if result.parse_error:
                 ux.echo(f"  ✗ {result.parse_error}", err=True)
@@ -351,20 +355,21 @@ def cli(ctx: click.Context) -> None:
                 ux.echo(f"  ✗ {issue}", err=True)
             if timed_out:
                 ux.echo("  Nothing was changed; re-run the command.", err=True)
+            elif status_continues:
+                ux.echo(
+                    "  A gateway that is already running keeps the config it started with; "
+                    "its status follows. Fix the problem above, then run: defenseclaw-gateway restart",
+                    err=True,
+                )
             else:
                 ux.echo(
                     "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
                     "then rerun the command.",
                     err=True,
                 )
-            if invoked == "status":
-                # The gateway is not stopped by a bad file (GAP-1353).
-                ux.echo(
-                    "  A gateway that is already running keeps the config it started with "
-                    "(check it with: defenseclaw-gateway status).",
-                    err=True,
-                )
-            raise SystemExit(1)
+            if not status_continues:
+                raise SystemExit(1)
+            app.config_problems = list(result.errors) or ["config.yaml does not validate"]
 
     # The setup group must inspect its child command before deciding whether
     # gateway-backed canonical validation and runtime/audit initialization are
@@ -382,7 +387,10 @@ def cli(ctx: click.Context) -> None:
         ux.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
-    app.logger = Logger.from_config(app.cfg) if source_is_v8 else Logger.no_runtime()
+    if source_is_v8 and not getattr(app, "config_problems", None):
+        app.logger = Logger.from_config(app.cfg)
+    else:
+        app.logger = Logger.no_runtime()
 
 
 @cli.result_callback()

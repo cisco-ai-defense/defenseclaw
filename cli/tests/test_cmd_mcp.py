@@ -458,6 +458,18 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("no connector configured", result.output)
         mock_scan_all.assert_not_called()
 
+    def test_list_connector_flag_with_nothing_configured_fails(self):
+        # GAP-1742: validate --connector before the zero-config hint (rc 0).
+        self.app.cfg.has_connector_configured = lambda: False  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: []  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: ""  # type: ignore[method-assign]
+
+        result = self.runner.invoke(mcp, ["list", "--connector", "claudecode"], obj=self.app)
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("no connector is configured yet", result.output)
+        self.assertIn("defenseclaw setup claude-code", result.output)
+
     @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
     def test_scan_all_connector_flag_targets_one(self, mock_scan_all):
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]

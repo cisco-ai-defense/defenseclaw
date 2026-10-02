@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from typing import NoReturn
 
 import click
 import yaml
@@ -121,6 +122,20 @@ def _not_a_policy_error(name: str, data: object) -> None:
             "List security policies with `defenseclaw policy list`.",
             err=True,
         )
+    raise SystemExit(1)
+
+
+def _policy_not_found(app: AppContext, name: str) -> NoReturn:
+    """Report an unknown policy name with the valid names, then exit 1 (GAP-1818)."""
+    try:
+        names = [p.name for p in policy_catalog.list_named_policies(_policies_dir(app))]
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        names = []
+    msg = f"Error: policy '{name}' not found."
+    if names:
+        msg += f" Available policies: {', '.join(names)}."
+    msg += " Run `defenseclaw policy list` for details."
+    click.echo(msg, err=True)
     raise SystemExit(1)
 
 
@@ -326,8 +341,7 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
     """Show details of a policy."""
     path = _find_policy(app, name)
     if not path:
-        click.echo(f"error: policy '{name}' not found", err=True)
-        raise SystemExit(1)
+        _policy_not_found(app, name)
 
     if json_out:
         summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app))
@@ -682,8 +696,7 @@ def _activate_policy(app: AppContext, name: str) -> str:
     """
     path = _find_policy(app, name)
     if not path:
-        click.echo(f"error: policy '{name}' not found", err=True)
-        raise SystemExit(1)
+        _policy_not_found(app, name)
 
     data = _load_policy(path)
 
@@ -1414,8 +1427,7 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
         name = _sanitize_policy_name(policy_name)
         path = _find_policy(app, name)
         if not path:
-            click.echo(f"error: policy '{policy_name}' not found", err=True)
-            raise SystemExit(1)
+            _policy_not_found(app, policy_name)
     else:
         name = _get_active_policy_name(app)
         path = _find_policy(app, name) if name else None

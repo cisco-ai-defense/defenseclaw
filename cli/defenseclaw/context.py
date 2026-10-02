@@ -39,6 +39,9 @@ class AppContext:
         # its nested child command. Direct command-unit invocations retain
         # their existing already-initialized AppContext contract.
         self.setup_runtime_deferred = False
+        # Config validation problems that ``status`` reports after rendering
+        # (GAP-1788); every other command exits before running instead.
+        self.config_problems: list[str] = []
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)

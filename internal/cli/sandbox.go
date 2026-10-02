@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -139,12 +140,26 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 		case errors.Is(err, context.Canceled):
 			return withExitCode(err, 130)
 		}
+		var disabled *sandboxcli.DisabledError
+		if errors.As(err, &disabled) && sandboxJSONOutput(cmd) {
+			// GAP-1817: keep --json machine-readable while sandboxes are off.
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"enabled": false, "available": false, "reason": disabled.Message})
+		}
 		fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" "+err.Error())
 		if errors.Is(err, sandboxcli.ErrUnsupported) {
 			return withExitCode(err, 3)
 		}
 		return withExitCode(err, 1)
 	}
+}
+
+// sandboxJSONOutput reports whether the command was run with --output json
+// (or --json).
+func sandboxJSONOutput(cmd *cobra.Command) bool {
+	f := cmd.Flags().Lookup("output")
+	return f != nil && strings.EqualFold(f.Value.String(), "json")
 }
 
 func outputFlag(cmd *cobra.Command) *string {

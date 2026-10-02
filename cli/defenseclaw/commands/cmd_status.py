@@ -275,7 +275,13 @@ def status(app: AppContext, as_json: bool) -> None:
     if as_json:
         import json
 
-        click.echo(json.dumps(_status_payload(app), indent=2))
+        payload = _status_payload(app)
+        problems = list(getattr(app, "config_problems", None) or [])
+        if problems:
+            payload["config_errors"] = problems
+        click.echo(json.dumps(payload, indent=2))
+        if problems:
+            raise SystemExit(1)
         return
 
     # Title block — `═` divider matches the legacy double-line look
@@ -284,6 +290,9 @@ def status(app: AppContext, as_json: bool) -> None:
     ux.echo(ux._style("DefenseClaw Status", fg="cyan", bold=True))
     ux.echo(ux._style("══════════════════", fg="cyan"))
 
+    from defenseclaw import __version__
+
+    _status_row("Version", f"{__version__} (all components: defenseclaw version)")
     _status_row("Environment", cfg.environment)
     if getattr(cfg, "deployment_mode", ""):
         _status_row("Deployment", cfg.deployment_mode)
@@ -292,6 +301,13 @@ def status(app: AppContext, as_json: bool) -> None:
         _status_row("Enterprise", f"{profile} (managed by your organization)")
     _status_row("Data dir", cfg.data_dir)
     _status_row("Config", str(config_path()))
+    config_problems = list(getattr(app, "config_problems", None) or [])
+    if config_problems:
+        _status_row(
+            "Config check",
+            ux._style(f"{len(config_problems)} problem(s), listed above", fg="yellow")
+            + ux.dim(" (details: defenseclaw config validate)"),
+        )
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
@@ -407,7 +423,10 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style("running a replaced binary; run defenseclaw-gateway restart", fg="yellow"),
             )
         else:
-            _status_row("Sidecar", ux._style("running", fg="green"))
+            _status_row(
+                "Sidecar",
+                ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
+            )
         _print_audit_log_health(cfg, health)
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
@@ -417,7 +436,7 @@ def status(app: AppContext, as_json: bool) -> None:
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
-            "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
+            "Subsystems:    defenseclaw-gateway status",
         )
     else:
         try:
@@ -448,8 +467,39 @@ def status(app: AppContext, as_json: bool) -> None:
             f"{_free_api_port_hint(cfg)} --non-interactive"
             if holder
             else "Start sidecar:  defenseclaw-gateway start",
-            "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
+            "Subsystems:    defenseclaw-gateway status",
         )
+    if config_problems:
+        raise SystemExit(1)
+
+
+def _format_uptime(ms: object) -> str:
+    """``3725000`` → ``1h 2m``; empty for a missing or bad value."""
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms < 0:
+        return ""
+    minutes = int(ms // 60000)
+    days, rem = divmod(minutes, 1440)
+    hours, mins = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m" if mins else "<1m"
+
+
+def _sidecar_running_detail(health: dict, host: str, port: object) -> str:
+    """`` (PID 1234, up 2h 5m, API http://127.0.0.1:18970)`` for the Sidecar row (GAP-1789)."""
+    parts = []
+    pid = health.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        parts.append(f"PID {pid}")
+    uptime = _format_uptime(health.get("uptime_ms"))
+    if uptime:
+        parts.append(f"up {uptime}")
+    if host and port:
+        shown = f"[{host}]" if ":" in str(host) else str(host)
+        parts.append(f"API http://{shown}:{port}")
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 _FRIENDLY_CONNECTOR_NAMES = {
@@ -735,7 +785,8 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     health = document.get("health")
     if not isinstance(health, dict):
         return None
-    return health
+    # The verified runtime PID, for the Sidecar row (GAP-1789).
+    return {**health, "pid": trust.pid} if "pid" not in health else health
 
 
 def _fetch_health_connectors(

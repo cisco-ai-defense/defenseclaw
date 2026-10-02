@@ -135,12 +135,16 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     """
     from defenseclaw.commands import resolve_list_connectors
 
-    all_connectors = resolve_list_connectors(app, "")
-    connectors = (
+    # GAP-1742: validate an explicit --connector before the zero-config
+    # guard in resolve_list_connectors(app, "") prints its generic hint and
+    # exits 0, so "mcp list --connector X" fails like skill/plugin list.
+    explicit = (
         resolve_list_connectors(app, connector_flag)
         if connector_flag and connector_flag.strip()
-        else all_connectors
+        else None
     )
+    all_connectors = resolve_list_connectors(app, "")
+    connectors = explicit if explicit is not None else all_connectors
     allow_legacy_plain_scans = len(all_connectors) == 1
 
     if as_json:

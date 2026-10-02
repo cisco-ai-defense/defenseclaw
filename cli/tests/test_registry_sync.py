@@ -337,6 +337,23 @@ class TestManualVerdictStatusFlip(SyncTestBase):
         self.assertEqual(verdict.status, "pending")
 
 
+    def test_approve_after_reject_restores_clean_scan_status(self):
+        # GAP-1750: reject then approve of a clean entry showed "pending"
+        # until the next sync; the cached scan says "clean".
+        manifest = _fresh_skill_manifest()
+        self.stub_fetch(manifest)
+        sync_source(
+            self.cfg, self.cfg.data_dir, self.source,
+            scan_callback=lambda _src, entry: _scan_result(entry.name, []),
+            auto_promote=False, save=False,
+        )
+        idx = load_index(self.cfg.data_dir, self.source.id)
+        self.assertEqual(idx.find("skill", "demo-skill").status, "clean")
+        manual_set_verdict(self.cfg.data_dir, self.source.id, "skill", "demo-skill", rejected=True)
+        verdict = manual_set_verdict(self.cfg.data_dir, self.source.id, "skill", "demo-skill", approved=True)
+        self.assertEqual(verdict.status, "clean")
+
+
 class TestPromotionWipeBeforeReplace(SyncTestBase):
     def test_remove_from_manifest_clears_old_rule(self):
         manifest_v1 = _fresh_skill_manifest()

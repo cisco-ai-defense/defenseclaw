@@ -64,7 +64,9 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   to fit, for example `myapp-7f3a`. The harness is a label on the sandbox, not
   part of its name, and `sandbox list` shows both.
 - **Output.** Commands with `-o, --output` print `text` (the default) or
-  `json`.
+  `json`. While sandboxes are off, a JSON command that needs them (`list`,
+  `policy show`) prints `{"enabled": false, "available": false, "reason": ...}`,
+  the same fields as `sandbox status --json`, and exits `1`.
 - **Exit status.** `0` on success and `1` on an error. `run` and `connect`
   return the exit status of the harness, and `exec` that of its command
   (`connect --shell` exits `0` when the shell ends). When the harness exits

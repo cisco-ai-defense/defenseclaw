@@ -383,6 +383,26 @@ def _promote_to_asset_policy(
     return promoted_skills, promoted_mcps
 
 
+def _cached_scan_status(verdict: EntryVerdict) -> str:
+    """Status from the entry's last cached scan, once a manual reject is lifted.
+
+    A reject overwrites ``status`` with "blocked" but keeps the scan fields,
+    so approving the entry again restores "clean"/"warning" instead of
+    "pending" until the next sync (GAP-1750). An entry that was never
+    scanned, failed to scan or scanned with blocking findings stays
+    "pending" for the next sync to decide.
+    """
+    if not verdict.last_scanned_at or verdict.error:
+        return "pending"
+    if verdict.findings == 0:
+        return "clean"
+    if verdict.severity in _BLOCKING_SEVERITIES:
+        return "pending"
+    if verdict.severity in _WARNING_SEVERITIES:
+        return "warning"
+    return "clean"
+
+
 def manual_set_verdict(
     data_dir: str,
     source_id: str,
@@ -412,7 +432,7 @@ def manual_set_verdict(
             # ``status`` so list filters and the TUI badge reflect
             # the decision before the next scan run.
             if verdict.status == "blocked":
-                verdict.status = "pending"
+                verdict.status = _cached_scan_status(verdict)
     if rejected is not None:
         verdict.rejected = rejected
         if rejected:
@@ -427,7 +447,7 @@ def manual_set_verdict(
             # so a subsequent scan can write a real verdict without
             # an explicit re-approve.
             if verdict.status == "blocked":
-                verdict.status = "pending"
+                verdict.status = _cached_scan_status(verdict)
     save_index(data_dir, source_id, idx)
     return verdict
 

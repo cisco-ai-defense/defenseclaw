@@ -59,10 +59,49 @@ The sidecar must be running for this command to work.`,
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
-		return gatewayStatusConfigLoadError(loadGatewayCommandConfigFor(cmd))
+		gatewayStatusConfigProblem = nil
+		err := loadGatewayCommandConfigFor(cmd)
+		if relaxed := gatewayStatusRelaxedConfig(err); relaxed != nil {
+			// GAP-1788: a missing destination secret does not hide the
+			// running gateway; show its status, then the config problem.
+			cfg = relaxed
+			gatewayStatusConfigProblem = gatewayStatusConfigLoadError(err)
+			return nil
+		}
+		return gatewayStatusConfigLoadError(err)
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
-	RunE:              runSidecarStatus,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		err := runSidecarStatus(cmd, args)
+		if gatewayStatusConfigProblem != nil {
+			return gatewayStatusConfigProblem
+		}
+		return err
+	},
+}
+
+// gatewayStatusConfigProblem is the config.yaml error that status reports
+// after the gateway's health when only a destination secret is missing.
+var gatewayStatusConfigProblem error
+
+// gatewayStatusRelaxedConfig loads config.yaml without compiling the
+// observability destinations when err is only a missing destination secret,
+// so status can still find and query the gateway. It returns nil otherwise.
+func gatewayStatusRelaxedConfig(err error) *config.Config {
+	var secretErr *config.V8SecretReferenceError
+	if err == nil || !errors.As(err, &secretErr) || secretErr.Credential {
+		return nil
+	}
+	path := config.ConfigPath()
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil
+	}
+	relaxed, loadErr := config.LoadRuntimeV8FromBytes(path, raw)
+	if loadErr != nil {
+		return nil
+	}
+	return relaxed
 }
 
 // gatewayStatusJSON selects the machine-readable status (GAP-1609).
@@ -129,8 +168,14 @@ func gatewayStatusConfigLoadError(err error) error {
 	var secretErr *config.V8SecretReferenceError
 	if errors.As(err, &secretErr) && !secretErr.Credential {
 		// Same next step start and restart print (GAP-1353).
-		return fmt.Errorf("%w. %s Set it with: defenseclaw keys set %s (or disable that destination), "+
-			"then run: defenseclaw-gateway restart", err, state, secretErr.Reference)
+		// `setup <destination> disable` validates the whole file too, so
+		// name the edit that works (GAP-1788).
+		dest := "that destination"
+		if secretErr.Destination != "" {
+			dest = fmt.Sprintf("destination %q", secretErr.Destination)
+		}
+		return fmt.Errorf("%w. %s Set it with: defenseclaw keys set %s (or remove %s from %s), "+
+			"then run: defenseclaw-gateway restart", err, state, secretErr.Reference, dest, config.ConfigPath())
 	}
 	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
 }
