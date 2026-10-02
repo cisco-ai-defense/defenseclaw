@@ -3773,7 +3773,9 @@ def _check_windows_gateway_diagnostics(
         _emit(
             "fail",
             "Gateway listener owner",
-            "configured API port is owned by " + (holder or "an unexpected process") + ", not by this account's gateway",
+            "configured API port is owned by "
+            + (holder or "an unexpected process")
+            + ", not by this account's gateway",
             r=r,
         )
     elif not identity_ok:
