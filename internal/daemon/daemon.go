@@ -67,9 +67,11 @@ const (
 	// childPIDRegistrationTimeout bounds the wait for a Windows child to
 	// publish its PID record. A first launch of a new binary on a busy host
 	// (antivirus scans it before it runs) took longer than 5 seconds, so an
-	// upgrade rolled back a healthy gateway. A child that exits ends the
-	// wait at once.
-	childPIDRegistrationTimeout = 60 * time.Second
+	// upgrade rolled back a healthy gateway. Right after an upgrade on a host
+	// running several per-user gateways it took over 60 s, three starts in a
+	// row (GAP-1556), so it matches the 240 s Windows readiness wait. A child
+	// that exits ends the wait at once. Only Windows children register.
+	childPIDRegistrationTimeout = 240 * time.Second
 	// legacyStartIdentityWindow is how far the native start second of a
 	// darwin process may be from the start time recorded just before
 	// cmd.Start, for a PID record written by an older release.
