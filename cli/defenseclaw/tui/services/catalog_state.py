@@ -236,6 +236,9 @@ class SkillRow:
     connector: str = ""
     # Vendor-managed rows remain visible for discovery, but expose Info only.
     bundled: bool = False
+    # An unscoped (every-connector) block, quarantine or disable, e.g. from
+    # the watcher. ``u`` clears it with the bare unblock (GAP-1820).
+    global_decision: bool = False
 
     @property
     def registry_badge(self) -> str:
@@ -1220,6 +1223,7 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         runtime_action=actions.runtime,
         connector=str(raw.get("connector") or ""),
         bundled=bool(raw.get("bundled")),
+        global_decision=bool(raw.get("global_decision")),
     )
 
 
@@ -1630,10 +1634,15 @@ def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str 
         return None
     verb, label_prefix = verbs[key]
     args = ["skill", verb, row.name]
-    if connector and key in _SKILL_CONNECTOR_VERBS:
+    label = f"{label_prefix} {row.name}"
+    if key == "u" and row.global_decision:
+        # A connector-scoped unblock leaves a global block in force and only
+        # says so, while the TUI reported "Done" (GAP-1820).
+        label += " (every connector)"
+    elif connector and key in _SKILL_CONNECTOR_VERBS:
         args.extend(("--connector", connector))
     return CatalogCommandIntent(
-        label=f"{label_prefix} {row.name}",
+        label=label,
         args=tuple(args),
         origin=origin,
     )

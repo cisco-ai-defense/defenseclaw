@@ -280,7 +280,8 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
-    "Runs: defenseclaw setup <connector> --yes. Need connector, restart preference, guardrail mode, and scanner mode.",
+    "Runs: defenseclaw setup <connector> --yes. Need connector, guardrail mode, and restart preference "
+    "(scanner mode for proxy connectors).",
     "Runs: defenseclaw keys list / check / set / remove / fill-missing. "
     "Need env var name for set and remove, and the secret only for set.",
     "Runs: defenseclaw setup llm --non-interactive. Need provider, model, optional base URL, and API key env or value.",
@@ -3204,7 +3205,9 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
             "Add or configure a connector",
             summary="Add a connector peer, or replace the configured set when requested.",
             presets={"@Action": "setup"},
-            fields=("Connector", "Action", "Replace Existing", "Restart Gateway"),
+            # The task text promises the guardrail mode; without the field a
+            # connector added here always got the CLI default (GAP-1957).
+            fields=("Connector", "Action", "Guardrail Mode", "Replace Existing", "Restart Gateway"),
         ),
         WizardGoal(
             "proxy-stack",

@@ -755,6 +755,30 @@ def _build_scan_map_for_connector(
     return scan_map
 
 
+def _skill_global_decisions(store) -> set[str]:
+    """Skills with an unscoped block, quarantine or disable decision.
+
+    Only a bare ``skill unblock`` clears these (see
+    ``_report_inherited_skill_state``).
+    """
+    if store is None:
+        return set()
+    try:
+        entries = store.list_actions_by_type("skill")
+    except Exception:
+        return set()
+    return {
+        e.target_name
+        for e in entries
+        if not e.connector
+        and (
+            e.actions.install == "block"
+            or e.actions.file == "quarantine"
+            or e.actions.runtime == "disable"
+        )
+    }
+
+
 def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
     """Build a map of skill-name -> effective ActionEntry from the DB.
 
@@ -1229,6 +1253,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     # overrides global) so each connector's table/card shows its own actions.
 
     if as_json:
+        global_decisions = _skill_global_decisions(app.store)
         if len(connectors) > 1:
             groups = []
             for c in connectors:
@@ -1243,6 +1268,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                         actions_map,
                         connector=c,
                         verdicts=_skill_policy_verdicts(app, c_skills, scan_map, actions_map, c),
+                        global_decisions=global_decisions,
                     ),
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -1260,6 +1286,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 actions_map,
                 connector=connectors[0] if connector_flag and connector_flag.strip() else "",
                 verdicts=_skill_policy_verdicts(app, skills, scan_map, actions_map, connectors[0]),
+                global_decisions=global_decisions,
             )
             payload = (
                 {"connector": connectors[0], "skills": items}
@@ -1398,6 +1425,7 @@ def _skill_list_json_items(
     *,
     connector: str = "",
     verdicts: dict[str, tuple[str, str, str]] | None = None,
+    global_decisions: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     items = []
     for s in skills:
@@ -1422,6 +1450,11 @@ def _skill_list_json_items(
             ae = actions_map[name]
             if not ae.actions.is_empty():
                 item["actions"] = ae.actions.to_dict()
+        if global_decisions and name in global_decisions:
+            # A global (unscoped) block, e.g. from the watcher: a --connector
+            # unblock cannot clear it, so the TUI runs the bare unblock for
+            # this row (GAP-1820).
+            item["global_decision"] = True
         if verdicts is not None and name in verdicts:
             verdict_label, _, verdict_reason = verdicts[name]
             if verdict_reason:

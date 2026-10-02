@@ -286,7 +286,7 @@ def _flag_is_secret(flag: str) -> bool:
 READINESS_HINT = "press 0 (Setup), then i for readiness"
 
 
-def suggested_next_action(command: str, exit_code: int) -> str:
+def suggested_next_action(command: str, exit_code: int, *, panel: str = "") -> str:
     """Return a one-line nudge for what to do after a command finishes.
 
     Each hint names the key that gets there. Returns an empty string when
@@ -295,22 +295,38 @@ def suggested_next_action(command: str, exit_code: int) -> str:
     the status bar already shows the gateway's health.
 
     Lower-cases the entire command before matching so e.g. ``KEYS
-    LIST`` and ``keys list`` produce the same hint.
+    LIST`` and ``keys list`` produce the same hint. On Setup (``panel``)
+    the hint leaves out "press 0 (Setup)".
     """
 
+    readiness = "press i for readiness" if panel == "setup" else READINESS_HINT
     cmd = command.strip().lower()
     if exit_code != 0:
         if "keys" in cmd:
             return "open Credentials or run keys check"
         if "doctor" in cmd:
-            return f"{READINESS_HINT}, or rerun doctor"
+            return f"{readiness}, or rerun doctor"
         return "review output and rerun when fixed"
     if "keys" in cmd or "doctor" in cmd or "setup" in cmd:
-        return READINESS_HINT
+        return readiness
     return ""
 
 
+def is_command_hint(line: str) -> bool:
+    """True for an output line that is a command to run next, not a result.
+
+    ``setup <connector>`` ends with "defenseclaw guardrail disable
+    --connector X" (how to undo it), which the drawer showed as the result
+    (GAP-1910).
+    """
+
+    text = line.strip().lstrip("$>").strip()
+    return text.startswith(("defenseclaw ", "defenseclaw-gateway "))
+
+
 _GATEWAY_PID_RE = re.compile(r"\bOK \(PID (\d+)\)")
+_SETUP_DONE_RE = re.compile(r"^[\u2713\u2714]\s+(.+ connector setup complete|\d+ connector\(s\) set up)")
+_SETUP_MODE_RE = re.compile(r"^[\u2713\u2714]\s+\S+ mode=(observe|action)$")
 _KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
 
 
@@ -327,6 +343,11 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
             if match := _GATEWAY_PID_RE.search(line):
                 return f"Gateway restarted (PID {match.group(1)})"
         return ""
+    if command.strip().lower().startswith("setup"):
+        done = next((m.group(1) for line in lines if (m := _SETUP_DONE_RE.match(line.strip()))), "")
+        mode = next((m.group(1) for line in lines if (m := _SETUP_MODE_RE.match(line.strip()))), "")
+        if done:
+            return f"{done} (mode {mode})" if mode else done
     if not any("ENV NAME" in line and "REQUIREMENT" in line for line in lines):
         return ""
     rows = [match for line in lines if (match := _KEYS_ROW_RE.match(line.strip()))]

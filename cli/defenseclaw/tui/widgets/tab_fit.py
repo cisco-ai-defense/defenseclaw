@@ -110,6 +110,11 @@ def strip_width(labels: Sequence[str]) -> int:
 # Badges shortened or dropped only after every other tab's.
 KEEP_BADGE = frozenset({"alerts"})
 
+# Strip cells at an 80-column terminal (80 less the header padding and the
+# ":" and "?" buttons). Narrower strips give the active tab's name priority
+# over the other tabs' minor badges (GAP-1998).
+NARROW_STRIP = 66
+
 # Cells kept free when choosing which tabs get a name, so the names don't
 # change as unread badges come and go (GAP-1155).
 BADGE_RESERVE = 6
@@ -220,6 +225,59 @@ def fit_tab_labels(
                     shrink.add(name)
         return width_of(chosen) <= width
 
+    def longest_active_name(chosen: dict[str, str]) -> dict[str, str]:
+        """6. Below 80 columns the active tab reads as much of its name as fits.
+
+        The steps above could leave "R Reg…" there while the Logs badge
+        stayed, or drop the Alerts count for "R Reg" (GAP-1998). Try the full
+        name, then ever shorter "Regis…" prefixes; for each, shrink and then
+        drop the other tabs' minor badges, then drop their names, and last
+        shrink (never drop) the Alerts count. The first that fits wins. From
+        80 columns up this only runs when the active tab has no name or the
+        Alerts count was dropped.
+        """
+
+        title = titles[active]
+        alerts_badge = "alerts" in keys and active != "alerts" and unread.get("alerts", 0) > 0
+        intact = bool(chosen[active]) and not (alerts_badge and "alerts" in no_badge)
+        if intact and (chosen[active] == title or width >= NARROW_STRIP):
+            return chosen
+        saved = (set(compact), set(no_badge))
+        minor = [n for n in reversed(ranked) if n not in {active, "alerts"} and unread.get(n, 0)]
+        wants = [title] + [f"{title[:n].rstrip()}…" for n in range(len(title) - 2, 1, -1)]
+        for want in dict.fromkeys(wants):
+            compact.clear()
+            compact.update(saved[0])
+            no_badge.clear()
+            no_badge.update(saved[1] - {"alerts"})
+            trial = {**chosen, active: want}
+            for shrink in (compact, no_badge):
+                for name in minor:
+                    if width_of(trial) <= width:
+                        break
+                    shrink.add(name)
+            for name in reversed(ranked):
+                if width_of(trial) <= width:
+                    break
+                if name != active:
+                    trial[name] = ""
+            if alerts_badge and width_of(trial) > width:
+                compact.add("alerts")
+            if width_of(trial) <= width:
+                return trial
+        # No room for any name (about 66 columns and less): every tab is a key
+        # letter, and the panel title names the active panel. The Alerts
+        # count stays whenever it fits.
+        trial = dict.fromkeys(keys, "")
+        compact.update(name for name in keys if unread.get(name, 0))
+        no_badge.clear()
+        no_badge.update(saved[1] - {"alerts"})
+        for name in [*minor, "alerts"]:
+            if width_of(trial) <= width:
+                break
+            no_badge.add(name)
+        return trial
+
     # 2. Badges go on every tab. 3. The active tab always shows a name. It
     #    takes its full (or a shortened) name from the room that is left, so
     #    no other tab changes for it; only when it has no name at all do the
@@ -298,17 +356,22 @@ def fit_tab_labels(
         for text in dict.fromkeys((current, tiny)):
             candidate = {**chosen, active: _abbreviated(text, titles[active])}
             if fit_badges(candidate, ((compact, False), (no_badge, False), (compact, True))):
-                return render(candidate)
+                chosen = candidate
+                break
             compact.clear()
             compact.update(saved[0])
             no_badge.clear()
             no_badge.update(saved[1])
-        candidate = {**chosen, active: _abbreviated(current, titles[active])}
-        for name in reversed(ranked):
-            if width_of(candidate) <= width:
-                return render(candidate)
-            if name != active:
-                candidate[name] = ""
+        else:
+            candidate = {**chosen, active: _abbreviated(current, titles[active])}
+            for name in reversed(ranked):
+                if width_of(candidate) <= width:
+                    break
+                if name != active:
+                    candidate[name] = ""
+            chosen = candidate
+    if active in keys:
+        chosen = longest_active_name(chosen)
     return render(chosen)
 
 

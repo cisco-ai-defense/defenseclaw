@@ -46,6 +46,7 @@ from defenseclaw.tui.command_line import (
     ParsedCommand,
     command_result_summary,
     infer_command_risk,
+    is_command_hint,
     parse_command_line,
     suggested_next_action,
 )
@@ -2303,6 +2304,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             and event.key in {"escape", "down", "enter"}
         ):
             table.focus()
+            if self.status_text == _CATALOG_FILTER_PROMPT:
+                # The prompt stayed after Enter left the box (GAP-1821).
+                self._set_status(self._catalog_filter_summary(self.active_panel))
             event.stop()
             event.prevent_default()
             return
@@ -3965,8 +3969,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.query_one(f"#{panel}-filter", Input).focus()
         except NoMatches:
             return False
-        self._set_status("Type to filter. Enter or Esc goes back to the list.")
+        self._set_status(_CATALOG_FILTER_PROMPT)
         return True
+
+    def _catalog_filter_summary(self, panel: str) -> str:
+        """Status after the filter box hands the keyboard back to the list."""
+
+        model = self.catalog_models.get(panel)
+        text = str(getattr(model, "filter_text", "") or "")
+        if model is None or not text:
+            return self._status_text()
+        shown = len(getattr(model, "filtered", ()) or ())
+        total = len(getattr(model, "items", ()) or ())
+        return f"Filter \"{text}\": {shown} of {total} {_panel_label(panel)} shown. Esc clears it."
 
     @on(DataTable.RowSelected, "#command-palette")
     def _on_command_palette_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -4654,6 +4669,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("q", "Close the drawer or overlay (does not quit)"),
         ]
 
+        # ``m`` filters by connector only when more than one is set up; with
+        # one, Overview's ``m`` switches the connector and the signal panes
+        # say there is nothing to filter (GAP-1986).
+        if len(self._active_connector_names()) > 1:
+            overview_m = f"Filter by connector (applies to {_CONNECTOR_FILTER_PANELS})"
+            signal_m = ("m", "Filter by connector")
+        else:
+            overview_m = "Switch the active connector (re-runs its setup after a confirm)"
+            signal_m = ("m", "Filter by connector (once two or more are set up)")
+
         # Per-active-panel cheat sheets. Anything we don't have a
         # tailored block for falls through to a "no extra shortcuts"
         # placeholder so the overlay never goes blank on weird panels.
@@ -4663,7 +4688,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
-                ("m", "Filter by connector (Overview, Alerts, Audit, Logs)"),
+                ("m", overview_m),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
                 ("b", "Turn desktop notifications on or off"),
                 ("u / X", "Upgrade / uninstall (both preview first)"),
@@ -4682,6 +4707,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
                 ("PgUp / PgDn", "Scroll the open alert detail"),
                 ("Esc", "Close detail / clear search / clear severity filter"),
+                signal_m,
             ],
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
@@ -4730,6 +4756,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("a / t / s", "Verdicts: filter action / event type / severity"),
                 ("J", "Verdicts: judge response history"),
                 ("b", "Turn desktop notifications on or off"),
+                signal_m,
             ],
             "audit": [
                 ("j/k or Up/Down", "Navigate entries"),
@@ -4739,6 +4766,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("t / u", "Same target / same run as the selected event"),
                 ("e", "Export to JSON"),
                 ("r", "Refresh"),
+                signal_m,
             ],
             "activity": [
                 ("h / l", "Commands / gateway activity (Mutations)"),
@@ -8355,7 +8383,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             result = result or command_result_summary(self._strip_label, self._strip_output_lines)
             if result:
                 self._strip_summary = result
-            elif tail and len(tail) <= 120 and not _is_bare_json_punctuation(tail):
+            elif tail and len(tail) <= 120 and not _is_bare_json_punctuation(tail) and not is_command_hint(tail):
                 self._strip_summary = tail
             else:
                 self._strip_summary = "exit 0 · finished cleanly"
@@ -8369,7 +8397,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # guardrail`). Empty string means "no hint" — skip the footer
         # rather than rendering an awkward dangling separator.
         label = self._strip_label or "command"
-        hint = "" if cancelled else suggested_next_action(label, exit_code)
+        hint = "" if cancelled else suggested_next_action(label, exit_code, panel=self.active_panel)
         if hint:
             self._strip_summary = f"{self._strip_summary} · next: {hint}"
         # Fire a transient toast as well so operators on a different
@@ -10016,9 +10044,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
+        # Re-renders pass the current text back in (a resize, a panel
+        # render). Only new text restarts the clock and changes the owning
+        # panel, or a "Done: ..." stayed on every panel after a resize
+        # (GAP-1821).
+        if text != self.status_text or self._status_panel is None:
+            self._status_panel = self.active_panel
+            self._status_set_at = time.monotonic()
         self.status_text = text
-        self._status_panel = self.active_panel
-        self._status_set_at = time.monotonic()
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
         # ``text`` is operator-supplied via every ``_set_status`` caller —
@@ -10980,13 +11013,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # picker on the signal panes too (Alerts/Audit/Logs). These panes
         # don't otherwise bind ``m``. Catalog/Overview/Inventory route ``m``
         # in their own branches below.
-        if (
-            not searching
-            and key == "m"
-            and len(self._active_connector_names()) > 1
-            and self.active_panel in {"alerts", "audit", "logs"}
-        ):
-            self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+        if not searching and key == "m" and self.active_panel in {"alerts", "audit", "logs"}:
+            actives = self._active_connector_names()
+            if len(actives) > 1:
+                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+            else:
+                # ``m`` did nothing here with one connector (GAP-1986).
+                current = _active_connector(self.config)
+                only = friendly_connector_name(current) if current else "one connector"
+                self._set_status(
+                    f"Only {only} is set up, so there is nothing to filter by connector. "
+                    "Add one in 0 Setup > Protect an agent."
+                )
             return True
         if self.active_panel == "runtime":
             self.runtime_model.short_screen = 0 < self.size.height < 32
@@ -13096,7 +13134,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ActionMenuScreen(
                 "Filter by Connector",
                 tuple(actions),
-                subtitle="Applies to Overview, Alerts, Audit, Logs, Skills, MCPs, Plugins, Tools, Inventory",
+                subtitle=f"Applies to {_CONNECTOR_FILTER_PANELS}",
                 selected_index=selected_index,
             )
         )
@@ -13460,6 +13498,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         command.
         """
 
+        # The same result text from a re-run is still a new result.
+        self.status_text = ""
         if exit_code == 0:
             dry_run = "dry-run" in display_name or "dry run" in display_name
             self._set_status(f"Done: {display_name}{' (nothing changed)' if dry_run else ''}.")
@@ -15714,6 +15754,12 @@ def _is_registry_focus_status(text: str) -> bool:
         " is not from a registry source. Showing all registry entries."
     )
 
+
+# Panels the shared connector filter (``m``) narrows; the help overlay and
+# the picker's subtitle both name them (GAP-1986).
+_CONNECTOR_FILTER_PANELS = "Overview, Alerts, Audit, Logs, Skills, MCPs, Plugins, Tools, Inventory"
+
+_CATALOG_FILTER_PROMPT = "Type to filter. Enter or Esc goes back to the list."
 
 # Seconds a command result keeps showing after you switch panels (GAP-1821).
 _COMMAND_RESULT_FOLLOW_S = 15.0

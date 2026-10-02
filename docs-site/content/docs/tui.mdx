@@ -41,7 +41,16 @@ Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
 terminal every tab stays on screen: the most-used tabs keep their names and
 the rest show only their key. Which tabs keep a name depends only on the
-terminal width, so the labels don't change as you switch panels.
+terminal width, so the labels don't change as you switch panels. Below 80
+columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
+of the other tabs' unread counts; the Alerts count stays. Below about 68
+columns every tab shows only its key, and the panel title names the panel.
+
+With two or more connectors set up, `m` filters Overview, Alerts, Audit, Logs,
+Skills, MCPs, Plugins, Tools and Inventory by connector. With one connector,
+`m` on Overview switches the active connector (it re-runs that connector's
+setup after a confirm), and on Alerts, Audit and Logs it says there is nothing
+to filter.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
