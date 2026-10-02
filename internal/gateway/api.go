@@ -2352,9 +2352,30 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "data": out})
 }
 
+// refuseOpenClawInventoryOnStandalone answers an OpenClaw-backed inventory
+// route on a managed standalone deployment, which runs no OpenClaw gateway:
+// /skills failed with 502 "gateway: not connected" and /mcps answered an
+// empty list (GAP-1142). There AI Discovery inventories each enrolled
+// account's skills and MCP servers instead.
+func (a *APIServer) refuseOpenClawInventoryOnStandalone(w http.ResponseWriter, route string) bool {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return false
+	}
+	a.writeJSON(w, http.StatusNotImplemented, map[string]string{
+		"error": route + " reads the OpenClaw gateway, which a managed enterprise deployment does not run; " +
+			"AI Discovery inventories each enrolled account's skills and MCP servers " +
+			"(defenseclaw-gateway enterprise linux|macos discovery)",
+	})
+	return true
+}
+
 func (a *APIServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseOpenClawInventoryOnStandalone(w, "/skills") {
 		return
 	}
 
@@ -2382,6 +2403,9 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseOpenClawInventoryOnStandalone(w, "/mcps") {
+		return
+	}
 
 	if a.scannerCfg == nil {
 		a.writeJSON(w, http.StatusOK, []config.MCPServerEntry{})
@@ -2400,6 +2424,9 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseOpenClawInventoryOnStandalone(w, "/tools/catalog") {
 		return
 	}
 

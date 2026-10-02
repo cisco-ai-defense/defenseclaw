@@ -215,6 +215,10 @@ guardrail proxy for LLM traffic, writes the audit log, and exposes the local
 REST API used by the defenseclaw CLI and TUI. With OpenClaw configured it also
 monitors the OpenClaw gateway WebSocket.
 
+On a managed enterprise host it runs as a system service for every enrolled
+account; administrators use 'defenseclaw-gateway enterprise linux|macos|windows'
+(status, verify, repair, ...).
+
 Run without arguments to start the sidecar daemon in the foreground; use
 'defenseclaw-gateway start' to run it in the background.`,
 	PersistentPreRunE: rootPersistentPreRunE,

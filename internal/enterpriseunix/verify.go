@@ -258,6 +258,13 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 				add("%s keeps capabilities %q; want none", unitGateway, caps)
 			}
 		}
+		// A running job an administrator disabled keeps working until the
+		// next boot, where launchd does not start it (GAP-1802).
+		for _, unit := range env.Services.Units() {
+			if unit.Activate && unitDisabled(ctx, env.Services, unit) {
+				add("%s is disabled and will not start after a reboot; run `%s`", unit.Name, env.lifecycleCommand("repair"))
+			}
+		}
 		if problem := l.ledgerProblem(); problem != "" {
 			add("%s", problem)
 		}

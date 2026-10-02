@@ -113,6 +113,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "rotate-credentials", "status", "verify", "uninstall"} {
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
+	group.AddCommand(newUnixDiscoveryCommand(name))
 	return group
 }
 

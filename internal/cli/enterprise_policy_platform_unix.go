@@ -38,6 +38,24 @@ func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, strin
 	return layout, "", "", err
 }
 
+// standaloneEnrolledHomes are the enrolled accounts' homes from the
+// enumerator's root-only record, which the lifecycle's machine-policy
+// publisher reads too. The Copilot VS Code lock gate checks each one;
+// without them show and verify said no enrolled users were recorded while
+// enterprise hooks status listed them (GAP-1137). An unreadable record is
+// no homes.
+func standaloneEnrolledHomes(layout managed.StandaloneLayout) []string {
+	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(layout.ManifestPath))
+	if err != nil {
+		return nil
+	}
+	homes := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		homes = append(homes, account.Home)
+	}
+	return homes
+}
+
 // pinStandaloneManagedEnv points an administrator's policy command at the
 // standalone deployment when the host runs one and the caller chose no
 // config, with the same pins the services run with. Without it root's

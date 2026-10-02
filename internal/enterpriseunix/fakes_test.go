@@ -34,11 +34,13 @@ import (
 
 // fakeServices is an in-memory service manager.
 type fakeServices struct {
-	mu        sync.Mutex
-	goos      string
-	version   int
-	active    map[string]bool
-	enabled   map[string]bool
+	mu      sync.Mutex
+	goos    string
+	version int
+	active  map[string]bool
+	enabled map[string]bool
+	// disabled units carry launchd's disabled override; Enable clears it.
+	disabled  map[string]bool
 	calls     []string
 	failStart map[string]error
 	// failed units report systemd's failed state.
@@ -119,10 +121,17 @@ func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	return nil
 }
 
+func (f *fakeServices) Disabled(_ context.Context, u Unit) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.disabled[u.Name]
+}
+
 func (f *fakeServices) Enable(_ context.Context, u Unit) error {
 	f.record("enable " + u.Name)
 	f.mu.Lock()
 	f.enabled[u.Name] = true
+	delete(f.disabled, u.Name)
 	f.mu.Unlock()
 	return nil
 }
