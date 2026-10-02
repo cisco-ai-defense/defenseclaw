@@ -29,6 +29,14 @@ const lockFileName = "lifecycle.lock"
 // errLockBusy reports that another lifecycle run holds the lock.
 var errLockBusy = errors.New("another DefenseClaw enterprise lifecycle run is in progress")
 
+// lockBusyNextStep is what an administrator does about errLockBusy on an
+// action that takes --lock-wait; verifyBusyNextStep is the same for verify,
+// which has no --lock-wait.
+const (
+	lockBusyNextStep   = "wait for it to finish, then rerun, or pass --lock-wait <duration> (at most 15m) to wait for it"
+	verifyBusyNextStep = "wait for it to finish, then rerun verify"
+)
+
 type lifecycleLock struct {
 	file *os.File
 }

@@ -672,6 +672,9 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	defer held.release()
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireError(t, r, codeBusy)
+	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "--lock-wait <duration>") {
+		t.Fatalf("busy must name the next step (GAP-1427): %q", msg)
+	}
 	if r.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("busy exit %d, want %d", r.ExitCode, enterprisestatus.UnixExitBusy)
 	}
@@ -679,6 +682,9 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	// unit accepts, instead of failing on the half-changed deployment.
 	verify := h.run(Options{Action: ActionVerify})
 	requireError(t, verify, codeBusy)
+	if msg := verify.Errors[len(verify.Errors)-1].Message; !strings.Contains(msg, "rerun verify") {
+		t.Fatalf("busy verify must name the next step: %q", msg)
+	}
 	if verify.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("verify busy exit %d, want %d", verify.ExitCode, enterprisestatus.UnixExitBusy)
 	}

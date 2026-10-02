@@ -222,7 +222,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error())
+			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep)
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())

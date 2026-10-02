@@ -45,7 +45,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// change; a run that outlasts the wait is busy, not a failed check.
 		lock, err := env.acquireLock(ctx)
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error())
+			r.AddError(codeBusy, err.Error()+"; "+verifyBusyNextStep)
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		lock.release()
