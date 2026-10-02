@@ -68,3 +68,42 @@ func TestHookBlockDispatchesWebhook(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1351: the webhook names the rule that blocked while the reason text
+// stays redacted.
+func TestHookBlockWebhookNamesRule(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	got := make(chan map[string]interface{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&m); err == nil {
+			got <- m
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{{
+		URL: srv.URL, Type: "generic", MinSeverity: "HIGH", Enabled: true, Events: []string{"block"},
+	}})
+	api := &APIServer{}
+	api.SetWebhookSource(func() *WebhookDispatcher { return d })
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"}
+	api.dispatchClaudeCodeHookNotification(req, "block", "block", "CRITICAL",
+		"matched: VB2-MARKER-BLOCK:Verify batch 2 marker command (block)", false,
+		hookEvaluationContext{RuleIDs: []string{"VB2-MARKER-BLOCK", "not a rule id"}})
+	d.Close()
+
+	payload := <-got
+	event, _ := payload["event"].(map[string]interface{})
+	details, _ := event["details"].(string)
+	if !strings.Contains(details, "rule=VB2-MARKER-BLOCK reason=<redacted") {
+		t.Errorf("details should name the rule and keep the reason redacted: %q", details)
+	}
+	if strings.Contains(details, "Verify batch") || strings.Contains(details, "not a rule id") {
+		t.Errorf("details leaked reason text: %q", details)
+	}
+	if rule, _ := event["defenseclaw_rule"].(string); rule != "rule VB2-MARKER-BLOCK" {
+		t.Errorf("defenseclaw_rule = %q, want %q", rule, "rule VB2-MARKER-BLOCK")
+	}
+}

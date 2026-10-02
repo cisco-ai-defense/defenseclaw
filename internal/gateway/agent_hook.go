@@ -2374,7 +2374,7 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 // one to a specific framework without opening the audit log.
 func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook(req.ConnectorName, req.ToolName, req.HookEventName, severity, reason)
+		a.dispatchHookBlockWebhook(req.ConnectorName, req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return
