@@ -497,6 +497,9 @@ func applyWindowsEnterpriseInstallerReport(
 			result.Errors[firstError].Message += " " + next
 		}
 	}
+	if !lifecycle && !report.OK && !report.TransactionPending && len(result.Errors) > firstError {
+		result.Errors[firstError].Message += windowsEnterpriseStoppedServiceNextStep(result.Services)
+	}
 	if !lifecycle && report.TransactionPending {
 		configPath := ""
 		if opts != nil {
