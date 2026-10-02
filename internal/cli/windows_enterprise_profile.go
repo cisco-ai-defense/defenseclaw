@@ -330,6 +330,10 @@ func applyWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpris
 	return nil
 }
 
+// windowsEnterpriseTrustConfigReader reads the config enterprise.trust comes
+// from; tests replace it.
+var windowsEnterpriseTrustConfigReader = readWindowsEnterpriseBoundedFile
+
 func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpriseLifecycleOptions) (windowsEnterpriseConfiguredTrust, error) {
 	path := strings.TrimSpace(opts.configPath)
 	supplied := path != ""
@@ -345,10 +349,15 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		path = installed
 	}
-	body, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseConfigProfileLimit)
+	body, err := windowsEnterpriseTrustConfigReader(path, windowsEnterpriseConfigProfileLimit)
 	if err != nil {
 		if !supplied && errors.Is(err, os.ErrNotExist) {
 			return windowsEnterpriseConfiguredTrust{}, nil
+		}
+		if !supplied && errors.Is(err, os.ErrPermission) && !windowsEnterpriseIsElevated() {
+			// A standard account cannot read the protected installed config,
+			// and could not change the deployment anyway (GAP-1961).
+			return windowsEnterpriseConfiguredTrust{}, errors.New("elevation_required: " + windowsEnterpriseStandardUserMutationAnswer(action))
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("read enterprise.trust from %s: %w", path, err)
 	}

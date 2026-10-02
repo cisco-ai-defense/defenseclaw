@@ -1133,6 +1133,8 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "invalid_arguments":
 			return enterprisestatus.WindowsExitInvalidArgs
+		case "elevation_required":
+			return enterprisestatus.WindowsExitAccessDenied
 		}
 	}
 	return enterprisestatus.WindowsExitFailure
@@ -1230,7 +1232,11 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 	if errors.Is(cause, errPowerShell7Untrusted) {
 		code = "powershell7_untrusted"
 	}
-	result.AddError(code, cause.Error())
+	message := cause.Error()
+	if code == "elevation_required" {
+		message = strings.TrimPrefix(message, code+": ")
+	}
+	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 

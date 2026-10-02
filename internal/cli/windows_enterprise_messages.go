@@ -89,6 +89,14 @@ func windowsEnterprisePurgedUserStateChange(entry string) string {
 	}
 }
 
+// windowsEnterpriseStandardUserMutationAnswer answers a standard account's
+// `enterprise windows install`, `upgrade`, `repair` or `ensure`: only an
+// administrator can change the managed deployment (GAP-1961).
+func windowsEnterpriseStandardUserMutationAnswer(action string) string {
+	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
+		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`. Nothing was changed."
+}
+
 // windowsEnterpriseStandardUserInspectionAnswer answers a standard account's
 // `enterprise windows status` or `verify`: only an elevated prompt can run
 // the installer's integrity checks. The installer's own refusal (an invalid
