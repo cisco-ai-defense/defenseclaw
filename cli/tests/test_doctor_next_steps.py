@@ -163,3 +163,163 @@ def test_partial_drop_only_names_signals_and_next_step() -> None:
     check = r.checks[-1]
     assert check["status"] == "warn"
     assert "defenseclaw setup claude-code" in check["remediation"]
+
+
+def _custody_report(**overrides) -> ConnectorCustodyReport:
+    fields = dict(
+        connector_instance_id="019b0000-0000-7000-8000-000000000001",
+        connector="claudecode",
+        custody="defenseclaw",
+        profile_version="claudecode-v1",
+        default=True,
+        managed_config_state="verified",
+        managed_config_files=1,
+        normalized_batches=11,
+        drop_only_batches=8,
+        drop_only_signals=("logs", "metrics"),
+    )
+    fields.update(overrides)
+    return ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(ConnectorCustodyStatus(**fields),),
+    )
+
+
+def test_unmapped_only_drops_are_healthy_delivery() -> None:
+    # GAP-1090 / GAP-0052: a healthy agent sends record types DefenseClaw
+    # does not map; those batches are skipped by design, not lost.
+    report = _custody_report(drop_only_reasons=("unsupported_identity",))
+    (row,) = summarize_native_delivery(report).connectors
+    assert row.state == "accepted"
+    assert "does not map, skipped by design" in row.detail
+    r = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(report, r)
+    assert r.checks[-1]["status"] == "pass"
+    assert "partial drop-only" not in r.checks[-1]["detail"]
+
+
+def test_real_drop_reasons_still_warn_with_the_reason() -> None:
+    report = _custody_report(drop_only_reasons=("invalid_record", "unsupported_identity"))
+    (row,) = summarize_native_delivery(report).connectors
+    assert row.state == "partial_drop_only"
+    assert "reason: invalid record, unsupported identity" in row.detail
+    r = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(report, r)
+    assert r.checks[-1]["status"] == "warn"
+    assert "defenseclaw setup claude-code" in r.checks[-1]["remediation"]
+
+
+def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:
+    report = _custody_report(managed_config_state="untracked", drop_only_batches=0)
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=report.instances,
+        unattributed_authentication_failures=4,
+    )
+    r = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(report, r)
+    rows = {c["label"]: c for c in r.checks}
+    assert "drift is not checked" in rows["Connector OTLP: claudecode"]["detail"]
+    assert "managed-exporter=untracked" not in rows["Connector OTLP: claudecode"]["detail"]
+    credentials = rows["Native OTLP credentials"]
+    assert credentials["status"] == "warn"
+    assert "defenseclaw setup <connector>" in credentials["remediation"]
+
+
+def test_drop_reason_class_is_read_from_the_drop_record() -> None:
+    from defenseclaw.observability.custody_status import _telemetry_facts
+
+    body = {
+        "defenseclaw.telemetry.record_count": 3,
+        "defenseclaw.telemetry.signal": "logs",
+        "defenseclaw.telemetry.rejection_reason_class": "unsupported_identity",
+    }
+    assert _telemetry_facts(json.dumps({"body": body}))["reason"] == "unsupported_identity"
+
+
+def test_destination_rows_name_a_next_step() -> None:
+    from types import SimpleNamespace
+
+    destination = SimpleNamespace(name="fdvlan", endpoint="10.0.1.40:14399")
+    failing = SimpleNamespace(state="failing", circuit_state="closed")
+    text = cmd_doctor._destination_remediation(destination, failing)
+    assert "defenseclaw observability destination test fdvlan" in text
+    assert "10.0.1.40:14399" in text
+    starting = SimpleNamespace(state="initializing", circuit_state="")
+    assert "run 'defenseclaw doctor' again" in cmd_doctor._destination_remediation(destination, starting)
+    assert "defenseclaw-gateway start" in cmd_doctor._destination_remediation(destination, None)
+    # The open-circuit detail already spells out the repair.
+    assert cmd_doctor._destination_remediation(destination, SimpleNamespace(state="failing", circuit_state="open")) == ""
+
+
+def test_header_corrupt_audit_db_names_gateway_restart(tmp_path) -> None:
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="audit-db-integrity-unavailable")
+    cfg = mock.MagicMock(audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path))
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    assert r.checks[-1]["status"] == "fail"
+    assert "defenseclaw-gateway restart" in r.checks[-1]["remediation"]
+
+
+def _bedrock_judge_cfg(tmp_path, auth_mode: str):
+    from defenseclaw.config import (
+        BedrockKeyConfig,
+        Config,
+        GatewayConfig,
+        GuardrailConfig,
+        LLMConfig,
+        OpenShellConfig,
+    )
+
+    cfg = Config(
+        data_dir=str(tmp_path),
+        audit_db=str(tmp_path / "audit.db"),
+        quarantine_dir=str(tmp_path / "q"),
+        plugin_dir=str(tmp_path / "p"),
+        policy_dir=str(tmp_path / "pol"),
+        guardrail=GuardrailConfig(enabled=True, mode="action", connector="claudecode"),
+        gateway=GatewayConfig(),
+        openshell=OpenShellConfig(),
+    )
+    cfg.claw.mode = "claudecode"
+    cfg.llm = LLMConfig(api_key_env="DEFENSECLAW_LLM_KEY")
+    cfg.guardrail.judge.enabled = True
+    cfg.guardrail.judge.llm = LLMConfig(
+        provider="bedrock",
+        model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        bedrock=BedrockKeyConfig(region="us-east-1", auth_mode=auth_mode),
+    )
+    return cfg
+
+
+def test_bedrock_instance_role_judge_needs_no_api_key(tmp_path, monkeypatch) -> None:
+    # GAP-1242 / GAP-1289: instance_role authenticates with AWS credentials.
+    monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
+    r = _DoctorResult()
+    cmd_doctor._check_llm_api_key(_bedrock_judge_cfg(tmp_path, "instance_role"), r)
+    assert r.checks[-1]["status"] == "skip"
+    assert "auth_mode=instance_role" in r.checks[-1]["detail"]
+
+
+def test_bedrock_api_key_judge_without_key_fails_with_next_step(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
+    r = _DoctorResult()
+    cmd_doctor._check_llm_api_key(_bedrock_judge_cfg(tmp_path, "api_key"), r)
+    assert r.checks[-1]["status"] == "fail"
+    assert "defenseclaw setup llm" in r.checks[-1]["remediation"]
+
+
+def test_setup_llm_summary_says_why_no_key_is_needed() -> None:
+    from defenseclaw.commands.cmd_setup import _llm_key_state
+    from defenseclaw.config import BedrockKeyConfig, LLMConfig
+
+    keyless = LLMConfig(provider="bedrock", bedrock=BedrockKeyConfig(auth_mode="instance_role"))
+    assert _llm_key_state(keyless, "") == "(not needed: bedrock auth_mode=instance_role uses AWS credentials)"
+    assert _llm_key_state(LLMConfig(provider="bedrock"), "") == "(not set)"

@@ -529,6 +529,8 @@ Auth modes:
 | `profile` | `--bedrock-profile-name` (matching `~/.aws/credentials`) |
 | `instance_role` | nothing — EC2 / EKS pod identity supplies short-lived creds |
 
+Only `api_key` needs `DEFENSECLAW_LLM_KEY`. With the other three modes `setup llm` shows the key as `(not needed: bedrock auth_mode=...)` and `defenseclaw doctor` skips its **LLM API key** row; **LLM reachable** still checks that the AWS credentials work.
+
 ### Google Vertex AI
 
 ```bash
