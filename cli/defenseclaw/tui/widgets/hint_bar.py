@@ -166,6 +166,14 @@ class HintEngine:
                 f"{state.critical_alerts} recent critical/high alert {noun} {verb} review. "
                 "Press 2 for Alerts."
             )
+        if state.hidden_critical_alerts > 0 and state.connector_filter:
+            # Alerts would open empty under the filter; say how to see them.
+            count = state.hidden_critical_alerts
+            noun = "alert" if count == 1 else "alerts"
+            return (
+                f"{count} critical/high {noun} outside the {state.connector_filter} filter. "
+                "Press m and pick All connectors, then 2 for Alerts."
+            )
         if state.unscanned_skills > 0:
             return f"{state.unscanned_skills} skills have not been scanned. Press s to scan all."
         return self.next_tip()

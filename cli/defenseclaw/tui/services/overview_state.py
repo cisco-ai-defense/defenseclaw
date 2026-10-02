@@ -115,6 +115,14 @@ class HealthSnapshot:
     connectors: tuple[ConnectorHealth, ...] = ()
 
 
+# Probe states that mean the sidecar is not running.
+_GATEWAY_DOWN_STATES = frozenset({"offline", "stopped", "down"})
+
+# SERVICES rows the gateway process reports on; they go offline with it.
+_GATEWAY_HOSTED_SERVICES = frozenset(
+    {"agent", "watcher", "guardrail", "api", "sinks", "telemetry", "ai_discovery", "sandbox"}
+)
+
 # Connectors enforced through their own hook/plugin surface; they never use
 # the guardrail proxy port. Mirrors ``cmd_doctor._HOOK_ENFORCED_CONNECTORS``.
 _HOOK_ENFORCED_CONNECTORS = frozenset(
@@ -566,6 +574,9 @@ class OverviewPanelModel:
         self.observability_status_error = ""
         self.native_delivery_summary: NativeDeliverySummary | None = None
         self.runtime = RuntimeOverview()
+        # True until the first audit-history read finishes; a large audit.db
+        # can take a minute, and the counts read 0 until then (GAP-1240).
+        self.history_loading = False
 
     def set_cfg(self, cfg: OverviewConfig | None) -> None:
         """Hot-swap the cached config snapshot (e.g. after ``setup``).
@@ -601,6 +612,17 @@ class OverviewPanelModel:
             # out so callers show the sidecar's own detail (uptime) instead.
             return SubsystemHealth(state="running")
         return availability
+
+    def gateway_down(self) -> bool:
+        """True when the sidecar probe says the gateway is not running.
+
+        The last ``/health`` payload is kept across a failed probe, so the
+        services the gateway hosts must not keep reading "running" from it
+        (GAP-1262, GAP-1280).
+        """
+
+        probe = self.gateway_probe
+        return probe is not None and probe.state.strip().lower() in _GATEWAY_DOWN_STATES
 
     def set_doctor_cache(self, cache: DoctorCache | None) -> None:
         self.doctor = cache
@@ -668,6 +690,13 @@ class OverviewPanelModel:
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
+        if self.history_loading and not self.not_configured:
+            notices.append(
+                OverviewNotice(
+                    "info",
+                    "Loading the audit history - alert and hook counts show 0 until it finishes",
+                )
+            )
         if self.not_configured:
             # No config.yaml (first run, wizard declined): say so instead of
             # implying the gateway will show up on its own (GAP-1163).
@@ -797,21 +826,40 @@ class OverviewPanelModel:
                     )
                 )
 
-        if self.health is not None and self.health.connector is not None and self.cfg is not None:
+        # A stopped gateway leaves its last /health payload behind; notices
+        # read from it ("since the gateway started 3m ago") would be stale.
+        live_health = self.health is not None and not self.gateway_down()
+        if live_health and self.health.connector is not None and self.cfg is not None:
             live = self.health.connector.name.strip()
             configured = self.cfg.claw_mode.strip()
-            if live and configured and live != configured:
+            roster = {c.strip().lower() for c, _m in self.cfg.connector_modes if c}
+            # In a multi-connector install the gateway's primary connector can
+            # be any rostered one; that is not drift (GAP-1220).
+            if live and configured and live != configured and live.lower() not in roster:
                 notices.append(
                     OverviewNotice(
                         "warn",
                         "Connector drift: configured "
-                        f"{friendly_connector_name(configured)} but gateway is routing for "
-                        f"{friendly_connector_name(live)} - restart the sidecar after editing claw.mode",
+                        f"{friendly_connector_name(configured)} but the gateway is routing for "
+                        f"{friendly_connector_name(live)} - run: defenseclaw-gateway restart",
                     )
                 )
             uptime = timedelta(milliseconds=self.health.uptime_ms)
-            if self.health.connector.requests == 0 and uptime > timedelta(minutes=1):
-                notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+            if uptime > timedelta(minutes=1):
+                if self._is_multi_connector() and self.health.connectors:
+                    # One idle connector out of several is normal; only say
+                    # something when none of them has seen a hook event.
+                    if not any(conn.requests for conn in self.health.connectors):
+                        notices.append(
+                            OverviewNotice(
+                                "info",
+                                f"No connector has seen a hook event since the gateway started "
+                                f"{format_duration(uptime)} ago - normal until an agent runs; "
+                                "verify connector hook setup if this persists",
+                            )
+                        )
+                elif self.health.connector.requests == 0:
+                    notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
 
         probe_detail = gateway_availability.last_error.strip().lower()
         if not gateway_broken and "elevated sidecar" in probe_detail:
@@ -831,7 +879,7 @@ class OverviewPanelModel:
                     "Open AI Discovery and press Scan now so Runtime can correlate them.",
                 )
             )
-        elif runtime.scanned and runtime.findings == 0 and runtime.processes:
+        elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
             why = f" ({runtime.degraded_reason}; press N for details)" if runtime.degraded_reason else ""
             notices.append(
                 OverviewNotice(
@@ -992,8 +1040,13 @@ class OverviewPanelModel:
         )
 
     def subsystem_state(self, key: str) -> str:
+        if key == "gateway" and (self.health is None or self.gateway_down()):
+            # Match the "Gateway is not running" banner instead of "unknown".
+            return self.gateway_availability().state if self.gateway_probe is not None else "unknown"
         if self.health is None:
             return "unknown"
+        if self.gateway_down() and key in _GATEWAY_HOSTED_SERVICES:
+            return "offline"
         match key:
             case "gateway":
                 # ``health.gateway`` is the OpenClaw fleet uplink. A hook-only
@@ -1057,6 +1110,11 @@ class OverviewPanelModel:
                 return None
 
     def service_detail(self, key: str) -> str:
+        if self.gateway_down():
+            if key == "gateway":
+                return "not running"
+            if key in _GATEWAY_HOSTED_SERVICES:
+                return ""
         match key:
             case "gateway":
                 return self.gateway_detail()
@@ -1336,12 +1394,36 @@ class OverviewPanelModel:
             parts.append(f"{details['plugin_dirs']} plugin dirs")
         return ", ".join(parts)
 
+    def guardrail_mode_label(self, connector: str = "") -> str:
+        """The guardrail mode, with per-connector exceptions counted.
+
+        ``observe`` for one mode; ``observe, 1 action`` when one rostered
+        connector runs in action mode and the rest observe (GAP-1220).
+        ``connector`` narrows it to that connector's own mode.
+        """
+
+        if self.cfg is None:
+            return ""
+        base = (self.cfg.guardrail_mode or "").strip()
+        modes = {c.strip().lower(): (m or base).strip() for c, m in self.cfg.connector_modes if c}
+        if connector:
+            return modes.get(connector.strip().lower(), base)
+        enabled = [mode for name, mode in modes.items() if mode and not self.cfg.connector_is_disabled(name)]
+        if len(set(enabled)) <= 1:
+            return enabled[0] if enabled else base
+        counts: dict[str, int] = {}
+        for mode in enabled:
+            counts[mode] = counts.get(mode, 0) + 1
+        main = base if base in counts else max(counts, key=counts.__getitem__)
+        others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != main]
+        return ", ".join([main, *others])
+
     def guardrail_detail(self) -> str:
         if self.cfg is None or not self.cfg.guardrail_enabled:
             return ""
         parts: list[str] = []
-        if self.cfg.guardrail_mode:
-            parts.append(self.cfg.guardrail_mode)
+        if mode := self.guardrail_mode_label():
+            parts.append(mode)
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         # The rule pack, not guardrail_strategy: that is read from a

@@ -226,6 +226,8 @@ class AuditPanelModel:
         self.correlation_run_id = ""
         self.detail_open = False
         self.error_message = ""
+        # True until the app's first audit-history read finishes (GAP-1240).
+        self.loading = False
         # 8.13 multi-connector: the shared connector filter ("" = All) and
         # whether the table should surface a CONNECTOR column. Both are set
         # by the app from the active connector count; single-connector
@@ -707,6 +709,8 @@ class AuditPanelModel:
             hidden = self.hidden_routine_count()
             if hidden:
                 body = f"{hidden} routine events are hidden (gateway starts, reloads). Press 1 to show all events."
+            elif self.loading:
+                body = "Loading audit events... a large audit database can take a minute to read."
             else:
                 body = "No audit events yet. Events are recorded when you scan, block, allow, or configure DefenseClaw."
             return f"{header}\n{body}".strip()

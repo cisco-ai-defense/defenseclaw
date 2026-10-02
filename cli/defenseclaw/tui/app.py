@@ -180,7 +180,7 @@ from defenseclaw.tui.widgets.panel_split import (
     split_layout,
 )
 from defenseclaw.tui.widgets.status_strip import render_status_strip
-from defenseclaw.tui.widgets.tab_fit import fit_tab_labels
+from defenseclaw.tui.widgets.tab_fit import BADGE_RESERVE, fit_tab_labels, strip_width
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
 
@@ -392,6 +392,9 @@ def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
     filled = int(round(ratio * width))
     return "▰" * filled + "▱" * (width - filled)
 
+
+# Stores opened by background readers; shutdown interrupts their queries.
+_LIVE_WORKER_STORES: weakref.WeakSet[Any] = weakref.WeakSet()
 
 PANELS = (
     ("overview", "1", "Overview"),
@@ -1225,6 +1228,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._read_repository = (
             TUIReadRepository(audit_db) if audit_db else None
         )
+        self._set_history_loading(self._read_repository is not None)
         self._slow_refresh_running = False
         self._roster_catalog_refresh_pending = False
         self._credentials_refresh_running = False
@@ -1434,11 +1438,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     )
                 with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
                     yield Button("Actionable", id="alerts-filter-actionable", compact=True)
-                    yield Button("All", id="alerts-filter-all", compact=True)
-                    yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
-                    yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
-                    yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
-                    yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
+                    # On Alerts the digits pick a severity, not a tab, so the
+                    # chips carry them (GAP-1272).
+                    yield Button("1 All", id="alerts-filter-all", compact=True)
+                    yield Button("2 Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
+                    yield Button("3 High", id="alerts-filter-high", compact=True, classes="severity-high")
+                    yield Button("4 Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
+                    yield Button("5 Low", id="alerts-filter-low", compact=True, classes="severity-low")
                     yield Button("Select all", id="alerts-select-all", compact=True)
                     yield Button("Ack selected", id="alerts-ack-selected", compact=True)
                     yield Button("Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning")
@@ -2003,6 +2009,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             except Exception:  # noqa: BLE001 - teardown is best-effort.
                 pass
         self._sandbox_unmount()
+        # Worker threads can't be cancelled, and the interpreter joins them at
+        # exit: stop their running SQLite reads so Ctrl+Q exits promptly with
+        # a large audit.db (GAP-1240).
+        for store in tuple(_LIVE_WORKER_STORES):
+            try:
+                store.db.interrupt()
+            except Exception:  # noqa: BLE001 - teardown is best-effort.
+                pass
+        if self._read_repository is not None:
+            self._read_repository.close()
         await self.executor.cancel()
         # Textual cancels workers during shutdown, but Windows' Proactor loop
         # must also be given time to run each worker's cancellation cleanup.
@@ -2496,13 +2512,26 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """The header brand, shortened on narrow terminals so every tab fits."""
 
         width = int(getattr(self.size, "width", 0) or 0)
-        if width <= 0 or width >= 120:
-            return f"DefenseClaw {__version__}"
+        versioned = f"DefenseClaw {__version__}"
+        if width <= 0:
+            return versioned
+        if width >= 120 and self._tabs_fit_next_to(versioned, width):
+            return versioned
         if width >= 96:
+            # The version is on Overview; its cells go to tab names, so a
+            # 200-column screen names every tab instead of a bare "R"
+            # (GAP-1283).
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
         return ""
+
+    def _tabs_fit_next_to(self, title: str, width: int) -> bool:
+        """True when every visible tab keeps its full name beside ``title``."""
+
+        strip = max(0, width - 2 - (len(title) + 1) - 12)
+        labels = [f"{key} {label}" for name, key, label in PANELS if not self._panel_hidden(name)]
+        return strip_width(labels) + BADGE_RESERVE <= strip
 
     def _sync_header_title(self) -> None:
         title = self._header_title()
@@ -2532,7 +2561,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # The nav list and aside appear and disappear at width thresholds.
         if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
             panel = self.active_panel
-            if self._panel_nav(panel) or self._panel_aside(panel) is not None:
+            if panel == "setup" or self._panel_nav(panel) or self._panel_aside(panel) is not None:
                 self.call_after_refresh(self._render_chrome)
 
     def action_switch_panel(self, panel: str) -> None:
@@ -3007,6 +3036,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             from defenseclaw.db import Store
 
             worker_store = Store(str(value))
+            _LIVE_WORKER_STORES.add(worker_store)
             detached.audit_model.store = worker_store
             detached.alerts_model.store = worker_store
             return worker_store
@@ -3074,6 +3104,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         finally:
             if worker_store is not None:
+                _LIVE_WORKER_STORES.discard(worker_store)
                 try:
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.
@@ -4484,7 +4515,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "alerts": [
                 ("j/k or Up/Down", "Navigate alerts"),
                 ("Enter", "Toggle detail pane"),
-                ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low)"),
+                ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low); Tab or Ctrl+P switches panel"),
                 ("/", "Search target / action / details"),
                 ("Space", "Toggle select current alert"),
                 ("a / A or X", "Select all filtered / deselect all"),
@@ -4493,7 +4524,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("c / C", "Dismiss filtered / dismiss ALL alerts"),
                 ("y", "Copy alert details to clipboard"),
                 ("r", "Refresh"),
-                ("Esc", "Close detail / clear search"),
+                ("PgUp / PgDn", "Scroll the open alert detail"),
+                ("Esc", "Close detail / clear search / clear severity filter"),
             ],
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
@@ -6212,7 +6244,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         outside_roster_findings = max(fleet_findings - total_findings, 0) if scope_connectors and not selected_connector else 0
 
         cfg = self.overview_model.cfg
-        guardrail_mode = (cfg.guardrail_mode if cfg else "") or "observe"
+        # Per-connector modes: "observe, 1 action", or the filtered connector's
+        # own mode (GAP-1220).
+        guardrail_mode = self.overview_model.guardrail_mode_label(selected_connector) or "observe"
         guardrail_active = guardrail_running or guardrail_enabled
         guardrail_value_text = "ON" if guardrail_active else "OFF"
         if guardrail_active:
@@ -9759,10 +9793,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 "showing the last successful snapshot.[/]"
             )
         if not self.audit_model.items and not self.audit_model.error_message:
-            lines.append(
-                f"[{TOKENS.text_muted}]No audit events yet. Scans, blocks, approvals and config "
-                "changes are recorded here as they happen.[/]"
-            )
+            if self.audit_model.loading:
+                lines.append(
+                    f"[{TOKENS.text_muted}]Loading audit events... a large audit database can take "
+                    "a minute to read.[/]"
+                )
+            else:
+                lines.append(
+                    f"[{TOKENS.text_muted}]No audit events yet. Scans, blocks, approvals and config "
+                    "changes are recorded here as they happen.[/]"
+                )
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
@@ -9873,10 +9913,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if self.command_running and self._command_started_at
             else 0
         )
+        critical_alerts = self.alerts_model.critical_count()
+        hidden_critical = 0
+        connector_filter = self._connector_filter() if active_panel == "overview" else ""
+        if connector_filter:
+            # Alerts opens filtered to the connector, so count what it will
+            # show; an alert with no connector is outside the filter (GAP-1253).
+            self._sync_signal_connector_filters()
+            scoped = self.alerts_model.scope_severity_counts()
+            scoped_critical = scoped["CRITICAL"] + scoped["HIGH"]
+            hidden_critical = max(critical_alerts - scoped_critical, 0)
+            critical_alerts = scoped_critical
         hint_state = HintState(
             active_panel=active_panel,
             filter_active=self._active_filter_label(),
-            critical_alerts=self.alerts_model.critical_count(),
+            critical_alerts=critical_alerts,
             total_alerts=sum(self.alerts_model.severity_counts().values()),
             commands_run=self.commands_run,
             command_running=self.command_running,
@@ -9891,6 +9942,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ),
             panel_has_rows=bool(self._table_rows) if active_panel == "sandboxes" else True,
             not_configured=self.config is None,
+            connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
+            hidden_critical_alerts=hidden_critical,
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
@@ -10015,7 +10068,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if view == "wizards":
             return (view, setup_center.active_group(model))
         if view == "config":
-            return (view, model.active_section)
+            # The column sizes depend on the width (narrow screens ellipsize
+            # values), so a resize rebuilds the table instead of keeping the
+            # wide layout's column widths (GAP-1166).
+            return (view, model.active_section, int(getattr(self.size, "width", 0) or 0))
         return view
 
     def _render_panel_table(self) -> None:
@@ -10653,6 +10709,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "policies":
             return self._apply_policy_action(self.policy_model.handle_key(_vim_key(key)))
         if self.active_panel == "alerts":
+            if self.alerts_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the detail pane shows five lines; PgUp/PgDn read
+                # the rest without leaving the table (GAP-0999).
+                return self._scroll_detail_panel(key)
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
         if self.active_panel == "registries":
@@ -10732,6 +10792,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self._handle_setup_key(_vim_key(key), character=_typed_character(event))
             return self._apply_setup_action(action)
         return False
+
+    def _scroll_detail_panel(self, key: str) -> bool:
+        try:
+            scroller = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return False
+        if key in {"pagedown", "page_down"}:
+            scroller.scroll_page_down(animate=False)
+        else:
+            scroller.scroll_page_up(animate=False)
+        return True
 
     def _scroll_help_body(self, key: str) -> bool:
         """Scroll the ``?`` sheet; at 80x24 most of it is below the fold."""
@@ -12344,6 +12415,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else None
         )
         self._read_snapshot = None
+        self._set_history_loading(self._read_repository is not None)
         self._snapshot_panel_revisions.clear()
         self._last_data_refresh_error = ""
         if self.status_text.startswith("Data refresh stale:"):
@@ -13026,9 +13098,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if pending and not getattr(self, "_app_shutting_down", False):
             self._schedule_active_log_file_refresh()
 
+    def _set_history_loading(self, loading: bool) -> None:
+        """Say "loading" instead of "no events" until the first read lands."""
+
+        self.overview_model.history_loading = loading
+        self.audit_model.loading = loading
+
     def _handle_data_refresh_result(self, result: TUIReadResult, *, force: bool) -> None:
         snapshot = result.snapshot
         should_render = False
+        if self.audit_model.loading and (snapshot is not None or result.error):
+            self._set_history_loading(False)
+            should_render = True
         if snapshot is not None and (result.changed or force or self._read_snapshot is None):
             self._read_snapshot = snapshot
             self._apply_read_snapshot(snapshot, self.active_panel)
@@ -13208,6 +13289,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         finally:
             if worker_store is not None:
+                _LIVE_WORKER_STORES.discard(worker_store)
                 try:
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.
@@ -13329,6 +13411,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         finally:
             if worker_store is not None:
+                _LIVE_WORKER_STORES.discard(worker_store)
                 try:
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.

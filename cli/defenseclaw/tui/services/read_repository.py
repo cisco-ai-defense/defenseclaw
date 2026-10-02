@@ -138,6 +138,15 @@ class TUIReadRepository:
         if self._closed:
             return
         self._closed = True
+        # A first read of a large audit.db runs for a minute or more, and the
+        # interpreter joins this thread at exit: Ctrl+Q then left the process
+        # spinning until the query ended (GAP-1240). Stop the running query.
+        store = self._store
+        if store is not None:
+            try:
+                store.db.interrupt()
+            except Exception:  # noqa: BLE001 - teardown is best-effort.
+                pass
         try:
             self._executor.submit(self._close_sync)
         except RuntimeError:
@@ -196,7 +205,7 @@ class TUIReadRepository:
             mutations = previous.mutations
         else:
             panel_history = history[:_PANEL_LIMIT]
-            alert_events = alerts_from_v8_history(alert_history)
+            alert_events = alerts_from_v8_history(alert_history, history)
             log_views = project_v8_log_views(history)
             egress_events = project_v8_egress_events(panel_history)
             mutations = activity_mutations_from_v8_history(panel_history)
@@ -310,8 +319,10 @@ class TUIReadRepository:
             self._hook_stats = loaded
         return loaded
 
-    @staticmethod
-    def _component(name: str, loader, fallback, errors: list[str]):  # type: ignore[no-untyped-def]
+    def _component(self, name: str, loader, fallback, errors: list[str]):  # type: ignore[no-untyped-def]
+        if self._closed:
+            # Closing: skip the remaining queries of this refresh.
+            return fallback
         try:
             return loader()
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
