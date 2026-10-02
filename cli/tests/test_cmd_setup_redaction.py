@@ -604,3 +604,23 @@ def test_json_mutation_requires_noninteractive_confirmation(tmp_path: Path) -> N
 
     assert result.exit_code == 2
     assert "--json mutations require --yes or --dry-run" in result.output
+
+
+def test_status_discloses_unredacted_judge_body_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1693: judge_bodies.db sits outside every redaction profile, so
+    # status must say it keeps raw judge text and how to turn it off.
+    monkeypatch.setattr(cmd_setup_redaction, "_operator_status", lambda _app: _status(tmp_path))
+
+    text = CliRunner().invoke(redaction, ["status"], obj=_app(tmp_path), catch_exceptions=False)
+    assert text.exit_code == 0, text.output
+    assert "Local judge-body store (not covered by redaction profiles)" in text.output
+    assert "unredacted (it can quote secrets from prompts), for 90 days." in text.output
+    assert "set guardrail.retain_judge_bodies: false" in text.output
+
+    raw = CliRunner().invoke(redaction, ["status", "--json"], obj=_app(tmp_path), catch_exceptions=False)
+    assert json.loads(raw.output)["judge_bodies"] == {
+        "capture": True,
+        "path": str(tmp_path / "judge_bodies.db"),
+        "redacted": False,
+        "retention_days": 90,
+    }

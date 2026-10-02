@@ -9001,11 +9001,16 @@ def _check_observability_v8_status(
         r=r,
     )
     if status.judge_bodies_path:
+        # The store sits outside every redaction profile; say so (GAP-1693).
+        capture = (
+            "enabled (raw judge text, not redacted; turn off with guardrail.retain_judge_bodies: false)"
+            if status.judge_bodies_enabled
+            else "disabled"
+        )
         _emit(
             "pass",
             "Judge-body store",
-            f"capture={'enabled' if status.judge_bodies_enabled else 'disabled'}; "
-            f"retention={retention}; path={status.judge_bodies_path}",
+            f"capture={capture}; retention={retention}; path={status.judge_bodies_path}",
             r=r,
         )
 

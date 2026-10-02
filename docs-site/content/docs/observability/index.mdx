@@ -346,7 +346,11 @@ and produces a capacity warning.
 The reaper removes eligible event, evidence, judge-body, and correlation rows
 in dependency order. SQLite can reuse the freed pages, but the database file
 does not shrink automatically. Raw judge-body capture is
-controlled separately by `guardrail.retain_judge_bodies`; the OPA
+controlled separately by `guardrail.retain_judge_bodies`. Redaction profiles
+do not apply to it: while it is `true` (the default), `judge_bodies.db` keeps
+the raw LLM-judge request and response text, which can quote secrets from
+prompts, for the same retention period. Set it to `false` and restart the
+gateway to stop that capture. The OPA
 `audit.retention_days` input is a distinct policy and does not configure this
 SQLite reaper.
 

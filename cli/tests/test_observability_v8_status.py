@@ -1198,3 +1198,29 @@ def test_inspect_status_errors_name_the_config_not_the_snapshot(tmp_path: Path) 
 
     assert f"{path.absolute()}:68:9" in str(raised.value)
     assert snapshots and snapshots[0] not in str(raised.value)
+
+
+def test_doctor_judge_body_row_says_capture_is_unredacted() -> None:
+    # GAP-1693: the judge-body store is outside every redaction profile.
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml",
+        data_dir="/tmp",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=7,
+        local_path="/tmp/audit.db",
+        judge_bodies_path="/tmp/judge.db",
+        destinations=(),
+        buckets=(),
+        warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result)
+
+    checks = {item["label"]: item for item in result.checks}
+    assert checks["Judge-body store"]["detail"] == (
+        "capture=enabled (raw judge text, not redacted; turn off with guardrail.retain_judge_bodies: false); "
+        "retention=7 days; path=/tmp/judge.db"
+    )
