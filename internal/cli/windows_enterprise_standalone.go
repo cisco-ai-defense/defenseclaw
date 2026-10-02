@@ -478,8 +478,16 @@ func applyWindowsEnterpriseInstallerReport(
 		if message == "" {
 			continue
 		}
+		enumeratorCode := ""
+		if text, specific, unwrapped := windowsEnterpriseEnumeratorFailureText(message); unwrapped {
+			result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
+			message, enumeratorCode = text, specific
+		}
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if enumeratorCode != "" {
+			code = enumeratorCode
+		}
 		if lifecycle {
 			original := message
 			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
@@ -495,7 +503,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if !report.Installed {
 			code = "not_installed"
 		}
-		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
+		result.AddError(code, windowsEnterpriseNotHealthyMessage(result.Services, run.ExitCode))
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""

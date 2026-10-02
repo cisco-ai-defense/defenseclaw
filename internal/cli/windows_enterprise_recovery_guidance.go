@@ -392,12 +392,7 @@ func windowsEnterpriseStandaloneNextStep(
 // (GAP-1072: verify named the stopped guardian but no next step). It is
 // empty when every required service runs.
 func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service) string {
-	var stopped []string
-	for _, service := range services {
-		if service.Required && strings.EqualFold(strings.TrimSpace(service.State), "stopped") {
-			stopped = append(stopped, service.Name)
-		}
-	}
+	stopped := windowsEnterpriseStoppedRequiredServices(services)
 	if len(stopped) == 0 {
 		return ""
 	}
@@ -414,4 +409,69 @@ func windowsEnterpriseStandaloneLifecycleAction(action string) bool {
 		return true
 	}
 	return false
+}
+
+// windowsEnterpriseStoppedRequiredServices names the required DefenseClaw
+// services that are stopped.
+func windowsEnterpriseStoppedRequiredServices(services []enterprisestatus.Service) []string {
+	var stopped []string
+	for _, service := range services {
+		if service.Required && strings.EqualFold(strings.TrimSpace(service.State), "stopped") {
+			stopped = append(stopped, service.Name)
+		}
+	}
+	return stopped
+}
+
+// windowsEnterpriseNotHealthyMessage says what is unhealthy when the
+// installer reported no error of its own. It said only "not healthy
+// (installer exit 1)" for a stopped gateway service (GAP-1184); the stopped
+// services are named instead, and the next step follows.
+func windowsEnterpriseNotHealthyMessage(services []enterprisestatus.Service, exitCode int) string {
+	stopped := windowsEnterpriseStoppedRequiredServices(services)
+	switch len(stopped) {
+	case 0:
+		return fmt.Sprintf("the standalone deployment is not healthy (its health check exited %d); "+
+			"run `defenseclaw enterprise windows verify --profile standalone` from an elevated prompt for the failing checks", exitCode)
+	case 1:
+		return "the standalone deployment is not healthy: the " + stopped[0] + " service is stopped"
+	default:
+		return "the standalone deployment is not healthy: the " + strings.Join(stopped, ", ") + " services are stopped"
+	}
+}
+
+// windowsEnterpriseEnumeratorFailurePrefix starts the module's report of a
+// failed synchronous `enterprise windows enumerate` run, which carries the
+// enumerator's whole output.
+const windowsEnterpriseEnumeratorFailurePrefix = "synchronous target enumeration failed with exit "
+
+// windowsEnterpriseEnumeratorFailureText returns the enumerator's own error
+// from that report, without its log line and command prefixes, and a
+// dedicated code for a rule pack the gateway service cannot read. The
+// actionable icacls advice was buried after "[hook-enumerator] windows:
+// manifest=... interval=5m0s once=true initial_delay=30s Error: ..."
+// (GAP-1276). ok is false for any other message.
+func windowsEnterpriseEnumeratorFailureText(message string) (text, code string, ok bool) {
+	start := strings.Index(message, windowsEnterpriseEnumeratorFailurePrefix)
+	if start < 0 {
+		return message, "", false
+	}
+	index := strings.LastIndex(message, "Error: ")
+	if index < start {
+		return message, "", false
+	}
+	text = strings.TrimSpace(message[index+len("Error: "):])
+	for _, prefix := range []string{"enterprise windows enumerate: ", "load config: ", "config: "} {
+		text = strings.TrimPrefix(text, prefix)
+	}
+	if rest, found := strings.CutPrefix(text, "managed standalone "); found {
+		text = "the managed config's " + rest
+	}
+	if text == "" {
+		return message, "", false
+	}
+	if strings.Contains(text, "rule_pack_dir") && strings.Contains(text, "cannot read") {
+		code = "rule_pack_unreadable"
+	}
+	return text, code, true
 }
