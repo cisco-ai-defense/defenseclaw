@@ -23,7 +23,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -31,6 +30,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.services.policy_state import (
     ALERT_LEVELS,
     BLOCK_LEVELS,

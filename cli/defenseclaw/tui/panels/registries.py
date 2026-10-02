@@ -260,14 +260,11 @@ class RegistriesPanelModel:
         if key in {"k", "up"}:
             self.cursor_up()
             return RegistryPanelAction(True)
-        if key == "1":
-            self.set_tab(RegistriesTab.SOURCES)
-            return RegistryPanelAction(True)
-        if key == "2":
-            self.set_tab(RegistriesTab.ENTRIES)
-            return RegistryPanelAction(True)
-        if key == "3":
-            self.set_tab(RegistriesTab.APPROVED)
+        # h/l switch the sub-tabs (as on Activity and Inventory); the digits
+        # stay panel keys, so 1 opens Overview from here too (GAP-1700).
+        if key in {"h", "left", "l", "right"}:
+            step = -1 if key in {"h", "left"} else 1
+            self.set_tab(max(0, min(int(self.current_tab) + step, len(RegistriesTab) - 1)))
             return RegistryPanelAction(True)
         if key == "enter":
             if self.row_count() == 0:

@@ -813,7 +813,11 @@ class PolicyPanelAction:
 
 # Every key the panel handles, for the ``?`` sheet: (keys, what, views).
 POLICY_KEYMAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("1 … 7", "Posture · Opt-in packs · Chains · Rule families · Policies · Rule packs · Sandbox packs", POLICY_VIEWS),
+    (
+        "←/→ or [ ]",
+        "Previous / next view: Posture · Opt-in packs · Chains · Rule families · Policies · Rule packs · Sandbox packs",
+        POLICY_VIEWS,
+    ),
     ("j/k or Up/Down", "Move in the view", POLICY_VIEWS),
     ("m", "Posture: switch the highlighted scope between observe and action", ("posture",)),
     ("b / a", "Posture: the scope's tool-call block at / alert at level", ("posture",)),
@@ -834,15 +838,15 @@ def policy_keymap_rows(sandbox_supported: bool = True) -> tuple[tuple[str, str, 
     views = POLICY_VIEWS if sandbox_supported else POLICY_VIEWS[:-1]
     rows = []
     for keys, what, key_views in POLICY_KEYMAP:
-        if not sandbox_supported and keys.startswith("1 "):
-            keys, what = "1 … 6", what.replace(" · Sandbox packs", "")
+        if not sandbox_supported:
+            what = what.replace(" · Sandbox packs", "")
         rows.append((keys, what, tuple(view for view in key_views if view in views)))
     return tuple(rows)
 
 
 def policies_keys_hint(view: str, *, sandbox_supported: bool = True) -> str:
     """The hint bar's keys for a Policies view (one line at 80 columns)."""
-    views = "1-7 view" if sandbox_supported else "1-6 view"
+    views = "←/→ view"
     if view == "posture":
         return f"KEYS  m mode | b block at | a alert at | h approval | p rule pack | {views}"
     if view == "optin":
@@ -1282,15 +1286,24 @@ class PoliciesPanelModel:
                 self.cursors["chains"] = self._next_chain(current, 1)
         self._clamp()
 
+    def select_view(self, view: str) -> PolicyPanelAction:
+        """Open ``view`` (a nav click, or Left/Right)."""
+        if view not in self.views():
+            return PolicyPanelAction("hint", hint="Sandbox packs are available on Linux and macOS only.")
+        self.set_view(view)
+        if view == "sandbox_packs" and not self.sandbox_loaded:
+            return PolicyPanelAction("load_sandbox_packs")
+        return PolicyPanelAction("render")
+
     def handle_key(self, key: str) -> PolicyPanelAction:
-        if key in VIEW_KEYS:
-            view = VIEW_KEYS[key]
-            if view not in self.views():
-                return PolicyPanelAction("hint", hint="Sandbox packs are available on Linux and macOS only.")
-            self.set_view(view)
-            if view == "sandbox_packs" and not self.sandbox_loaded:
-                return PolicyPanelAction("load_sandbox_packs")
-            return PolicyPanelAction("render")
+        # Left/Right (or [ and ]) switch the view; h is Posture's approval key.
+        # The digits stay panel keys, so 1 opens Overview from here too
+        # (GAP-1708).
+        if key in {"left", "right", "[", "]"}:
+            views = self.views()
+            index = views.index(self.view) if self.view in views else 0
+            index = max(0, min(index + (-1 if key in {"left", "["} else 1), len(views) - 1))
+            return self.select_view(views[index])
         if key in {"escape", "esc", "q"}:
             if self.detail_open:
                 self.detail_open = False

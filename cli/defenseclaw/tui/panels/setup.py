@@ -1580,6 +1580,9 @@ class SetupPanelModel:
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        if self.active_wizard == SetupWizard.CONNECTOR_SETUP and len(args) > 1 and not args[1].startswith("-"):
+            # "setup claude-code", not "setup Connector Setup" (GAP-1709).
+            name = args[1]
         if self.active_wizard == SetupWizard.GUARDRAIL:
             connector = wizard_field_value(self.form_fields, "Connector")
             if connector:

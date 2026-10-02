@@ -18,8 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from rich.markup import escape as rich_escape
-
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.services.event_models import ActivityMutation, timestamp_label
 from defenseclaw.tui.services.v8_event_history import (
     V8EventHistoryRow,

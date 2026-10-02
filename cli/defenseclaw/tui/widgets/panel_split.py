@@ -40,12 +40,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
-from rich.markup import escape
 from rich.text import Text
 from textual import events
 from textual.message import Message
 from textual.widgets import Static
 
+from defenseclaw.tui.markup_safe import escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS

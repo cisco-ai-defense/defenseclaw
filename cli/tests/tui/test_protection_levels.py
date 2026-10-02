@@ -75,7 +75,7 @@ def test_b_and_a_pick_tool_call_levels_on_posture_and_policy_levels_on_policies(
     for key, kind in (("b", "pick_block"), ("a", "pick_alert")):
         action = model.handle_key(key)
         assert (action.kind, action.connector) == (kind, "claudecode")
-    model.handle_key("5")
+    model.select_view("policies")
     model.handle_key("down")
     for key, kind in (("b", "pick_policy_block"), ("a", "pick_policy_alert")):
         action = model.handle_key(key)

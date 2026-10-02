@@ -20,13 +20,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
-from rich.markup import escape as rich_escape
-
 from defenseclaw.connector_paths import (
     connector_config_files,
     connector_home,
     hermes_config_path,
 )
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
