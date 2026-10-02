@@ -145,3 +145,28 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 		t.Fatalf("status hides the inspection state:\n%s", out.String())
 	}
 }
+
+// A failed verify of an installed deployment ends with the repair command
+// (GAP-1094); other failures and --json keep their line.
+func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
+	const repair = "/usr/bin/defenseclaw-gateway enterprise linux repair"
+	result := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	result.Installed = true
+	result.AddError("verify_failed", "defenseclaw-sensor-helper.service is not active")
+	result.AddError("verify_failed", "DefenseClaw hooks are not in place in vendor machine policy for claudecode")
+	result.Finish("linux", 0)
+	err := lifecycleFailure(result, false, repair)
+	if want := "verify failed; see the 2 problems listed above. Run `" + repair + "` as root to fix them"; err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if commandExitCode(err) != result.ExitCode {
+		t.Fatalf("exit code %d, want %d", commandExitCode(err), result.ExitCode)
+	}
+	if err := lifecycleFailure(result, true, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("--json error line = %q, want the problems only", err)
+	}
+	result.Installed = false
+	if err := lifecycleFailure(result, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("not installed: %q, want no repair advice", err)
+	}
+}

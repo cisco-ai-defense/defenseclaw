@@ -81,7 +81,7 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
-	return lifecycleFailure(result, opts.json)
+	return lifecycleFailure(result, opts.json, env.LifecycleCommand(enterpriseunix.ActionRepair))
 }
 
 // settleInterruptedRotation makes an interrupt (Ctrl+C, SIGTERM) end
@@ -123,16 +123,22 @@ func settleInterruptedRotation(parent context.Context, w io.Writer, platform str
 
 // lifecycleFailure is the command error of a failed result. The human
 // output has already listed every problem, so the error line only says
-// where to look; with --json the document is on stdout and the error line
-// on stderr carries the problems.
-func lifecycleFailure(result *enterprisestatus.Result, asJSON bool) error {
+// where to look and, for a failed status or verify of an installed
+// deployment, names repairCommand as the next step; with --json the
+// document is on stdout and the error line on stderr carries the problems.
+func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairCommand string) error {
 	if result.OK {
 		return nil
 	}
 	if asJSON || len(result.Errors) == 0 {
 		return withExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
 	}
-	return withExitCode(fmt.Errorf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem")), result.ExitCode)
+	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
+	if repairCommand != "" && result.Installed &&
+		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
+		message += ". Run `" + repairCommand + "` as root to fix them"
+	}
+	return withExitCode(errors.New(message), result.ExitCode)
 }
 
 func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON bool) error {
@@ -260,5 +266,5 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
-	return lifecycleFailure(result, opts.json)
+	return lifecycleFailure(result, opts.json, "")
 }

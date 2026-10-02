@@ -322,6 +322,10 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool) []strin
 // lifecycleCommand is the administrator command line for a lifecycle
 // action on this host, with the absolute gateway path (sudo's secure_path
 // does not include the install directory).
+// LifecycleCommand is the full `defenseclaw-gateway enterprise <os> <action>`
+// command line of this host, for next-step advice.
+func (e *Env) LifecycleCommand(action string) string { return e.lifecycleCommand(action) }
+
 func (e *Env) lifecycleCommand(action string) string {
 	group := "linux"
 	if e.GOOS == "darwin" {
