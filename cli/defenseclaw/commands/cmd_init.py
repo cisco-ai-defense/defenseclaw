@@ -1478,7 +1478,8 @@ def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:
         StepResult(
             "Agent Selection",
             "warn",
-            f"left out {', '.join(sorted(problems))}, which setup cannot select ({details})",
+            f"left out {', '.join(sorted(problems))}: no usable agent executable was found ({details}); "
+            "fix that, then add each one with defenseclaw setup <agent>",
             f"defenseclaw setup {first}",
         )
     )
