@@ -67,9 +67,43 @@ func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string 
 	return ""
 }
 
+// windowsNativePowerShellStartForTest is the statement of the encoded bridge
+// that names the per-user hook launcher and its arguments.
 func windowsNativePowerShellStartForTest(hookBinary, connector string) string {
-	return "$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
-		" -ArgumentList @('hook','--connector'," + powershellQuoteLiteral(connector) + ") -NoNewWindow -Wait -PassThru"
+	return "$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) +
+		",'hook --connector " + connector + "')"
+}
+
+// windowsAwaitedHookScriptForTest spells out the whole decoded bridge script
+// for hook arguments without spaces or quotes.
+func windowsAwaitedHookScriptForTest(hookBinary string, arguments ...string) string {
+	quoted := make([]string, len(arguments))
+	for i, argument := range arguments {
+		quoted[i] = powershellQuoteLiteral(argument)
+	}
+	return strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
+			powershellQuoteLiteral(strings.Join(arguments, " ")) + ")",
+		"$hookStart.UseShellExecute=$false",
+		"$hookStart.RedirectStandardError=$true",
+		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+		"$hookProcess.WaitForExit()",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+}
+
+// windowsBridgeBindsArgumentForTest reports whether a decoded awaited-hook
+// bridge passes flag and value to the launcher in both of its forms: the
+// Constrained Language fallback's quoted literals and the ProcessStartInfo
+// argument string.
+func windowsBridgeBindsArgumentForTest(decoded, flag, value string) bool {
+	return strings.Contains(decoded, powershellQuoteLiteral(flag)+" "+powershellQuoteLiteral(value)) &&
+		strings.Contains(decoded, " "+flag+" "+value)
 }
 
 func TestWindowsSystemPowerShellExeIgnoresMutableEnvironment(t *testing.T) {
@@ -805,6 +839,8 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	}{
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
+		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", "", "", hookBinary)},
+		{name: "event-bound-start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contractID, hookBinary)},
 		{
 			name: "event-bound-non-waiting",
 			command: legacyWindowsNativePowerShellHookCommandForCodexEvent(
@@ -865,12 +901,11 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 			}
 		})
 	}
+	// The repaired command awaits the launcher on the handle it started it
+	// with; $LASTEXITCODE is read only after Out-Host has awaited it.
 	decoded := decodePowerShellEncodedCommandForTest(t, current)
-	if strings.Contains(decoded, "$LASTEXITCODE") {
-		t.Fatalf("repaired command still depends on stale LASTEXITCODE: %s", decoded)
-	}
-	if !strings.Contains(decoded, "Microsoft.PowerShell.Management\\Start-Process") {
-		t.Fatalf("repaired command does not bypass broad module discovery: %s", decoded)
+	if want := windowsAwaitedHookScriptForTest(hookBinary, "hook", "--connector", "codex", "--event", event, "--hook-contract", contractID); decoded != want {
+		t.Fatalf("repaired command = %s\nwant %s", decoded, want)
 	}
 }
 
@@ -1243,16 +1278,36 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 			if want := windowsNativeHookCommand(connector); got != want {
 				t.Fatalf("wrapper command = %q, want shared builder output %q", got, want)
 			}
-			wantScript := strings.Join([]string{
-				"$ErrorActionPreference='Stop'",
-				"$env:NoDefaultCurrentDirectoryInExePath='1'",
-				windowsNativePowerShellStartForTest(windowsExe, connector),
-				"exit $hookProcess.ExitCode",
-			}, "; ")
+			wantScript := windowsAwaitedHookScriptForTest(windowsExe, "hook", "--connector", connector)
 			if decoded := decodePowerShellEncodedCommandForTest(t, got); decoded != wantScript {
 				t.Fatalf("decoded command = %q, want %q", decoded, wantScript)
 			}
 		})
+	}
+}
+
+// The exact ownership set is cached; a changed launcher must render a new
+// one, so a command for the previous launcher is no longer claimed.
+func TestNativeHookOwnershipFollowsTheCurrentLauncher(t *testing.T) {
+	const first = `C:\DefenseClawOwnershipTest\first\defenseclaw-hook.exe`
+	const second = `C:\DefenseClawOwnershipTest\second\defenseclaw-hook.exe`
+	firstCommand := windowsNativePowerShellHookCommandForBinary("codex", first)
+	secondCommand := windowsCopilotPowerShellHookCommandForBinary(second)
+
+	setHookBinaryOverride(t, first)
+	if !isNativeHookCommand(firstCommand) {
+		t.Fatal("the current launcher's Codex bridge is not owned")
+	}
+	if isNativeHookCommand(secondCommand) {
+		t.Fatal("another launcher's Copilot program is owned")
+	}
+
+	defenseclawHookBinaryOverride = second
+	if isNativeHookCommand(firstCommand) {
+		t.Fatal("the previous launcher's Codex bridge is still owned")
+	}
+	if !isNativeHookCommand(secondCommand) {
+		t.Fatal("the current launcher's Copilot program is not owned")
 	}
 }
 
@@ -1264,14 +1319,8 @@ func TestAntigravityWindowsHookCommandBindsOfficialEvent(t *testing.T) {
 		t.Fatalf("visible Antigravity command contains quote characters: %q", command)
 	}
 	decoded := decodePowerShellEncodedCommandForTest(t, command)
-	for _, expected := range []string{
-		powershellQuoteLiteral(windowsExe),
-		"'hook','--connector','antigravity','--event','PostInvocation'",
-		"-NoNewWindow -Wait -PassThru",
-	} {
-		if !strings.Contains(decoded, expected) {
-			t.Fatalf("encoded event command missing %q:\n%s", expected, decoded)
-		}
+	if want := windowsAwaitedHookScriptForTest(windowsExe, "hook", "--connector", "antigravity", "--event", "PostInvocation"); decoded != want {
+		t.Fatalf("encoded event command = %s\nwant %s", decoded, want)
 	}
 }
 
@@ -1721,7 +1770,7 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	command := hookInvocationCommandFor("windows", "codex", "")
 	decoded := decodePowerShellEncodedCommandForTest(t, command)
 	wantInvocation := windowsNativePowerShellStartForTest(defenseclawHookBinary(), "codex")
-	probeInvocation := "$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath 'where.exe' -ArgumentList @('cmd.exe') -NoNewWindow -Wait -PassThru"
+	probeInvocation := "$hookStart=[System.Diagnostics.ProcessStartInfo]::new('where.exe','cmd.exe')"
 	probeScript := strings.Replace(decoded, wantInvocation, probeInvocation, 1)
 	if probeScript == decoded {
 		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)
@@ -1892,8 +1941,8 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 				)
 			}
 			decoded := decodePowerShellEncodedCommandForTest(t, windowsCommand)
-			if !strings.Contains(decoded, "'--event','"+group.eventType+"'") ||
-				!strings.Contains(decoded, "'--hook-contract','"+contract.ContractID+"'") {
+			if !windowsBridgeBindsArgumentForTest(decoded, "--event", group.eventType) ||
+				!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", contract.ContractID) {
 				t.Errorf(
 					"event %s command did not bind event and contract %s: %s",
 					group.eventType,
@@ -2373,7 +2422,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 				decoded := decodePowerShellEncodedCommandForTest(t, wantCommand)
 				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
-					!strings.Contains(decoded, "'--event','PreToolUse'") {
+					!windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
 			} else if connectorName == "claudecode" {
@@ -2402,8 +2451,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					t.Errorf("Codex PreToolUse command_windows = %q, want %q", command, wantCommand)
 				}
 				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !strings.Contains(decoded, "'--event','PreToolUse'") ||
-					!strings.Contains(decoded, "'--hook-contract','codex-hooks-v4'") {
+				if !windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") ||
+					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
 			} else if connectorName == "copilot" {

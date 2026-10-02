@@ -105,18 +105,45 @@ func installedDevinConnector(t *testing.T) (connector.Connector, connector.Setup
 	return conn, opts, cfgPath
 }
 
-func waitForPresence(t *testing.T, conn connector.Connector, opts connector.SetupOpts, want bool, timeout time.Duration) {
+func requireOwnedHooks(t *testing.T, conn connector.Connector, opts connector.SetupOpts) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		present, err := connector.OwnedHooksPresent(conn, opts)
-		if err == nil && present == want {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent = %v, %v; want true", present, err)
 	}
-	present, err := connector.OwnedHooksPresent(conn, opts)
-	t.Fatalf("timed out waiting for OwnedHooksPresent==%v (last present=%v err=%v)", want, present, err)
+}
+
+// observeRepairs subscribes to the guard's repair outcomes. Waiting on them,
+// rather than polling the config, keeps the test from holding the file open
+// while the guard's Setup replaces it.
+func observeRepairs(guard *HookConfigGuard) <-chan hookGuardRepairOutcome {
+	outcomes := make(chan hookGuardRepairOutcome, 16)
+	guard.mu.Lock()
+	guard.repairObserver = func(outcome hookGuardRepairOutcome) {
+		select {
+		case outcomes <- outcome:
+		default:
+		}
+	}
+	guard.mu.Unlock()
+	return outcomes
+}
+
+// waitForRepair blocks until the guard completes a repair and then verifies
+// the restored hook contract. A busy-file failure re-arms the guard, so it
+// keeps waiting; any other failure is final. The wait is bounded only by the
+// go test timeout.
+func waitForRepair(t *testing.T, outcomes <-chan hookGuardRepairOutcome, conn connector.Connector, opts connector.SetupOpts) hookGuardRepairOutcome {
+	t.Helper()
+	for {
+		outcome := <-outcomes
+		if outcome.err == nil {
+			requireOwnedHooks(t, conn, opts)
+			return outcome
+		}
+		if !outcome.rearmed {
+			t.Fatalf("hook guard repair failed without re-arming: %v", outcome.err)
+		}
+	}
 }
 
 func TestHookConfigGuard_RestoresDeletedHookBlock(t *testing.T) {
@@ -125,18 +152,18 @@ func TestHookConfigGuard_RestoresDeletedHookBlock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	repairs := observeRepairs(guard)
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
 
-	waitForPresence(t, conn, opts, true, time.Second)
+	requireOwnedHooks(t, conn, opts)
 
 	// Simulate a user deleting the DefenseClaw hook block.
 	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("strip hook block: %v", err)
 	}
 
-	// The guard should re-install it within a few debounce cycles.
-	waitForPresence(t, conn, opts, true, 3*time.Second)
+	waitForRepair(t, repairs, conn, opts)
 }
 
 func TestHookConfigGuard_RecreatesDeletedFile(t *testing.T) {
@@ -145,16 +172,17 @@ func TestHookConfigGuard_RecreatesDeletedFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	repairs := observeRepairs(guard)
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
 
-	waitForPresence(t, conn, opts, true, time.Second)
+	requireOwnedHooks(t, conn, opts)
 
 	if err := os.Remove(cfgPath); err != nil {
 		t.Fatalf("remove config file: %v", err)
 	}
 
-	waitForPresence(t, conn, opts, true, 3*time.Second)
+	waitForRepair(t, repairs, conn, opts)
 	if _, err := os.Stat(cfgPath); err != nil {
 		t.Fatalf("config file not recreated: %v", err)
 	}
@@ -369,7 +397,7 @@ func TestHookConfigGuard_IgnoresUnrelatedEdits(t *testing.T) {
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
 
-	waitForPresence(t, conn, opts, true, time.Second)
+	requireOwnedHooks(t, conn, opts)
 
 	// Edit an unrelated top-level key while keeping the hook block intact.
 	data, err := os.ReadFile(cfgPath)
@@ -478,14 +506,15 @@ func TestHookConfigGuard_HealAuditRowsCarryConnector(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guard := NewHookConfigGuard(logger, runtime, guardTestDebounce)
+	repairs := observeRepairs(guard)
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
 
-	waitForPresence(t, conn, opts, true, time.Second)
+	requireOwnedHooks(t, conn, opts)
 	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("strip hook block: %v", err)
 	}
-	waitForPresence(t, conn, opts, true, 3*time.Second)
+	waitForRepair(t, repairs, conn, opts)
 
 	// The audit rows are written inside heal() around the presence flip;
 	// poll briefly so the assertion does not race the heal's DB writes.
@@ -560,16 +589,18 @@ func TestHookConfigGuard_NotifierFiresOnHeal(t *testing.T) {
 	guard.SetHealNotifier(func(name string, paths []string) {
 		calls <- healCall{name: name, paths: paths}
 	})
+	repairs := observeRepairs(guard)
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
 
-	waitForPresence(t, conn, opts, true, time.Second)
+	requireOwnedHooks(t, conn, opts)
 
 	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("strip hook block: %v", err)
 	}
-	waitForPresence(t, conn, opts, true, 3*time.Second)
+	waitForRepair(t, repairs, conn, opts)
 
+	// The notifier runs inside the repair, before its outcome is published.
 	select {
 	case got := <-calls:
 		if got.name != conn.Name() {
@@ -580,7 +611,7 @@ func TestHookConfigGuard_NotifierFiresOnHeal(t *testing.T) {
 		} else if got.paths[0] != cfgPath {
 			t.Errorf("notifier path = %q, want %q", got.paths[0], cfgPath)
 		}
-	case <-time.After(3 * time.Second):
+	default:
 		t.Fatal("heal notifier did not fire after a successful re-install")
 	}
 }
@@ -812,9 +843,10 @@ func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	repairs := observeRepairs(guard)
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
-	waitForPresence(t, conn, opts, true, time.Second)
+	requireOwnedHooks(t, conn, opts)
 
 	// Suppress healing, then strip the hook block. The deletion lands
 	// inside the suppression window and must NOT be auto-restored.
@@ -840,7 +872,7 @@ func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("re-strip hook block after window: %v", err)
 	}
-	waitForPresence(t, conn, opts, true, 3*time.Second)
+	waitForRepair(t, repairs, conn, opts)
 }
 
 func TestHookConfigGuard_RepointFollowsConnectorSwitch(t *testing.T) {
@@ -850,9 +882,10 @@ func TestHookConfigGuard_RepointFollowsConnectorSwitch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	repairs := observeRepairs(guard)
 	guard.Start(ctx, cursorConn, cursorOpts)
 	defer guard.Stop()
-	waitForPresence(t, cursorConn, cursorOpts, true, time.Second)
+	requireOwnedHooks(t, cursorConn, cursorOpts)
 
 	// Switch the guard to the devin connector.
 	guard.Repoint(devinConn, devinOpts)
@@ -861,14 +894,26 @@ func TestHookConfigGuard_RepointFollowsConnectorSwitch(t *testing.T) {
 	if err := os.WriteFile(devinPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("strip devin hook block: %v", err)
 	}
-	waitForPresence(t, devinConn, devinOpts, true, 3*time.Second)
+	if outcome := waitForRepair(t, repairs, devinConn, devinOpts); outcome.connector != devinConn.Name() {
+		t.Fatalf("repaired connector = %q, want %q", outcome.connector, devinConn.Name())
+	}
 
-	// Deleting the previous connector's hook block is NOT healed: the guard
-	// repointed away from it.
+	// Deleting the previous connector's hook block is NOT healed: after the
+	// repoint the guard neither targets nor watches cursor's config, so the
+	// edit cannot reach it, and every repair runs for the active connector.
+	cursorClean := filepath.Clean(cursorPath)
+	guard.mu.Lock()
+	_, cursorTargeted := guard.targets[cursorClean]
+	_, cursorDirWatched := guard.watchedDirs[filepath.Dir(cursorClean)]
+	activeConnector := guard.conn.Name()
+	guard.mu.Unlock()
+	if cursorTargeted || cursorDirWatched || activeConnector != devinConn.Name() {
+		t.Fatalf("guard still follows cursor after repoint (targeted=%v watched=%v active=%s)",
+			cursorTargeted, cursorDirWatched, activeConnector)
+	}
 	if err := os.WriteFile(cursorPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("strip cursor hook block: %v", err)
 	}
-	time.Sleep(20 * guardTestDebounce)
 	present, err := connector.OwnedHooksPresent(cursorConn, cursorOpts)
 	if err != nil {
 		t.Fatalf("OwnedHooksPresent cursor: %v", err)

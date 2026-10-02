@@ -101,8 +101,11 @@ end {
         finally {
             if ($started -and -not $process.HasExited) {
                 try {
+                    # Kill() only starts termination. Wait briefly: this wait
+                    # and the exit below share the reserve left after
+                    # $timeoutMs inside Cursor's 30-second hook budget.
                     $process.Kill()
-                    [void]$process.WaitForExit(5000)
+                    [void]$process.WaitForExit(2000)
                 }
                 catch {
                     [Console]::Error.WriteLine(
@@ -141,9 +144,18 @@ end {
     }
     # powershell.exe -Command reduces a non-zero exit from an invoked script
     # to the generic process code 1. Cursor distinguishes the adapter's exact
-    # fail-closed code, so flush the direct console writes and terminate this
-    # dedicated hook host with the intended code.
+    # fail-closed code, so flush the direct console writes and have this
+    # dedicated hook host exit with the intended code. SetShouldExit does that
+    # through the console host; Windows PowerShell 5.1 spends seconds in
+    # runtime shutdown after [System.Environment]::Exit (about 3s on an idle
+    # host, more on a busy one), which Cursor counts against the hook budget.
+    # Hosts that do not support SetShouldExit keep the forced exit.
     [Console]::Out.Flush()
     [Console]::Error.Flush()
-    [System.Environment]::Exit([int]$exitCode)
+    try {
+        $Host.SetShouldExit([int]$exitCode)
+    }
+    catch {
+        [System.Environment]::Exit([int]$exitCode)
+    }
 }

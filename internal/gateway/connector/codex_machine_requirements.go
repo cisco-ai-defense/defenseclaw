@@ -241,23 +241,17 @@ type codexMachineRequirementsLayout struct {
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
 // managed group. It names the group's event and the hook contract, which
-// the hook requires, and starts the GUI-subsystem launcher through
-// Start-Process -Wait: the PowerShell call operator does not wait for a
-// GUI-subsystem process, so its exit code (2 blocks) and stdout never
-// reached Codex and every decision was lost.
+// the hook requires, and starts the GUI-subsystem launcher through the
+// awaited Process.Start statements (windowsAwaitedHookStatements): the
+// PowerShell call operator does not wait for a GUI-subsystem process, so its
+// exit code (2 blocks) and stdout never reached Codex and every decision was
+// lost.
 func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
 	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
-	quoted := make([]string, 0, len(arguments))
-	for _, argument := range arguments {
-		quoted = append(quoted, powershellQuoteLiteral(argument))
-	}
-	script := strings.Join([]string{
+	script := strings.Join(append([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
-			" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
-		"exit $hookProcess.ExitCode",
-	}, "; ")
+	}, windowsAwaitedHookStatements(hookBinary, arguments)...), "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 

@@ -103,7 +103,7 @@ func TestConnectorReconcilePublishesManagedCodexRegistrationInSubprocess(t *test
 		}
 		decoded := decodeCodexManagedPowerShellCommand(t, command)
 		if !strings.Contains(strings.ToLower(decoded), strings.ToLower(expectedHook)) ||
-			!strings.Contains(strings.ToLower(decoded), "'hook','--connector','codex'") {
+			!strings.Contains(strings.ToLower(decoded), "'hook' '--connector' 'codex'") {
 			t.Fatalf("managed hooks.%s does not name the exact hook contract: %q", event, decoded)
 		}
 	}

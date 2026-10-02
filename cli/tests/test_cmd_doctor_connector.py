@@ -37,9 +37,11 @@ Coverage:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -802,6 +804,19 @@ class TestCheckConnectorHooks(unittest.TestCase):
         )
         self.assertEqual(run_mock.call_args.kwargs["env"]["SystemRoot"], r"C:\Windows")
         self.assertEqual(run_mock.call_args.kwargs["env"]["WINDIR"], r"C:\Windows")
+        # A cold profile analyzes the modules on PSModulePath the first time a
+        # cmdlet must be auto-loaded. The wrapper imports the two core modules
+        # from $PSHOME before its only other cmdlet, so nothing is discovered.
+        script = base64.b64decode(argv[4]).decode("utf-16-le")
+        self.assertRegex(
+            script,
+            r'^\$OutputEncoding = [^;]+; Import-Module -ErrorAction Stop -Name '
+            r'"\$PSHOME\\Modules\\Microsoft\.PowerShell\.Management\\Microsoft\.PowerShell\.Management\.psd1", '
+            r'"\$PSHOME\\Modules\\Microsoft\.PowerShell\.Utility\\Microsoft\.PowerShell\.Utility\.psd1"; ',
+        )
+        self.assertEqual(
+            re.findall(r"\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b", script), ["Import-Module", "Get-Content"]
+        )
         self.assertEqual(
             run_mock.call_args.kwargs["timeout"],
             _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,

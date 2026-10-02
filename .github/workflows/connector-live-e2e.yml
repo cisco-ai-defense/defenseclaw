@@ -161,6 +161,9 @@ jobs:
   # Gate — decide which contract cells to run for this event.
   #
   #   schedule / workflow_dispatch → full 2-OS x 9 Unix shell-hook matrix.
+  #                                  Linux gets one cell per connector; macOS
+  #                                  runs every connector in one cell so the
+  #                                  ~2 min install is paid once, not 9 times.
   #   pull_request                 → just the always-on macOS smoke cell,
   #                                  unless the PR touches connector / hook /
   #                                  registry / contract-script / workflow
@@ -187,7 +190,9 @@ jobs:
           # The Unix harness covers connectors with executable shell-hook
           # contracts. Plugin/policy transports have their own focused gates.
           # Native Windows contract validation is a separate, explicit x64 matrix.
-          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","amp","cursor","copilot","openhands","hermes","devin","antigravity"]}'
+          # The macOS entry keeps the "Contract codex / macos-latest" name that
+          # branch protection requires, but runs every listed connector.
+          full='{"os":["ubuntu-latest"],"connector":["codex","claudecode","amp","cursor","copilot","openhands","hermes","devin","antigravity"],"include":[{"os":"macos-latest","connector":"codex","connectors":"codex claudecode amp cursor copilot openhands hermes devin antigravity"}]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
           # chosen because windows-native.yml separately checks the native
           # Windows hook contract on every PR. This adds the missing native macOS
@@ -270,6 +275,7 @@ jobs:
           INPUT_CONNECTOR: ${{ inputs.connector }}
           INPUT_OS: ${{ inputs.os }}
           MATRIX_CONNECTOR: ${{ matrix.connector }}
+          MATRIX_CONNECTORS: ${{ matrix.connectors }}
         run: |
           case "${RUNNER_OS}" in
             Linux)   dcos=linux ;;
@@ -278,15 +284,23 @@ jobs:
           esac
           echo "DC_E2E_OS=${dcos}" >> "$GITHUB_ENV"
 
-          run=true
+          connectors="${MATRIX_CONNECTORS:-${MATRIX_CONNECTOR}}"
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             in_conn="${INPUT_CONNECTOR}"
             in_os="${INPUT_OS}"
-            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${MATRIX_CONNECTOR}" ] || run=false
-            [ "${in_os}" = "all" ] || [ "${in_os}" = "${dcos}" ] || run=false
+            if [ "${in_conn}" != "all" ]; then
+              case " ${connectors} " in
+                *" ${in_conn} "*) connectors="${in_conn}" ;;
+                *) connectors="" ;;
+              esac
+            fi
+            [ "${in_os}" = "all" ] || [ "${in_os}" = "${dcos}" ] || connectors=""
           fi
+          run=false
+          [ -z "${connectors}" ] || run=true
           echo "run=${run}" >> "$GITHUB_OUTPUT"
-          echo "cell ${{ matrix.connector }}/${dcos} selected=${run}"
+          echo "connectors=${connectors}" >> "$GITHUB_OUTPUT"
+          echo "cell ${dcos} connectors=[${connectors}] selected=${run}"
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: steps.select.outputs.run == 'true'
@@ -318,17 +332,29 @@ jobs:
             echo "${{ github.workspace }}/.venv/Scripts" >> "$GITHUB_PATH"
           fi
 
-      # Deterministic Go contract tests for this connector. The shared
-      # connector lifecycle / observability / verify matrices are
-      # connector-parameterized; filtering with -run to the active cell makes
-      # a failure point at exactly which connector regressed. A connector with
+      # Deterministic Go contract tests for each connector in the cell. The
+      # shared connector lifecycle / observability / verify matrices are
+      # connector-parameterized; filtering with -run per connector makes a
+      # failure point at exactly which connector regressed. A connector with
       # no dedicated subtest matches nothing and `go test` exits 0, so the
       # golden-payload smoke below is its real Layer-A coverage.
       - name: Go contract tests
         if: steps.select.outputs.run == 'true'
+        env:
+          CELL_CONNECTORS: ${{ steps.select.outputs.connectors }}
         run: |
-          go test -count=1 ./test/e2e/ \
-            -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}|TestGoldenPerConnectorLayout"
+          failed=""
+          for c in ${CELL_CONNECTORS}; do
+            echo "::group::go contract tests: ${c}"
+            go test -count=1 ./test/e2e/ \
+              -run "TestConnectorLifecycle_Matrix/${c}|TestV7Observability_DestinationAppPerConnector/${c}|TestConnectorVerifyCleanOnFreshDataDir/${c}|TestGoldenPerConnectorLayout" \
+              || failed="${failed} ${c}"
+            echo "::endgroup::"
+          done
+          if [ -n "${failed}" ]; then
+            echo "::error::Go contract tests failed for:${failed}"
+            exit 1
+          fi
 
       # Golden-payload entrypoint smoke: feed each registry event into its Unix
       # contract entrypoint and assert fire + verdict shaping + clean teardown.
@@ -346,13 +372,14 @@ jobs:
         # daemon is spawned without inheriting the script's environment.
         env:
           DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT: "1"
-        run: bash scripts/live-connector-e2e/run.sh --layer contract --connector "${{ matrix.connector }}"
+          CELL_CONNECTORS: ${{ steps.select.outputs.connectors }}
+        run: bash scripts/live-connector-e2e/run.sh --layer contract --connector "${CELL_CONNECTORS}"
 
       - name: Upload contract results
         if: ${{ always() && steps.select.outputs.run == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: connector-live-e2e-results-contract-${{ matrix.connector }}-${{ env.DC_E2E_OS }}
+          name: connector-live-e2e-results-contract-${{ matrix.connectors && 'all' || matrix.connector }}-${{ env.DC_E2E_OS }}
           path: ${{ env.DC_E2E_RESULTS }}
           if-no-files-found: ignore
           retention-days: 7
@@ -361,7 +388,7 @@ jobs:
         if: ${{ failure() && steps.select.outputs.run == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: connector-live-e2e-logs-contract-${{ matrix.connector }}-${{ env.DC_E2E_OS }}
+          name: connector-live-e2e-logs-contract-${{ matrix.connectors && 'all' || matrix.connector }}-${{ env.DC_E2E_OS }}
           path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
           if-no-files-found: ignore
           retention-days: 7

@@ -1996,7 +1996,7 @@ connection.close()
             Join-Path $projectionStateRoot '.canonical-event-projection'
         ) -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
         Assert-True ($projectionFiles.Count -eq 0) `
-            'private canonical projection snapshots are deleted immediately after each read'
+            'canonical polls stream records without creating projection snapshots'
 
         $delayedSessionId = 'windows-contract-delayed-session'
         $delayedRequestId = [guid]::NewGuid().ToString()
@@ -2024,7 +2024,7 @@ import sys
 import time
 from pathlib import Path
 
-database, raw, uncommitted_ready, commit_ready, committed_ready = sys.argv[1:]
+database, raw, uncommitted_ready, commit_ready, committed_ready, bound = sys.argv[1:]
 event = json.loads(raw)
 correlation = event["correlation"]
 connection = sqlite3.connect(database, timeout=5)
@@ -2046,7 +2046,7 @@ connection.execute(
     ),
 )
 Path(uncommitted_ready).write_text("ready", encoding="utf-8")
-deadline = time.monotonic() + 10
+deadline = time.monotonic() + float(bound)
 while not Path(commit_ready).is_file():
     if time.monotonic() >= deadline:
         raise TimeoutError("commit authorization was not published")
@@ -2057,21 +2057,29 @@ Path(committed_ready).write_text("committed", encoding="utf-8")
 '@
         $pythonApplication = (Get-Command 'python.exe' -CommandType Application `
             -ErrorAction Stop | Select-Object -First 1).Source
-        $walWriter = Start-Job -ArgumentList @(
-            $pythonApplication, $walPython, $database, $delayedRaw,
-            $uncommittedReady, $commitReady, $committedReady
-        ) -ScriptBlock {
-            param($Python, $Code, $Database, $Raw, $Uncommitted, $Commit, $Committed)
-            & $Python -c $Code $Database $Raw $Uncommitted $Commit $Committed
-            if ($LASTEXITCODE -ne 0) { throw "SQLite WAL fixture exited $LASTEXITCODE" }
-        }
-        $uncommittedDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        # The writer is a direct child, not a background job, so no second
+        # PowerShell start-up sits in front of it. Its ready files are the
+        # synchronization; the bound is hang protection and uses the
+        # harness launch budget, because interpreter start-up on a loaded
+        # runner is not what this fixture measures.
+        $walBound = $CommandTimeoutSeconds
+        $walStart = [Diagnostics.ProcessStartInfo]::new($pythonApplication)
+        $walStart.UseShellExecute = $false
+        $walStart.CreateNoWindow = $true
+        $walStart.RedirectStandardError = $true
+        foreach ($argument in @(
+            '-c', $walPython, $database, $delayedRaw,
+            $uncommittedReady, $commitReady, $committedReady, [string]$walBound
+        )) { [void]$walStart.ArgumentList.Add($argument) }
+        $walWriter = [Diagnostics.Process]::Start($walStart)
+        $walWriterStderr = $walWriter.StandardError.ReadToEndAsync()
+        $uncommittedDeadline = [DateTime]::UtcNow.AddSeconds($walBound)
         while (-not (Test-Path -LiteralPath $uncommittedReady -PathType Leaf)) {
-            if ($walWriter.State -eq 'Failed') {
-                Receive-Job $walWriter -ErrorAction Stop | Out-Null
+            if ($walWriter.HasExited) {
+                throw "SQLite WAL fixture exited $($walWriter.ExitCode) before its uncommitted row: $($walWriterStderr.Result)"
             }
             if ([DateTime]::UtcNow -ge $uncommittedDeadline) {
-                throw 'SQLite WAL fixture did not publish its uncommitted row'
+                throw "SQLite WAL fixture did not publish its uncommitted row within ${walBound}s"
             }
             Start-Sleep -Milliseconds 50
         }
@@ -2104,11 +2112,10 @@ Path(committed_ready).write_text("committed", encoding="utf-8")
             -not [bool]$delayedObserved.would_block -and
             -not [bool]$delayedObserved.enforced) `
             'session-bound readiness observes the exact canonical decision after WAL commit'
-        Wait-Job -Job $walWriter -Timeout 10 | Out-Null
-        Assert-True ($walWriter.State -eq 'Completed' -and
+        $walExited = $walWriter.WaitForExit($walBound * 1000)
+        Assert-True ($walExited -and $walWriter.ExitCode -eq 0 -and
             (Test-Path -LiteralPath $committedReady -PathType Leaf)) `
             'SQLite WAL writer committed and closed within the bounded fixture'
-        Receive-Job $walWriter -ErrorAction Stop | Out-Null
 
         $validatorSnapshot = New-CanonicalAuditProjectionSnapshot
         try {
@@ -2271,11 +2278,96 @@ connection.close()
             Assert-True $corruptionRejected `
                 "canonical SQLite reader rejects a $($corruption.Name)"
         }
+
+        $servingProjector = $script:CanonicalAuditProjector
+        Assert-True ($null -ne $servingProjector -and -not $servingProjector.Process.HasExited) `
+            'canonical SQLite reads are served by a live long-lived projector'
+        $projectionRoot = Join-Path ([IO.Path]::GetFullPath($StateRoot)) '.canonical-event-projection'
+        $snapshotsBeforePolls = @(Get-ChildItem -LiteralPath $projectionRoot -Force -ErrorAction SilentlyContinue).Count
+        foreach ($poll in 1..20) {
+            Assert-True (@(Get-EventLines $script:AuditDb).Count -eq 6) `
+                "canonical poll $poll reads the committed history"
+        }
+        Assert-True (@(Get-ChildItem -LiteralPath $projectionRoot -Force -ErrorAction SilentlyContinue).Count -eq
+            $snapshotsBeforePolls) `
+            'canonical polls stream records and leave no snapshot file behind'
+        Assert-True ([object]::ReferenceEquals($script:CanonicalAuditProjector, $servingProjector) -and
+            -not $servingProjector.Process.HasExited) `
+            'repeated canonical polls and rejected projections reuse one projector process'
+
+        # Interpreter start-up is not charged to any poll: a projector that
+        # takes longer to start than the whole per-request bound still serves
+        # the poll, and later polls stay within that bound.
+        $null = Stop-CanonicalAuditProjector
+        $slowStartProjector = Join-Path $temp 'slow-start-projector.py'
+        [IO.File]::WriteAllText($slowStartProjector, @"
+import importlib.util
+import sys
+import time
+
+time.sleep(3)
+spec = importlib.util.spec_from_file_location("projector", r"$auditProjector")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sys.argv = [sys.argv[0], "--serve"]
+raise SystemExit(module.main())
+"@)
+        $script:CanonicalAuditProjectorScript = $slowStartProjector
+        $script:CanonicalAuditProjectionRequestTimeoutSeconds = 1
+        $script:CanonicalAuditProjectorStartTimeoutSeconds = 120
+        $slowStartWatch = [Diagnostics.Stopwatch]::StartNew()
+        $slowStartDecision = Wait-HookDecisionAfter `
+            -Since 5 -Deadline ([DateTime]::UtcNow.AddSeconds(120)) `
+            -SessionID $delayedSessionId -HookEvent $hookEvent
+        $slowStartWatch.Stop()
+        Assert-True ($null -ne $slowStartDecision -and
+            [string]$slowStartDecision.request_id -ceq $delayedRequestId -and
+            $slowStartWatch.Elapsed.TotalSeconds -ge 3) `
+            'a projector start-up slower than the per-request bound does not fail the poll'
+        foreach ($poll in 1..5) {
+            Assert-True (@(Get-EventLines $script:AuditDb).Count -eq 6) `
+                "poll $poll after a slow projector start-up reads the committed history"
+        }
+
+        # The per-request bound remains hang protection: a request that never
+        # answers fails within it and the hung projector is killed.
+        $null = Stop-CanonicalAuditProjector
+        $hungProjector = Join-Path $temp 'hung-request-projector.py'
+        [IO.File]::WriteAllText($hungProjector, @'
+import sys
+import threading
+
+sys.stdout.write('{"ready":true,"protocol":1}\n')
+sys.stdout.flush()
+sys.stdin.readline()
+threading.Event().wait()
+'@)
+        $script:CanonicalAuditProjectorScript = $hungProjector
+        $hungMessage = ''
+        $hungWatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $null = @(Get-EventLines $script:AuditDb)
+        } catch {
+            $hungMessage = $_.Exception.Message
+        }
+        $hungWatch.Stop()
+        $hungSurvivors = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($hungProjector) })
+        Assert-True ($hungMessage -match 'did not answer its projection request within 1s' -and
+            $null -eq $script:CanonicalAuditProjector -and
+            $hungWatch.Elapsed.TotalSeconds -lt 30 -and
+            $hungSurvivors.Count -eq 0) `
+            'a hung projection request fails within its hang-protection bound and kills the projector'
     } finally {
         if ($null -ne $walWriter) {
-            Stop-Job $walWriter -ErrorAction SilentlyContinue
-            Remove-Job $walWriter -Force -ErrorAction SilentlyContinue
+            if (-not $walWriter.HasExited) { $walWriter.Kill($true) }
+            $null = $walWriter.WaitForExit(5000)
+            $walWriter.Dispose()
         }
+        $null = Stop-CanonicalAuditProjector
+        $script:CanonicalAuditProjectorScript = ''
+        $script:CanonicalAuditProjectionRequestTimeoutSeconds = 15
+        $script:CanonicalAuditProjectorStartTimeoutSeconds = $CommandTimeoutSeconds
         $script:AuditDb = $savedAuditDb
         $StateRoot = $savedStateRoot
     }
@@ -2945,9 +3037,9 @@ connection.close()
         $nativeHarnessText,
         '(?s)function Set-WizardCodexLegacyNonWaitingHook\b.*?(?=\r?\nfunction )'
     ).Value
-    Assert-True ($legacyLauncherFixture -match '--event' -and
-        $legacyLauncherFixture -match '--hook-contract' -and
-        $legacyLauncherFixture -match '\$argumentLiterals\.Value -join '' ''') `
+    Assert-True ($legacyLauncherFixture -match '\$bridge = Get-AwaitedHookBridge \$script' -and
+        $legacyLauncherFixture -match '\$bridge\.Invocation \+ ''; exit \$LASTEXITCODE''' -and
+        $legacyLauncherFixture -notmatch 'argumentLiterals') `
         'legacy Codex launcher fixture preserves current event and hook-contract bindings'
     $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
     $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)
@@ -2998,46 +3090,22 @@ connection.close()
         $contractFunction.IndexOf('$env:APPDATA =', [StringComparison]::Ordinal) -gt
             $contractFunction.IndexOf("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D", [StringComparison]::Ordinal)) `
         'connector contract binds Profile, LocalAppData, and RoamingAppData to the current process token before hostile environment isolation'
-    Assert-True ($connectorContractJob -match '(?s)Required connector contract with one bounded telemetry retry.*?Invoke-ConnectorContractAttempt.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$attemptDiagnostics' -and
+    Assert-True ($connectorContractJob -match '(?s)Required connector contract\r?\n.*?Invoke-WindowsNativeProcess.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$contractDiagnostics' -and
         $connectorContractJob -match "timeout-minutes: \$\{\{ matrix\.connector == 'devin' && 50 \|\| 35 \}\}" -and
         $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
         'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
-    $connectorRetryStep = [regex]::Match(
+    $connectorContractStep = [regex]::Match(
         $connectorContractJob,
-        '(?ms)^      - name: Required connector contract with one bounded telemetry retry.*?(?=^      - name:)'
+        '(?ms)^      - name: Required connector contract\r?\n.*?(?=^      - name:)'
     ).Value
-    $retryCaptureIndex = $connectorRetryStep.IndexOf("'-Operation', 'capture'", [StringComparison]::Ordinal)
-    $retryCleanupIndex = $connectorRetryStep.IndexOf("'-Operation', 'cleanup'", [StringComparison]::Ordinal)
-    $retrySecondAttemptIndex = $connectorRetryStep.IndexOf(
-        '$second = Invoke-ConnectorContractAttempt 2', [StringComparison]::Ordinal
-    )
-    $retryCleanupFailurePrefixes = @(
-        'disposable execution boundary:',
-        'interactive desktop ACL restore:',
-        'ancestor ACL lease restore:',
-        'diagnostic handoff:',
-        'account/profile cleanup:',
-        'sandbox cleanup:',
-        'parent-only sibling cleanup:'
-    )
-    Assert-True ($connectorRetryStep -match '\. \$nativeHarness -NoRun' -and
-        $connectorRetryStep -match '\$first = Invoke-ConnectorContractAttempt 1' -and
-        $connectorRetryStep -match '\$retrySignal = ''event_history=sqlite_write_failed''' -and
-        $connectorRetryStep -notmatch 'rollback was incomplete' -and
-        @($retryCleanupFailurePrefixes | Where-Object {
-            -not $connectorRetryStep.Contains("'$_'", [StringComparison]::Ordinal)
-        }).Count -eq 0 -and
-        $connectorRetryStep -match '\$firstOutput\.Contains\(\$_, \[StringComparison\]::Ordinal\)' -and
-        $connectorRetryStep -match '\$cleanupFailure\.Count -ne 0' -and
-        $connectorRetryStep -match '-AllowedExitCodes @\(0, 1\)' -and
-        $retryCaptureIndex -ge 0 -and $retryCleanupIndex -gt $retryCaptureIndex -and
-        $retrySecondAttemptIndex -gt $retryCleanupIndex -and
-        $connectorRetryStep -match 'Test-Path -LiteralPath \$contractStateRoot' -and
-        $connectorRetryStep -match 'Get-StateProcesses \$contractStateRoot' -and
-        $connectorRetryStep -match 'attempt-\$Attempt-child' -and
-        $connectorRetryStep -match 'Write-BoundedText.*?\$env:CONNECTOR-event-history-retry\.txt' -and
-        $connectorContractJob -match 'steps\.connector_contract\.outputs\.retried == ''true''') `
-        'every connector retries only the exact SQLite telemetry transient after bounded capture and complete isolated cleanup'
+    Assert-True ($connectorContractStep -match '\. \$nativeHarness -NoRun' -and
+        $connectorContractStep -match '-AllowedExitCodes @\(0, 1\)' -and
+        $connectorContractStep -match '\$contract\.ExitCode -ne 0' -and
+        $connectorContractStep -notmatch 'Attempt' -and
+        $connectorContractStep -notmatch 'sqlite_write_failed' -and
+        $connectorContractJob -notmatch 'retried' -and
+        $connectorContractJob -match 'Upload diagnostics on failure\r?\n        if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}') `
+        'every connector contract runs once; a telemetry failure fails the job instead of being retried'
     Assert-True ($omniGentJob -match '(?s)invoke-windows-setup-standard-user-ci\.ps1.*?-Mode omnigent-native-degraded.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
         $standardUserCIText -match "'omnigent-native-degraded'" -and
         $standardUserCIText -match 'test-omnigent-windows-native\.ps1' -and
@@ -3376,6 +3444,10 @@ connection.close()
         $nativeHarnessText,
         '(?s)function New-WizardAgentFixtures\b.*?(?=\r?\nfunction Remove-WizardAgentFixtures)'
     ).Value
+    $fixtureCompiler = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function New-WizardFixtureExecutable\b.*?(?=\r?\nfunction New-WizardAgentFixtures)'
+    ).Value
     $agentFixtureCleanupFunction = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Remove-WizardAgentFixtures\b.*?(?=\r?\nfunction )'
@@ -3402,8 +3474,19 @@ connection.close()
         '\$openCodePath = Join-Path \$openCodeBin ''opencode\.exe''' -and
         $agentFixtureFunction -match 'OpenCodeVersionFixture' -and
         $agentFixtureFunction -match 'opencode 1\.18\.11' -and
-        $agentFixtureFunction -match "(?s)foreach \(\`$attempt in 1\.\.3\).*?\`$openCodePath @\('--version'\) -TimeoutSeconds 2" -and
+        $agentFixtureFunction -match "\`$openCodePath @\('--version'\) -TimeoutSeconds 30" -and
+        $agentFixtureFunction -notmatch "\`$openCodePath @\('--version'\) -TimeoutSeconds [0-9]\b" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
+        $agentFixtureFunction -match 'New-WizardFixtureExecutable \$fixture\.ClassName \$fixture\.Source \$fixture\.Path' -and
+        $agentFixtureFunction -notmatch 'csc\.exe' -and
+        $fixtureCompiler -match 'CSharpCompilation\]::Create' -and
+        $fixtureCompiler -match 'Framework64\\v4\.0\.30319\\mscorlib\.dll' -and
+        $fixtureCompiler -match 'FileMode\]::CreateNew' -and
+        $fixtureCompiler -match 'CreateDefaultWin32Resources\(\$true, \$false, \$null, \$null\)' -and
+        $fixtureCompiler -match 'Emit\(\$stream, \$null, \$null, \$win32Resources\)' -and
+        $fixtureCompiler -notmatch 'Invoke-WindowsNativeProcess|Start-Process|csc\.exe' -and
+        $agentFixtureFunction -match "\(\`$fixture\.ClassName \+ '\.go'\)" -and
+        $agentFixtureFunction -notmatch "'\.cs'" -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesPath' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.HermesBin' -and
         $agentFixtureCleanupFunction -match 'Fixtures\.OpenCodePath' -and
@@ -3775,15 +3858,16 @@ connection.close()
             "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')",
             [StringComparison]::Ordinal
         )
-        return $prewarm -ge 0 -and $readiness -gt $prewarm
+        return $prewarm -ge 0 -and $readiness -ge 0 -and $prewarm -gt $readiness
     }
     Assert-True (& $hasHealthSamplerPrewarm $setupHealthSampler) `
-        'Setup health sampler initializes its listener provider before publishing readiness'
-    Assert-True ($setupHealthSampler -match '\$prewarmDeadline = \[DateTime\]::UtcNow\.AddSeconds\(20\)' -and
-        $setupHealthSampler -match '(?s)do \{.*?Get-NetTCPConnection.*?\$prewarmListeners\.Count -gt 0.*?Start-Sleep -Milliseconds 100.*?\} while \(\$true\)' -and
-        $setupHealthSampler -match '\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(30\)' -and
-        $setupHealthSampler -match "Setup health sampler readiness cleanup timed out") `
-        'Setup health sampler cold-provider retry, readiness polling, and cleanup remain bounded'
+        'Setup health sampler publishes its started record before its listener-provider prewarm'
+    Assert-True ($setupHealthSampler -notmatch 'prewarmDeadline' -and
+        $setupHealthSampler -match "stage = 'listener_prewarm'" -and
+        $setupHealthSampler -match '(?s)while \(-not \(Test-Path -LiteralPath \$outcome -PathType Leaf\)\).*?\$process\.HasExited' -and
+        $setupHealthSampler -notmatch '\$deadline = ' -and
+        $setupHealthSampler -match '\$process\.Kill\(\$true\)\s+\$process\.WaitForExit\(\)') `
+        'Setup health sampler has no wall clock; prewarm, readiness, and cleanup are event-ordered'
     Assert-True (-not (& $hasHealthSamplerPrewarm $setupHealthSampler.Replace(
                 "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
             ))) `
@@ -3792,10 +3876,10 @@ connection.close()
         "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)", ''
     ).Replace(
         "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')",
-        "`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')`n`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)"
+        "`$prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort `$ApiPort -ErrorAction Stop)`n`$stream = [IO.FileStream]::new(`$OutcomePath, 'CreateNew', 'Write', 'Read')"
     )
     Assert-True (-not (& $hasHealthSamplerPrewarm $reorderedHealthSampler)) `
-        'Setup health sampler prewarm predicate rejects readiness published before preload'
+        'Setup health sampler prewarm predicate rejects a prewarm that delays the started record'
     Assert-True ($setupHealthSamplerContract -match '\$listener = \[Net\.Sockets\.TcpListener\]::new\(\[Net\.IPAddress\]::Loopback, 0\)' -and
         $setupHealthSamplerContract -match 'started_at = \$startedAt' -and
         $setupHealthSamplerContract -match 'uptime_ms = 1' -and
@@ -3813,18 +3897,19 @@ connection.close()
         '$sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath',
         [StringComparison]::Ordinal
     )
-    $sampleDeadlineStart = $setupHealthSamplerContract.IndexOf(
-        '$sampleDeadline = [DateTime]::UtcNow.AddSeconds(15)',
+    $sampleWaitStart = $setupHealthSamplerContract.IndexOf(
+        "`$sample = Wait-SetupAcceptanceHealthSamplerRecord `$sampler `$sampleOutcomePath 'sample'",
         [StringComparison]::Ordinal
     )
     Assert-True ($sampleSamplerStart -ge 0 -and
-        $sampleDeadlineStart -gt $sampleSamplerStart -and
+        $sampleWaitStart -gt $sampleSamplerStart -and
+        $setupHealthSamplerContract -notmatch 'AddSeconds\(' -and
         ([regex]::Matches(
             $setupHealthSamplerContract.Substring($sampleSamplerStart),
             'Start-SetupAcceptanceHealthSampler'
         )).Count -eq 1 -and
         $setupHealthSamplerContract -notmatch 'foreach \(\$attempt in 1\.\.2\)') `
-        'hosted-equivalent Setup health sampler uses one persistent sampler with a fresh post-readiness deadline'
+        'hosted-equivalent Setup health sampler uses one persistent sampler and waits for its sample or exit, not a deadline'
     Assert-True ($harnessText -match 'CLAUDE_CODE_USE_POWERSHELL_TOOL = ''1''' -and
         $harnessText -match 'https://claude\.ai/install\.ps1' -and
         $harnessText -match '\.local\\bin\\claude\.exe' -and
@@ -4760,11 +4845,10 @@ connection.close()
     ).Value
     Assert-True ($doctorContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
         $doctorSetupContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
-        $synchronousCodexHookContract -match 'Start-Process' -and
-        $synchronousCodexHookContract -match '-NoNewWindow\\s\+\-Wait\\s\+\-PassThru' -and
-        $synchronousCodexHookContract -match '\$hookProcess\\\.ExitCode' -and
-        $synchronousCodexHookContract -match '\$LASTEXITCODE') `
-        'Codex Doctor contracts require the synchronous native launcher and reject stale LASTEXITCODE handling'
+        $synchronousCodexHookContract.Contains('Get-AwaitedHookBridge $CodexCommand.Script') -and
+        $harnessText.Contains('function Get-AwaitedHookBridge') -and
+        $harnessText.Contains('\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)')) `
+        'Codex Doctor contracts require the awaited native launcher bridge'
     $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
     $doctorAmpSelfHeal = $doctorContract.IndexOf('Assert-AmpPluginSelfHeal $configPath $originalConfig', [StringComparison]::Ordinal)
     $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)
@@ -4872,13 +4956,35 @@ connection.close()
         $harnessText,
         '(?s)function Get-EventLines\b.*?(?=\r?\nfunction )'
     ).Value
-    Assert-True ($canonicalEventReader -match 'project-audit-events\.py' -and
-        $canonicalEventReader -match '\.canonical-event-projection' -and
+    $canonicalProjectorStart = [regex]::Match(
+        $harnessText,
+        '(?s)function Start-CanonicalAuditProjector\b.*?(?=\r?\nfunction Invoke-CanonicalAuditProjection)'
+    ).Value
+    $canonicalProjectionRequest = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-CanonicalAuditProjection\b.*?(?=\r?\nfunction New-CanonicalAuditProjectionSnapshot)'
+    ).Value
+    Assert-True ($canonicalProjectorStart -match 'project-audit-events\.py' -and
+        $canonicalProjectorStart -match "@\(\`$projectorScript, '--serve'\)" -and
+        $canonicalProjectorStart -match 'CanonicalAuditProjectorStartTimeoutSeconds' -and
+        $harnessText.Contains('$script:CanonicalAuditProjectorStartTimeoutSeconds = $CommandTimeoutSeconds') -and
+        $canonicalProjectionRequest -match 'CanonicalAuditProjectionRequestTimeoutSeconds' -and
+        $canonicalProjectionRequest -notmatch 'Start-Process|Invoke-Tool|Invoke-NativeProcess' -and
+        $canonicalEventReader -match 'Invoke-CanonicalAuditProjection' -and
+        $canonicalEventReader -notmatch 'Invoke-Tool|Invoke-NativeProcess|python\.exe' -and
+        $harnessText -notmatch "Invoke-Tool 'python\.exe' @\(\s*\`$projector\b" -and
+        $auditProjectorText -match 'def serve\(' -and
+        $auditProjectorText -match '"--serve"') `
+        'canonical audit polls reuse one long-lived projector; start-up is never charged to a poll'
+    Assert-True ($canonicalEventReader -match '\.canonical-event-projection' -and
         $canonicalEventReader -match '\[guid\]::NewGuid' -and
-        $eventLineRouter -match 'New-CanonicalAuditProjectionSnapshot' -and
-        $eventLineRouter -match 'Remove-Item -LiteralPath \$snapshot' -and
+        $eventLineRouter -match 'Invoke-CanonicalAuditProjection \(\[IO\.Path\]::GetFullPath\(\$script:AuditDb\)\)\)' -and
+        $eventLineRouter -notmatch 'New-CanonicalAuditProjectionSnapshot|Read-EventJsonLines \$snapshot' -and
+        $canonicalProjectionRequest -match "Read-CanonicalAuditProjectorLines \`$projector \(\[int\]\`$count\) \`$deadline 'projection' \`$timeout" -and
+        $canonicalProjectionRequest -notmatch 'ReadLineAsync' -and
+        $harnessText -match 'lines\.TryTake\(out line, wait\)' -and
         $harnessText -notmatch '\$script:GatewayJsonl') `
-        'Windows live readiness exclusively reads a private transient canonical SQLite projection'
+        'Windows live readiness streams the canonical SQLite projection; evidence snapshots stay private and transient'
     Assert-True ($auditProjectorText -match 'mode=ro' -and
         $auditProjectorText -match 'PRAGMA query_only=ON' -and
         $auditProjectorText -match 'ORDER BY rowid' -and
@@ -4886,6 +4992,8 @@ connection.close()
         $auditProjectorText -match 'os\.replace\(temporary, output\)' -and
         $auditProjectorText -match 'output must differ from the audit database') `
         'canonical SQLite projection is read-only, ordered, schema-bound, and atomically published'
+    Assert-True ($auditProjectorText -notmatch 'os\.fsync\(') `
+        'transient evidence snapshots skip a device flush they do not need (tail latency only; polls never launch an interpreter)'
     Assert-True ($openCodeAssertionText.Contains('const probeID = basename(scratchPath, ".mjs");') -and
         [regex]::Matches(
             $openCodeAssertionText,
@@ -4902,6 +5010,8 @@ connection.close()
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and
         $isolatedCleanup -match '-not \$ancestorIds\.Contains\(\$processId\)') `
         'isolated process cleanup excludes the complete ancestor wrapper chain'
+    Assert-True ($isolatedCleanup -match 'Stop-CanonicalAuditProjector') `
+        'isolated process cleanup stops the long-lived canonical audit projector'
     Assert-True ($isolatedCleanup -match '\$matchesRoot -and' -and
         $isolatedCleanup -notmatch 'descendantIds') `
         'isolated process cleanup only terminates state-root-owned processes'
