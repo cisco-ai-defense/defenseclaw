@@ -327,6 +327,7 @@ def enrich_with_policy(
 
         actions_map = _build_actions_map_for_type(store, target_type, inv_connector)
         scan_map = _build_scan_map_for_type(store, scanner_name)
+        scan_by_path = _scan_map_by_path(scan_map)
 
         counts: dict[str, int] = {
             "blocked": 0,
@@ -335,6 +336,7 @@ def enrich_with_policy(
             "warning": 0,
             "clean": 0,
             "unscanned": 0,
+            "discovery-only": 0,
         }
 
         for item in items:
@@ -343,7 +345,12 @@ def enrich_with_policy(
                 continue
 
             candidates = _inventory_key_candidates(item, target_type, name)
-            scan_entry = _lookup_by_candidates(scan_map, candidates)
+            # GAP-1593: the scan of this exact copy wins. The basename key
+            # holds only the latest scan of any same-named copy (codeguard is
+            # in every connector), which the path check below then dropped.
+            scan_entry = _scan_entry_for_item_path(scan_by_path, item)
+            if scan_entry is None:
+                scan_entry = _lookup_by_candidates(scan_map, candidates)
             fallback_actions = _fallback_actions_for(target_type, skill_actions, cfg)
             action_entry = _lookup_by_candidates(actions_map, candidates)
             policy_name = _inventory_policy_name(item, target_type, name, action_entry)
@@ -389,6 +396,10 @@ def enrich_with_policy(
                 allow_first_party=allow_first_party,
                 connector=inv_connector,
             )
+            if verdict == "unscanned" and target_type == "skill" and item.get("bundled"):
+                # GAP-1593: vendor-bundled skills are discovery-only, as
+                # 'skill list' says; they are never scanned or blocked.
+                verdict, detail = "discovery-only", "vendor-bundled; not scanned or blocked"
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
             # GAP-1383: a skill DefenseClaw disabled or quarantined is not
@@ -404,13 +415,14 @@ def enrich_with_policy(
 
         scanned = sum(1 for it in items if "scan_findings" in it)
         total_findings = sum(it.get("scan_findings", 0) for it in items)
+        discovery_only = counts.get("discovery-only", 0)
 
         summary = inv.get("summary")
         if summary:
             summary[f"policy_{inv_key}"] = counts
             summary[f"scan_{inv_key}"] = {
                 "scanned": scanned,
-                "unscanned": len(items) - scanned,
+                "unscanned": len(items) - scanned - discovery_only,
                 "total_findings": total_findings,
             }
 
@@ -634,6 +646,33 @@ def _inventory_policy_name(
             return alias
 
     return name
+
+
+def _path_key(path: str) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(path))
+    except (OSError, ValueError):
+        return os.path.normcase(path)
+
+
+def _scan_map_by_path(scan_map: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Scan entries keyed by their normalized full target path."""
+    by_path: dict[str, dict[str, Any]] = {}
+    for entry in scan_map.values():
+        target = str(entry.get("target") or "")
+        if target and (os.path.isabs(target) or os.sep in target or "/" in target):
+            by_path.setdefault(_path_key(target), entry)
+    return by_path
+
+
+def _scan_entry_for_item_path(
+    by_path: dict[str, dict[str, Any]], item: dict[str, Any],
+) -> dict[str, Any] | None:
+    for key in ("path", "baseDir", "filePath"):
+        raw = item.get(key)
+        if raw:
+            return by_path.get(_path_key(str(raw)))
+    return None
 
 
 def _lookup_by_candidates(mapping: dict[str, Any], candidates: list[str]) -> Any | None:
@@ -1069,6 +1108,8 @@ def _policy_detail_suffix(policy: dict[str, int] | None) -> str:
         parts.append(f"[green]{policy['clean']} clean[/green]")
     if policy.get("unscanned"):
         parts.append(f"[dim]{policy['unscanned']} unscanned[/dim]")
+    if policy.get("discovery-only"):
+        parts.append(f"[dim]{policy['discovery-only']} discovery-only[/dim]")
     return " · " + ", ".join(parts) if parts else ""
 
 
@@ -1092,6 +1133,7 @@ _VERDICT_STYLES: dict[str, tuple[str, str]] = {
     "clean": ("green", "✓ clean"),
     "allowed": ("cyan", "↪ allowed"),
     "unscanned": ("dim", "… unscanned"),
+    "discovery-only": ("dim", "discovery-only"),
 }
 
 

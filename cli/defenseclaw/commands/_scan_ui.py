@@ -179,7 +179,8 @@ class ScanContext:
     as_json: bool = False
     click_ctx: click.Context | None = None
     # Replaces "on <connector>" in the preamble when the target does not come
-    # from a connector's config (GAP-1506: an ad-hoc ``mcp scan <url>``).
+    # from a connector's config (GAP-1506: an ad-hoc ``mcp scan <url>``;
+    # GAP-1640/1599: a skill or plugin folder outside every connector root).
     where: str = ""
 
     def __post_init__(self) -> None:
@@ -192,21 +193,27 @@ class ScanContext:
     # -- convenience constructors -------------------------------------
 
     @classmethod
-    def for_plugin(cls, *, connector: str, paths: Iterable[str], as_json: bool = False) -> ScanContext:
+    def for_plugin(
+        cls, *, connector: str, paths: Iterable[str], as_json: bool = False, where: str = "",
+    ) -> ScanContext:
         return cls(
             component=COMPONENT_PLUGIN,
             connector=connector,
             paths=list(paths),
             as_json=as_json,
+            where=where,
         )
 
     @classmethod
-    def for_skill(cls, *, connector: str, paths: Iterable[str], as_json: bool = False) -> ScanContext:
+    def for_skill(
+        cls, *, connector: str, paths: Iterable[str], as_json: bool = False, where: str = "",
+    ) -> ScanContext:
         return cls(
             component=COMPONENT_SKILL,
             connector=connector,
             paths=list(paths),
             as_json=as_json,
+            where=where,
         )
 
     @classmethod
@@ -227,6 +234,10 @@ class ScanContext:
         """Return the human-readable component label, optionally pluralized."""
         sing, plur = _COMPONENT_LABELS.get(self.component, (self.component, self.component + "s"))
         return plur if plural else sing
+
+
+# Preamble wording for a skill/plugin folder that no connector root holds.
+WHERE_ADHOC_PATH = "at a path (not from a connector config)"
 
 
 # ---------------------------------------------------------------------------

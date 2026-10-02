@@ -1088,7 +1088,7 @@ def _skill_held_off(info_map: dict[str, Any] | None, action_entry: Any = None) -
 
 
 def _skill_policy_note(
-    name: str, label: str, *, held: bool = True, connector: str = "",
+    name: str, label: str, *, held: bool = True, connector: str = "", installed: bool = True,
 ) -> str:
     """What a policy verdict means for an installed copy, plus next steps.
 
@@ -1103,6 +1103,14 @@ def _skill_policy_note(
         return "\n".join(lines)
 
     if label == "rejected":
+        if not installed:
+            # GAP-1599: a folder outside every connector's skill dirs is not
+            # loaded by any agent, so do not say it "stays loaded".
+            return steps(
+                "the policy would refuse this skill at install.",
+                ("Block it", "block"),
+                ("Accept it", "allow"),
+            )
         return steps(
             "the policy refuses this skill at install; the copy already on disk "
             "stays loaded until you act.",
@@ -1605,6 +1613,7 @@ def _print_skill_scan_policy(
     *,
     connector: str = "",
     pe: Any = None,
+    installed: bool = True,
 ) -> None:
     """Under a non-clean scan line, say what the policy makes of it.
 
@@ -1631,7 +1640,9 @@ def _print_skill_scan_policy(
             held = _skill_held_off(None, pe.get_action("skill", name, connector or ""))
         except Exception:
             held = True
-    note = _skill_policy_note(name, label, held=held, connector=connector) or reason
+    note = _skill_policy_note(
+        name, label, held=held, connector=connector if installed else "", installed=installed,
+    ) or reason
     first, *steps = (note or "").splitlines() or [""]
     click.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
     for step in steps:
@@ -1765,6 +1776,15 @@ def scan(
         _scan_from_url(app, target, as_json)
         return
 
+    # GAP-1599: a TARGET that names an existing folder ("./my-skill",
+    # "~/stage/my-skill", "C:\stage\my-skill") is scanned as that folder,
+    # like --path; a bare name keeps resolving across connectors.
+    folder_target = bool(
+        target and not scan_path and target != "all" and _looks_like_skill_path(target)
+    )
+    if folder_target:
+        scan_path = os.path.expanduser(target)
+
     # Connector-scoped parity with MCP/list: a missing TARGET means "scan
     # configured skills" (all configured connectors by default, or the selected
     # connector when --connector is present). --all remains a readable alias.
@@ -1868,6 +1888,12 @@ def scan(
     # Resolve scan directory
     scan_dir = scan_path
     scan_connector = ""
+    adhoc = False
+    if folder_target and not connector_flag:
+        # Name the connector whose skill dir holds the folder; a folder no
+        # connector holds is an ad-hoc path scan, not "on <first connector>".
+        scan_connector = _connector_for_skill_path(app, scan_dir)
+        adhoc = not scan_connector
     if not scan_dir:
         if not connector_flag:
             # Bare named scans must fan out over every configured connector copy
@@ -2039,7 +2065,34 @@ def scan(
         as_json=as_json,
         action=action,
         connector=connector,
+        adhoc=adhoc,
     )
+
+
+def _looks_like_skill_path(target: str) -> bool:
+    """True when TARGET is written as a path to an existing folder."""
+    pathish = (
+        "/" in target
+        or "\\" in target
+        or target in (".", "..")
+        or target.startswith(("./", "../", "~"))
+        or os.path.isabs(target)
+    )
+    return pathish and os.path.isdir(os.path.expanduser(target))
+
+
+def _connector_for_skill_path(app: AppContext, path: str) -> str:
+    """The active connector whose skill dir holds *path*, else ``""``."""
+    try:
+        real = os.path.normcase(os.path.realpath(path))
+        for connector in _active_skill_connectors(app):
+            for root in app.cfg.skill_dirs(connector):
+                real_root = os.path.normcase(os.path.realpath(root))
+                if real == real_root or real.startswith(real_root.rstrip(os.sep) + os.sep):
+                    return connector
+    except Exception:  # noqa: BLE001 - attribution is cosmetic; scan anyway.
+        return ""
+    return ""
 
 
 def _scan_one_local_skill(
@@ -2051,6 +2104,7 @@ def _scan_one_local_skill(
     action: bool,
     connector: str,
     json_sink: list[dict[str, Any]] | None = None,
+    adhoc: bool = False,
 ) -> dict[str, Any] | None:
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
@@ -2131,6 +2185,7 @@ def _scan_one_local_skill(
         connector=connector,
         paths=[scan_dir],
         as_json=as_json,
+        where=_scan_ui.WHERE_ADHOC_PATH if adhoc else "",
     )
     _scan_ui.render_preamble(ctx, target_count=1)
 
@@ -2186,7 +2241,10 @@ def _scan_one_local_skill(
                 findings=len(result.findings),
             )
             if not enforcement_blocks:
-                _print_skill_scan_policy(app, name, scan_dir, result, connector=connector or "", pe=pe)
+                _print_skill_scan_policy(
+                    app, name, scan_dir, result, connector=connector or "", pe=pe,
+                    installed=not adhoc,
+                )
         click.echo()
         _print_result(name, result)
         _scan_ui.render_summary(

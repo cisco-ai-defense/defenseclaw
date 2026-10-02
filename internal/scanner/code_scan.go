@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -68,6 +70,44 @@ func ScanCode(ctx context.Context, target, rulesDir string) (*ScanResult, error)
 		}
 	}
 
+	result.Findings = dropEvalOnlyExecFindings(result.Findings)
 	result.Duration = time.Since(start)
 	return result, nil
+}
+
+// cgExecNonEval is CG-EXEC-001's pattern without eval(), which the vuln
+// scanner already reports as CS-VLN-CODE-EVAL.
+var cgExecNonEval = regexp.MustCompile(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|system\()`)
+
+// dropEvalOnlyExecFindings removes a CodeGuard CG-EXEC-001 finding whose line
+// matched only because of eval() when CS-VLN-CODE-EVAL reports the same line
+// (GAP-1595: one eval() call read as two HIGH findings).
+func dropEvalOnlyExecFindings(findings []Finding) []Finding {
+	evalLines := map[string]bool{}
+	for _, f := range findings {
+		if f.ID == "CS-VLN-CODE-EVAL" {
+			evalLines[codeFindingLineKey(f.Location)] = true
+		}
+	}
+	if len(evalLines) == 0 {
+		return findings
+	}
+	kept := findings[:0]
+	for _, f := range findings {
+		if f.ID == "CG-EXEC-001" && evalLines[codeFindingLineKey(f.Location)] && !cgExecNonEval.MatchString(f.Description) {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
+
+// codeFindingLineKey normalizes "dir/calc.py:2" and "calc.py:2" to the same
+// file-name:line key; both scanners report the same file in one scan.
+func codeFindingLineKey(location string) string {
+	file, line := location, ""
+	if i := strings.LastIndex(location, ":"); i > 0 {
+		file, line = location[:i], location[i+1:]
+	}
+	return filepath.Base(filepath.Clean(file)) + ":" + line
 }
