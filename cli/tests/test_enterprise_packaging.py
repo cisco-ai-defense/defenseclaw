@@ -768,6 +768,47 @@ MDM = ROOT / "packaging" / "mdm"
 SCHEMA = MDM / "contract" / "lifecycle-result.schema.json"
 
 
+def _macos_pkg_preinstall(host: _Host, version: str) -> str:
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    match = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert match, "the pkg preinstall heredoc was not found"
+    _write_stub(host.bin, "stat", "echo 0")  # the record and marker are root-owned
+    return _rooted(
+        match.group(1) + "\n",
+        {"state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}", "@DC_PKG_VERSION@": version},
+    )
+
+
+# GAP-1199: a refused downgrade showed only the Installer's generic error,
+# and last-package-result.json still held the previous success. The
+# refusal now rewrites the result with downgrade_refused and the next step.
+@pytest.mark.parametrize("version", ["1.0.0", "1.0.2"])
+def test_macos_pkg_preinstall_records_a_refused_downgrade(tmp_path: Path, version: str) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    result_path = host.state / "last-package-result.json"
+    result_path.write_text('{"ok":true}', encoding="utf-8")
+    (host.state / "deployment.json").write_text('{"product_version": "1.0.1"}', encoding="utf-8")
+    result = host.run(_macos_pkg_preinstall(host, version))
+    if version == "1.0.2":
+        assert result.returncode == 0, result.stderr
+        assert result_path.read_text(encoding="utf-8") == '{"ok":true}'
+        return
+    assert result.returncode == 1
+    assert str(result_path) in result.stderr
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["installed_version"] == "1.0.1"
+    assert document["errors"][0]["code"] == "downgrade_refused"
+    assert "allow-downgrade" in document["errors"][0]["message"]
+    assert result_path.stat().st_mode & 0o077 == 0
+    try:
+        import jsonschema
+    except ImportError:
+        return
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
+    assert not sorted(validator.iter_errors(document), key=str)
+
+
 def _shell_function(text: str, name: str) -> str:
     match = re.search(rf"^{re.escape(name)}\(\) \{{.*?^\}}$", text, re.MULTILINE | re.DOTALL)
     assert match, f"{name} not found"
