@@ -411,7 +411,7 @@ class TestSkillScannerWrapper(unittest.TestCase):
         finding.category.name = "injection"
         finding.remediation = "Remove exec"
         finding.analyzer = "static"
-        finding.rule_id = "rule-001"
+        finding.rule_id = "COMMAND_INJECTION_EVAL"
 
         sdk_result = MagicMock()
         sdk_result.findings = [finding]
@@ -425,11 +425,14 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertEqual(result.findings[0].scanner, "skill-scanner")
         self.assertIn("injection", result.findings[0].tags)
         self.assertIn("analyzer:static", result.findings[0].tags)
+        self.assertEqual(result.findings[0].rule_id, "COMMAND_INJECTION_EVAL")
 
         recorder = MagicMock()
         Logger(recorder).log_scan(result)
         payload = recorder.emit_cli_observability.call_args.args[0]
         self.assertEqual(payload["scan"]["target"], target)
+        # GAP-1683: path scans carry the scanner's rule id, like the watcher.
+        self.assertEqual(payload["scan"]["findings"][0]["rule_id"], "COMMAND_INJECTION_EVAL")
         self.assertEqual(
             payload["scan"]["findings"][0]["scanner"],
             payload["scan"]["scanner"],

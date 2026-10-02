@@ -193,13 +193,18 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 // copy of the bundle this gateway embeds. Files still being written may be
 // missing; an added, changed or non-regular file makes it false (GAP-1525).
 func (c *OpenClawConnector) IsBundledPlugin(dir string) bool {
-	extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
+	extDir := c.BundledPluginDir()
 	got, err1 := filepath.Abs(dir)
 	want, err2 := filepath.Abs(extDir)
 	if err1 != nil || err2 != nil || filepath.Clean(got) != filepath.Clean(want) {
 		return false
 	}
 	return openClawExtensionMatchesBundle(want)
+}
+
+// BundledPluginDir is where Setup installs DefenseClaw's own OpenClaw plugin.
+func (c *OpenClawConnector) BundledPluginDir() string {
+	return filepath.Join(openClawHome(), "extensions", "defenseclaw")
 }
 
 var errNotBundledFile = errors.New("not a bundled file")

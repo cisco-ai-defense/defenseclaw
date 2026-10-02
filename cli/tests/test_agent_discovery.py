@@ -2751,3 +2751,26 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
     os.utime(binary, None)  # replaced after the earlier scan: no stale version
     changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
     assert changed.agents["amp"].version == ""
+
+
+def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
+    """GAP-1627: setup / setup remove change hook files after the cache was written."""
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: _signal(name, name == "copilot"))
+    hooks = tmp_path / ".copilot" / "hooks" / "defenseclaw.json"
+
+    ad.discover_agents()
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n")
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: (_ for _ in ()).throw(AssertionError(name)))
+
+    cached = ad.discover_agents()
+    assert cached.cache_hit is True
+    assert cached.agents["copilot"].configured is True
+    assert Path(cached.agents["copilot"].config_path) == hooks
+
+    hooks.unlink()
+    removed = ad.discover_agents()
+    assert removed.agents["copilot"].configured is False
+    assert removed.agents["copilot"].config_path == ""

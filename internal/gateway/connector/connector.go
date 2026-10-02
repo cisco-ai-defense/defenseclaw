@@ -939,6 +939,9 @@ type ManagedPluginArtifactOwner interface {
 // skips scanning that plugin while it is byte-identical to the shipped copy.
 type BundledPluginChecker interface {
 	IsBundledPlugin(path string) bool
+	// BundledPluginDir is where Setup writes that plugin. Setup rewrites it on
+	// every gateway start, so a stale copy there is about to be replaced.
+	BundledPluginDir() string
 }
 
 // ManagedPluginArtifacts returns the connector's auto-loaded managed plugin

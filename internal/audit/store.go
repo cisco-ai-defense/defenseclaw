@@ -4071,10 +4071,10 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 		INNER JOIN (
 			SELECT target, MAX(timestamp) as max_ts
 			FROM scan_results
-			WHERE scanner = ?
+			WHERE scanner = ? AND COALESCE(exit_code, 0) = 0 AND COALESCE(error, '') = ''
 			GROUP BY target
 		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-		WHERE sr.scanner = ?
+		WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
 	`, scannerName, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
