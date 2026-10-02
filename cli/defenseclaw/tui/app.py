@@ -10611,7 +10611,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel in self.catalog_models:
             return self.catalog_models[self.active_panel].cursor
         if self.active_panel == "logs":
-            return self.logs_model.cursor[self.logs_model.source]
+            return self.logs_model.table_cursor_row()
         if self.active_panel == "audit":
             return self.audit_model.cursor
         if self.active_panel == "inventory":
@@ -10628,16 +10628,38 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self._setup_cursor()
         return 0
 
+    def _panel_search_active(self) -> bool:
+        """Whether the active panel's ``/`` search box is taking typed text."""
+
+        model = {
+            "alerts": self.alerts_model,
+            "audit": self.audit_model,
+            "ai": self.ai_discovery_model,
+            "runtime": self.runtime_model,
+        }.get(self.active_panel)
+        if model is not None:
+            return bool(getattr(model, "filtering", False))
+        if self.active_panel == "logs":
+            return bool(self.logs_model.searching)
+        return False
+
     def _handle_active_panel_key(self, event: events.Key) -> bool:
         if self.help_open:
             return self._scroll_help_body(_panel_key(event))
         key = _panel_key(event)
+        # While a panel search box is open, a printable key is text: pass the
+        # character exactly as typed. _panel_key folds most capitals for the
+        # shortcuts, so typing "MARKER-ASK" showed "MARkER-ASk" (GAP-1214).
+        searching = self._panel_search_active()
+        if searching and (typed := _typed_character(event)) is not None:
+            key = typed
         # 8.13: the connector filter is shared, so ``m`` opens the filter
         # picker on the signal panes too (Alerts/Audit/Logs). These panes
         # don't otherwise bind ``m``. Catalog/Overview/Inventory route ``m``
         # in their own branches below.
         if (
-            key == "m"
+            not searching
+            and key == "m"
             and len(self._active_connector_names()) > 1
             and self.active_panel in {"alerts", "audit", "logs"}
         ):
@@ -10911,9 +10933,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not action.handled:
             return False
         if getattr(action, "intent", None) is not None and action.intent.kind == "export":
+            rows = len(self.audit_model.filtered)
             path = self._export_audit(action.intent.path)
             self._render_chrome()
-            self._set_status(f"Audit exported to {path}.")
+            # Say what was written: the rows in the current view (GAP-1215).
+            self._set_status(f"Exported {rows} audit row(s) from the current view to {path}.")
             return True
         if getattr(action, "hint", ""):
             self._set_status(action.hint)
@@ -11742,6 +11766,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key == "r":
             self.setup_model.set_config(self.config)
             return SetupPanelAction(True, hint="Config edits reverted.")
+        if len(key) == 1 and key.isdigit():
+            # Digits are panel keys, as the tab bar shows. They used to open
+            # the selected field's editor with the digit appended (30 -> 301);
+            # Enter edits a field (GAP-1282).
+            return SetupPanelAction(False)
         seed = _typed_seed(key, character)
         if seed:
             # Letters the editor uses as commands (j k s r w ...) were
@@ -12815,6 +12844,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             needs_preview=True,
             stdin_input=getattr(intent, "secret_stdin", None),
             env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
+            consequence=str(getattr(intent, "consequence", "") or ""),
         )
         exit_code = await self._confirm_and_run_parsed(parsed)
         return await self._run_follow_ups(intent, exit_code)
@@ -12939,13 +12969,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.state_store.save()
         except Exception:  # noqa: BLE001 - palette MRU is cosmetic
             pass
-        return await self._run_command(
+        exit_code = await self._run_command(
             parsed.binary,
             parsed.args,
             display_name=parsed.display_name,
             stdin_input=parsed.stdin_input,
             env_overrides=parsed.env_overrides,
         )
+        # Say how it ended: the status bar kept "Command cancelled." from an
+        # earlier cancel after a later run succeeded (GAP-1213).
+        if exit_code == 0:
+            self._set_status(f"Done: {parsed.display_name}.")
+        elif exit_code == 130:
+            self._set_status(f"Cancelled: {parsed.display_name}.")
+        elif exit_code is not None:
+            self._set_status(f"{parsed.display_name} failed (exit {exit_code}). Activity shows the output.")
+        return exit_code
 
     def _schedule_data_refresh(self, *, force: bool = False) -> None:
         """Schedule one generation-aware SQLite refresh off the UI loop."""

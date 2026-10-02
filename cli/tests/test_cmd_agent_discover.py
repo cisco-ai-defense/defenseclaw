@@ -856,6 +856,36 @@ class AiUsageRendererTests(unittest.TestCase):
         # width is tight, so we assert on the unique prefix.
         self.assertEqual(out.count("@anthrop"), 1)
 
+    def test_grouped_view_fits_an_80_column_terminal(self):
+        """At 80 columns the default table drops its secondary columns
+        instead of drawing 120 wide and wrapping every row (GAP-1284)."""
+        import os as _os
+
+        from defenseclaw.commands import cmd_agent
+
+        sig = {
+            "state": "seen",
+            "category": "supported_connector",
+            "product": "OpenCode",
+            "vendor": "OpenCode",
+            "detector": "plugin",
+            "basenames": ["opencode.json"],
+            "component": {"ecosystem": "npm", "name": "opencode-ai", "version": "1.0.0"},
+            "last_active_at": "2026-10-02T07:00:00Z",
+        }
+        payload = {
+            "enabled": True,
+            "summary": {"active_signals": 1, "scanned_at": "2026-10-02T07:41:06Z", "files_scanned": 1},
+            "signals": [sig],
+        }
+        with patch("shutil.get_terminal_size", return_value=_os.terminal_size((80, 24))):
+            narrow = cmd_agent._render_ai_usage_table(payload)
+            wide = cmd_agent._render_ai_usage_table(payload, wide=True)
+        self.assertTrue(all(len(line) <= 80 for line in narrow.splitlines()), narrow)
+        self.assertNotIn("Vendor", narrow)
+        self.assertIn("--wide", " ".join(narrow.split()))
+        self.assertIn("Vendor", wide)
+
     def test_grouped_view_omits_confidence_when_engine_silent(self):
         """Older sidecars without the engine must render the legacy
         column set unchanged so existing dashboards / golden fixtures

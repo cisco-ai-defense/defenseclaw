@@ -37,7 +37,7 @@ the panels have data to show.
 ## Panels
 
 Switch panels with the number/letter key shown, from any panel (only an open
-Setup form or the config editor types digits), or cycle with `Tab` /
+Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
 terminal every tab stays on screen: the most-used tabs keep their names and
 the rest show only their key. Which tabs keep a name depends only on the
@@ -53,9 +53,9 @@ terminal width, so the labels don't change as you switch panels.
 | `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key) |
 | `6` | Inventory | Combined inventory view |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
-| `8` | Logs | Live gateway logs with filter presets |
-| `9` | Audit | Audit trail |
-| `A` | Activity | Live output from commands you run |
+| `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
+| `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included; a row's detail names the connector, decision, mode and rule |
+| `A` | Activity | Live output from commands you run; `2` (Mutations) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |

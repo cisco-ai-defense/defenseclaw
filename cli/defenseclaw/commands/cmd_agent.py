@@ -4179,7 +4179,13 @@ def _render_ai_usage_table(
     # wide terminal is not squeezed into 120 columns.
     import shutil
 
-    width = max(160 if wide else 120, shutil.get_terminal_size((120, 24)).columns)
+    term_columns = shutil.get_terminal_size((120, 24)).columns
+    # Below 120 columns the default grouped view drops its secondary columns
+    # (model status, component, vendor, last active) and draws at the
+    # terminal width, so rows stop wrapping; --wide keeps every column
+    # (GAP-1284).
+    compact = not wide and not detail and term_columns < 120
+    width = term_columns if compact else max(160 if wide else 120, term_columns)
     console = Console(file=stream, force_terminal=False, color_system=None, width=width)
 
     title = "AI visibility"
@@ -4342,13 +4348,13 @@ def _render_ai_usage_table(
 
     full_groups = _summarize_ai_usage_signals_full(filtered, by_detector=by_detector)
     displayed_full = full_groups[:limit] if limit > 0 else full_groups
-    has_component = any(g.get("component") for g in displayed_full)
+    has_component = not compact and any(g.get("component") for g in displayed_full)
     has_model = any(g.get("model") for g in displayed_full)
     # The default grouped table keeps the columns that fit a normal
     # terminal; model format, version and the identity/presence
     # confidence columns only show with --wide (or --detail / --json).
     has_version = wide and any(g.get("version") for g in displayed_full)
-    has_last_active = any(g.get("last_active_at") for g in displayed_full)
+    has_last_active = not compact and any(g.get("last_active_at") for g in displayed_full)
     has_confidence = wide and any(
         g.get("identity_band") or g.get("presence_band") for g in displayed_full
     )
@@ -4368,14 +4374,16 @@ def _render_ai_usage_table(
     table.add_column("Product", no_wrap=True)
     if has_model:
         table.add_column("Model")
-        table.add_column("Model status")
+        if not compact:
+            table.add_column("Model status")
         if wide:
             table.add_column("Format")
     if has_component:
         table.add_column("Component")
     if has_version:
         table.add_column("Version")
-    table.add_column("Vendor")
+    if not compact:
+        table.add_column("Vendor")
     table.add_column(det_header)
     table.add_column("Count", justify="right")
     if has_confidence:
@@ -4400,10 +4408,9 @@ def _render_ai_usage_table(
             det_cell = detector_join
         row: list[str] = [state, cat_cell, product]
         if has_model:
-            row.extend([
-                str(g.get("model", "")),
-                _format_csv_truncated(g.get("model_statuses") or [], limit=2),
-            ])
+            row.append(str(g.get("model", "")))
+            if not compact:
+                row.append(_format_csv_truncated(g.get("model_statuses") or [], limit=2))
             if wide:
                 row.append(_format_csv_truncated(g.get("model_formats") or [], limit=2))
         if has_component:
@@ -4415,7 +4422,9 @@ def _render_ai_usage_table(
                 row.append(comp_name)
         if has_version:
             row.append(str(g.get("version", "")))
-        row.extend([vendor, det_cell, str(g["count"])])
+        if not compact:
+            row.append(vendor)
+        row.extend([det_cell, str(g["count"])])
         if has_confidence:
             row.append(_format_confidence(
                 g.get("identity_score"), g.get("identity_band")))
@@ -4438,6 +4447,8 @@ def _render_ai_usage_table(
     if hidden > 0:
         footer += f" {hidden} more {_pluralize(hidden, 'group', 'groups')} hidden by --limit."
     footer += _format_ai_usage_scan_diagnostics(summary)
+    if compact:
+        footer += " Narrow terminal: model status, component, vendor and last active are hidden."
     footer += (
         " Use --wide for every column, --detail for per-signal rows, "
         "--by-detector to split by category/detector, --json for raw, "

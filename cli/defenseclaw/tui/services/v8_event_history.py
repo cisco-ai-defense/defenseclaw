@@ -308,6 +308,10 @@ class V8EventHistoryRow:
     hook_decision: str = ""
 
 
+# Activity -> Mutations rows (operator and config changes, enforcement actions).
+_MUTATION_BUCKETS_SQL = "('compliance.activity', 'enforcement.action')"
+
+
 class V8EventHistoryReader:
     """Connection-scoped canonical history reader with a cached schema probe."""
 
@@ -329,6 +333,29 @@ class V8EventHistoryReader:
 
         return self._load(limit, alert_only=False)
 
+    def load_mutations(self, limit: int = 500) -> tuple[V8EventHistoryRow, ...]:
+        """Read the newest operator/config change rows (Activity -> Mutations).
+
+        They are a small share of the history, so taking them from the newest
+        mixed rows showed only the last ~20 changes (GAP-1217).
+        """
+
+        if not self._schema_is_supported():
+            return ()
+        rows = self.db.execute(
+            f"""SELECT {_v8_select_columns(self._columns)}
+               FROM audit_events
+               WHERE signal = 'logs' AND bucket IN {_MUTATION_BUCKETS_SQL}
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (
+                _MAX_PAYLOAD_BYTES,
+                _MAX_PAYLOAD_BYTES,
+                _MAX_FINDING_TAGS_BYTES,
+                self._bounded_limit(limit),
+            ),
+        ).fetchall()
+        return _decode_v8_event_history_rows(rows)
+
     def load_alerts(self, limit: int = 500) -> tuple[V8EventHistoryRow, ...]:
         """Read newest alert-eligible rows before applying the row bound.
 
@@ -349,10 +376,30 @@ class V8EventHistoryReader:
     ]:
         """Read generic and alert-filtered histories in one SQLite snapshot."""
 
+        history, alerts, _mutations = self.load_views_and_mutations(history_limit, alert_limit, 0)
+        return history, alerts
+
+    def load_views_and_mutations(
+        self,
+        history_limit: int = 1000,
+        alert_limit: int = 500,
+        mutation_limit: int = 500,
+    ) -> tuple[
+        tuple[V8EventHistoryRow, ...],
+        tuple[V8EventHistoryRow, ...],
+        tuple[V8EventHistoryRow, ...],
+    ]:
+        """Read history, alerts and Activity mutations in one SQLite snapshot.
+
+        Mutation rows are a small share of the history, so taking them from
+        the newest mixed rows showed only the last ~20 changes (GAP-1217).
+        """
+
         if not self._schema_is_supported():
-            return (), ()
+            return (), (), ()
         bounded_history = self._bounded_limit(history_limit)
         bounded_alerts = self._bounded_limit(alert_limit)
+        bounded_mutations = max(0, min(int(mutation_limit), _MAX_ROWS))
         ack_filter = self._alert_ack_filter_sql()
         alert_where = _v8_alert_where_sql(self._columns)
         select_columns = _v8_select_columns(self._columns)
@@ -402,11 +449,18 @@ class V8EventHistoryReader:
                    FROM audit_events
                    JOIN selected_alerts
                      ON selected_alerts.dc_rowid = audit_events.rowid
+               ), mutations AS (
+                   SELECT rowid AS dc_rowid, {select_columns}
+                   FROM audit_events
+                   WHERE signal = 'logs' AND bucket IN {_MUTATION_BUCKETS_SQL}
+                   ORDER BY timestamp DESC, rowid DESC LIMIT ?
                )
                SELECT * FROM (
                    SELECT 0 AS dc_view, history.* FROM history
                    UNION ALL
                    SELECT 1 AS dc_view, alerts.* FROM alerts
+                   UNION ALL
+                   SELECT 2 AS dc_view, mutations.* FROM mutations
                )
                )
                ORDER BY dc_view, timestamp DESC, dc_rowid DESC""",
@@ -421,13 +475,19 @@ class V8EventHistoryReader:
                 _MAX_PAYLOAD_BYTES,
                 _MAX_PAYLOAD_BYTES,
                 _MAX_FINDING_TAGS_BYTES,
+                _MAX_PAYLOAD_BYTES,
+                _MAX_PAYLOAD_BYTES,
+                _MAX_FINDING_TAGS_BYTES,
+                bounded_mutations,
             ),
         ).fetchall()
         history_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 0]
         alert_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 1]
+        mutation_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 2]
         return (
             _decode_v8_event_history_rows(history_rows),
             _decode_v8_event_history_rows(alert_rows),
+            _decode_v8_event_history_rows(mutation_rows),
         )
 
     @staticmethod
@@ -545,6 +605,17 @@ def load_v8_event_history(store: object | None, limit: int = 500) -> tuple[V8Eve
         return ()
     try:
         return V8EventHistoryReader(store).load(limit)
+    except Exception:  # noqa: BLE001 - partial/locked DBs degrade to an empty snapshot.
+        return ()
+
+
+def load_v8_mutation_history(store: object | None, limit: int = 500) -> tuple[V8EventHistoryRow, ...]:
+    """Read the newest Activity mutation rows; empty on a missing/locked DB."""
+
+    if store is None:
+        return ()
+    try:
+        return V8EventHistoryReader(store).load_mutations(limit)
     except Exception:  # noqa: BLE001 - partial/locked DBs degrade to an empty snapshot.
         return ()
 

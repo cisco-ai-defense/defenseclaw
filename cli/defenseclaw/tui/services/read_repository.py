@@ -182,10 +182,14 @@ class TUIReadRepository:
         errors: list[str] = []
 
         history_error_count = len(errors)
-        history, alert_history = self._component(
+        history, alert_history, mutation_history = self._component(
             "history",
-            lambda: self._history_reader.load_views(_HISTORY_LIMIT, _PANEL_LIMIT) if self._history_reader else ((), ()),
-            (previous.history if previous else (), ()),
+            lambda: (
+                self._history_reader.load_views_and_mutations(_HISTORY_LIMIT, _PANEL_LIMIT, _PANEL_LIMIT)
+                if self._history_reader
+                else ((), (), ())
+            ),
+            (previous.history if previous else (), (), ()),
             errors,
         )
         history_failed = len(errors) != history_error_count
@@ -199,7 +203,7 @@ class TUIReadRepository:
             alert_events = alerts_from_v8_history(alert_history)
             log_views = project_v8_log_views(history)
             egress_events = project_v8_egress_events(panel_history)
-            mutations = activity_mutations_from_v8_history(panel_history)
+            mutations = activity_mutations_from_v8_history(mutation_history)
 
         audit_events = self._component(
             "audit",

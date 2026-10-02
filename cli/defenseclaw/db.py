@@ -693,7 +693,8 @@ class Store:
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector,
+                      enforced
                FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -705,7 +706,7 @@ class Store:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
+                      severity, run_id, NULL AS structured_json, connector, enforced
                FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -717,7 +718,7 @@ class Store:
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
+                      severity, run_id, NULL AS structured_json, connector, enforced
                FROM audit_events
                WHERE {_ACTIONABLE_EVENT_WHERE}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
@@ -1118,8 +1119,15 @@ class Store:
         return [self._row_to_event(r) for r in cur.fetchall()]
 
     def get_event(self, event_id: str) -> Event | None:
+        # v8 rows keep their fields in payload_json and may leave
+        # structured_json empty; the detail view needs them (GAP-1215).
+        columns, _tables = self._audit_projection_schema()
+        structured = (
+            "COALESCE(NULLIF(structured_json, ''), payload_json)" if "payload_json" in columns else "structured_json"
+        )
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id, {structured}, connector,
+                      enforced
                FROM audit_events WHERE id = ?""",
             (event_id,),
         )
@@ -1843,6 +1851,7 @@ class Store:
             run_id=row[7] or "",
             structured=structured,
             connector=(row[9] or "") if len(row) > 9 else "",
+            enforced=(bool(row[10]) if row[10] is not None else None) if len(row) > 10 else None,
         )
 
     def get_target_snapshot(self, target_type: str, target_path: str) -> TargetSnapshot | None:
