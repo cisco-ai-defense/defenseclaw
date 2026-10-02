@@ -5391,10 +5391,21 @@ def _record_windows_setup_agent_selections(
         return None
 
     target_dir = data_dir or os.path.expanduser("~/.defenseclaw")
+    # Each executable is probed and hashed again here; with ten connectors on
+    # a busy Windows host that took minutes with no output, so setup looked
+    # hung after its version line (GAP-1571).
+    started = time.monotonic()
+    if host_os == "windows":
+        ux.subhead(
+            f"Verifying {len(selected)} agent executable(s) ({', '.join(selected)}): "
+            "version probe and digest; this can take a few minutes on a busy host..."
+        )
     try:
         selections, selection_errors = record_setup_agent_selections(target_dir, selected)
     except OSError as exc:
         raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
+    if host_os == "windows" and selections:
+        ux.ok(f"Verified {len(selections)} agent executable(s) in {time.monotonic() - started:.0f} s")
 
     for connector in selected:
         if connector not in selections and connector not in selection_errors:
