@@ -841,6 +841,19 @@ class LLMConfig:
                 return True
         return False
 
+    def needs_api_key(self) -> bool:
+        """Return False when the provider authenticates without an API key.
+
+        On-box runtimes take no key, and Bedrock with ``iam_credentials``,
+        ``profile`` or ``instance_role`` auth signs requests with AWS
+        credentials (the gateway's judge accepts an empty key for Bedrock).
+        """
+        if self.is_local_provider():
+            return False
+        if self.provider_prefix() in ("bedrock", "amazon-bedrock") and self.bedrock is not None:
+            return (self.bedrock.auth_mode or "api_key").strip().lower() == "api_key"
+        return True
+
 
 @dataclass
 class InspectLLMConfig:

@@ -1072,7 +1072,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 llm_base_url="",
             )
 
-        self.assertEqual(got, ("openai", "gpt-4o", "", "OPENAI_API_KEY", "https://api.example/v1"))
+        self.assertEqual(got, ("openai", "gpt-4o", "", "OPENAI_API_KEY", "https://api.example/v1", "", ""))
         provider.assert_called_once()
         model.assert_called_once()
         key_env.assert_called_once()
@@ -1096,7 +1096,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 llm_base_url="",
             )
 
-        self.assertEqual(got, ("ollama", "qwen3.5:9b-mlx", "", "", "http://127.0.0.1:11434"))
+        self.assertEqual(got, ("ollama", "qwen3.5:9b-mlx", "", "", "http://127.0.0.1:11434", "", ""))
         local_runtime.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)

@@ -591,6 +591,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir)
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
+    llm_bedrock_region = ""
+    llm_bedrock_auth_mode = ""
     interactive_wizard = False
     # --start-gateway/--no-start-gateway as typed (None: neither); the wizard
     # replaces start_gateway with its answer.
@@ -641,6 +643,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
                 llm_api_key,
                 llm_api_key_env,
                 llm_base_url,
+                llm_bedrock_region,
+                llm_bedrock_auth_mode,
             ) = _prompt_first_run_judge_llm_config(
                 data_dir=data_dir,
                 llm_provider=llm_provider,
@@ -700,6 +704,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         llm_api_key=llm_api_key,
         llm_api_key_env=llm_api_key_env,
         llm_base_url=llm_base_url,
+        llm_bedrock_region=llm_bedrock_region,
+        llm_bedrock_auth_mode=llm_bedrock_auth_mode,
         cisco_endpoint=cisco_endpoint,
         cisco_api_key=cisco_api_key,
         cisco_api_key_env=cisco_api_key_env,
@@ -1752,17 +1758,30 @@ def _prompt_first_run_judge_llm_config(
     llm_api_key: str,
     llm_api_key_env: str,
     llm_base_url: str,
-) -> tuple[str, str, str, str, str]:
-    """Prompt for unified LLM settings when init enables the judge."""
+) -> tuple[str, str, str, str, str, str, str]:
+    """Prompt for unified LLM settings when init enables the judge.
+
+    Returns ``(provider, model, api_key, api_key_env, base_url,
+    bedrock_region, bedrock_auth_mode)``. Bedrock asks for its region and
+    auth mode like ``setup llm`` and skips the key for IAM, profile and
+    instance-role auth.
+    """
     ux.section("LLM judge configuration")
     ux.subhead("These settings are saved to the unified llm block and used by the guardrail judge.")
     if not click.confirm(
         "  Configure LLM judge provider/model/API settings now?",
         default=True,
     ):
-        return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url
+        return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url, "", ""
 
-    from defenseclaw.commands._llm_picker import pick_key_env, pick_local_runtime, pick_model, pick_provider
+    from defenseclaw.commands._llm_picker import (
+        pick_auth_mode,
+        pick_key_env,
+        pick_local_runtime,
+        pick_model,
+        pick_provider,
+        pick_region,
+    )
     from defenseclaw.commands.cmd_setup import (
         _LOCAL_LLM_DEFAULT_BASE_URL,
         _LOCAL_LLM_WIZARD_PROVIDERS,
@@ -1785,7 +1804,7 @@ def _prompt_first_run_judge_llm_config(
             flag_base_url=None,
             non_interactive=False,
         )
-        return provider, model, "", "", base_url
+        return provider, model, "", "", base_url, "", ""
 
     model = pick_model(
         current=llm_model or "",
@@ -1795,19 +1814,27 @@ def _prompt_first_run_judge_llm_config(
         non_interactive=False,
     )
 
-    key_env = pick_key_env(
-        provider=provider,
-        current=llm_api_key_env or DEFENSECLAW_LLM_KEY_ENV,
-        flag_value=None,
-        non_interactive=False,
-    )
-    _prompt_and_save_secret(key_env, llm_api_key, os.fspath(data_dir))
+    bedrock_region = ""
+    bedrock_auth_mode = ""
+    if provider == "bedrock":
+        bedrock_region = pick_region(provider=provider, current="", flag_value=None, non_interactive=False)
+        bedrock_auth_mode = pick_auth_mode(provider=provider, current="", flag_value=None, non_interactive=False)
+
+    key_env = ""
+    if not bedrock_auth_mode or bedrock_auth_mode == "api_key":
+        key_env = pick_key_env(
+            provider=provider,
+            current=llm_api_key_env or DEFENSECLAW_LLM_KEY_ENV,
+            flag_value=None,
+            non_interactive=False,
+        )
+        _prompt_and_save_secret(key_env, llm_api_key, os.fspath(data_dir))
     base_url = click.prompt(
         "  LLM base URL (leave blank to use provider default)",
         default=llm_base_url or "",
         show_default=bool(llm_base_url),
     )
-    return provider, model, "", key_env, base_url
+    return provider, model, "", key_env, base_url, bedrock_region, bedrock_auth_mode
 
 
 def _activate_additional_connectors(

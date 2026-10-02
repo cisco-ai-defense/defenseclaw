@@ -7044,8 +7044,15 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    llm = cfg.resolve_llm("guardrail")
+    # Hook/policy-only connectors use an LLM only for the judge, which resolves
+    # guardrail.judge.llm (written by ``setup llm --role judge``).
+    llm = cfg.resolve_llm("guardrail.judge" if _guardrail_proxy_intentionally_closed(cfg) else "guardrail")
     model = llm.model or gc.model or ""
+
+    if not llm.is_local_provider() and not llm.needs_api_key():
+        mode = llm.bedrock.auth_mode if llm.bedrock is not None else ""
+        _emit("pass", "LLM API key", f"bedrock auth_mode={mode} signs with AWS credentials; no API key needed", r=r)
+        return
 
     if llm.is_local_provider():
         base = llm.base_url or "(default)"

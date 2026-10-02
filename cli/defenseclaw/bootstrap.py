@@ -143,6 +143,10 @@ class FirstRunOptions:
     llm_api_key: str = ""
     llm_api_key_env: str = "DEFENSECLAW_LLM_KEY"
     llm_base_url: str = ""
+    # Bedrock region and auth mode for the unified llm block. Empty leaves
+    # llm.bedrock alone; IAM, profile and instance-role auth need no key.
+    llm_bedrock_region: str = ""
+    llm_bedrock_auth_mode: str = ""
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
@@ -902,7 +906,18 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         else:
             steps.append(StepResult("Local LLM", "warn", "local provider set without base_url"))
     elif cfg.guardrail.enabled and (llm.model or options.llm_api_key or llm.api_key):
-        steps.append(_doctor_check("_check_llm_api_key", cfg, "LLM API key"))
+        key_step = _doctor_check("_check_llm_api_key", cfg, "LLM API key")
+        if key_step.status == "fail":
+            # The key is supplied afterwards; a missing or rejected key must not
+            # roll back the config and connectors this run just wrote.
+            env_name = llm.api_key_env or cfg.guardrail.api_key_env or "DEFENSECLAW_LLM_KEY"
+            key_step = StepResult(
+                "LLM API key",
+                "warn",
+                f"{key_step.detail}; the LLM judge stays inactive until the key is set",
+                f"defenseclaw keys set {env_name}",
+            )
+        steps.append(key_step)
     else:
         steps.append(StepResult("LLM API", "skip", "not configured"))
 
@@ -1232,6 +1247,15 @@ def _apply_first_run_choices(
         cfg.llm.api_key_env = options.llm_api_key_env.strip()
     if options.llm_base_url:
         cfg.llm.base_url = options.llm_base_url.strip()
+    if options.llm_bedrock_region or options.llm_bedrock_auth_mode:
+        from defenseclaw.config import BedrockKeyConfig
+
+        bedrock = cfg.llm.bedrock or BedrockKeyConfig()
+        if options.llm_bedrock_region:
+            bedrock.region = options.llm_bedrock_region.strip()
+        if options.llm_bedrock_auth_mode:
+            bedrock.auth_mode = options.llm_bedrock_auth_mode.strip().lower()
+        cfg.llm.bedrock = bedrock
 
     if options.cisco_endpoint:
         cfg.cisco_ai_defense.endpoint = options.cisco_endpoint.strip()

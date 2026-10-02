@@ -1050,11 +1050,16 @@ def setup_llm(
 
     click.echo()
     terminal_checkbox.restore_line_prompt_mode()
-    ux.section("Unified LLM configuration")
-    ux.subhead("Every LLM-using component (guardrail judge, MCP scanner,")
-    ux.subhead("skill scanner, plugin scanner) resolves through this block")
-    ux.subhead("by default. Per-component overrides live under")
-    ux.subhead("scanners.*.llm / guardrail.{llm,judge.llm}.")
+    if target_path == "guardrail.judge":
+        ux.section("Judge LLM configuration")
+        ux.subhead("Saved to guardrail.judge.llm and used by the LLM judge.")
+        ux.subhead("Other components keep the unified llm block.")
+    else:
+        ux.section("Unified LLM configuration")
+        ux.subhead("Every LLM-using component (guardrail judge, MCP scanner,")
+        ux.subhead("skill scanner, plugin scanner) resolves through this block")
+        ux.subhead("by default. Per-component overrides live under")
+        ux.subhead("scanners.*.llm / guardrail.{llm,judge.llm}.")
     click.echo()
     if llm.model:
         click.echo(f"  Current: model={llm.model}, api_key_env={llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}")
@@ -1085,8 +1090,9 @@ def setup_llm(
         _configure_llm(cfg, cfg.data_dir, target_path=target_path)
         missing_key_env = _interactive_llm_missing_key_env(cfg, target_path)
         if missing_key_env:
+            users = "the LLM judge" if target_path == "guardrail.judge" else "the LLM judge and LLM scanners"
             ux.warn(
-                f"{missing_key_env} has no value, so the LLM judge and LLM scanners cannot use "
+                f"{missing_key_env} has no value, so {users} cannot use "
                 f"{cfg.resolve_llm(target_path).model} and doctor reports the key as missing."
             )
             if not click.confirm("  Save this LLM configuration without a key?", default=False):
@@ -1293,12 +1299,12 @@ def _role_to_target_path(role: str) -> str:
 def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
     """Name the key variable an interactively configured LLM still lacks, or "".
 
-    Only the key prompt sets ``api_key_env``; local providers and the
-    Bedrock, Vertex and Azure credential modes clear it and need no key here.
+    Local providers and Bedrock IAM, profile or instance-role auth need no
+    key, even when ``api_key_env`` is inherited from the unified block.
     """
     resolved = cfg.resolve_llm(target_path)
     env_name = resolved.api_key_env
-    if not env_name or not resolved.model or resolved.is_local_provider():
+    if not env_name or not resolved.model or not resolved.needs_api_key():
         return ""
     if os.environ.get(env_name, "").strip():
         return ""
@@ -1307,7 +1313,13 @@ def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
     return env_name
 
 
-def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
+def _configure_llm(
+    cfg,
+    data_dir: str,
+    *,
+    target_path: str = "",
+    _pending_secrets: list[_PendingGuardrailSecret] | None = None,
+) -> None:
     """Prompt for unified ``llm:`` settings (provider, model, API key).
 
     Writes to the target block selected by ``target_path`` (defaults to
@@ -1452,7 +1464,7 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
                 flag_value=None,
                 non_interactive=False,
             )
-            _prompt_and_save_secret(env_name, llm.api_key, data_dir)
+            _prompt_and_save_secret(env_name, llm.api_key, data_dir, _pending_secrets=_pending_secrets)
             llm.api_key = ""
             llm.api_key_env = env_name
         llm.base_url = click.prompt(
@@ -10114,7 +10126,9 @@ def _prompt_batch_trusted_prefixes(
 def _judge_llm_needs_configuration(app: AppContext) -> bool:
     try:
         resolved = app.cfg.resolve_llm("guardrail.judge")
-        return not (bool(resolved.model) and bool(resolved.resolved_api_key()))
+        return not (
+            bool(resolved.model) and (bool(resolved.resolved_api_key()) or not resolved.needs_api_key())
+        )
     except Exception:  # noqa: BLE001 — prompt conservatively if resolution fails.
         return True
 
@@ -12106,74 +12120,46 @@ def _prompt_judge_model_config(
     *,
     _pending_secrets: list[_PendingGuardrailSecret] | None = None,
 ) -> None:
-    """Prompt for judge LLM details using the same model UX across setup flows."""
+    """Prompt for the judge LLM with the same wizard as ``setup llm --role judge``.
+
+    The answers go to ``guardrail.judge.llm`` (v5). An LLM that already
+    resolves for the judge (``setup llm --role judge`` or the unified block) is
+    offered first. The deprecated v4 ``guardrail.judge.{model,api_base,
+    api_key_env}`` fields are cleared; ``config.load()`` already copied them
+    into ``guardrail.judge.llm``.
+    """
     ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
 
-    # V5 UX: when the operator has already configured the unified top-level
-    # ``llm:`` block, default the judge to INHERIT those values. Empty judge
-    # fields fall through ``Config.resolve_llm("guardrail.judge")`` to the
-    # top-level block and pick up ``DEFENSECLAW_LLM_KEY`` automatically.
-    top_llm = app.cfg.llm
-    has_unified_llm = bool(top_llm.model) and bool(top_llm.resolved_api_key())
-    judge_already_customised = bool(
-        gc.judge.model or gc.judge.api_base or gc.judge.api_key_env,
-    )
-
-    inherit_unified = False
-    if has_unified_llm and not judge_already_customised:
-        click.echo("  Judge can reuse your unified LLM settings:")
-        click.echo(f"    model:       {top_llm.model}")
-        if top_llm.base_url:
-            click.echo(f"    base URL:    {top_llm.base_url}")
-        click.echo(f"    api key:     {top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV} (inherited)")
-        click.echo()
-        inherit_unified = click.confirm(
-            "  Inherit the unified LLM for the judge?",
-            default=True,
-        )
-
-    if inherit_unified:
-        gc.judge.model = ""
-        gc.judge.api_base = ""
-        gc.judge.api_key_env = ""
-        click.echo(f"  ✓ Judge will use {top_llm.model} via {top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}.")
-    else:
-        # Pre-fill each prompt from the top-level ``llm:`` block so operators
-        # who want to override only have to retype the fields they're changing.
-        default_api_base = gc.judge.api_base or top_llm.base_url or ""
-        gc.judge.api_base = click.prompt(
-            "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
-            default=default_api_base,
-            show_default=bool(default_api_base),
-        )
-        default_model = gc.judge.model or top_llm.model or ""
-        gc.judge.model = click.prompt(
-            "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
-            default=default_model,
-            show_default=bool(default_model),
-        )
-
-        default_key_env = gc.judge.api_key_env or top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
-        gc.judge.api_key_env = click.prompt(
-            "  API key env var name",
-            default=default_key_env,
-        )
-        env_val = os.environ.get(gc.judge.api_key_env, "")
-        if env_val:
-            click.echo(f"    Current value: {_mask(env_val)} (set)")
+    resolved = app.cfg.resolve_llm("guardrail.judge")
+    usable = bool(resolved.model) and (bool(resolved.resolved_api_key()) or not resolved.needs_api_key())
+    reuse = False
+    if usable:
+        if resolved.needs_api_key():
+            credentials = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+        elif resolved.bedrock is not None:
+            credentials = f"AWS {resolved.bedrock.auth_mode}"
         else:
-            click.echo(f"    {gc.judge.api_key_env} is not set in environment")
+            credentials = "none needed"
+        click.echo("  The judge can use the LLM already configured:")
+        click.echo(f"    model:       {resolved.model}")
+        if resolved.base_url:
+            click.echo(f"    base URL:    {resolved.base_url}")
+        click.echo(f"    credentials: {credentials}")
+        click.echo()
+        reuse = click.confirm("  Use this LLM for the judge?", default=True)
 
-        # Only prompt for a secret value when the operator picked a custom env
-        # var that is not already satisfied by the unified key.
-        unified_env = top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
-        if gc.judge.api_key_env != unified_env or not env_val:
-            _prompt_and_save_secret(
-                gc.judge.api_key_env,
-                "",
-                app.cfg.data_dir,
-                _pending_secrets=_pending_secrets,
-            )
+    if reuse:
+        click.echo(f"  ✓ Judge will use {resolved.model}.")
+    else:
+        _configure_llm(
+            app.cfg,
+            app.cfg.data_dir,
+            target_path="guardrail.judge",
+            _pending_secrets=_pending_secrets,
+        )
+    gc.judge.model = ""
+    gc.judge.api_base = ""
+    gc.judge.api_key_env = ""
 
     click.echo()
     if click.confirm("  Configure fallback models?", default=bool(gc.judge.fallbacks)):
@@ -12191,17 +12177,18 @@ def _prompt_judge_model_config(
 
     # Share a custom judge key into the v5 top-level LLM block only when that
     # block is otherwise unset, matching the guardrail wizard's existing rule.
+    judge_key_env = gc.judge.llm.api_key_env
     custom_judge_key = (
-        gc.judge.api_key_env
-        and gc.judge.api_key_env != DEFENSECLAW_LLM_KEY_ENV
-        and gc.judge.api_key_env != (top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV)
+        judge_key_env
+        and judge_key_env != DEFENSECLAW_LLM_KEY_ENV
+        and judge_key_env != (app.cfg.llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV)
     )
     if custom_judge_key and not app.cfg.llm.api_key_env:
         if click.confirm(
-            f"  Use {gc.judge.api_key_env} as the shared LLM key for all scanners too?",
+            f"  Use {judge_key_env} as the shared LLM key for all scanners too?",
             default=True,
         ):
-            app.cfg.llm.api_key_env = gc.judge.api_key_env
+            app.cfg.llm.api_key_env = judge_key_env
 
 
 def _interactive_guardrail_setup(
