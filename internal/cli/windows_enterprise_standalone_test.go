@@ -1709,6 +1709,7 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		exit                        int
 	}{
 		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
+		{"verify", "nope", "invalid_arguments", "--profile must be secure_client or standalone", 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
 			var stdout bytes.Buffer
