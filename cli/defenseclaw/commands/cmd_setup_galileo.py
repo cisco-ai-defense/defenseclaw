@@ -211,10 +211,53 @@ def test_cmd(app: AppContext, timeout: float) -> None:
         raise click.ClickException("Galileo is not configured")
     if not destination.enabled:
         raise click.ClickException("Galileo is disabled; enable it before running the canary")
-    _test_galileo_trace_canary(app.cfg.data_dir, timeout)
+    _test_galileo_trace_canary(app.cfg.data_dir, timeout, store=getattr(app, "store", None))
 
 
-def _test_galileo_trace_canary(data_dir: str, timeout: float) -> None:
+# Hints for the delivery failure the gateway recorded for Galileo, in place of
+# the generic "check the API key" one (GAP-1318).
+_GALILEO_DELIVERY_HINTS = {
+    "http_authentication": "Galileo rejected the credentials (HTTP 401/403): check that the API key and "
+    "project belong to this deployment",
+    "http_rejected": "Galileo rejected the data (HTTP 4xx): check the project and log stream names",
+    "resolution_failed": "the endpoint host name did not resolve: check the endpoint and DNS",
+    "connection_failed": "could not connect to the endpoint: check the endpoint and the network",
+    "request_timeout": "the export to Galileo timed out: check the network, then retry",
+    "endpoint_prohibited": "the endpoint is blocked by the egress policy",
+}
+
+
+def _recent_galileo_delivery_failure(store, since) -> tuple[str, str]:
+    """The code and time of the newest Galileo delivery alert at or after ``since``."""
+    from datetime import timezone
+
+    if store is None:
+        return "", ""
+    try:
+        events = store.list_alerts(50)
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        return "", ""
+    for event in events:
+        details = (getattr(event, "details", "") or "").strip()
+        stamp = getattr(event, "timestamp", None)
+        if not details.startswith("galileo/") or ":" not in details or stamp is None:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp < since:
+            break
+        code = details.rsplit(":", 1)[1].strip()
+        if code in _GALILEO_DELIVERY_HINTS:
+            return code, stamp.strftime("%H:%M:%SZ")
+    return "", ""
+
+
+def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    # The gateway records a repeated failure once, so its alert can be older
+    # than this run; one from the last few minutes still names the cause.
+    since = datetime.now(timezone.utc) - timedelta(minutes=15)
     try:
         result = run_trace_canary(
             destination=_DESTINATION,
@@ -224,7 +267,15 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float) -> None:
         )
     except TraceCanaryError as exc:
         hint = ""
-        if exc.failure_class == "gateway_rejected":
+        delivery, when = (
+            _recent_galileo_delivery_failure(store, since) if exc.failure_class == "gateway_rejected" else ("", "")
+        )
+        if delivery:
+            hint = (
+                f". The gateway's latest Galileo export failure ({when}) is {delivery}: "
+                f"{_GALILEO_DELIVERY_HINTS[delivery]}. Fix it with 'defenseclaw setup galileo', then run this test again"
+            )
+        elif exc.failure_class == "gateway_rejected":
             hint = (
                 ". Galileo did not accept the export: check that the API key and project belong to "
                 "this deployment. For a dedicated or self-hosted deployment, run 'defenseclaw setup "

@@ -234,6 +234,9 @@ def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
     assert "The gateway isn't running" in result.output
     assert "loads this destination when it starts" in result.output
     assert "run the command again" not in result.output
+    # GAP-1336: add names the destination and the command that tests it.
+    assert "Generic OTLP: added as destination 'local'" in result.output
+    assert "defenseclaw setup observability test local" in result.output
     source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
     assert [d["name"] for d in source["observability"]["destinations"]] == ["local"]
 
@@ -1296,3 +1299,27 @@ def test_setup_v8_destination_test_uses_canonical_local_evidence_path() -> None:
     )
     assert run.call_args.kwargs["write_probe"] is True
     assert run.call_args.kwargs["compliance"] == "recorder"
+
+
+def test_setup_v8_destination_test_unknown_name_lists_configured_names() -> None:
+    # GAP-1336: 'test otlp' said only "not_found" when add had named it otlp-127-0-0-1.
+    from defenseclaw.observability.destination_test import DestinationTestError
+
+    inspected = SimpleNamespace(
+        effective={"destinations": [{"name": "otlp-127-0-0-1"}, {"name": "terminal"}]},
+        source="/tmp/dc/config.yaml",
+        data_dir="/tmp/dc",
+    )
+    with (
+        patch("defenseclaw.config_inspect.inspect_v8_config", return_value=inspected),
+        patch("defenseclaw.observability.destination_test.canonical_local_compliance_recorder"),
+        patch(
+            "defenseclaw.observability.destination_test.run_destination_test",
+            side_effect=DestinationTestError("not_found", "the named destination does not exist"),
+        ),
+        pytest.raises(click.ClickException) as raised,
+    ):
+        _test_v8_destination("/tmp/dc", "otlp", 3.0, write_probe=False)
+    message = raised.value.message
+    assert "no observability destination is named 'otlp'" in message
+    assert "configured: otlp-127-0-0-1, terminal" in message

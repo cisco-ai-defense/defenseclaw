@@ -287,8 +287,11 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         changed = "already configured"
     else:
         changed = "updated" if existed else "added"
-    click.echo(f"  {mode}{preset.display_name}: {changed}")
+    # GAP-1336: the generated name is what every later command takes.
+    click.echo(f"  {mode}{preset.display_name}: {changed} as destination '{destination_name}'")
     echo_setup_notes(preset, warnings)
+    if not dry_run:
+        click.echo(f"  Test it with: defenseclaw setup observability test {destination_name}")
 
     if not dry_run:
         # The destination is already saved, and the gateway loads it when it
@@ -901,12 +904,28 @@ def _test_v8_destination(
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     except DestinationTestError as exc:
-        raise click.ClickException(
-            f"destination test failed ({exc.failure_class}): {exc.message}"
-        ) from exc
+        message = f"destination test failed ({exc.failure_class}): {exc.message}"
+        if exc.failure_class == "not_found":
+            message = _unknown_destination_message(name, inspected.effective or {})
+        raise click.ClickException(message) from exc
     click.echo(f"  {result.destination}: {result.mode} succeeded")
     click.echo(f"  protocol={result.protocol}; endpoints={result.endpoint_count}")
     click.echo(f"  probe_id={result.probe_id}; compliance activity recorded locally")
+
+
+def _unknown_destination_message(name: str, effective: dict) -> str:
+    """Name the configured destinations when ``test`` gets an unknown one (GAP-1336)."""
+    destinations = effective.get("destinations") if isinstance(effective, dict) else None
+    names = sorted(
+        str(item.get("name"))
+        for item in destinations or []
+        if isinstance(item, dict) and item.get("name")
+    )
+    configured = ", ".join(names) if names else "none"
+    return (
+        f"no observability destination is named '{name}'; configured: {configured}. "
+        "Pass one of those names (see 'defenseclaw setup observability list')"
+    )
 
 
 # ---------------------------------------------------------------------------

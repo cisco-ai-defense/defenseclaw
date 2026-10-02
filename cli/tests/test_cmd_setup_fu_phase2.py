@@ -3648,6 +3648,26 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertIn("The change was saved", result.output)
         self.assertNotIsInstance(result.exception, CanonicalObservabilityError)
 
+    def test_new_api_port_held_by_another_listener_is_refused_before_saving(self):
+        # GAP-1345: --api-port saved a port another account's gateway held.
+        import socket
+
+        self.app.logger = MagicMock()
+        before = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+            holder.bind(("127.0.0.1", 0))
+            holder.listen(1)
+            port = holder.getsockname()[1]
+            result = _invoke(["gateway", "--api-port", str(port), "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(f"127.0.0.1:{port} is already in use", result.output)
+        self.assertIn("config.yaml was not changed", result.output)
+        self.assertIn("defenseclaw setup gateway --api-port ", result.output)
+        after = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
+        self.assertEqual(after, before)
+        self.app.logger.log_action.assert_not_called()
+
     def test_no_verify_keeps_non_availability_audit_errors_fatal(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = RuntimeError("audit rejected")

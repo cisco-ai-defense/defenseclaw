@@ -2361,7 +2361,50 @@ def _gateway_port_holder(cfg) -> str:
     except Exception:  # noqa: BLE001
         executable = ""
     name = os.path.basename(executable) if executable else ""
+    if not name and sys.platform == "win32":
+        name = _windows_process_label(listener.pid)
     return f"PID {listener.pid}" + (f" ({name})" if name else "")
+
+
+def _windows_process_label(pid: int) -> str:
+    """Image name and, when Windows shows it, the account of another process (GAP-1345).
+
+    A standard account cannot open another account's process, but tasklist
+    still lists its image name (and its account where this one may see it).
+    """
+    import csv
+
+    try:
+        proc = subprocess.run(
+            ["tasklist", "/V", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    for row in csv.reader(proc.stdout.splitlines()):
+        if len(row) < 7 or row[1].strip() != str(pid):
+            continue
+        image, account = row[0].strip(), row[6].strip()
+        if account and account.upper() not in {"N/A", "UNKNOWN"}:
+            return f"{image}, {account}"
+        if image.lower() == "defenseclaw-gateway.exe":
+            return f"{image}, probably another account's DefenseClaw gateway"
+        return image
+    return ""
+
+
+def _free_api_port_hint(cfg) -> str:
+    """A concrete free API port for the fix text, or a placeholder."""
+    try:
+        from defenseclaw.bootstrap import suggest_free_api_port
+
+        port = suggest_free_api_port(_gateway_api_host(cfg), int(cfg.gateway.api_port))
+    except Exception:  # noqa: BLE001 - the suggestion is best effort
+        port = 0
+    return str(port) if port else "<free port>"
 
 
 def _foreign_gateway_port_holder(cfg) -> str:
@@ -2380,7 +2423,8 @@ def _foreign_gateway_port_holder(cfg) -> str:
 def _foreign_gateway_port_detail(cfg, holder: str) -> str:
     return (
         f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
-        "Stop that process, or move this account's gateway with `defenseclaw setup gateway --api-port <free port>`, "
+        "Stop that process, or move this account's gateway with "
+        f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
         "then run `defenseclaw-gateway start`"
     )
 
@@ -2451,7 +2495,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 "Sidecar API",
                 f"{bind}:{cfg.gateway.api_port} answers, but not as this account's verified gateway "
                 f"({trust.detail}){held}. Stop that process, or move this account's gateway with "
-                "`defenseclaw setup gateway --api-port <free port>`, "
+                f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
                 "then run `defenseclaw-gateway restart`",
                 r=r,
             )
@@ -3558,7 +3602,13 @@ def _check_windows_gateway_diagnostics(
     elif listener.status in {"denied", "unavailable"}:
         _emit("skip", "Gateway listener owner", listener.reason or "listener inspection unavailable", r=r)
     elif record.status != "ok" or listener.pid != record.pid:
-        _emit("fail", "Gateway listener owner", "configured API port is owned by an unexpected process", r=r)
+        holder = _gateway_port_holder(cfg) if listener.pid > 0 else ""
+        _emit(
+            "fail",
+            "Gateway listener owner",
+            "configured API port is owned by " + (holder or "an unexpected process") + ", not by this account's gateway",
+            r=r,
+        )
     elif not identity_ok:
         _emit("fail", "Gateway listener owner", "listener PID matches an unverified or stale PID record", r=r)
     elif status_code == 200 and runtime_pid is None:

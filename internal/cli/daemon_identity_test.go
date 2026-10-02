@@ -238,7 +238,10 @@ func TestInspectConfiguredListenerRejectsForeignCollisionAndStalePID(t *testing.
 	withStartupListenerInspector(t, func(string, int) (int, error) { return 9001, nil })
 	for _, state := range []fakeDaemonState{{running: false}, {running: true, pid: 42}} {
 		_, _, err := inspectConfiguredListener(state, cfg, http.DefaultClient)
-		if err == nil || !strings.Contains(err.Error(), "foreign process PID 9001") {
+		// GAP-1345: the error names the holder and a concrete next step.
+		if err == nil || !strings.Contains(err.Error(), "is held by PID 9001, not by this account's gateway") ||
+			!strings.Contains(err.Error(), "defenseclaw setup gateway --api-port ") ||
+			!strings.Contains(err.Error(), "defenseclaw-gateway start") {
 			t.Fatalf("state %#v: error = %v, want foreign collision", state, err)
 		}
 	}

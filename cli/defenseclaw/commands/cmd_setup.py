@@ -4195,6 +4195,8 @@ def setup_gateway(
     else:
         _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir, uses_openclaw=uses_openclaw)
 
+    if gw.api_port != previous_api_port:
+        _refuse_held_api_port(app.cfg, gw.api_port)
     app.cfg.save()
     # A new API port takes effect only when the gateway (re)starts, so nothing
     # listens on it yet: the connectivity check and the audit event cannot
@@ -4236,6 +4238,42 @@ def setup_gateway(
             else "  Note: the gateway could not be reached, so this change was not written to the audit log."
         ),
     )
+
+
+def _refuse_held_api_port(cfg, port: int) -> None:
+    """Refuse a new API port that another account or program holds (GAP-1345).
+
+    Saving it would leave this account's gateway unable to start and send its
+    hook calls, with its token, to that listener.
+    """
+    from defenseclaw.bootstrap import _api_port_available, suggest_free_api_port
+    from defenseclaw.config import api_bind_host
+
+    host = (api_bind_host(cfg) or "127.0.0.1").strip("[]")
+    if host == "localhost":
+        host = "127.0.0.1"
+    if _api_port_available(host, port):
+        return
+    try:
+        from defenseclaw.commands.cmd_doctor import _gateway_port_holder
+
+        holder = _gateway_port_holder(cfg)  # cfg.gateway.api_port is the new port here
+    except Exception:  # noqa: BLE001 - naming the holder is best effort
+        holder = ""
+    free = suggest_free_api_port(host, port)
+    click.echo(
+        f"error: {host}:{port} is already in use"
+        + (f" by {holder}" if holder else " (often another account's DefenseClaw gateway)")
+        + "; this account's gateway could not listen there. config.yaml was not changed.",
+        err=True,
+    )
+    click.echo(
+        "  Choose a free port: defenseclaw setup gateway --api-port "
+        + (str(free) if free else "<free port>")
+        + " --non-interactive",
+        err=True,
+    )
+    raise SystemExit(1)
 
 
 def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str, *, uses_openclaw: bool = True) -> None:

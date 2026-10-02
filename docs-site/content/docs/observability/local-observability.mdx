@@ -327,6 +327,7 @@ defenseclaw setup local-observability down
 ```
 
 Stops all five containers and removes the Compose project. Dashboards and Grafana state live in named Docker volumes so they survive `down`/`up` cycles.
+The `local-observability` destination stays in `config.yaml`, so the gateway keeps trying to send to the stopped stack; add `--disable-config` to turn it off too.
 
 To wipe everything including the volumes:
 
@@ -348,7 +349,7 @@ defenseclaw setup local-observability status
 defenseclaw setup local-observability logs --service grafana --follow
 ```
 
-`status` shows container health and the resolved OTLP endpoint. `logs --service <name>` tails one of the five containers — useful when Grafana isn't picking up dashboards or the OTel collector is dropping spans. Drop `--service` to fan out logs from every container at once.
+`status` shows container health and the readiness of each service, and exits 1 when the stack is down, a probe fails, or the containers belong to another copy of the stack (for example one started by another account). `logs --service <name>` tails one of the five containers — useful when Grafana isn't picking up dashboards or the OTel collector is dropping spans. Drop `--service` to fan out logs from every container at once.
 
 ## Use it alongside Splunk
 

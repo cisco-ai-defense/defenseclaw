@@ -615,6 +615,20 @@ def _validate_windows_docker_certification(
         )
 
 
+def _docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
+    """Say why ``docker info`` failed and what to do on this OS (GAP-1335)."""
+
+    if os_name.startswith("win") or os_name == "darwin":
+        return "Docker daemon is not reachable. Start Docker Desktop and retry"
+    if "permission denied" in detail.lower():
+        return (
+            "This account cannot use the Docker daemon socket (permission denied). Add it to the "
+            "docker group (sudo usermod -aG docker $USER, then sign out and back in) or use "
+            "rootless Docker, and retry"
+        )
+    return "Docker daemon is not reachable. Start it (sudo systemctl start docker) and retry"
+
+
 def validate_native_docker_preflight(
     docker_path: str,
     runner: CommandRunner,
@@ -638,7 +652,7 @@ def validate_native_docker_preflight(
     if info_result.returncode != 0:
         detail = (info_result.stderr or info_result.stdout).strip()
         suffix = f" ({detail.splitlines()[0]})" if detail else ""
-        raise LocalStackError("Docker daemon is not reachable. Start Docker Desktop and retry" + suffix)
+        raise LocalStackError(_docker_daemon_unreachable_message(detail, os_name) + suffix)
     info = _parse_json_object(info_result.stdout.strip(), description="info")
     if str(info.get("OSType", "")).lower() != "linux":
         raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
@@ -671,6 +685,8 @@ class LocalStackController:
         self.docker_path = resolve_native_docker_executable(docker_path, os_name=self.os_name)
         self.runner = runner or CommandRunner()
         self.environment = dict(os.environ if environment is None else environment)
+        # Set by status(): every readiness probe passed and no foreign copy was found.
+        self.status_ready = False
         # The managed lifecycle always uses the Compose file's loopback default.
         # Intentional HOST_BIND overrides are confined to the documented manual
         # `docker compose` path, where the operator owns the exposure decision.
@@ -822,10 +838,17 @@ class LocalStackController:
                 or not config_matches
                 or not working_dir_matches
             ):
+                # GAP-1335: a copy of this stack started from another directory
+                # (another account or install) carries the same labels.
+                origin = (
+                    f"belongs to another copy of the {COMPOSE_PROJECT} stack, started from "
+                    f"{working_dir}, not to this one ({self.stack_dir})"
+                    if actual_project == COMPOSE_PROJECT and actual_service == service and working_dir
+                    else f"is not owned by the {COMPOSE_PROJECT}/{service} Compose service"
+                )
                 raise LocalStackError(
-                    f"container name collision: {container} is not owned by the "
-                    f"{COMPOSE_PROJECT}/{service} Compose service. DefenseClaw will not "
-                    "delete it; rename or remove the foreign container and retry."
+                    f"container name collision: {container} {origin}. DefenseClaw will not "
+                    "delete it; stop that stack (or rename or remove the container) and retry."
                 )
         return existing_names.intersection(SERVICE_CONTAINERS)
 
@@ -1269,12 +1292,21 @@ class LocalStackController:
         )
 
     def status(self) -> str:
+        """Compose ps plus readiness; ``status_ready`` says whether all of it is healthy."""
         self.preflight()
         compose = self._checked(self._run_compose("ps", timeout=30), "docker compose ps")
         lines = [compose.stdout.rstrip(), "", "Readiness:"]
-        for probe in self.probe_all():
+        probes = self.probe_all()
+        for probe in probes:
             state = "ready" if probe.ready else "fail"
             lines.append(f"  {probe.label:<10} {state:<7} {probe.target}")
+        self.status_ready = bool(probes) and all(probe.ready for probe in probes)
+        # GAP-1335: say when the containers listed belong to another copy.
+        try:
+            self.verify_container_ownership()
+        except LocalStackError as exc:
+            self.status_ready = False
+            lines.extend(("", f"Note: {exc}"))
         return "\n".join(lines).rstrip() + "\n"
 
     def logs(self, *, service: str | None = None, follow: bool = False) -> str:
