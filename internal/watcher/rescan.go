@@ -188,6 +188,17 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if isBundledSkillWatchPath(path) {
 				continue
 			}
+			if synced, ok := claudeSyncedSkillDirs(path); ok {
+				for _, skill := range synced {
+					targets = append(targets, InstallEvent{
+						Type:      InstallSkill,
+						Name:      filepath.Base(skill),
+						Path:      skill,
+						Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
 			if watcherConnectorName(w.cfg) == "claudecode" &&
 				isClaudeSkillsPlugin(path) {
 				continue

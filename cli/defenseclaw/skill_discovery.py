@@ -256,6 +256,45 @@ def read_skill_marker_text(
         os.close(fd)
 
 
+def _claude_synced_skill_directories(
+    skill_root: str,
+    entry: str,
+) -> list[SkillDirectory] | None:
+    """Expand Claude Code's account-synced skill container.
+
+    Claude Code keeps skills synced from the account under
+    ``~/.claude/skills/synced/<account-id>/<skill>/SKILL.md``. The ``synced``
+    folder is a container, not a skill: reporting it as one gave a broken
+    "missing" row and a scanner error on every rescan. Returns ``None`` when
+    *entry* is not that container (so it is handled as an ordinary skill),
+    otherwise the marked skills two levels below it.
+    """
+    normalized = os.path.normpath(skill_root)
+    if (
+        entry != "synced"
+        or os.path.basename(normalized).casefold() != "skills"
+        or os.path.basename(os.path.dirname(normalized)).casefold() != ".claude"
+    ):
+        return None
+    container = os.path.join(skill_root, entry)
+    if is_symlink(container) or skill_dir_is_eligible(container):
+        return None
+    rows: list[SkillDirectory] = []
+    try:
+        accounts = _stable_child_directories(container)
+    except OSError:
+        return rows
+    for _account, account_path, _identity in accounts:
+        try:
+            children = _stable_child_directories(account_path)
+        except OSError:
+            continue
+        for child, child_path, _child_identity in children:
+            if skill_dir_is_eligible(child_path):
+                rows.append(SkillDirectory(child, child_path, account_path))
+    return rows
+
+
 def _discover_claude_skill_directories(
     skill_root: str,
     *,
@@ -269,6 +308,7 @@ def _discover_claude_skill_directories(
         return []
 
     regular: list[SkillDirectory] = []
+    synced: list[SkillDirectory] = []
     targets: set[str] = set()
     for entry in entries:
         full = os.path.join(skill_root, entry)
@@ -288,6 +328,10 @@ def _discover_claude_skill_directories(
             continue
         if not os.path.isdir(full):
             continue
+        synced_children = None if commands else _claude_synced_skill_directories(skill_root, entry)
+        if synced_children is not None:
+            synced.extend(synced_children)
+            continue
         resolved = os.path.realpath(full)
         target_key = os.path.normcase(resolved)
         if target_key in targets:
@@ -300,7 +344,7 @@ def _discover_claude_skill_directories(
             # namespace. It must not also appear as a plain skill.
             continue
         regular.append(SkillDirectory(entry, resolved, skill_root))
-    return regular
+    return regular + synced
 
 
 def _discover_markdown_commands(skill_root: str) -> list[SkillDirectory]:
@@ -415,6 +459,12 @@ def discover_skill_directories(
     container_children: list[SkillDirectory] = []
     selected_identities: list[tuple[str, os.stat_result]] = []
     for entry, full, entry_identity in entries:
+        # Amp and other connectors that read ~/.claude/skills see the same
+        # account-synced container as Claude Code.
+        synced_children = _claude_synced_skill_directories(skill_root, entry)
+        if synced_children is not None:
+            container_children.extend(synced_children)
+            continue
         if entry not in system_containers:
             regular.append(SkillDirectory(entry, full, skill_root))
             selected_identities.append((full, entry_identity))
