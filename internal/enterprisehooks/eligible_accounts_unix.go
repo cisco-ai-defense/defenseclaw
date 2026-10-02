@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -163,7 +164,30 @@ func LoadUnixEligibleAccounts(path string) ([]UnixEligibleAccount, error) {
 			continue
 		}
 		account.Home = home
+		account.CreatedDirs = UnixCreatedDirsBelow(home, account.CreatedDirs)
 		out = append(out, account)
 	}
 	return out, nil
+}
+
+// unixCreatedDirsLimit bounds the folders one account's record entry lists.
+const unixCreatedDirsLimit = 64
+
+// UnixCreatedDirsBelow keeps the absolute folders strictly below home, cleaned,
+// without duplicates.
+func UnixCreatedDirsBelow(home string, dirs []string) []string {
+	var out []string
+	for _, dir := range dirs {
+		dir = filepath.Clean(strings.TrimSpace(dir))
+		relative, err := filepath.Rel(home, dir)
+		if !filepath.IsAbs(dir) || err != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if !slices.Contains(out, dir) && len(out) < unixCreatedDirsLimit {
+			out = append(out, dir)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

@@ -163,6 +163,9 @@ type enterpriseHookWorkerCopilotVSCode struct {
 	HookBinary string `json:"hook_binary"`
 	HookFile   bool   `json:"hook_file"`
 	Plugin     bool   `json:"plugin"`
+	// RemoveDirs are the folders the guardian created in the home for
+	// these files (from its record); each still empty afterwards goes.
+	RemoveDirs []string `json:"remove_dirs,omitempty"`
 }
 
 // enterpriseHookWorkerCopilotVSCodeReport is the worker's account of it
@@ -171,6 +174,9 @@ type enterpriseHookWorkerCopilotVSCodeReport struct {
 	Changed []string `json:"changed,omitempty"`
 	Removed []string `json:"removed,omitempty"`
 	Kept    []string `json:"kept,omitempty"`
+	// Created are the folders the write created in the home; the parent
+	// records them (only below the home) for the removal.
+	Created []string `json:"created,omitempty"`
 	Error   string   `json:"error,omitempty"`
 }
 
@@ -295,12 +301,15 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	enterprisehooks.SetStandaloneUnix(request.Standalone)
 	switch request.Operation {
 	case enterpriseHookWorkerOpApply:
-		response := runEnterpriseHookWorkerApply(ctx, request)
+		// remove-all: the VS Code Local file and plugin go with the
+		// registrations, first, so a purge target finds the folders
+		// DefenseClaw created for them empty and removes them too.
+		var vscode *enterpriseHookWorkerCopilotVSCodeReport
 		if request.CopilotVSCode != nil {
-			// remove-all: the VS Code Local file and plugin go with the
-			// registrations.
-			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
+			vscode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
+		response := runEnterpriseHookWorkerApply(ctx, request)
+		response.CopilotVSCode = vscode
 		return respond(response, 0)
 	case enterpriseHookWorkerOpDiscover:
 		versions := map[string]string{}
