@@ -2918,7 +2918,8 @@ def use_pack_cmd(
     """Switch the guardrail rule pack, globally or for one connector.
 
     PACK is a built-in preset (default, strict, permissive), the name of a
-    pack under ``<policy_dir>/guardrail/``, or a directory path. The pack is
+    pack under ``<policy_dir>/guardrail/``, or a directory path (``./NAME``
+    for a folder in the current directory that shares a pack's name). The pack is
     validated first; an invalid pack changes nothing. Without ``--connector``
     every connector uses PACK and any per-connector overrides are removed.
     With ``--connector X`` only X's override is written. ``--clear
@@ -3030,12 +3031,18 @@ def use_pack_cmd(
         pack_name, kind = raw, "preset"
     else:
         candidate = policy_catalog.normalize_pack_path(raw)
-        if not os.path.isdir(candidate):
-            named = [
-                p for p in policy_catalog.discover_rule_packs(app.cfg) if p.name == raw and os.path.isdir(p.path)
-            ]
-            if not named or os.sep in raw or (os.altsep and os.altsep in raw):
-                _finish(
+        # A bare name is the installed pack of that name even when the current
+        # directory has a folder called NAME; ./NAME selects the folder (GAP-1576).
+        bare = not (os.sep in raw or (os.altsep and os.altsep in raw) or raw.startswith(("~", ".")))
+        named = (
+            [p for p in policy_catalog.discover_rule_packs(app.cfg) if p.name == raw and os.path.isdir(p.path)]
+            if bare
+            else []
+        )
+        if named:
+            candidate = named[0].path
+        elif not os.path.isdir(candidate):
+            _finish(
                     ok=False,
                     exit_code=1,
                     scope=scope,
@@ -3046,7 +3053,6 @@ def use_pack_cmd(
                         "and not an existing directory. Nothing was changed."
                     ),
                 )
-            candidate = named[0].path
         path = candidate
         pack_name, kind = policy_catalog.pack_name_for_path(app.cfg, path)
 
