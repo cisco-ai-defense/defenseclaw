@@ -938,6 +938,20 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         # Existing override block must not be clobbered.
         self.assertEqual(gc.connectors["codex"].mode, "action")
 
+    def test_add_reenables_connector_disabled_per_connector(self):
+        # GAP-1950: `guardrail disable --connector codex` then `setup codex`
+        # must clear enabled=false, or the gateway never activates codex.
+        gc = self.app.cfg.guardrail
+        gc.connector = "claudecode"
+        gc.connectors = {
+            "claudecode": PerConnectorGuardrailConfig(mode="action"),
+            "codex": PerConnectorGuardrailConfig(mode="observe", enabled=False),
+        }
+        _write_connector_identity(self.app.cfg, "codex", "add")
+        self.assertIsNone(gc.connectors["codex"].enabled)
+        self.assertTrue(gc.effective_enabled("codex"))
+        self.assertEqual(gc.connectors["codex"].mode, "observe")
+
     def test_replace_clears_map(self):
         gc = self.app.cfg.guardrail
         gc.connectors = {"codex": PerConnectorGuardrailConfig(), "cursor": PerConnectorGuardrailConfig()}
@@ -3328,6 +3342,9 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, msg=result.output)
                 self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
                 self.assertEqual(gc.effective_mode(connector), effective_mode)
+                # Setting codex up re-enables it (GAP-1950); everything else stays.
+                if connector == "codex":
+                    before_policies["codex"].enabled = None
                 self.assertEqual(gc.connectors, before_policies)
                 self.assertEqual(gc.judge.hook_connectors, before_gate)
                 self.assertEqual(gc.connector, "claudecode")
