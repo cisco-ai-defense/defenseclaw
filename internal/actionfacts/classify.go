@@ -391,6 +391,10 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "new-item", "ni":
 		classifyStructuredPowerShellNewItem(out, command)
 	case "mkdir", "md":
+		if program == "mkdir" && command.Dialect == DialectPOSIX {
+			classifyPOSIXMkdir(out, command)
+			break
+		}
 		// PowerShell exposes these names through wrapper functions whose exact
 		// parameter binding is not represented by structured argv. Keep them on
 		// fallback instead of treating the wrapper invocation as a complete
@@ -3243,6 +3247,13 @@ func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
 		appendCommandPath(out, command, PathAccessWrite, target)
 		return
 	}
+	if targets, ok := staticPOSIXSedInPlaceExpressionTargets(*command); ok {
+		addOperation(command, OperationWrite)
+		for _, pathValue := range targets {
+			appendCommandPath(out, command, PathAccessWrite, pathValue)
+		}
+		return
+	}
 	if targets, readOnly := staticPOSIXSedNumericPrintTargets(*command); readOnly {
 		addOperation(command, OperationRead)
 		for _, pathValue := range targets {
@@ -3251,6 +3262,42 @@ func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
 		return
 	}
 	out.markPartial(IssueUnknownOperandGrammar)
+}
+
+// staticPOSIXSedInPlaceExpressionTargets owns two more sed -i spellings of
+// the StaticPOSIXSedInPlaceLiteralMutation script grammar, with the script
+// given by -e (GAP-1716): `sed -i "" -e SCRIPT FILE` and `sed -i -e SCRIPT
+// FILE`. GNU and BSD sed read them differently (BSD takes "" or "-e" as the
+// backup suffix; GNU reads "" as a missing input file), but both rewrite FILE
+// in place, and BSD also writes the FILE-e backup of the second form. The
+// targets are those writes. Lineage proofs keep the stricter grammar.
+func staticPOSIXSedInPlaceExpressionTargets(command CommandFact) ([]string, bool) {
+	if len(command.Argv) < 5 || len(command.Argv) != len(command.Arguments) {
+		return nil, false
+	}
+	var suffix string
+	switch {
+	case len(command.Argv) == 6 && command.Argv[1] == "-i" && command.Argv[2] == "" &&
+		command.Argv[3] == "-e":
+	case len(command.Argv) == 5 && command.Argv[1] == "-i" && command.Argv[2] == "-e":
+		suffix = "-e"
+	default:
+		return nil, false
+	}
+	last := len(command.Argv) - 1
+	literal := command
+	literal.Argv = []string{command.Argv[0], "-i", command.Argv[last-1], command.Argv[last]}
+	literal.Arguments = []ArgumentFact{
+		command.Arguments[0], command.Arguments[1], command.Arguments[last-1], command.Arguments[last],
+	}
+	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(literal)
+	if !ok {
+		return nil, false
+	}
+	if suffix == "" {
+		return []string{target}, true
+	}
+	return []string{target, target + suffix}, true
 }
 
 // staticPOSIXSedNumericPrintTargets owns the narrow read-only grammar used by
@@ -3298,6 +3345,39 @@ func staticPOSIXSedNumericPrintTargets(command CommandFact) ([]string, bool) {
 		}
 	}
 	return targets, true
+}
+
+// classifyPOSIXMkdir owns POSIX mkdir's -p, -v and -m MODE options (GNU and
+// BSD): each operand is a directory the command creates, a write of that
+// path (GAP-1716). Any other option keeps unknown_operand_grammar.
+func classifyPOSIXMkdir(out *parseOutput, command *CommandFact) {
+	if pathFlavor(command.Executable) != PathFlavorUnknown {
+		appendPath(out, command.ID, PathAccessExecute, command.Executable)
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet("-m", "--mode"),
+		exactOptionSet("-p", "--parents", "-v", "--verbose"),
+		exactOptionSet("--help", "--version"),
+	)
+	if parsed.preview {
+		command.Effect = EffectPreview
+		if !parsed.complete {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+		return
+	}
+	if !parsed.complete || len(parsed.positionals) == 0 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if !command.ArgvComplete {
+		out.markPartial(IssueDynamicWord)
+	}
+	addOperation(command, OperationWrite)
+	for _, operand := range parsed.positionals {
+		appendCommandPath(out, command, PathAccessWrite, operand)
+	}
 }
 
 func classifyPOSIXPermissionChange(
