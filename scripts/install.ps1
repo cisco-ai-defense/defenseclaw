@@ -201,6 +201,29 @@ function New-InstallDirectory([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Protect-UvDirectory {
+    param([switch]$Create)
+    # New-InstallDirectory for the uv folder, which must keep its contents.
+    # Its cache and Python (about 23,000 files) inherited the data dir's
+    # permissions, so a 1.0.0 gateway, which re-applies those on every private
+    # write, missed its 5-second start window after a rollback (GAP-1988).
+    # Empty, this is instant; the first run over a full folder takes a while.
+    $uvDir = Join-Path $DataDir ".uv"
+    if (-not (Test-Path -LiteralPath $uvDir -PathType Container)) {
+        if (-not $Create) { return }
+        New-Item -ItemType Directory -Path $uvDir | Out-Null
+    }
+    $acl = Get-Acl -LiteralPath $uvDir
+    if ($acl.AreAccessRulesProtected) { return }
+    if (Get-ChildItem -LiteralPath $uvDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1) {
+        Write-Info "Setting the permissions of $uvDir (once; this can take a minute)"
+    }
+    $acl.SetAccessRuleProtection($true, $true)
+    try { Set-Acl -LiteralPath $uvDir -AclObject $acl } catch {
+        Write-Warn "Could not set the permissions of ${uvDir}: $($_.Exception.Message)"
+    }
+}
+
 function Repair-DataOwner {
     # An elevated 0.x installer left its connector backups, and the agent
     # configs its connectors wrote (such as ~\.codex\config.toml), owned by
@@ -1489,6 +1512,8 @@ function Invoke-Rollback {
         if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
         Die "Rollback failed part-way; see $($Run.Log)"
     }
+    # Homes upgraded before the uv folder was protected (GAP-1988).
+    Protect-UvDirectory
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
@@ -1679,6 +1704,7 @@ function Invoke-Install {
     # data dir, so `uninstall --all` leaves nothing of them in AppData.
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
+    Protect-UvDirectory -Create
     # uv's defaults (60 s to compile one file, 30 s per download read) fail
     # on a Windows host busy with Defender and other accounts (GAP-1776).
     if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }
