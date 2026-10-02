@@ -660,6 +660,17 @@ def _alerts_default(
 
     # A full disk drops new alerts silently while enforcement goes on (GAP-1528).
     notice = audit_disk_full_notice(str(getattr(app.cfg, "audit_db", "") or ""))
+    if not notice and app.cfg is not None:
+        # Some full volumes still report free space; the gateway knows its
+        # writes fail.
+        from defenseclaw.commands.cmd_status import gateway_audit_write_failure
+
+        failure = gateway_audit_write_failure(app.cfg)
+        if failure:
+            notice = (
+                f"{failure}: new alerts and audit events are not being recorded; "
+                "free space on the disk holding the audit database and run 'defenseclaw doctor'"
+            )
     if notice:
         ux.warn(notice[0].upper() + notice[1:])
 

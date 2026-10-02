@@ -1058,19 +1058,49 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
     from defenseclaw.audit_capacity import audit_disk_full_notice
 
     value = audit_disk_full_notice(str(getattr(cfg, "audit_db", "") or ""))
-    telemetry = health.get("telemetry") if isinstance(health, dict) else None
-    if not value and isinstance(telemetry, dict):
-        state = str(telemetry.get("state") or "").strip().lower()
-        if state and state not in _RUNTIME_HEALTHY_STATES:
-            from defenseclaw.commands.cmd_doctor import _telemetry_error_reason
-
-            reason = _telemetry_error_reason(telemetry.get("details"))
-            since = str(telemetry.get("since") or "").strip()
-            if reason:
-                value = reason + (f" (since {since})" if since and not since.startswith("0001") else "")
-                value += "; run 'defenseclaw doctor'"
+    if not value:
+        value = _gateway_audit_write_failure(health)
+        if value:
+            value += "; run 'defenseclaw doctor'"
     if value:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
+
+
+def _gateway_audit_write_failure(health: dict | None) -> str:
+    """The gateway's own report that audit writes fail, in plain words, or "".
+
+    The free-space check misses volumes that report some room but reject
+    writes (APFS showed 32 MiB free on a full volume), so this signal from the
+    gateway is what status and alerts rely on (GAP-1528).
+    """
+    telemetry = health.get("telemetry") if isinstance(health, dict) else None
+    if not isinstance(telemetry, dict):
+        return ""
+    state = str(telemetry.get("state") or "").strip().lower()
+    if not state or state in _RUNTIME_HEALTHY_STATES:
+        return ""
+    from defenseclaw.commands.cmd_doctor import _telemetry_error_reason
+
+    reason = _telemetry_error_reason(telemetry.get("details"))
+    if not reason:
+        return ""
+    since = str(telemetry.get("since") or "").strip()
+    return reason + (f" (since {since})" if since and not since.startswith("0001") else "")
+
+
+def gateway_audit_write_failure(cfg) -> str:
+    """Ask the running gateway whether audit writes fail; "" when they don't or it can't tell."""
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(cfg),
+            port=cfg.gateway.api_port,
+            token=cfg.gateway.resolved_token(),
+        )
+        return _gateway_audit_write_failure(_fetch_runtime_bound_health(client, cfg))
+    except Exception:
+        return ""
 
 
 def _print_llm_judge(health: dict | None) -> None:

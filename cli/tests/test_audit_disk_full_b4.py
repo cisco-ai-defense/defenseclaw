@@ -47,6 +47,30 @@ class AuditDiskFullNoticeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("new alerts and audit events are not being recorded", result.output)
 
+    def test_alerts_warns_when_the_gateway_reports_audit_writes_failing(self):
+        # APFS reported 32 MiB free on the full volume, so only the gateway knew.
+        health = {
+            "telemetry": {
+                "state": "error",
+                "since": "2026-10-02T19:10:00Z",
+                "details": {"event_history_failure": "sqlite_write_failed", "event_history_last_sqlite_class": "full"},
+            }
+        }
+        with (
+            mock.patch("shutil.disk_usage", return_value=_ROOMY),
+            mock.patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=health),
+        ):
+            result = CliRunner().invoke(alerts, [], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("since 2026-10-02T19:10:00Z", result.output)
+        self.assertIn("new alerts and audit events are not being recorded", result.output)
+        with (
+            mock.patch("shutil.disk_usage", return_value=_ROOMY),
+            mock.patch.object(cmd_status, "_fetch_runtime_bound_health", return_value={"telemetry": {"state": "running"}}),
+        ):
+            result = CliRunner().invoke(alerts, [], obj=self.app)
+        self.assertNotIn("not being recorded", result.output)
+
     def test_status_names_the_audit_write_failure(self):
         health = {
             "telemetry": {
