@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
@@ -226,6 +227,34 @@ def test_real_drop_reasons_still_warn_with_the_reason() -> None:
     cmd_doctor._check_connector_export_custody(report, r)
     assert r.checks[-1]["status"] == "warn"
     assert "defenseclaw setup claude-code" in r.checks[-1]["remediation"]
+
+
+def test_removed_connectors_get_no_otlp_rows_or_setup_advice() -> None:
+    # GAP-1931: OpenClaw-only after removing the hook connectors.
+    def status(connector: str, **overrides) -> ConnectorCustodyStatus:
+        base = _custody_report().instances[0]
+        return dataclasses.replace(base, connector=connector, profile_version=f"{connector}-v1", **overrides)
+
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            status("claudecode", drop_only_reasons=("invalid_record",)),
+            status("openclaw", drop_only_batches=0),
+            status("openhands", custody="external"),
+        ),
+    )
+    r = _DoctorResult()
+    cfg = mock.Mock(spec=["policy_connectors"])
+    cfg.policy_connectors.return_value = ["openclaw"]
+    cmd_doctor._check_connector_export_custody(report, r, configured=cmd_doctor._otlp_configured_connectors(cfg))
+    rows = {c["label"]: c for c in r.checks}
+    assert set(rows) == {"Connector OTLP: openclaw", "Connector OTLP: not configured"}
+    assert rows["Connector OTLP: openclaw"]["status"] == "pass"
+    removed = rows["Connector OTLP: not configured"]
+    assert removed["status"] == "skip" and "claudecode, openhands" in removed["detail"]
+    assert not any("setup" in c.get("remediation", "") for c in r.checks)
 
 
 def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:

@@ -1195,23 +1195,32 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     except ConfigInspectError as exc:
         from defenseclaw.commands.cmd_config import _v8_failure_detail
 
+        detail = _v8_failure_detail(cfg_path, exc)
+        # Not `config validate`: it prints the same line again (GAP-1662).
+        # A refusal outside the file (the validator could not run) keeps
+        # the step its detail names.
+        remediation = (
+            "correct config.yaml as shown, then rerun `defenseclaw doctor`"
+            if exc.field_path
+            else "do the step shown, then rerun `defenseclaw doctor`"
+        )
+        missing_key = re.search(r"Save it with: (defenseclaw keys set \S+?)\.?(?:\s|$)", detail)
+        if missing_key:
+            # The file is fine; the referenced key has no value (GAP-1915).
+            remediation = (
+                f"run `{missing_key.group(1)}` (or delete that destination from config.yaml), "
+                "then rerun `defenseclaw doctor`"
+            )
         _emit(
             "fail",
             "Config validation",
             # The same plain line, field and next step as config validate
             # (GAP-1499), not the wire record.
-            _v8_failure_detail(cfg_path, exc),
+            detail,
             r=r,
             check_id="doctor.config.canonical-v8",
             reason_code="canonical-validation-failed",
-            # Not `config validate`: it prints the same line again (GAP-1662).
-            # A refusal outside the file (the validator could not run) keeps
-            # the step its detail names.
-            remediation=(
-                "correct config.yaml as shown, then rerun `defenseclaw doctor`"
-                if exc.field_path
-                else "do the step shown, then rerun `defenseclaw doctor`"
-            ),
+            remediation=remediation,
         )
         return
     if validation.valid is not True:
@@ -4986,6 +4995,18 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
     elif telemetry_state not in {"running", "healthy"}:
         reason = _telemetry_error_reason(telemetry.get("details") if isinstance(telemetry, dict) else None)
+        if reason:
+            # The audit store, not Codex, is failing; the audit storage and
+            # telemetry rows already FAIL with the fix (GAP-1927).
+            _emit(
+                "warn",
+                "Codex OTel runtime",
+                f"Codex telemetry settings are correct (environment {runtime_environment!r}), "
+                f"but DefenseClaw cannot store its events: {reason}",
+                r=r,
+                remediation="fix the audit storage problem reported above, then rerun `defenseclaw doctor`",
+            )
+            return
         _emit(
             "fail",
             "Codex OTel runtime",
@@ -8908,6 +8929,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
             cfg.data_dir,
         ),
         r,
+        configured=_otlp_configured_connectors(cfg),
     )
     _check_galileo_trace_canaries(
         status,
@@ -8929,12 +8951,33 @@ def _native_drop_remediation(connector: str, state: str) -> str:
     )
 
 
-def _check_connector_export_custody(report, r: _DoctorResult) -> None:
+def _warnings_label(count: int) -> str:
+    """'1 warning', '2 warnings' for the Health summary (GAP-1913)."""
+    return f"{count} warning" if count == 1 else f"{count} warnings"
+
+
+def _otlp_configured_connectors(cfg) -> set[str] | None:
+    """Connectors set up now (host and sandbox), or None when unknown."""
+    for name in ("policy_connectors", "active_connectors"):
+        getter = getattr(cfg, name, None)
+        if callable(getter):
+            try:
+                return {normalize(str(c)) for c in getter() if str(c).strip()}
+            except Exception:  # noqa: BLE001 - unknown: keep every row.
+                return None
+    return None
+
+
+def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set[str] | None = None) -> None:
     """Render per-instance custody and bounded native-ingest evidence.
 
     This is intentionally diagnostic only. In particular, doctor never edits
     a connector exporter, and an ``external`` row is the expected result for
     a migrated connector until the operator runs explicit managed setup.
+
+    ``configured`` (when known) limits the rows to connectors set up now:
+    the evidence outlives ``setup remove``, and advising setup for a removed
+    connector would undo the removal (GAP-1931).
     """
 
     if report.state != "available":
@@ -8955,10 +8998,15 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
     from defenseclaw.observability.custody_status import summarize_native_delivery
 
     delivery_rows = iter(summarize_native_delivery(report).connectors)
+    removed: list[str] = []
     for item in report.instances:
         suffix = "" if item.default else f"/{item.connector_instance_id[:8]}"
         label = f"Connector OTLP: {item.connector}{suffix}"
         delivery = None if item.custody == "hook_only" else next(delivery_rows)
+        if configured is not None and normalize(item.connector) not in configured:
+            if item.connector not in removed:
+                removed.append(item.connector)
+            continue
         if item.custody == "external":
             tag = "warn"
             if delivery.state == "unmapped_only":
@@ -9065,6 +9113,13 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             remediation=remediation,
         )
 
+    if removed:
+        _emit(
+            "skip",
+            "Connector OTLP: not configured",
+            "telemetry history only, not checked: " + ", ".join(removed),
+            r=r,
+        )
     if report.unattributed_authentication_failures:
         _emit(
             "warn",
@@ -9738,7 +9793,7 @@ def doctor(
             if r.failed:
                 parts.append(ux._style(f"{r.failed} failed", fg="red", bold=True))
             if r.warned:
-                parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
+                parts.append(ux._style(_warnings_label(r.warned), fg="yellow", bold=True))
             ux.echo("  " + ", ".join(parts))
             ux.echo()
             ux.warn(startup_diagnostics.remediation, indent="  ")
@@ -9964,7 +10019,7 @@ def doctor(
         if r.failed:
             parts.append(ux._style(f"{r.failed} failed", fg="red", bold=True))
         if r.warned:
-            parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
+            parts.append(ux._style(_warnings_label(r.warned), fg="yellow", bold=True))
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
         ux.echo("  Health: " + ", ".join(parts))

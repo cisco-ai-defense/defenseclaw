@@ -27,6 +27,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_observability,
     _DoctorResult,
     _opencode_runtime_remediation,
+    _warnings_label,
 )
 from defenseclaw.config_inspect import ConfigInspectError
 from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
@@ -48,6 +49,34 @@ def test_config_validation_next_step_is_not_config_validate(tmp_path: Path) -> N
     assert "guardrail.mode" in row["detail"]
     assert "config validate" not in row["remediation"]
     assert "correct config.yaml" in row["remediation"]
+
+
+def test_missing_key_next_step_is_keys_set_not_editing_config(tmp_path: Path) -> None:
+    # GAP-1915: the file is fine; the key it names has no value.
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nobservability:\n  destinations:\n    - name: galileo\n"
+        "      headers:\n        Galileo-API-Key: {env: GALILEO_API_KEY}\n"
+    )
+    refusal = ConfigInspectError(
+        "invalid",
+        field_path='$.observability.destinations[0].headers["Galileo-API-Key"]',
+        reason="[secret_reference_unresolved] required environment-backed secret is unavailable",
+    )
+    r = _DoctorResult()
+    with patch("defenseclaw.config_inspect.inspect_v8_config", side_effect=refusal):
+        _check_config(SimpleNamespace(data_dir=str(tmp_path)), r)
+    row = r.checks[0]
+    assert row["status"] == "fail"
+    assert "Until it is set, setup commands refuse to run" in row["detail"]
+    assert "setup commands check the whole file" not in row["detail"]
+    assert row["remediation"].startswith("run `defenseclaw keys set GALILEO_API_KEY`")
+    assert "correct config.yaml" not in row["remediation"]
+
+
+def test_health_summary_says_one_warning() -> None:
+    # GAP-1913.
+    assert _warnings_label(1) == "1 warning"
+    assert _warnings_label(5) == "5 warnings"
 
 
 def test_observability_plan_skips_after_config_validation_failed(tmp_path: Path) -> None:
