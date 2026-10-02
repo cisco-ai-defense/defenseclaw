@@ -33,3 +33,30 @@ class WebhookTestMasksUrl(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("https://hooks.slack.com/***", result.output)
         self.assertNotIn(SECRET_PART, result.output)
+
+
+class WebhookAddWithGatewayStopped(unittest.TestCase):
+    """GAP-1399: a saved webhook must not end in a traceback and rc=1."""
+
+    def test_add_saves_and_warns_when_audit_is_unavailable(self):
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        logger = SimpleNamespace(
+            log_action=lambda *a, **k: (_ for _ in ()).throw(
+                CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppContext()
+            app.cfg = SimpleNamespace(data_dir=tmp)
+            app.logger = logger
+            result = CliRunner().invoke(
+                webhook,
+                ["add", "slack", "--name", "gap1399", "--url", URL, "--non-interactive", "--disabled"],
+                obj=app,
+            )
+            listed = CliRunner().invoke(webhook, ["list"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(result.exception)
+        self.assertIn("audit event was not recorded", result.output)
+        self.assertIn("gap1399", listed.output)
