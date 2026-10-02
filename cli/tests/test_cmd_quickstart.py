@@ -469,6 +469,31 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertEqual(readiness["Connector"]["status"], "fail")
         self.assertEqual(readiness["Connector"]["detail"], "Codex config not found yet")
 
+    def test_connector_the_running_gateway_does_not_guard_is_nonzero(self):
+        # GAP-1589: "OK Guardrail" and "OK Sidecar already running" with rc 0
+        # while status showed claudecode DEGRADED and Claude Code ran unguarded.
+        with (
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult("Sidecar", "pass", "already running"),
+            ),
+            patch("defenseclaw.bootstrap._pid_file_running", return_value=True),
+            patch(
+                "defenseclaw.hook_integrity.hook_registration_problems",
+                return_value=["no DefenseClaw hooks in /home/u/.claude/settings.json"],
+            ),
+        ):
+            result = self._invoke(["--connector", "claudecode", "--json-summary"])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        runtime = readiness["Connector runtime"]
+        self.assertEqual(runtime["status"], "fail")
+        self.assertIn("is not guarded: no DefenseClaw hooks", runtime["detail"])
+        self.assertEqual(runtime["next_command"], "defenseclaw setup claude-code")
+
     def test_optional_warning_only_remains_partial_and_zero(self):
         advisory = [StepResult("Skill scanner", "warn", "optional scanner unavailable")]
         with (
