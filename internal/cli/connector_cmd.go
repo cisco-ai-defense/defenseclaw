@@ -57,7 +57,7 @@ These subcommands operate on a single connector adapter (openclaw, codex,
 claudecode, amp, zeptoclaw, or any plugin connector) and intentionally bypass
 the interactive 'defenseclaw setup' flow. They are primarily intended for
 the 'defenseclaw uninstall' flow and for operator debugging when a
-connector handoff (S7) leaves residual state behind.
+connector switch leaves residual state behind.
 
 Each subcommand accepts an optional --connector flag. When omitted, the
 active connector is resolved in this order:
@@ -146,6 +146,8 @@ mutations. It does not restart the gateway and does not setup peer connectors.`,
 var connectorLaunchCmd = &cobra.Command{
 	Use:   "launch -- [openhands arguments...]",
 	Short: "Launch the protected OpenHands executable with scoped native telemetry",
+	// OpenHands is not a supported connector on Windows (GAP-1719).
+	Hidden: runtime.GOOS == "windows",
 	Long: `Launch the exact OpenHands executable selected and sealed by setup.
 
 This Darwin-only boundary revalidates the protected executable and hook
