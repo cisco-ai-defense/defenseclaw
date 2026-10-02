@@ -42,6 +42,7 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import contextlib
+import errno
 import glob
 import json
 import ntpath
@@ -2808,6 +2809,11 @@ def _remove_data_dir(
     try:
         os.rmdir(data_dir)
     except OSError as exc:
+        # A data dir on its own filesystem (GAP-1447) is a mount point: the
+        # contents are gone, and only an administrator can unmount the folder.
+        if exc.errno == errno.EBUSY or os.path.ismount(data_dir):
+            ux.ok(f"emptied {data_dir}; the empty folder stays because it is a mount point (unmount it to remove it)")
+            return
         raise OSError(f"could not remove data directory: {exc}") from exc
     ux.ok(f"removed {data_dir}")
 
