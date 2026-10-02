@@ -5950,6 +5950,7 @@ def setup_guardrail(
     # Stored/picked fallback values are checked after resolution below.
     if explicit_connector:
         _ensure_connector_available(explicit_connector)
+        _refuse_proxy_next_to_hook_connectors(gc, explicit_connector)
 
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
@@ -9259,7 +9260,10 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         os_name = os.name
 
     click.echo("  Next steps:")
-    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
+    click.echo(
+        "    • Check the gateway has the connector: defenseclaw-gateway status "
+        "(start it with defenseclaw-gateway start if it is stopped)"
+    )
     click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
     if connector == "hermes":
         click.echo(
@@ -9656,12 +9660,26 @@ def _setup_observability_alias(
     # legacy confirm-then-replace flow byte-for-byte. When another HOOK
     # connector is configured this becomes the multi-connector decision point.
     gc = app.cfg.guardrail
-    existing_others = [c for c in _configured_connector_set(gc) if c != connector and c in _HOOK_ENFORCED_CONNECTORS]
-    if not existing_others:
+    configured_now = _configured_connector_set(gc)
+    existing_others = [c for c in configured_now if c != connector and c in _HOOK_ENFORCED_CONNECTORS]
+    already_configured = connector in {normalize_connector(c) for c in configured_now}
+    label = _CONNECTOR_META[connector]["label"]
+    if already_configured and not (replace and existing_others):
+        # GAP-1231: re-running setup for a configured connector re-applies its
+        # hooks (a repair); it is not a new connector, so never offer
+        # Add/Replace as if it were.
+        if not yes and not click.confirm(
+            f"  {label} is already configured; re-apply its hooks (mode={normalized_mode})?",
+            default=True,
+        ):
+            click.echo("  Aborted — no changes made.")
+            return
+        write_mode = "add" if _existing_connector_override(gc, connector) is not None else "replace"
+    elif not existing_others:
         if not yes:
             verb = "enforcement" if normalized_mode == "action" else "observability"
             if not click.confirm(
-                f"  Configure DefenseClaw for {_CONNECTOR_META[connector]['label']} {verb} now?",
+                f"  Configure DefenseClaw for {label} {verb} now?",
                 default=True,
             ):
                 click.echo("  Aborted — no changes made.")
@@ -11529,11 +11547,15 @@ def _setup_guardrail_connector_alias(
     click.echo("  then runs the same non-interactive backend as `setup guardrail`.")
     click.echo()
 
+    _refuse_proxy_next_to_hook_connectors(app.cfg.guardrail, connector)
+
     if not (yes or non_interactive):
         if not click.confirm(f"  Configure {label} guardrail now?", default=True):
             click.echo("  Aborted — no changes made.")
             return
 
+    if connector == "openclaw":
+        _adopt_openclaw_gateway_token(app)
     app.cfg.claw.mode = connector
     app.cfg.guardrail.connector = connector
     _write_picked_connector_hint(getattr(app.cfg, "data_dir", None), connector)
@@ -11587,6 +11609,53 @@ def _setup_guardrail_connector_alias(
         verify=verify,
         non_interactive=True,
     )
+
+
+def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
+    """Fail when a proxy connector is set up next to configured hook connectors.
+
+    GAP-1178: the gateway's multi-connector mode is hook-only, so pinning
+    OpenClaw/ZeptoClaw while ``guardrail.connectors`` lists hook connectors
+    left the proxy connector out of the active roster: setup exited 0, no
+    plugin was written, and the agent ran unprotected. Refuse instead.
+    """
+    if connector not in _PROXY_BACKED_CONNECTORS:
+        return
+    peers = [
+        name
+        for name in sorted(getattr(gc, "connectors", None) or {})
+        if normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
+    ]
+    if not peers:
+        return
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    raise click.ClickException(
+        f"{label} is proxy-backed and cannot run next to hook connectors, and this install has "
+        f"{len(peers)} configured ({', '.join(peers)}). No changes made. To switch this install "
+        f"to {label}, remove them first with 'defenseclaw setup remove <connector>' (add --force "
+        f"for the last one), then rerun 'defenseclaw setup {connector}'."
+    )
+
+
+def _adopt_openclaw_gateway_token(app: AppContext) -> None:
+    """Use OpenClaw's gateway token before the restart (GAP-1179).
+
+    DefenseClaw authenticates to the OpenClaw gateway and serves its own API
+    with the same token. When OpenClaw was onboarded after DefenseClaw, the
+    two differ: the sidecar then adopted OpenClaw's token mid-setup and the
+    readiness check, still holding the old one, failed with 401. Reconcile the
+    token up front so the first run converges.
+    """
+    detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file) or "").strip()
+    gw = app.cfg.gateway
+    if not detected or detected == gw.resolved_token():
+        return
+    keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
+    if gw.token_env and gw.token_env not in keys:
+        keys.append(gw.token_env)
+    for key in keys:
+        _save_secret_to_dotenv(key, detected, app.cfg.data_dir)
+    click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
 
 
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:

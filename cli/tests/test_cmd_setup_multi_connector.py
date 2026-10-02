@@ -760,6 +760,59 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
         self.assertEqual(self.app.cfg.guardrail.connectors, {})
 
+    # GAP-1231/GAP-1245: re-running setup for a configured connector is a
+    # re-apply, not the Add/Replace decision for a new connector.
+    def test_rerun_of_configured_connector_reapplies_without_add_replace(self):
+        self._seed_map("claudecode", "codex", "cursor")
+        with (
+            _setup_patches(),
+            patch("defenseclaw.commands.cmd_setup.click.prompt", side_effect=AssertionError("Add/Replace prompt")),
+        ):
+            result = CliRunner().invoke(
+                setup_group,
+                ["claude-code", "--mode", "action", "--no-enable-judge", "--no-restart"],
+                obj=self.app,
+                input="\n",
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Claude Code is already configured; re-apply its hooks (mode=action)?", result.output)
+        self.assertNotIn("You are setting up", result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(set(gc.connectors), {"claudecode", "codex", "cursor"})
+        self.assertEqual(gc.connectors["claudecode"].mode, "action")
+
+    # GAP-1178: a proxy connector cannot join the hook-only multi-connector
+    # roster; setup must fail instead of exiting 0 with OpenClaw unprotected.
+    def test_openclaw_next_to_hook_connectors_is_refused(self):
+        self._seed_map("codex", "cursor")
+        with _setup_patches():
+            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("cannot run next to hook connectors", result.output)
+        self.assertIn("setup remove", result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(set(gc.connectors), {"codex", "cursor"})
+        self.assertEqual(gc.connector, "codex")
+        self.assertEqual(self.app.cfg.claw.mode, "codex")
+
+    # GAP-1179: DefenseClaw adopts OpenClaw's gateway token before restarting.
+    def test_openclaw_gateway_token_is_adopted_up_front(self):
+        oc = os.path.join(self.tmp_dir, "openclaw.json")
+        with open(oc, "w", encoding="utf-8") as handle:
+            json.dump({"gateway": {"auth": {"token": "openclaw-side-token"}}}, handle)
+        self.app.cfg.claw.config_file = oc
+        self.app.cfg.gateway.token = ""
+        self.app.cfg.gateway.token_env = ""
+        with patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_TOKEN": "defenseclaw-own-token"}):
+            os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+            cmd_setup._adopt_openclaw_gateway_token(self.app)
+            self.assertEqual(self.app.cfg.gateway.resolved_token(), "openclaw-side-token")
+            with open(os.path.join(self.app.cfg.data_dir, ".env"), encoding="utf-8") as handle:
+                dotenv = handle.read()
+        self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
+        self.assertIn("OPENCLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
+
     # D4: an existing PROXY connector is replaced, never added to.
     def test_proxy_existing_is_replaced_not_added(self):
         self._seed_single("openclaw")
