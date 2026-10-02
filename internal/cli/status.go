@@ -159,7 +159,8 @@ func gatewayStatusConfigLoadError(err error) error {
 		return err
 	}
 	state := "The gateway is not running."
-	if running, pid := daemon.New(config.DefaultDataPath()).IsRunning(); running {
+	running, pid := daemon.New(config.DefaultDataPath()).IsRunning()
+	if running {
 		state = fmt.Sprintf("The gateway (PID %d) is still running with the config it started with.", pid)
 	}
 	if message, empty := emptyConfigFileMessage(config.ConfigPath()); empty {
@@ -171,11 +172,26 @@ func gatewayStatusConfigLoadError(err error) error {
 		// `setup <destination> disable` validates the whole file too, so
 		// name the edit that works (GAP-1788).
 		dest := "that destination"
+		subject := "an observability destination"
 		if secretErr.Destination != "" {
 			dest = fmt.Sprintf("destination %q", secretErr.Destination)
+			subject = "observability " + dest
 		}
-		return fmt.Errorf("%w. %s Set it with: defenseclaw keys set %s (or remove %s from %s), "+
-			"then run: defenseclaw-gateway restart", err, state, secretErr.Reference, dest, config.ConfigPath())
+		// One remedy, as start and restart give it: the loader's own
+		// "set it with ..." advice repeated it (GAP-1900).
+		where := ""
+		var semanticErr *config.V8SemanticError
+		if errors.As(err, &semanticErr) && semanticErr.Line > 0 {
+			where = fmt.Sprintf("%s line %d: ", config.ConfigPath(), semanticErr.Line)
+		}
+		return fmt.Errorf("failed to load config: %s%s needs %s, which is not set. %s Set it with: "+
+			"defenseclaw keys set %s (or remove %s from %s), then run: defenseclaw-gateway %s",
+			where, subject, secretErr.Reference, state, secretErr.Reference, dest, config.ConfigPath(),
+			gatewayStatusNextVerb(running))
+	}
+	if problem, ok := configEnumProblem(err); ok {
+		return fmt.Errorf("failed to load config: %s. %s Fix the file (check it with: defenseclaw config validate)",
+			problem, state)
 	}
 	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
 }

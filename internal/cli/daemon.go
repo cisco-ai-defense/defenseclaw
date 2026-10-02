@@ -367,6 +367,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		d.SetStartProgress(progress.report)
 	}
 	startAttemptedAt := time.Now()
+	logOffset := gatewayLogSize(d.LogFile())
 	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -421,6 +422,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if !rotationTransaction {
 			err = explainForeignListenerAtReadiness(cfg, err)
 		}
+		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
@@ -751,6 +753,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	progress := newStartProgressPrinter()
 	d.SetStartProgress(progress.report)
 	startAttemptedAt := time.Now()
+	logOffset := gatewayLogSize(d.LogFile())
 	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -774,6 +777,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		err = explainForeignListenerAtReadiness(cfg, err)
+		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
@@ -1039,6 +1043,12 @@ func daemonConfigLoadError(verb string, err error) error {
 	if running && verb == "start" {
 		untouched += " Nothing was changed."
 		next = "restart"
+	}
+	if problem, ok := configEnumProblem(err); ok {
+		return fmt.Errorf(
+			"cannot %s the gateway: %s.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
+			verb, problem, untouched, next,
+		)
 	}
 	return fmt.Errorf(
 		"cannot %s the gateway: %s does not load: %w.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
@@ -2071,11 +2081,11 @@ func waitForGatewayReadiness(
 		if processRunning != nil && !processRunning() {
 			if lastProbeErr != nil {
 				return lastSnap, false, fmt.Errorf(
-					"gateway process exited before readiness (last health probe: %v)",
-					lastProbeErr,
+					"%w (last health probe: %v)",
+					errGatewayExitedBeforeReadiness, lastProbeErr,
 				)
 			}
-			return lastSnap, false, fmt.Errorf("gateway process exited before readiness")
+			return lastSnap, false, errGatewayExitedBeforeReadiness
 		}
 
 		var snap gateway.HealthSnapshot

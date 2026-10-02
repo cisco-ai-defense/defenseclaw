@@ -47,6 +47,10 @@ type V8SchemaError struct {
 	Suggestion    string
 	Summary       string
 	Action        string
+	// Value is the rejected scalar of an enum violation (at most 60 bytes),
+	// so the CLI can say 'mode is "x"; allowed values: ...' as config validate
+	// does (GAP-1914). Error() never prints it.
+	Value string
 }
 
 func (e *V8SchemaError) Error() string {
@@ -128,6 +132,12 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 		}
 		if node != nil {
 			result.Line, result.Column = node.Line, node.Column
+			if keyword == "enum" && node.Kind == yaml.ScalarNode {
+				result.Value = node.Value
+				if len(result.Value) > 60 {
+					result.Value = strings.ToValidUTF8(result.Value[:57], "") + "..."
+				}
+			}
 		}
 		return result
 	}
