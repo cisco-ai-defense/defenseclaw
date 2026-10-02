@@ -199,7 +199,15 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
-  exit 0
+{{if not .Sandbox}}  # Codex does not show stderr of a hook that exits 0: say on screen that
+  # this account's gateway is down and how to start it again. Codex shows a
+  # systemMessage for these two events.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$BOUND_EVENT" in
+      SessionStart|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{end}}  exit 0
 }
 
 # Response-layer failure: gateway answered but the answer was bad

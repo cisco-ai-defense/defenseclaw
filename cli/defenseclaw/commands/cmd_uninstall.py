@@ -45,6 +45,7 @@ import contextlib
 import json
 import ntpath
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -69,6 +70,7 @@ from defenseclaw.commands import windows_native_uninstall
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
 # .uv holds the Python the installer's venv runs on (scripts/install.sh).
 _RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv", ".uv")
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 # The installers (scripts/install.sh, scripts/install.ps1) write this record
 # beside the launchers when they install uv because it was missing: one
 # "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
@@ -282,6 +284,33 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+    _render_kept_and_next_steps(plan)
+
+
+def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
+    """Say what a partial uninstall kept and how to resume or finish it.
+
+    The default uninstall keeps the data dir and the binaries, so the user
+    needs to know that the config, the audit log and the policies are still
+    there and which command turns protection back on.
+    """
+    if plan.remove_data_dir and plan.remove_binaries:
+        return
+    kept: list[str] = []
+    if not plan.remove_data_dir and plan.data_dir:
+        kept.append(f"{plan.data_dir}: config, audit log, policies and secrets")
+    if not plan.remove_binaries and plan.install_root:
+        kept.append(f"{plan.install_root}: the DefenseClaw commands")
+    if kept:
+        ux.subhead("Kept:")
+        for line in kept:
+            click.echo(f"  • {line}")
+    ux.subhead("Next steps:")
+    if plan.remove_data_dir:
+        click.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
+    else:
+        click.echo("  • turn protection back on:   defenseclaw setup guardrail")
+    click.echo("  • remove everything:         defenseclaw uninstall --all --binaries")
 
 
 def _dispatch_native_windows_uninstall(
@@ -2218,7 +2247,11 @@ def _run_gateway_connector_teardown(
         return failed(f"teardown did not run: {exc}")
     if proc.stdout:
         for line in proc.stdout.splitlines():
-            click.echo(f"  {ux.dim('·')} {line}")
+            # The gateway's own "✓ <connector> teardown complete" line would
+            # double the verified line printed below.
+            if _ANSI_ESCAPE.sub("", line).strip().endswith(f"{connector} teardown complete"):
+                continue
+            click.echo(f"  {ux.dim('·')} {line.strip()}")
     if proc.stderr and proc.returncode != 0:
         for line in proc.stderr.splitlines():
             click.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
@@ -2246,7 +2279,7 @@ def _run_gateway_connector_teardown(
             detail = (verified.stderr or verified.stdout or "residual connector state").strip()
             ux.warn(f"{connector} teardown verification failed: {detail}")
             return failed(last_line(detail))
-        ux.ok(f"{connector} teardown via gateway sentinel")
+        ux.ok(f"{connector} teardown complete (verified)")
         return True
     return failed(last_line(proc.stderr, proc.stdout))
 
