@@ -491,13 +491,15 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 }
 
 // A rule pack the gateway cannot load, or one inside the service-writable
-// data_dir, is refused before any change instead of failing activation.
+// data_dir, is refused before any change instead of failing activation. A
+// missing pack names a source that exists before the first install
+// (GAP-1429: the hint named the vendor folder only an install creates).
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	cases := map[string]struct {
 		replace, with, want string
 		packMode            os.FileMode
 	}{
-		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist", 0},
+		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release", 0},
 		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700},
 		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0},
 		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0},
