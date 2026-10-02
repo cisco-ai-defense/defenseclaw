@@ -148,7 +148,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs, and each enrolled account's ~/.defenseclaw and per-user binaries in ~/.local/bin (after stopping its per-user gateway); the result names every account whose data it removed or kept")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs, and each enrolled account's ~/.defenseclaw and per-user binaries in ~/.local/bin (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
 		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "with --purge, also delete the gateway service account")
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "reconcile", "rotate-credentials":

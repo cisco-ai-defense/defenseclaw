@@ -624,7 +624,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("connector reconcile amp: %w", err)
 		}
 	} else {
-		if err := conn.Setup(cmd.Context(), opts); err != nil {
+		if err := connector.SetupRecordingCreatedDirs(cmd.Context(), conn, opts); err != nil {
 			return fmt.Errorf("connector reconcile %s: %w", name, err)
 		}
 		entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
@@ -696,7 +696,7 @@ func reconcileAmpRegistration(
 	}
 
 	setupStarted = true
-	if err := conn.Setup(ctx, opts); err != nil {
+	if err := connector.SetupRecordingCreatedDirs(ctx, conn, opts); err != nil {
 		return rollback(fmt.Errorf("setup plugin and custody receipt: %w", err))
 	}
 	entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
@@ -783,7 +783,7 @@ func reconcileOpenCodeRegistration(
 	}
 
 	setupStarted = true
-	if err := conn.Setup(ctx, opts); err != nil {
+	if err := connector.SetupRecordingCreatedDirs(ctx, conn, opts); err != nil {
 		return rollback(fmt.Errorf("setup plugin and custody receipt: %w", err))
 	}
 	current, err := connector.OpenCodeRegistrationCurrent(opts)
@@ -884,6 +884,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		// The empty folders the gateway's install watcher created go too.
 		connector.RemoveOpenCodeWatcherCreatedDirs(opts.DataDir)
 	}
+	// Windows lock files stay after their lock; the idle ones this teardown
+	// used beside the agent configs go now.
+	connector.RemoveIdleFileLockSentinels()
 
 	if connectorFlagJSON {
 		payload := map[string]any{

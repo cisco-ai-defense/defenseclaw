@@ -228,8 +228,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return true
 		}
 		created, err := ensureAndWatch(fsw, dir)
-		if len(created) > 0 && watcherConnectorName(w.cfg) == "opencode" {
-			// The OpenCode teardown removes these again while they are empty.
+		if len(created) > 0 {
+			// Uninstall removes these again while they are empty (and the
+			// OpenCode teardown removes its own).
 			if recordErr := gatewayconnector.RecordWatcherCreatedDirs(w.cfg.DataDir, created); recordErr != nil {
 				fmt.Fprintf(os.Stderr, "[watch] record created dirs: %v\n", recordErr)
 			}

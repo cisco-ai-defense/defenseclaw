@@ -1,0 +1,93 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package connector
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+)
+
+// createdDirsConnector writes its config file below the home on Setup and a
+// disabled hook script into the data directory on Teardown.
+type createdDirsConnector struct {
+	stubConnector
+	config string
+}
+
+func (c *createdDirsConnector) HookScriptNames(SetupOpts) []string { return []string{"fake-hook.sh"} }
+func (c *createdDirsConnector) HookCapabilities(SetupOpts) HookCapability {
+	return HookCapability{ConfigPath: c.config}
+}
+func (c *createdDirsConnector) Setup(context.Context, SetupOpts) error {
+	if err := os.MkdirAll(filepath.Dir(c.config), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(c.config, []byte("{}"), 0o600)
+}
+func (c *createdDirsConnector) Teardown(_ context.Context, opts SetupOpts) error {
+	_ = os.Remove(c.config)
+	if err := os.MkdirAll(filepath.Join(opts.DataDir, "hooks"), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(opts.DataDir, "hooks", "fake-hook.sh"), []byte("exit 0\n"), 0o700)
+}
+
+func TestSetupRecordingCreatedDirsRecordsConfigParents(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.Mkdir(filepath.Join(home, ".agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := &createdDirsConnector{stubConnector: stubConnector{name: "fake"}, config: filepath.Join(home, ".agent", "hooks", "deep", "hooks.json")}
+	err := WithUserHomeDir(home, func() error {
+		return SetupRecordingCreatedDirs(context.Background(), conn, SetupOpts{DataDir: dataDir})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs
+	slices.Sort(got)
+	want := []string{filepath.Join(home, ".agent", "hooks"), filepath.Join(home, ".agent", "hooks", "deep")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recorded %v, want %v (the existing ~/.agent is not DefenseClaw's)", got, want)
+	}
+}
+
+func TestRemovalLeavingNoNewDirsOnlyWhenDataDirWasMissing(t *testing.T) {
+	for _, existed := range []bool{false, true} {
+		home := t.TempDir()
+		dataDir := filepath.Join(home, ".defenseclaw")
+		if existed {
+			if err := os.Mkdir(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		conn := &createdDirsConnector{stubConnector: stubConnector{name: "fake"}, config: filepath.Join(home, ".agent", "hooks.json")}
+		opts := SetupOpts{DataDir: dataDir}
+		err := WithUserHomeDir(home, func() error {
+			return RemovalLeavingNoNewDirs(conn, opts, func() error {
+				// A removal that also makes the config folder.
+				if err := os.MkdirAll(filepath.Dir(conn.config), 0o700); err != nil {
+					return err
+				}
+				return conn.Teardown(context.Background(), opts)
+			})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, dataErr := os.Lstat(dataDir)
+		_, agentErr := os.Lstat(filepath.Join(home, ".agent"))
+		if existed && (dataErr != nil || agentErr != nil) {
+			t.Fatalf("existing data dir: the removal's files must stay (data %v, agent %v)", dataErr, agentErr)
+		}
+		if !existed && (!os.IsNotExist(dataErr) || !os.IsNotExist(agentErr)) {
+			t.Fatalf("missing data dir: want no new folders, got data %v, agent %v", dataErr, agentErr)
+		}
+	}
+}

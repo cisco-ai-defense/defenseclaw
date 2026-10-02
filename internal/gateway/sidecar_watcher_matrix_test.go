@@ -126,6 +126,13 @@ func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
 				t.Errorf("plugin dirs %v do not contain %q",
 					pluginDirs, tc.expectPluginFrag)
 			}
+			// No workspace: a relative project target would be created in
+			// the gateway's working folder.
+			for _, dir := range append(append([]string{}, skillDirs...), pluginDirs...) {
+				if !filepath.IsAbs(dir) {
+					t.Errorf("watcher dir %q is relative", dir)
+				}
+			}
 		})
 	}
 }

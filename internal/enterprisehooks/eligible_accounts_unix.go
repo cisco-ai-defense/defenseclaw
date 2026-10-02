@@ -39,6 +39,19 @@ func UnixEligibleAccountsPath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(filepath.Clean(manifestPath)), UnixEligibleAccountsFileName)
 }
 
+// UnixCopilotVSCodeAccountsFileName is the guardian's root-only record of
+// the accounts it wrote DefenseClaw's VS Code Local hook file or Copilot
+// plugin for, in the eligible-accounts format. An account that stops being
+// eligible keeps those files until the guardian or remove-all takes them out
+// through this record.
+const UnixCopilotVSCodeAccountsFileName = "copilot-vscode-accounts.json"
+
+// UnixCopilotVSCodeAccountsPath is the VS Code Local accounts record for
+// manifestPath.
+func UnixCopilotVSCodeAccountsPath(manifestPath string) string {
+	return filepath.Join(filepath.Dir(filepath.Clean(manifestPath)), UnixCopilotVSCodeAccountsFileName)
+}
+
 // WriteUnixEligibleAccounts publishes accounts at path: root-owned 0600
 // below a root-owned directory chain, written through a same-directory temp
 // file and rename. The guardian only trusts a record written this way.

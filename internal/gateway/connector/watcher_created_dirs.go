@@ -5,7 +5,9 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,8 +18,10 @@ import (
 )
 
 // watcherCreatedDirsFile, in the DefenseClaw data directory, lists the
-// folders the gateway's install watcher created because they were missing
-// when it started watching them.
+// folders DefenseClaw created because they were missing: those the gateway's
+// install watcher started watching, and the parents of the agent config files
+// a connector setup wrote. Uninstall removes the ones still empty
+// (cli/defenseclaw/commands/cmd_uninstall.py _remove_created_dirs).
 const (
 	watcherCreatedDirsFile     = "watcher-created-dirs.json"
 	watcherCreatedDirsMaxBytes = 1 << 20
@@ -35,6 +39,83 @@ func RecordWatcherCreatedDirs(dataDir string, dirs []string) error {
 		return nil
 	}
 	return recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), dirs)
+}
+
+// SetupRecordingCreatedDirs runs conn.Setup and adds to the data directory's
+// list the folders below the home directory that it created for the agent
+// config files the connector owns (~/.copilot/hooks, say), so uninstall can
+// remove them again while they are empty. The list is best effort: Setup's
+// own result is what it returns.
+func SetupRecordingCreatedDirs(ctx context.Context, conn Connector, opts SetupOpts) error {
+	missing := missingConfigDirs(conn, opts)
+	err := conn.Setup(ctx, opts)
+	var created []string
+	for _, dir := range missing {
+		if info, statErr := os.Lstat(dir); statErr == nil && info.Mode().Type() == fs.ModeDir {
+			created = append(created, dir)
+		}
+	}
+	if len(created) > 0 && strings.TrimSpace(opts.DataDir) != "" {
+		_ = recordCreatedDirs(filepath.Join(opts.DataDir, watcherCreatedDirsFile), created)
+	}
+	return err
+}
+
+// RemovalLeavingNoNewDirs runs fn, a removal of conn's registration for a
+// target that may never have had DefenseClaw's per-user state. When the data
+// directory did not exist, what fn put there (the disabled hook scripts and
+// locks a teardown writes so an agent's cached registration stays harmless;
+// none can be cached, as no hook script was ever there) goes again, and so do
+// the agent config folders below the home it created and left empty.
+func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) error {
+	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
+	_, statErr := os.Lstat(dataDir)
+	dataDirMissing := strings.TrimSpace(opts.DataDir) != "" && errors.Is(statErr, fs.ErrNotExist)
+	missing := missingConfigDirs(conn, opts)
+	err := fn()
+	if !dataDirMissing {
+		return err
+	}
+	if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
+		if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
+			err = removeErr
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return len(missing[i]) > len(missing[j]) })
+	for _, dir := range missing {
+		_ = os.Remove(dir) // only empty folders go
+	}
+	return err
+}
+
+// missingConfigDirs returns the missing folders between the home directory
+// and each agent config file conn writes, deepest first.
+func missingConfigDirs(conn Connector, opts SetupOpts) []string {
+	home := strings.TrimSpace(userHomeDir())
+	if home == "" || conn == nil {
+		return nil
+	}
+	home = filepath.Clean(home)
+	var missing []string
+	for _, path := range HookConfigPathsForConnector(conn, opts) {
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		for dir := filepath.Dir(filepath.Clean(path)); belowDir(home, dir); dir = filepath.Dir(dir) {
+			if _, statErr := os.Lstat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+				break
+			}
+			missing = append(missing, dir)
+		}
+	}
+	return missing
+}
+
+// belowDir reports whether path is strictly inside root.
+func belowDir(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
 // recordCreatedDirs adds dirs to the created-folder list at path.

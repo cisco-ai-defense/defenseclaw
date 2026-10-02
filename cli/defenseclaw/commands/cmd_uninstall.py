@@ -66,7 +66,8 @@ from defenseclaw.commands import windows_native_uninstall
 # is the conservative fallback path used when the gateway binary is too
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
-_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
+# .uv holds the Python the installer's venv runs on (scripts/install.sh).
+_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv", ".uv")
 # The installers (scripts/install.sh, scripts/install.ps1) write this record
 # beside the launchers when they install uv because it was missing: one
 # "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
@@ -75,6 +76,11 @@ _UV_RECORD = "defenseclaw-uv.sha256"
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
+# The folders DefenseClaw created because they were missing (the gateway's
+# install watcher, connector setup); see the Go connector package's
+# watcher_created_dirs.go. Uninstall removes the ones still empty.
+_CREATED_DIRS_RECORD = "watcher-created-dirs.json"
+_CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
@@ -173,6 +179,12 @@ class UninstallPlan:
     # (`defenseclaw setup local-observability`) and its data volumes before
     # its Compose files in data_dir go (uninstall --all only).
     observability_teardown: bool = False
+    # uv_leftovers are uv's download cache and the Python it fetched, which
+    # installers before 1.0.2 left outside data_dir (~/.cache/uv,
+    # ~/.local/share/uv/python; %LOCALAPPDATA%\uv\cache, %APPDATA%\uv\python)
+    # when they installed uv (--all --binaries only, and only when that uv
+    # goes too and no other uv is on PATH).
+    uv_leftovers: tuple[str, ...] = ()
     # mac_app is DefenseClawMac.app when it is installed (macOS). Uninstall
     # does not remove the app, its login item or its background service; the
     # plan says how to.
@@ -563,6 +575,11 @@ def _build_plan(
             wipe_data and not preserve_data_entries and _local_observability_stack_file(data_dir) != ""
         ),
         mac_app=_installed_mac_app(platform_name) if wipe_data and binaries else "",
+        uv_leftovers=(
+            _installer_uv_leftovers(install_root, binary_targets, data_dir, platform_name)
+            if wipe_data and binaries
+            else ()
+        ),
     )
 
 
@@ -721,6 +738,252 @@ def _installer_uv_targets(install_root: str, platform_name: str) -> tuple[str, .
         targets.append(path)
     targets.append(record)
     return tuple(targets)
+
+
+def _uv_default_dirs(platform_name: str) -> tuple[str, str]:
+    """Return uv's default cache folder and managed-Python folder."""
+    if platform_name == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        roaming = os.environ.get("APPDATA", "")
+        return (
+            os.path.join(local, "uv", "cache") if os.path.isabs(local) else "",
+            os.path.join(roaming, "uv", "python") if os.path.isabs(roaming) else "",
+        )
+    home = os.path.expanduser("~")
+    cache = os.environ.get("XDG_CACHE_HOME", "")
+    data = os.environ.get("XDG_DATA_HOME", "")
+    cache = cache if os.path.isabs(cache) else os.path.join(home, ".cache")
+    data = data if os.path.isabs(data) else os.path.join(home, ".local", "share")
+    return os.path.join(cache, "uv"), os.path.join(data, "uv", "python")
+
+
+def _venv_base_python_dir(data_dir: str, python_root: str) -> str:
+    """Return the folder in python_root that the data dir's venv runs on, or ""."""
+    try:
+        with open(os.path.join(data_dir, ".venv", "pyvenv.cfg"), encoding="utf-8") as stream:
+            lines = stream.read(16_384).splitlines()
+    except (OSError, UnicodeError):
+        return ""
+    home = next(
+        (value.strip() for key, _, value in (line.partition("=") for line in lines) if key.strip() == "home"),
+        "",
+    )
+    if not home or not os.path.isabs(home):
+        return ""
+    root = _normalized(os.path.realpath(python_root))
+    base = _normalized(os.path.realpath(home))
+    try:
+        if os.path.commonpath((root, base)) != root or base == root:
+            return ""
+    except ValueError:
+        return ""
+    first = os.path.relpath(base, root).split(os.sep)[0]
+    return os.path.join(python_root, first)
+
+
+def _installer_uv_leftovers(
+    install_root: str, binary_targets: tuple[str, ...], data_dir: str, platform_name: str
+) -> tuple[str, ...]:
+    """Name the uv cache and Python an older installer left for DefenseClaw.
+
+    Only when uninstall removes the uv the installer installed (its digest
+    still matches), no other uv is on PATH, and uv's folders are the
+    defaults. The Python folder goes only when it holds nothing but the
+    Python the data dir's venv runs on (and uv's links and bookkeeping).
+    """
+    uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
+    if not any(os.path.basename(target) == uv_name for target in binary_targets):
+        return ()
+    root = _normalized(install_root)
+    for directory in os.get_exec_path():
+        if directory and _normalized(directory) != root and os.path.isfile(os.path.join(directory, uv_name)):
+            return ()
+    cache, python_root = _uv_default_dirs(platform_name)
+    leftovers: list[str] = []
+    if cache and not os.environ.get("UV_CACHE_DIR") and _plain_owned_dir(cache):
+        leftovers.append(cache)
+    if python_root and not os.environ.get("UV_PYTHON_INSTALL_DIR") and _plain_owned_dir(python_root):
+        base = _venv_base_python_dir(data_dir, python_root)
+        if base and _only_python(python_root, base):
+            leftovers.append(python_root)
+    return tuple(leftovers)
+
+
+def _plain_owned_dir(path: str) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(path):
+        return False
+    return not hasattr(os, "getuid") or info.st_uid == os.getuid()
+
+
+def _only_python(python_root: str, base: str) -> bool:
+    """Report whether python_root holds only base, links to it and uv's dot files."""
+    wanted = _normalized(os.path.realpath(base))
+    try:
+        entries = list(os.scandir(python_root))
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if _normalized(entry.path) == _normalized(base) and not _is_reparse_path(entry.path):
+            continue
+        if _is_reparse_path(entry.path) and _normalized(os.path.realpath(entry.path)) == wanted:
+            continue
+        return False
+    return True
+
+
+def _running_base_python() -> str:
+    return os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
+
+
+def _holds_running_python(path: str) -> bool:
+    """Report whether path holds the Python this CLI runs on (Windows only matters)."""
+    if sys.platform != "win32":
+        return False
+    return _below(os.path.realpath(path), _running_base_python())
+
+
+def _deferred_interpreter_dirs(plan: UninstallPlan, base_python: str) -> list[str]:
+    """Name the folders holding base_python that the deferred helper removes after it exits.
+
+    The helper runs on base_python, so it cannot remove them while it runs:
+    the installer's <data_dir>/.uv (scripts/install.ps1), or a uv Python
+    folder the plan removes (uv_leftovers).
+    """
+    candidates = []
+    if plan.remove_data_dir and not plan.preserve_data_entries:
+        candidates.append(os.path.join(plan.data_dir, ".uv"))
+    candidates.extend(plan.uv_leftovers)
+    return [path for path in candidates if os.path.isdir(path) and _below(os.path.realpath(path), base_python)]
+
+
+def _remove_uv_leftovers(paths: tuple[str, ...]) -> None:
+    """Remove the uv folders the plan names, then their parents left empty."""
+    for path in paths:
+        try:
+            _remove_tree_no_follow(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
+        _remove_empty_parents(path)
+
+
+def _remove_tree_no_follow(path: str) -> None:
+    """Remove a folder tree; links and junctions inside go without being followed."""
+    if _is_reparse_path(path):
+        raise OSError(f"refusing link or reparse point {path}")
+    with os.scandir(path) as entries:
+        children = list(entries)
+    for entry in children:
+        if _is_reparse_path(entry.path):
+            if entry.is_dir(follow_symlinks=False) or (sys.platform == "win32" and os.path.isdir(entry.path)):
+                os.rmdir(entry.path)
+            else:
+                os.unlink(entry.path)
+        elif entry.is_dir(follow_symlinks=False):
+            _remove_tree_no_follow(entry.path)
+        else:
+            os.unlink(entry.path)
+    os.rmdir(path)
+
+
+def _remove_empty_parents(path: str) -> None:
+    """Remove the parents of path that are empty now, up to the home folder."""
+    home = _normalized(os.path.expanduser("~"))
+    parent = os.path.dirname(os.path.abspath(path))
+    while parent and _normalized(parent) != home and os.path.dirname(parent) != parent:
+        try:
+            if os.path.commonpath((home, _normalized(parent))) != home:
+                return
+            os.rmdir(parent)
+        except (OSError, ValueError):
+            return
+        parent = os.path.dirname(parent)
+
+
+def _remove_created_dirs(data_dir: str) -> None:
+    """Remove the folders DefenseClaw created in the home folder that are still empty.
+
+    The gateway records them (_CREATED_DIRS_RECORD): the folders its install
+    watcher created to watch, and the parents of the agent config files a
+    connector setup wrote. Deepest first, each goes only while it is an empty
+    real folder reached through real folders from the home folder; one with
+    content stays, and so does its record.
+    """
+    record = os.path.join(data_dir, _CREATED_DIRS_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CREATED_DIRS_RECORD_MAX_BYTES:
+            return
+        with open(record, encoding="utf-8") as stream:
+            dirs = json.load(stream).get("dirs")
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(dirs, list):
+        return
+    home = os.path.abspath(os.path.expanduser("~"))
+    kept: list[str] = []
+    removed: list[str] = []
+    for path in sorted({d for d in dirs if isinstance(d, str)}, key=len, reverse=True):
+        if not os.path.isabs(path) or not _below(home, path):
+            kept.append(path)
+            continue
+        if not _real_dir_chain(home, path):
+            continue
+        try:
+            os.rmdir(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            kept.append(path)
+            continue
+        removed.append(path)
+    try:
+        if kept:
+            with open(record, "w", encoding="utf-8") as stream:
+                json.dump({"dirs": sorted(kept)}, stream)
+                stream.write("\n")
+        else:
+            os.unlink(record)
+    except OSError:
+        pass
+    if removed:
+        ux.ok(f"removed the empty folders DefenseClaw created: {', '.join(sorted(removed))}")
+
+
+def _below(root: str, path: str) -> bool:
+    root = _normalized(root)
+    candidate = _normalized(path)
+    try:
+        return candidate != root and os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        return False
+
+
+def _real_dir_chain(root: str, path: str) -> bool:
+    """Report whether path and each folder up to root is a real folder."""
+    root = _normalized(root)
+    current = os.path.abspath(path)
+    while _normalized(current) != root:
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(current):
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return True
 
 
 def _sha256_file(path: str) -> str:
@@ -961,6 +1224,8 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
                 click.echo(f"      {ux.dim('·')} {target}")
         for path in plan.setup_leftovers:
             click.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
+        for path in plan.uv_leftovers:
+            click.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
         if plan.platform_name == "win32":
             click.echo(
                 f"      {ux.dim('·')} the {plan.install_root} entry in your user Path, "
@@ -1031,6 +1296,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+    if plan.stop_gateway and plan.data_dir:
+        # The gateway is stopped, so its watcher no longer uses them.
+        _remove_created_dirs(plan.data_dir)
     if "copilot" in plan.connectors or plan.remove_data_dir:
         _remove_orphan_copilot_plugin()
     if plan.remove_plugin and "openclaw" in plan.connectors:
@@ -1082,6 +1350,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         _remove_install_bookkeeping(plan.install_root, plan.data_dir)
         if _install_root_empties(plan):
             _remove_user_path_entry(plan)
+    if plan.uv_leftovers:
+        # Last: on Linux and macOS this CLI may run on the Python that goes.
+        # On Windows that one is in use until the deferred helper exits,
+        # which removes it then (_deferred_interpreter_dirs).
+        _remove_uv_leftovers(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
@@ -1413,11 +1686,21 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
     """Start the validated standalone helper and wait for its ready signal."""
     _validate_plan(plan)
     base_python = os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or ""))
+    interpreter_dirs = _deferred_interpreter_dirs(plan, base_python) if base_python else []
+    # The installer's Python is in <data_dir>\.uv (install.ps1); any other
+    # base Python inside the data dir is not trusted to run the helper.
+    uv_dir = os.path.join(plan.data_dir, ".uv")
     if (
         not base_python
         or not os.path.isfile(base_python)
         or _is_reparse_path(base_python)
-        or _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+        or (
+            _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+            and not (
+                _normalized(base_python).startswith(_normalized(uv_dir) + os.sep)
+                and not _is_reparse_path(uv_dir)
+            )
+        )
     ):
         raise click.ClickException("no trusted base Python is available for deferred cleanup")
 
@@ -1445,6 +1728,8 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
             "binary_targets": list(plan.binary_targets if plan.remove_binaries else plan.data_bound_launchers),
             "remove_data_dir": plan.remove_data_dir,
             "remove_empty_install_root": plan.remove_binaries,
+            # The folders holding the helper's own Python: they go once it exits.
+            "interpreter_dirs": interpreter_dirs,
             "ready_path": ready_path,
             "status_path": status_path,
         }
@@ -2159,6 +2444,15 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
         with contextlib.suppress(OSError):
             os.rmdir(plan.install_root)
         _remove_user_path_entry(plan)
+    elif plan.platform_name != "win32":
+        # An empty ~/.local/bin goes too, and so does ~/.local when that
+        # leaves it empty.
+        try:
+            if not os.listdir(plan.install_root):
+                os.rmdir(plan.install_root)
+                _remove_empty_parents(plan.install_root)
+        except OSError:
+            pass
 
     # A pip-installed CLI is outside this plan; we don't shell out to pip
     # because we can't be sure which environment was used. Mention it only

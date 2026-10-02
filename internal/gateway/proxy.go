@@ -4315,7 +4315,7 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: setting up %s\n", newName)
-	if err := newConn.Setup(ctx, p.setupOpts); err != nil {
+	if err := connector.SetupRecordingCreatedDirs(ctx, newConn, p.setupOpts); err != nil {
 		oldName := "<none>"
 		if oldConn != nil {
 			oldName = oldConn.Name()

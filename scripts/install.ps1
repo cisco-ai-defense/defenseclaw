@@ -92,7 +92,7 @@ $PosixShim = "defenseclaw"
 $HookState = "defenseclaw-hook-state.json"
 $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
 # Data-dir entries that are install machinery, not user data.
-$NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
+$NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
@@ -1402,6 +1402,10 @@ function Invoke-Install {
 
     # Never pick up uv settings (overrides, indexes) from a project in the cwd.
     $env:UV_NO_CONFIG = "1"
+    # The download cache and the Python uv fetches for the venv stay in the
+    # data dir, so `uninstall --all` leaves nothing of them in AppData.
+    if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
+    if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
     if (-not $Uv) {
         Write-Info "Installing uv $UvVersion (Python package manager)"
@@ -1572,7 +1576,7 @@ function Invoke-Install {
 }
 
 $savedEnv = @{}
-foreach ($name in @("UV_NO_CONFIG", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH", "DEFENSECLAW_GATEWAY_BIN",
+foreach ($name in @("UV_NO_CONFIG", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH", "DEFENSECLAW_GATEWAY_BIN",
         "DEFENSECLAW_UPGRADE_FRESH_PROCESS", "CODEX_HOME", "CLAUDE_CONFIG_DIR")) {
     $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }

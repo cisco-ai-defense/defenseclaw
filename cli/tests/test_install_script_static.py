@@ -430,3 +430,14 @@ def test_windows_installer_leaves_unset_variables_unset() -> None:
     restore = text[text.index("foreach ($name in $savedEnv.Keys)") :][:400]
     assert 'if ($null -eq $savedEnv[$name]) { Remove-Item -LiteralPath "Env:$name"' in restore
 
+
+def test_both_installers_keep_uv_downloads_in_the_data_dir() -> None:
+    # uv's cache and managed Python go below the data dir (kept by an upgrade,
+    # removed by `uninstall --all`), never to ~/.cache/uv or %LOCALAPPDATA%\uv.
+    posix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}"' in posix
+    assert 'UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${DEFENSECLAW_HOME}/.uv/python}"' in posix
+    assert 'NOT_DATA=".venv .uv ' in posix
+    assert '$env:UV_CACHE_DIR = Join-Path $DataDir ".uv\\cache"' in windows
+    assert '$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"' in windows

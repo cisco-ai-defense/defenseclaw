@@ -189,3 +189,26 @@ func TestCopilotUntrustedDropInIsAConflict(t *testing.T) {
 		t.Fatalf("repaired drop-in: %v %v %+v", info, err, state)
 	}
 }
+
+func TestVSCodePolicyFolderDefenseClawCreatedIsRemoved(t *testing.T) {
+	opts := testOptions(t)
+	vscodeDir := filepath.Join(opts.Root, "etc/vscode")
+	if err := os.MkdirAll(filepath.Join(opts.Root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(vscodeDir, "policy.json")); !strings.Contains(got, "ChatEditorPreferCopilotHarness") {
+		t.Fatalf("vscode policy: %s", got)
+	}
+	if _, err := (copilotTarget{}).RemoveOwned(opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(vscodeDir); !os.IsNotExist(err) {
+		t.Fatalf("%s was created by DefenseClaw and must be removed: %v", vscodeDir, err)
+	}
+	if _, err := os.Lstat(filepath.Join(opts.Root, "etc")); err != nil {
+		t.Fatalf("the existing parent must stay: %v", err)
+	}
+}

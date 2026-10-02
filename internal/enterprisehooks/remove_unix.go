@@ -76,21 +76,29 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	}
 	return connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
-			if err := conn.Teardown(ctx, setupOpts); err != nil {
-				return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
-			}
-			// The connector's hook credential goes with its registration.
-			if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
-				if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
-				}
-			}
-			if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
-			}
-			return nil
+			return connector.RemovalLeavingNoNewDirs(conn, setupOpts, func() error {
+				return removeUserHooksAs(ctx, conn, setupOpts, dataDir)
+			})
 		})
 	})
+}
+
+// removeUserHooksAs is RemoveUserHooks' removal, run with the user's
+// credentials and home.
+func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts connector.SetupOpts, dataDir string) error {
+	if err := conn.Teardown(ctx, setupOpts); err != nil {
+		return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
+	}
+	// The connector's hook credential goes with its registration.
+	if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
+		if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
+		}
+	}
+	if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
+	}
+	return nil
 }
 
 // PurgeUserState removes one account's DefenseClaw per-user state for the
