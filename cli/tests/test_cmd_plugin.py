@@ -705,6 +705,79 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertFalse(items["disk-cleanup"]["enabled"])
         self.assertEqual(items["extra"].get("host_path", ""), "")
 
+    def _hermes_nested_rows(self) -> list[dict]:
+        rows = []
+        for plugin_id, name in (
+            ("web/ddgs", "web-ddgs"),
+            ("a2a", "a2a-platform"),
+            ("image_gen/xai", "image-gen-xai"),
+            ("web/xai", "web-xai"),
+        ):
+            source = os.path.join(self.tmp_dir, "hermes-agent", "plugins", *plugin_id.split("/"))
+            if plugin_id == "a2a":
+                source = os.path.join(self.tmp_dir, "hermes-agent", "plugins", "platforms", "a2a")
+            os.makedirs(source, exist_ok=True)
+            rows.append({"id": plugin_id, "name": name, "enabled": True, "source_kind": "bundled", "source": source})
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        return rows
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_hermes_nested_plugin_scans_by_listed_id_or_name(self, mock_scan, _mock_oc):
+        """GAP-1374: every id/name plugin list shows for a nested Hermes plugin scans."""
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.return_value = ScanResult(
+            scanner="plugin-scanner", target="x", timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(milliseconds=1),
+        )
+        rows = self._hermes_nested_rows()
+        ddgs, a2a = rows[0]["source"], rows[1]["source"]
+        with patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows):
+            for args, expected in (
+                (["scan", "web/ddgs", "--connector", "hermes"], ddgs),
+                (["scan", "ddgs", "--connector", "hermes"], ddgs),
+                (["scan", "web-ddgs", "--connector", "hermes"], ddgs),
+                (["scan", "a2a", "--connector", "hermes"], a2a),
+                (["scan", "a2a-platform", "--connector", "hermes"], a2a),
+                (["scan", "platforms/a2a", "--connector", "hermes"], a2a),
+                (["scan", "web/ddgs"], ddgs),
+            ):
+                mock_scan.reset_mock()
+                result = self.invoke(args)
+                self.assertEqual(result.exit_code, 0, (args, result.output))
+                self.assertEqual(mock_scan.call_args.args[0], expected, args)
+
+            ambiguous = self.invoke(["scan", "xai", "--connector", "hermes"])
+        self.assertNotEqual(ambiguous.exit_code, 0)
+        self.assertIn("image_gen/xai, web/xai", ambiguous.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_hermes_nested_block_is_keyed_by_listed_id(self, _mock_oc):
+        """GAP-1480: blocking a nested Hermes plugin turns its list row blocked."""
+        rows = self._hermes_nested_rows()
+        with patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows):
+            blocked = self.invoke(["block", "ddgs", "--connector", "hermes"])
+            self.assertEqual(blocked.exit_code, 0, blocked.output)
+            self.assertIn("'web/ddgs' added to block list", blocked.output)
+            listed = self.invoke(["list", "--connector", "hermes", "--json"])
+            items = {item["id"]: item for item in json.loads(listed.output)}
+            self.assertEqual(items["web/ddgs"]["status"], "blocked")
+            self.assertEqual(items["web/ddgs"]["actions"]["install"], "block")
+            self.assertEqual(items["a2a"]["status"], "enabled")
+
+            unblocked = self.invoke(["unblock", "web/ddgs", "--connector", "hermes"])
+            self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+            listed = self.invoke(["list", "--connector", "hermes", "--json"])
+            items = {item["id"]: item for item in json.loads(listed.output)}
+            self.assertEqual(items["web/ddgs"]["status"], "enabled")
+
+            ambiguous = self.invoke(["block", "xai", "--connector", "hermes"])
+        self.assertNotEqual(ambiguous.exit_code, 0)
+        self.assertIn("matches several Hermes plugins", ambiguous.output)
+
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_table_title_counts_effectively_enabled_plugins(self, _mock_oc):
         codex_dir = os.path.join(self.tmp_dir, "codex-plugins")

@@ -211,7 +211,10 @@ def scan(
 
     matches: list[_PluginMatch] = []
     registry_cache: PluginRegistryCache = {}
-    if _looks_like_explicit_path(name_or_path):
+    hermes_match = _hermes_listed_plugin(app, name_or_path, connector_flag, require_active=True)
+    if hermes_match is not None and hermes_match[1]:
+        matches = [_PluginMatch("hermes", hermes_match[1], plugin_id=hermes_match[0])]
+    elif _looks_like_explicit_path(name_or_path):
         from defenseclaw.commands import resolve_list_connector
 
         connector = resolve_list_connector(app, connector_flag)
@@ -262,6 +265,11 @@ def scan(
             )
             if scan_dir:
                 matches = [_PluginMatch(connector, scan_dir)]
+        if not matches and not connector_flag:
+            # A bare nested Hermes name (``ddgs``) when no connector is named.
+            hermes_match = _hermes_listed_plugin(app, name_or_path, "hermes", require_active=True)
+            if hermes_match is not None and hermes_match[1]:
+                matches = [_PluginMatch("hermes", hermes_match[1], plugin_id=hermes_match[0])]
 
     _refuse_managed_opencode_bridge_action(
         app,
@@ -314,6 +322,7 @@ def scan(
             profile=profile,
             scope=match.scope,
             project_path=match.project_path,
+            plugin_id=match.plugin_id,
         )
 
 
@@ -331,6 +340,7 @@ def _scan_one_plugin_dir(
     profile: str | None,
     scope: str = "",
     project_path: str = "",
+    plugin_id: str = "",
 ) -> None:
     from defenseclaw.commands import _scan_ui
 
@@ -410,7 +420,7 @@ def _scan_one_plugin_dir(
 
     sev = result.max_severity()
     verdict = _plugin_scan_findings_verdict(
-        app, result, name=target_name, path=scan_dir, connector=connector,
+        app, result, name=plugin_id or target_name, path=scan_dir, connector=connector,
     )
     _scan_ui.render_per_target_status(
         ctx,
@@ -1004,7 +1014,7 @@ def _scan_all_plugins(
         )
         _scan_ui.render_preamble(ctx, target_count=len(targets))
 
-        clean = blocked = errored = 0
+        clean = blocked = errored = findings_total = 0
         total_ms = 0
         group_results: list[dict[str, Any]] = []
         for pid, scan_dir, scope, project_path in targets:
@@ -1039,6 +1049,7 @@ def _scan_all_plugins(
                     findings=0,
                 )
             else:
+                findings_total += len(result.findings)
                 verdict = _plugin_scan_findings_verdict(
                     app, result, name=pid, path=scan_dir, connector=connector,
                 )
@@ -1060,6 +1071,7 @@ def _scan_all_plugins(
                 blocked=blocked,
                 errored=errored,
                 total=len(targets),
+                findings=findings_total,
                 duration_ms=total_ms,
             )
 
@@ -2557,7 +2569,7 @@ def _read_host_plugin_manifest(plugin_path: str) -> dict[str, Any] | None:
         if not os.path.isfile(manifest_path):
             continue
         try:
-            with open(manifest_path) as fh:
+            with open(manifest_path, encoding="utf-8") as fh:
                 if fname.endswith((".yaml", ".yml")):
                     import yaml as _yaml
 
@@ -3038,6 +3050,82 @@ def _resolve_connector_scope(app: AppContext, connector_flag: str) -> str:
     return resolve_list_connector(app, connector_flag)
 
 
+def _hermes_listed_plugin(
+    app: AppContext,
+    name: str,
+    connector: str,
+    *,
+    require_active: bool = False,
+) -> tuple[str, str] | None:
+    """Map a Hermes plugin, as ``plugin list`` shows it, to ``(id, directory)``.
+
+    Hermes nests most plugins in category folders, so the list shows ids like
+    ``web/ddgs`` or ``cron_providers/chronos``. With ``--connector hermes``
+    the listed id, the manifest name, the last id segment or the folder path
+    (``platforms/a2a``) is accepted
+    (refused when it names more than one plugin, like ``xai``). Without a
+    connector only a nested listed id is mapped, so bare names keep their
+    meaning for the other connectors. Returns ``None`` when nothing matches.
+    """
+    wanted = (name or "").strip().strip("/\\")
+    if not wanted:
+        return None
+    if connector:
+        if connector_paths.normalize(connector) != "hermes":
+            return None
+        if require_active and "hermes" not in _active_plugin_connectors(app):
+            return None
+        nested_only = False
+    else:
+        if "/" not in wanted or "hermes" not in _active_plugin_connectors(app):
+            return None
+        nested_only = True
+    try:
+        rows = _list_hermes_plugins()
+    except Exception:  # noqa: BLE001 - fall back to the generic resolvers.
+        return None
+    for row in rows:
+        if row["id"] == wanted:
+            return row["id"], row.get("host_path") or ""
+    if nested_only:
+        return None
+    # The folder path under plugins/ (``platforms/a2a``) names the plugin too.
+    suffix = os.sep + os.path.normpath(wanted)
+    hits = {
+        row["id"]: row.get("host_path") or ""
+        for row in rows
+        if wanted in (row.get("name"), row["id"].rsplit("/", 1)[-1])
+        or ("/" in wanted and os.path.normpath(row.get("host_path") or "").endswith(suffix))
+    }
+    if len(hits) > 1:
+        raise click.ClickException(
+            f"{wanted!r} matches several Hermes plugins: {', '.join(sorted(hits))}. "
+            "Use the ID that 'defenseclaw plugin list --connector hermes' shows."
+        )
+    if hits:
+        plugin_id, path = next(iter(hits.items()))
+        return plugin_id, path
+    return None
+
+
+def _policy_plugin_target(app: AppContext, name: str, connector: str) -> tuple[str, str | None]:
+    """Return the policy key and directory for a block/allow/unblock target.
+
+    Hermes plugins are keyed by the id ``plugin list`` shows, so the row
+    reflects the action; everything else keeps the validated plugin id.
+    """
+    hermes = _hermes_listed_plugin(app, name, connector)
+    if hermes is not None:
+        plugin_id, path = hermes
+        try:
+            for segment in plugin_id.split("/"):
+                validate_plugin_id(segment)
+        except PluginIdentityError as exc:
+            raise click.ClickException(f"invalid plugin identity: {exc}") from exc
+        return plugin_id, path or None
+    return _validated_plugin_argument(name), None
+
+
 def _validated_plugin_argument(name: str) -> str:
     """Validate lifecycle identity without laundering traversal via basename."""
     try:
@@ -3155,7 +3243,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         connector,
         action="block",
     )
-    plugin_name = _validated_plugin_argument(name)
+    plugin_name, hermes_path = _policy_plugin_target(app, name, connector)
     pe = PolicyEngine(app.store)
 
     if not reason:
@@ -3175,7 +3263,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
                 click.echo(f"Already blocked by unscoped policy (covers {connector}): {plugin_name}")
             return
         pe.block_for_connector("plugin", plugin_name, connector, reason)
-        plugin_path = _resolve_plugin_path(app, plugin_name, connector)
+        plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         click.secho(
@@ -3184,7 +3272,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         )
     else:
         pe.block("plugin", plugin_name, reason)
-        plugin_path = _resolve_plugin_path(app, plugin_name)
+        plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path)
         click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
@@ -3219,9 +3307,9 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove plugin enforcement state without adding an allow entry."""
     from defenseclaw.enforce import PolicyEngine
 
-    plugin_name = _validated_plugin_argument(name)
-    pe = PolicyEngine(app.store)
     connector = _resolve_connector_scope(app, connector_flag)
+    plugin_name, _hermes_path = _policy_plugin_target(app, name, connector)
+    pe = PolicyEngine(app.store)
     if connector:
         has_state = bool(app.store) and (
             app.store.has_action("plugin", plugin_name, "install", "block", connector)
@@ -3315,17 +3403,17 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    plugin_name = _validated_plugin_argument(name)
+    # P-A connector-scoped allow: write the narrowed entry and clear residual
+    # file/runtime state for that peer. The gateway runtime-enable dance below
+    # is for the unscoped/OpenClaw runtime lane and stays on the bare path.
+    connector_scope = _resolve_connector_scope(app, connector_flag)
+    plugin_name, hermes_path = _policy_plugin_target(app, name, connector_scope)
     runtime_name = plugin_name
     pe = PolicyEngine(app.store)
 
     if not reason:
         reason = "manual allow via CLI"
 
-    # P-A connector-scoped allow: write the narrowed entry and clear residual
-    # file/runtime state for that peer. The gateway runtime-enable dance below
-    # is for the unscoped/OpenClaw runtime lane and stays on the bare path.
-    connector_scope = _resolve_connector_scope(app, connector_flag)
     if connector_scope:
         if pe.is_allowed_for_connector("plugin", plugin_name, connector_scope):
             if app.store and app.store.has_action(
@@ -3340,7 +3428,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
                 click.echo(f"Already allowed by unscoped policy (covers {connector_scope}): {plugin_name}")
             return
         pe.allow_for_connector("plugin", plugin_name, connector_scope, reason)
-        plugin_path = _resolve_plugin_path(app, plugin_name, connector_scope)
+        plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector_scope)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector_scope)
         click.secho(
@@ -3964,7 +4052,7 @@ def _plugin_metadata_from_path(plugin_name: str, candidate: str) -> dict[str, An
     pkg_json = os.path.join(candidate, "package.json")
     if os.path.isfile(pkg_json):
         try:
-            with open(pkg_json) as f:
+            with open(pkg_json, encoding="utf-8") as f:
                 pkg = json.load(f)
             info_map["version"] = pkg.get("version", "")
             info_map["description"] = pkg.get("description", "")

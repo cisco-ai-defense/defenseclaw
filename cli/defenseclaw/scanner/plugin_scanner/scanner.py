@@ -28,6 +28,8 @@ import os
 import stat
 import time
 
+import yaml
+
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
 from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
@@ -125,14 +127,17 @@ def scan_plugin(
             description=(
                 "Plugin directory lacks a recognised manifest "
                 "(package.json, manifest.json, plugin.json, "
-                "openclaw.plugin.json, .codex-plugin/plugin.json, "
+                "openclaw.plugin.json, plugin.yaml, .codex-plugin/plugin.json, "
                 ".claude-plugin/plugin.json, or .cursor-plugin/plugin.json). "
                 "Cannot verify plugin "
                 "identity, version, or declared permissions. Source "
                 "scanning will still run."
             ),
             location=target,
-            remediation="Add a package.json with name, version, and permissions fields.",
+            remediation=(
+                "Add the manifest your agent expects (for example package.json, "
+                "plugin.json or plugin.yaml) with the plugin's name and version."
+            ),
             tags=["supply-chain"],
         )
         # Synthetic manifest so the analyzer pipeline still runs
@@ -260,6 +265,10 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     # for stability; none takes precedence over another in practice
     # because each lives in a distinct plugin layout.
     ("openclaw.plugin.json", "openclaw.plugin.json"),
+    # Hermes plugins declare themselves in a YAML plugin.yaml (name,
+    # version, description, kind); it has no permissions field.
+    ("plugin.yaml", "plugin.yaml"),
+    ("plugin.yml", "plugin.yml"),
     (os.path.join(".claude-plugin", "plugin.json"), "claude.plugin.json"),
     (os.path.join(".codex-plugin", "plugin.json"), "codex.plugin.json"),
     (os.path.join(".cursor-plugin", "plugin.json"), "cursor.plugin.json"),
@@ -318,8 +327,11 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
                 pass
 
     try:
-        data = json.loads(raw_text)
-    except (json.JSONDecodeError, ValueError):
+        if candidate.endswith((".yaml", ".yml")):
+            data = yaml.safe_load(raw_text)
+        else:
+            data = json.loads(raw_text)
+    except (json.JSONDecodeError, ValueError, yaml.YAMLError):
         return None
     return data if isinstance(data, dict) else None
 
