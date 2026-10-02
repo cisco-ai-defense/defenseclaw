@@ -312,6 +312,10 @@ func openAtomicTransformBoundFilePlatform(parent *os.File, name string, rename b
 	return os.NewFile(uintptr(handle), name), nil
 }
 
+// atomicTransformFileRenameInformationEx is FileRenameInformationEx, which
+// x/sys/windows does not name.
+const atomicTransformFileRenameInformationEx = 65
+
 func renameAtomicTransformBoundFilePlatform(
 	parent, source *os.File, targetName string, replace bool,
 ) error {
@@ -324,16 +328,36 @@ func renameAtomicTransformBoundFilePlatform(
 	bufferSize := int(unsafe.Offsetof(layout.FileName)) + len(name)*2
 	buffer := make([]byte, bufferSize)
 	info := (*atomicTransformFileRenameInfo)(unsafe.Pointer(&buffer[0]))
-	if replace {
-		info.ReplaceIfExists = 1
-	}
 	info.RootDirectory = windows.Handle(parent.Fd())
 	info.FileNameLength = uint32(len(name) * 2)
 	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
 	var status windows.IO_STATUS_BLOCK
-	if err := windows.NtSetInformationFile(
-		windows.Handle(source.Fd()), &status, &buffer[0], uint32(len(buffer)), windows.FileRenameInformation,
-	); err != nil {
+	rename := func(class uint32) error {
+		return windows.NtSetInformationFile(
+			windows.Handle(source.Fd()), &status, &buffer[0], uint32(len(buffer)), class,
+		)
+	}
+	if replace {
+		// A replace of a destination with FILE_ATTRIBUTE_READONLY fails with
+		// access denied. Anyone who can write the file can set that
+		// attribute, so it let a standard user keep the guardian from
+		// restoring DefenseClaw's registration in their own agent files
+		// (GAP-1439). The Ex class (same layout, Flags in place of
+		// ReplaceIfExists) replaces it; volumes without the class get the
+		// plain rename.
+		info.ReplaceIfExists = windows.FILE_RENAME_REPLACE_IF_EXISTS |
+			windows.FILE_RENAME_IGNORE_READONLY_ATTRIBUTE
+		err = rename(atomicTransformFileRenameInformationEx)
+		if errors.Is(err, windows.STATUS_INVALID_PARAMETER) ||
+			errors.Is(err, windows.STATUS_INVALID_INFO_CLASS) ||
+			errors.Is(err, windows.STATUS_NOT_SUPPORTED) {
+			info.ReplaceIfExists = 1
+			err = rename(windows.FileRenameInformation)
+		}
+	} else {
+		err = rename(windows.FileRenameInformation)
+	}
+	if err != nil {
 		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.STATUS_OBJECT_NAME_EXISTS) {
 			return errAtomicTransformConflict
 		}
