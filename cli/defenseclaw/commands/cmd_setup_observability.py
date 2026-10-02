@@ -46,6 +46,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.config import config_path_for_data_dir
+from defenseclaw.config_inspect import ConfigInspectError
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
     PRESETS,
@@ -277,6 +278,14 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             allow_private_networks=allow_private_networks,
             plaintext=plaintext,
         )
+    except ConfigInspectError as exc:
+        message = str(exc)
+        if "secret_reference_unresolved" in (exc.reason or "") and preset.token_env:
+            message = (
+                f"{preset.token_env} is not set. Pass --token <value>, or store it first with: "
+                f"defenseclaw keys set {preset.token_env}"
+            )
+        raise click.ClickException(message) from exc
     except ValueError as exc:
         message = str(exc)
         if "set allow_private_networks" in message and not allow_private_networks:
@@ -499,13 +508,38 @@ def _add_v8_destination(
                 "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
             )
     warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
+    validator = None
+    if dry_run and stored_secret and preset.token_env:
+        validator = _staged_secret_validator({preset.token_env: stored_secret})
     result = mutate_v8_config(
         config_path_for_data_dir(data_dir),
         mutations,
         data_dir=data_dir,
+        validator=validator,
         dry_run=dry_run,
     )
     return result, warnings
+
+
+def _staged_secret_validator(overrides: dict[str, str]):
+    """Validate a dry-run candidate with the unwritten --token value (GAP-1890).
+
+    A real add writes the key to .env and the environment before it validates;
+    a dry run writes nothing, so the value goes to the validator directly.
+    """
+    from defenseclaw.observability import v8_writer
+
+    def validate(path: str, data_dir: str | None) -> None:
+        result = v8_writer.inspect_v8_config(
+            "validate",
+            config_path=path,
+            data_dir=data_dir,
+            environment_overrides=overrides,
+        )
+        if result.valid is not True:
+            raise RuntimeError("canonical v8 configuration validator rejected the candidate")
+
+    return validate
 
 
 def _v8_authored_destinations(data_dir: str) -> list[dict[str, Any]]:
@@ -920,12 +954,42 @@ def _remove_v8_destination(data_dir: str, name: str, connector: str) -> None:
             "v8 destinations are process-wide; use route selectors to constrain a connector"
         )
     index = _v8_source_destination_index(data_dir, name)
+    try:
+        authored = _v8_authored_destinations(data_dir)
+    except (OSError, ValueError):
+        authored = []
     mutate_v8_config(
         config_path_for_data_dir(data_dir),
         [V8YAMLMutation.delete(("observability", "destinations", index))],
         data_dir=data_dir,
     )
     click.echo(f"  {name}: removed")
+    # GAP-1892: add wrote the key to .env; say so when nothing else uses it.
+    removed: set[str] = set()
+    kept: set[str] = set()
+    for destination in authored:
+        (removed if destination.get("name") == name else kept).update(_env_references(destination))
+    dotenv = os.path.join(data_dir, ".env")
+    for env_name in sorted(removed - kept):
+        if _peek_dotenv(data_dir, env_name):
+            click.echo(
+                f"  {env_name} is still stored in {dotenv}; remove it with: "
+                f"defenseclaw keys remove {env_name}"
+            )
+
+
+def _env_references(value: Any) -> set[str]:
+    """Names of every {env: NAME} secret reference inside a destination."""
+    if isinstance(value, dict):
+        found: set[str] = set()
+        if set(value) == {"env"} and isinstance(value["env"], str):
+            found.add(value["env"])
+        for item in value.values():
+            found |= _env_references(item)
+        return found
+    if isinstance(value, list):
+        return set().union(*(_env_references(item) for item in value)) if value else set()
+    return set()
 
 
 def _test_v8_destination(

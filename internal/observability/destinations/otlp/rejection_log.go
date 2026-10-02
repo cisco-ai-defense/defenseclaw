@@ -17,6 +17,8 @@
 package otlp
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"mime"
@@ -52,6 +54,57 @@ var rejectionLogLimiter = struct {
 }{last: map[string]time.Time{}, suppressed: map[string]int{}}
 
 var rejectionTokenPattern = regexp.MustCompile(`[A-Za-z0-9+/=_\-.]{32,}`)
+
+type rejectionCaptureKey struct{}
+
+// rejectedResponse keeps the status and the head of the body of the last
+// refused HTTP attempt for an SDK exporter that never returns the response
+// (metrics, GAP-1870), so the refusal can be logged like logs and traces.
+type rejectedResponse struct {
+	mu          sync.Mutex
+	status      int
+	contentType string
+	body        []byte
+}
+
+func withRejectionCapture(ctx context.Context) (context.Context, *rejectedResponse) {
+	capture := &rejectedResponse{}
+	return context.WithValue(ctx, rejectionCaptureKey{}, capture), capture
+}
+
+// captureRejection records a non-2xx response when the request context asks
+// for it, and puts the bytes it read back in front of the body for the SDK.
+func captureRejection(ctx context.Context, response *http.Response) {
+	capture, ok := ctx.Value(rejectionCaptureKey{}).(*rejectedResponse)
+	if !ok || capture == nil || response == nil || (response.StatusCode >= 200 && response.StatusCode < 300) {
+		return
+	}
+	var head []byte
+	if response.Body != nil {
+		head, _ = io.ReadAll(io.LimitReader(response.Body, rejectionBodyReadBytes))
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), response.Body), response.Body}
+	}
+	capture.mu.Lock()
+	capture.status, capture.contentType, capture.body = response.StatusCode, response.Header.Get("Content-Type"), head
+	capture.mu.Unlock()
+}
+
+// response rebuilds the last refused response, or nil when there was none.
+func (capture *rejectedResponse) response() *http.Response {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if capture.status == 0 {
+		return nil
+	}
+	return &http.Response{
+		StatusCode: capture.status,
+		Header:     http.Header{"Content-Type": []string{capture.contentType}},
+		Body:       io.NopCloser(bytes.NewReader(capture.body)),
+	}
+}
 
 // logHTTPRejection writes one gateway.log line when a destination refuses an
 // export with a non-retryable HTTP status, so an operator can see the status

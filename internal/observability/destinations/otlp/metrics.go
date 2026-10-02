@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -89,7 +90,7 @@ func (factory *Factory) NewMetricExporter(ctx context.Context) (*MetricExporter,
 			return nil, newError(ErrorInitialization, buildErr)
 		}
 		return &MetricExporter{
-			inner: exporter, httpTransport: transport,
+			inner: exporter, httpTransport: transport, destination: factory.config.Destination,
 			maxBytes: factory.config.Batch.MaxExportBatchBytes, config: config,
 			circuit: circuit, now: time.Now,
 		}, nil
@@ -115,7 +116,7 @@ func (factory *Factory) NewMetricExporter(ctx context.Context) (*MetricExporter,
 		return nil, newError(ErrorInitialization, buildErr)
 	}
 	return &MetricExporter{
-		inner: exporter, connection: connection,
+		inner: exporter, connection: connection, destination: factory.config.Destination,
 		maxBytes: factory.config.Batch.MaxExportBatchBytes, config: config,
 		circuit: circuit, now: time.Now,
 	}, nil
@@ -197,6 +198,7 @@ func (reader *MetricReader) DeliveryHealthSource(generation uint64) (delivery.Sn
 		return nil, newError(ErrorInvalidConfig, nil)
 	}
 	reader.healthGeneration = generation
+	reader.exporter.healthGeneration.Store(generation)
 	return &metricReaderHealthSource{reader: reader, generation: generation}, nil
 }
 
@@ -316,6 +318,11 @@ type MetricExporter struct {
 	lastFailure   time.Time
 	circuit       *delivery.Circuit
 	now           func() time.Time
+	destination   string
+	// lastFailureCode is guarded by healthMu; healthGeneration is set once
+	// the reader is bound to a provider generation.
+	lastFailureCode  delivery.FailureCode
+	healthGeneration atomic.Uint64
 }
 
 func (exporter *MetricExporter) Temporality(kind sdkmetric.InstrumentKind) metricdata.Temporality {
@@ -392,13 +399,24 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 	exporter.counters.accepted.Add(count)
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
+	attemptContext, rejection := withRejectionCapture(attemptContext)
 	err := exporter.inner.Export(attemptContext, metrics)
 	if err != nil {
 		exporter.counters.failed.Add(count)
+		// GAP-1870: name the HTTP refusal like the log and trace paths do.
+		refused := rejection.response()
+		if refused != nil {
+			exporter.healthMu.Lock()
+			exporter.lastFailureCode = httpStatusFailureCode(refused.StatusCode)
+			exporter.healthMu.Unlock()
+		}
 		class := otlpFailureClass(exporter.config.tracker, dialSequence, err)
 		exporter.recordCircuitFailure(class, exporter.nowUTC())
 		probePending = false
 		unlock()
+		if refused != nil && httpStatusFailureCode(refused.StatusCode) == delivery.FailureCodeHTTPRejected {
+			logHTTPRejection(exporter.destination, observability.SignalMetrics, refused, int(count), nil)
+		}
 		recordRetryAttempts(&exporter.counters, exporter.config.observer, observability.SignalMetrics, count, attempts.Load())
 		observe(exporter.config.observer, SignalEvent{Signal: observability.SignalMetrics, Outcome: SignalOutcomeExportFailed, Count: count})
 		if class == delivery.FailureClassUnsafeEndpoint {
@@ -488,6 +506,7 @@ func (exporter *MetricExporter) recordHealthAt(
 	at time.Time,
 ) {
 	exporter.healthMu.Lock()
+	previous, previousReason := exporter.health, exporter.healthReason
 	exporter.health = state
 	exporter.healthReason = reason
 	if success {
@@ -495,7 +514,9 @@ func (exporter *MetricExporter) recordHealthAt(
 	} else {
 		exporter.lastFailure = at.UTC()
 	}
+	code := exporter.lastFailureCode
 	exporter.healthMu.Unlock()
+	exporter.observeTransition(previous, previousReason, state, reason, code, at)
 }
 
 func (exporter *MetricExporter) setHealth(state delivery.HealthState, reason delivery.HealthReason) {
@@ -503,9 +524,52 @@ func (exporter *MetricExporter) setHealth(state delivery.HealthState, reason del
 		return
 	}
 	exporter.healthMu.Lock()
+	previous, previousReason := exporter.health, exporter.healthReason
 	exporter.health = state
 	exporter.healthReason = reason
+	code := exporter.lastFailureCode
 	exporter.healthMu.Unlock()
+	exporter.observeTransition(previous, previousReason, state, reason, code, exporter.nowUTC())
+}
+
+// observeTransition reports a failing, degraded or recovered metric signal to
+// the delivery observer, as the log and trace dispatchers do, so a refused
+// metrics export raises the same telemetry-destination alert (GAP-1870). Only
+// a generation-bound exporter reports, and the observer runs off the export
+// path because it may persist a record.
+func (exporter *MetricExporter) observeTransition(
+	previous delivery.HealthState,
+	previousReason delivery.HealthReason,
+	state delivery.HealthState,
+	reason delivery.HealthReason,
+	code delivery.FailureCode,
+	at time.Time,
+) {
+	observer := exporter.config.health
+	generation := exporter.healthGeneration.Load()
+	if observer == nil || generation == 0 || (previous == state && previousReason == reason) {
+		return
+	}
+	unhealthy := func(value delivery.HealthState) bool {
+		return value == delivery.HealthDegraded || value == delivery.HealthFailing
+	}
+	if !unhealthy(state) && !unhealthy(previous) {
+		return
+	}
+	if previous == "" {
+		previous = delivery.HealthInitializing
+	}
+	transition := delivery.HealthTransition{
+		Destination: exporter.destination, Generation: generation, Signal: string(observability.SignalMetrics),
+		Previous: previous, Current: state, Reason: reason, FailureCode: code, OccurredAt: at.UTC(),
+	}
+	if exporter.circuit != nil {
+		transition.FailureClass = exporter.circuit.Snapshot().LastFailureClass
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		observer.Observe(transition)
+	}()
 }
 
 func (exporter *MetricExporter) nowUTC() time.Time {
@@ -535,6 +599,7 @@ func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot
 	reason := exporter.healthReason
 	lastSuccess := exporter.lastSuccess
 	lastFailure := exporter.lastFailure
+	lastFailureCode := exporter.lastFailureCode
 	exporter.healthMu.Unlock()
 	circuit := exporter.circuit.Snapshot()
 	counters := exporter.Counters()
@@ -542,6 +607,7 @@ func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot
 		State: state, Reason: string(reason),
 		CircuitState: circuit.State, ConsecutiveFailures: circuit.ConsecutiveFailures,
 		CircuitOpenUntil: circuit.OpenUntil, LastFailureClass: circuit.LastFailureClass,
+		LastFailureCode: lastFailureCode,
 		Counters: delivery.Counters{
 			Accepted: counters.Accepted, Delivered: counters.Exported, Retried: counters.Retried,
 			// Circuit-suppressed records never reached the destination and are

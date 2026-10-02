@@ -1416,3 +1416,65 @@ def test_v8_remove_unknown_destination_fails_before_the_prompt(
     assert "Remove destination" not in result.output
     assert "no configurable v8 destination named 'nosuchdest'" in result.output
     assert "configured destinations:" in result.output
+
+
+def test_setup_v8_dry_run_validates_with_the_token_and_names_a_missing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1890: --dry-run validated without the --token value and crashed with a traceback.
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.delenv("DD_API_KEY", raising=False)
+
+    def validate(_operation, *, config_path, data_dir=None, environment_overrides=None):
+        if "DD_API_KEY" not in (environment_overrides or {}) and "DD_API_KEY" not in os.environ:
+            raise ConfigInspectError(
+                "candidate field=$.observability.destinations[0].headers; reason=[secret_reference_unresolved] x",
+                reason="[secret_reference_unresolved] required environment-backed secret is unavailable",
+            )
+        return SimpleNamespace(valid=True)
+
+    monkeypatch.setattr("defenseclaw.observability.v8_writer.inspect_v8_config", validate)
+    args = ["add", "datadog", "--non-interactive", "--name", "dd", "--dry-run", "--site", "us5"]
+    app = _setup_app(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+
+    result = CliRunner().invoke(observability, [*args, "--token", "dummy-key"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "DRY-RUN Datadog: added as destination 'dd'" in result.output
+    assert not (tmp_path / ".env").exists()
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+    missing = CliRunner().invoke(observability, args, obj=app)
+    assert missing.exit_code == 1, missing.output
+    assert missing.exception is None or isinstance(missing.exception, SystemExit)
+    assert "DD_API_KEY is not set. Pass --token <value>" in missing.output
+    assert "Traceback" not in missing.output
+
+
+def test_setup_v8_remove_says_the_key_stays_in_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1892: remove said only "removed" and left DD_API_KEY in .env without a word.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setenv("DD_API_KEY", "")  # recorded, so add's os.environ write is undone
+    monkeypatch.delenv("DD_API_KEY")
+    app = _setup_app(tmp_path)
+    add = ["add", "datadog", "--non-interactive", "--site", "us5", "--token", "dummy-key"]
+    assert CliRunner().invoke(observability, [*add, "--name", "dd1"], obj=app).exit_code == 0
+    assert CliRunner().invoke(observability, [*add, "--name", "dd2"], obj=app).exit_code == 0
+    monkeypatch.delenv("DD_API_KEY", raising=False)
+
+    shared = CliRunner().invoke(observability, ["remove", "dd1", "--yes"], obj=app)
+    assert shared.exit_code == 0, shared.output
+    assert "dd1: removed" in shared.output
+    assert "still stored" not in shared.output  # dd2 still uses the key
+
+    last = CliRunner().invoke(observability, ["remove", "dd2", "--yes"], obj=app)
+    assert last.exit_code == 0, last.output
+    assert "DD_API_KEY is still stored in" in last.output
+    assert "defenseclaw keys remove DD_API_KEY" in last.output
+    assert dotenv_values(tmp_path / ".env").get("DD_API_KEY") == "dummy-key"
