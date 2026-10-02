@@ -8738,6 +8738,7 @@ def _check_observability_v8_status(
 
     from defenseclaw.observability.v8_status import (
         destination_health_from_gateway,
+        local_collector_opt_in_destination,
         retention_health_from_gateway,
     )
 
@@ -8834,20 +8835,17 @@ def _check_observability_v8_status(
         f"version={status.bucket_catalog_version}; collected={collected}/{len(status.buckets)}",
         r=r,
     )
-    endpoints = {destination.name: str(destination.endpoint or "") for destination in status.destinations}
     for code, path, summary in status.warnings:
-        if code in _LOCAL_COLLECTOR_OPT_INS:
-            match = re.search(r"destinations\[([^\]]+)\]", str(path))
-            if match and _endpoint_is_loopback(endpoints.get(match.group(1), "")):
-                # The operator chose this for a collector on this machine
-                # (--plaintext / --allow-private-networks): not a warning.
-                _emit(
-                    "pass",
-                    f"Observability option: {code}",
-                    f"{path}: set on purpose for a collector on this machine; no action needed",
-                    r=r,
-                )
-                continue
+        if local_collector_opt_in_destination(code, path, status.destinations):
+            # The operator chose this for a collector on this machine
+            # (--plaintext / --allow-private-networks): not a warning.
+            _emit(
+                "pass",
+                f"Observability option: {code}",
+                f"{path}: set on purpose for a collector on this machine; no action needed",
+                r=r,
+            )
+            continue
         _emit(
             "warn",
             f"Observability warning: {code}",
@@ -8870,22 +8868,10 @@ _LOCAL_COLLECTOR_OPT_INS = {
 
 
 def _endpoint_is_loopback(endpoint: str) -> bool:
-    """Whether an exporter endpoint names this machine (127.0.0.0/8, ::1, localhost)."""
-    text = endpoint.strip()
-    if not text:
-        return False
-    if "://" not in text:
-        text = "//" + text
-    try:
-        host = urllib.parse.urlsplit(text).hostname or ""
-    except ValueError:
-        return False
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    """Whether an exporter endpoint names this machine (shared with setup redaction, GAP-1577)."""
+    from defenseclaw.observability.v8_status import endpoint_is_loopback
+
+    return endpoint_is_loopback(endpoint)
 
 
 def _check_webhooks(cfg, r: _DoctorResult) -> None:

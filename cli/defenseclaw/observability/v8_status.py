@@ -25,9 +25,11 @@ never attempts to compile policy independently.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import tempfile
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -237,6 +239,49 @@ def source_is_v8(config_path: str | Path) -> bool:
             return False
         raise
     return True
+
+
+# Warnings for options the operator turns on with --plaintext and
+# --allow-private-networks. For a collector on this machine they are a
+# deliberate choice, not a problem (GAP-1167, GAP-1577).
+LOCAL_COLLECTOR_OPT_IN_CODES = frozenset(("tls_verification_disabled", "private_export_network_allowed"))
+_DESTINATION_IN_PATH = re.compile(r"destinations\[([^\]]+)\]")
+
+
+def endpoint_is_loopback(endpoint: str) -> bool:
+    """Whether an exporter endpoint names this machine (127.0.0.0/8, ::1, localhost)."""
+    text = endpoint.strip()
+    if not text:
+        return False
+    if "://" not in text:
+        text = "//" + text
+    try:
+        host = urllib.parse.urlsplit(text).hostname or ""
+    except ValueError:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def local_collector_opt_in_destination(
+    code: str, path: str, destinations: Sequence[V8DestinationStatus]
+) -> str:
+    """Name of the loopback destination a deliberate --plaintext /
+    --allow-private-networks warning is about; "" for any other warning."""
+    if code not in LOCAL_COLLECTOR_OPT_IN_CODES:
+        return ""
+    match = _DESTINATION_IN_PATH.search(str(path))
+    if not match:
+        return ""
+    name = match.group(1)
+    for destination in destinations:
+        if destination.name == name and endpoint_is_loopback(str(destination.endpoint or "")):
+            return name
+    return ""
 
 
 def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
