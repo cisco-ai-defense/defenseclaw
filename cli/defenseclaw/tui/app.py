@@ -44,6 +44,7 @@ from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
+    command_result_summary,
     infer_command_risk,
     parse_command_line,
     suggested_next_action,
@@ -8336,6 +8337,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._strip_summary = "cancelled by operator"
         elif self._strip_state == "success":
             tail = self._strip_last_output
+            result = result or command_result_summary(self._strip_label, self._strip_output_lines)
             if result:
                 self._strip_summary = result
             elif tail and len(tail) <= 120 and not _is_bare_json_punctuation(tail):
@@ -8348,7 +8350,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 tail = ""
             self._strip_summary = result or tail or f"exit {exit_code} · no output captured"
         # Append a contextual "next thing to try" hint when we have a
-        # confident suggestion (e.g. ``rerun readiness`` after `setup
+        # confident suggestion (e.g. the readiness key after `setup
         # guardrail`). Empty string means "no hint" — skip the footer
         # rather than rendering an awkward dangling separator.
         label = self._strip_label or "command"
@@ -10025,7 +10027,29 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _write_activity(self, text: str) -> None:
         self.activity_lines.append(text)
-        self.query_one("#activity", RichLog).write(text)
+        self._activity_log_write(self.query_one("#activity", RichLog), text)
+
+    def _activity_log_write(self, log: RichLog, content: object) -> None:
+        width = self._activity_write_width(log)
+        if width is None:
+            log.write(content)
+        else:
+            log.write(content, width=width)
+
+    def _activity_write_width(self, log: RichLog) -> int | None:
+        """Wrap width for a line written while the Activity log is hidden.
+
+        A hidden RichLog has no width, so it wrapped each line at its
+        78-column minimum and kept that wrap when shown in a 160-column
+        terminal (GAP-1911). Use the width the log gets when shown: the
+        screen less the log's margin, border, padding and scrollbar.
+        """
+
+        region = getattr(log, "scrollable_content_region", None)
+        if region is None or region.width > 0:
+            return None
+        width = self.size.width - 8
+        return width if width > log.min_width else None
 
     def _write_activity_safe(self, text: str) -> None:
         """Write subprocess output to the Activity RichLog without ever
@@ -10057,7 +10081,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         self.activity_lines.append(text)
-        self.query_one("#activity", RichLog).write(Text.from_ansi(text))
+        self._activity_log_write(self.query_one("#activity", RichLog), Text.from_ansi(text))
 
     def _export_audit(self, path: Path | None) -> Path:
         target = path or Path("defenseclaw-audit-export.json")

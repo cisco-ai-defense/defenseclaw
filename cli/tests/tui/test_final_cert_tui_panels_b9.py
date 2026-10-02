@@ -89,7 +89,7 @@ def test_setup_hint_fits_one_row_at_80_columns() -> None:
 def test_plugins_header_says_verdict() -> None:
     # GAP-1749: clean/blocked sat under an "Actions" header.
     model = PluginsPanelModel(connector="hermes")
-    assert model.data_table_columns()[3] == "Verdict"
+    assert model.data_table_columns()[2] == "Verdict"
 
 
 def test_connector_filter_empty_state_names_the_hidden_rows() -> None:

@@ -870,6 +870,14 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
 
     actions_header = "Verdict"
 
+    def data_table_columns(self) -> tuple[str, ...]:
+        # The verdict comes before the long Source path, so it stays on
+        # screen at 80 columns (GAP-1905).
+        return _verdict_before_source(super().data_table_columns())
+
+    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(_verdict_before_source(row) for row in super().data_table_rows())
+
     def __init__(self, *, connector: str = "") -> None:
         # Without filter fields the filter matched every row (GAP-1520).
         super().__init__(filter_fields=("id", "name", "description", "origin", "status", "verdict"))
@@ -1964,6 +1972,13 @@ def load_rows_from_command(
         check=True,
     )
     return parser(result.stdout)
+
+
+def _verdict_before_source(cells: tuple[str, ...]) -> tuple[str, ...]:
+    """Swap the Source and Verdict cells (the 3rd and 2nd from last)."""
+
+    *head, source, verdict, details = cells
+    return (*head, verdict, source, details)
 
 
 def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
