@@ -322,13 +322,11 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
     mode_flag = f" --mode {mode}" if mode else ""
     if wanted in {"openclaw", "zeptoclaw"}:
         # Proxy-backed connectors cannot run next to hook connectors, so
-        # "keep the rest" is refused and setup has no --replace (GAP-1407).
+        # "keep the rest" is refused (GAP-1407); --replace switches (GAP-1455).
         click.echo(
             f"  \u2717 This install already guards: {', '.join(configured)}.\n"
             f"    {wanted} is proxy-backed and cannot run next to these connectors.\n"
-            "    To switch to it, remove each one first: defenseclaw setup remove <connector>"
-            " (add --force for the last one)\n"
-            f"    Then run: defenseclaw setup {slug}{mode_flag}\n"
+            f"    Switch to it and remove them: defenseclaw setup {slug} --replace{mode_flag}\n"
             "    Change the whole set instead: defenseclaw init",
             err=True,
         )

@@ -96,6 +96,7 @@ from defenseclaw.connector_contracts import (
     normalize_connector,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
+    stable_agent_version,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
 from defenseclaw.file_permissions import (
@@ -7478,6 +7479,23 @@ def _capture_setup_watchdog_fingerprint(cfg) -> str:
     )
 
 
+def _stable_lock_identity_entry(name: str, raw_entry: dict[str, Any]) -> dict[str, Any]:
+    """A lock entry without the fields that change with no setup change.
+
+    Each gateway generation rewrites ``updated_at``, and Amp's raw version
+    ends in a relative release age ("..., 8h ago") that moves as time passes
+    (Go compares it through stableRawAgentVersionForContract). A rollback
+    restart that crossed such an hour boundary reported "connector amp: lock
+    identity changed" and left the rollback incomplete (GAP-1206).
+    """
+    stable_entry = copy.deepcopy(raw_entry)
+    stable_entry.pop("updated_at", None)
+    raw_version = stable_entry.get("raw_agent_version")
+    if isinstance(raw_version, str):
+        stable_entry["raw_agent_version"] = stable_agent_version(name, raw_version)
+    return stable_entry
+
+
 def _capture_setup_applied_runtime_once(
     cfg,
     required_registration_locations: tuple[_SetupRegistrationLocationEvidence, ...] = (),
@@ -7532,8 +7550,7 @@ def _capture_setup_applied_runtime_once(
         put(("runtime", "gateway", "shared-lock-digests"), _setup_runtime_digest(shared_digests))
         for name, raw_entry in lock_entries.items():
             subject = _setup_runtime_subject(name)
-            stable_entry = copy.deepcopy(raw_entry)
-            stable_entry.pop("updated_at", None)
+            stable_entry = _stable_lock_identity_entry(name, raw_entry)
             put(("connector", subject, "lock-identity"), _setup_runtime_digest(stable_entry))
             fail_mode = raw_entry.get("hook_fail_mode")
             posture = raw_entry.get("registration_posture")
@@ -11942,6 +11959,7 @@ def _setup_guardrail_connector_alias(
     hilt_min_severity: str | None,
     restart: bool,
     verify: bool,
+    replace: bool = False,
 ) -> None:
     """Run the full guardrail setup backend for a specific connector."""
     if connector not in _GUARDRAIL_SUPPORTING_CONNECTORS:
@@ -11957,13 +11975,26 @@ def _setup_guardrail_connector_alias(
     click.echo("  then runs the same non-interactive backend as `setup guardrail`.")
     click.echo()
 
-    _refuse_proxy_next_to_hook_connectors(app.cfg.guardrail, connector)
+    # GAP-1455: --replace switches a hook-connector install to the proxy
+    # connector in one command; the gateway tears the removed ones down.
+    replaced = _hook_peers_of_proxy_connector(app.cfg.guardrail, connector) if replace else []
+    if not replace:
+        _refuse_proxy_next_to_hook_connectors(app.cfg.guardrail, connector)
 
+    if replaced:
+        click.echo(f"  --replace removes {len(replaced)} hook connector(s): {', '.join(replaced)}")
     if not (yes or non_interactive):
-        if not click.confirm(f"  Configure {label} guardrail now?", default=True):
+        if replaced:
+            question = f"  Replace them with {label}? Their hooks are torn down when the gateway restarts."
+            proceed = click.confirm(question, default=False)
+        else:
+            proceed = click.confirm(f"  Configure {label} guardrail now?", default=True)
+        if not proceed:
             click.echo("  Aborted — no changes made.")
             return
 
+    if replaced:
+        app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
         _adopt_openclaw_gateway_token(app)
         _adopt_openclaw_gateway_port(app)
@@ -12030,22 +12061,27 @@ def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
     left the proxy connector out of the active roster: setup exited 0, no
     plugin was written, and the agent ran unprotected. Refuse instead.
     """
-    if connector not in _PROXY_BACKED_CONNECTORS:
-        return
-    peers = [
-        name
-        for name in sorted(getattr(gc, "connectors", None) or {})
-        if normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
-    ]
+    peers = _hook_peers_of_proxy_connector(gc, connector)
     if not peers:
         return
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     raise click.ClickException(
         f"{label} is proxy-backed and cannot run next to hook connectors, and this install has "
         f"{len(peers)} configured ({', '.join(peers)}). No changes made. To switch this install "
-        f"to {label}, remove them first with 'defenseclaw setup remove <connector>' (add --force "
-        f"for the last one), then rerun 'defenseclaw setup {connector}'."
+        f"to {label} and remove them, run 'defenseclaw setup {connector} --replace' (or remove "
+        "them one at a time with 'defenseclaw setup remove <connector>')."
     )
+
+
+def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
+    """Hook connectors configured next to a proxy-backed *connector*."""
+    if connector not in _PROXY_BACKED_CONNECTORS:
+        return []
+    return [
+        name
+        for name in sorted(getattr(gc, "connectors", None) or {})
+        if normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
+    ]
 
 
 def _adopt_openclaw_gateway_token(app: AppContext) -> None:
@@ -12172,6 +12208,14 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
     )
     @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
     @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
+    @click.option(
+        "--replace",
+        is_flag=True,
+        help=(
+            f"Switch to {label}: remove every configured hook connector (it cannot run next to them). "
+            "Asks first unless --yes is given."
+        ),
+    )
     @pass_ctx
     def _cmd(
         app: AppContext,
@@ -12194,6 +12238,7 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         hilt_min_severity: str | None,
         restart: bool,
         verify: bool,
+        replace: bool,
     ) -> None:
         _setup_guardrail_connector_alias(
             app,
@@ -12217,6 +12262,7 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             hilt_min_severity=hilt_min_severity,
             restart=restart,
             verify=verify,
+            replace=replace,
         )
 
     _cmd.__name__ = f"setup_{connector}"

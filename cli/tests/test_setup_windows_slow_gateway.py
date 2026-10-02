@@ -32,6 +32,33 @@ def test_windows_launcher_timeout_outlasts_the_gateway_readiness_wait():
     assert _go_seconds("daemon_readiness_other.go") == 60
 
 
+def test_rollback_lock_identity_ignores_amp_release_age():
+    # GAP-1206: the rollback restart wrote Amp's lock entry an hour bucket
+    # later ("7h ago" -> "8h ago"); the identity check called that a change
+    # and left the rollback incomplete.
+    def identity(name, entry):
+        return cmd_setup._setup_runtime_digest(cmd_setup._stable_lock_identity_entry(name, entry))
+
+    before = {
+        "connector": "amp",
+        "raw_agent_version": "0.0.1790934954-gaac027 (released 2026-10-02T09:55:54.000Z, 7h ago)",
+        "contract_id": "amp-plugin-v1",
+        "updated_at": "2026-10-02T17:40:00Z",
+    }
+    after = dict(
+        before,
+        raw_agent_version="0.0.1790934954-gaac027 (released 2026-10-02T09:55:54.000Z, 8h ago)",
+        updated_at="2026-10-02T18:08:31Z",
+    )
+    assert identity("amp", before) == identity("amp", after)
+    assert before["raw_agent_version"].endswith("7h ago)"), "the stored entry must not be modified"
+    upgraded = dict(before, raw_agent_version="0.0.1790999999-gbbbbbb (released 2026-10-03T01:00:00.000Z, 1h ago)")
+    assert identity("amp", before) != identity("amp", upgraded)
+    # Only Amp's presentation suffix is dropped.
+    codex = {"connector": "codex", "raw_agent_version": "codex-cli 0.130.0 (released x, 7h ago)"}
+    assert identity("codex", codex) != identity("codex", dict(codex, raw_agent_version="codex-cli 0.130.0 (released x, 8h ago)"))
+
+
 def test_restart_passes_the_launcher_timeout(tmp_path):
     exe = tmp_path / "defenseclaw-gateway"
     exe.write_bytes(b"")

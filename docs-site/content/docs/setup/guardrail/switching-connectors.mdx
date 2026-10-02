@@ -57,6 +57,18 @@ defenseclaw setup remove codex --force
 
 Choose **Replace** in the connector setup prompt when you want setup to tear down the previous connector's agent-side files before wiring the new one. This is useful when a single-user workstation is moving from one agent to another and you do not want both configured at the same time.
 
+Non-interactively, pass `--replace`:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+OpenClaw and ZeptoClaw are proxy-backed and cannot run next to hook connectors, so their setup refuses while hook connectors are configured. To switch the whole install in one command, pass `--replace`. Setup lists the hook connectors it removes and asks first (`--yes` skips the question); the gateway tears down their hooks when it restarts:
+
+```bash
+defenseclaw setup openclaw --replace --mode action
+```
+
 ## Verify
 
 ```bash

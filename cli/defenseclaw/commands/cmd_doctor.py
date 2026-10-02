@@ -4759,8 +4759,77 @@ def _check_codex_hooks(
     elif os.path.isfile(hook_script):
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
+        config_toml = config_path or os.path.join(codex_home(), "config.toml")
+        foreign = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
+        if foreign:
+            _emit(
+                "warn",
+                "Codex hooks of another install",
+                f"{config_toml} also runs {len(foreign)} hook script(s) of another DefenseClaw "
+                f"install ({', '.join(foreign)}), so every Codex event runs two hook chains",
+                r=r,
+                remediation=(
+                    f"delete the hook entries that run {foreign[0]} from {config_toml}, "
+                    "then run: defenseclaw setup codex --yes"
+                ),
+            )
     else:
         _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
+
+
+_CODEX_HOOK_SCRIPT = "codex-hook.sh"
+_MANAGED_HOOK_MARKER = "# defenseclaw-managed-hook v"
+
+
+def _foreign_defenseclaw_codex_hook_scripts(config_toml: str, own_hook_script: str) -> list[str]:
+    """DefenseClaw codex-hook.sh scripts in config.toml other than our own.
+
+    Copied dotfiles or a second DEFENSECLAW home leave another install's
+    hook entries next to ours; setup keeps them because they are not this
+    install's, and every Codex event then runs both chains (GAP-1529). A
+    script counts as DefenseClaw's when it carries the managed-hook marker
+    or, once deleted, sits under a .defenseclaw directory.
+    """
+    try:
+        with open(config_toml, "rb") as fh:
+            raw = fh.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return []
+        document = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return []
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    own = os.path.realpath(own_hook_script)
+    found: set[str] = set()
+    for groups in hooks.values():
+        for group in groups if isinstance(groups, list) else []:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            for handler in handlers if isinstance(handlers, list) else []:
+                command = handler.get("command") if isinstance(handler, dict) else None
+                if not isinstance(command, str):
+                    continue
+                script = command.split(" --event ", 1)[0].strip()
+                if (
+                    os.path.basename(script) != _CODEX_HOOK_SCRIPT
+                    or os.path.basename(os.path.dirname(script)) != "hooks"
+                    or os.path.realpath(script) == own
+                ):
+                    continue
+                if _is_defenseclaw_hook_script(script):
+                    found.add(script)
+    return sorted(found)
+
+
+def _is_defenseclaw_hook_script(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return _MANAGED_HOOK_MARKER in fh.read(512)
+    except FileNotFoundError:
+        return ".defenseclaw" in path.replace("\\", "/").split("/")
+    except OSError:
+        return False
 
 
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
