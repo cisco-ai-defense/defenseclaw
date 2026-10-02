@@ -1918,7 +1918,8 @@ func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
 	case strings.HasSuffix(lower, ".toml"):
 		return config.ReadMCPFromCodexConfigTOML(path)
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
-		return config.ReadMCPFromYAMLPath(path, []string{"mcp", "servers"}, []string{"mcpServers"})
+		// Hermes keeps its servers under top-level mcp_servers (GAP-1845).
+		return config.ReadMCPFromYAMLPath(path, []string{"mcp_servers"}, []string{"mcp", "servers"}, []string{"mcpServers"})
 	case base == ".claude.json":
 		// ~/.claude.json holds user-scope (top-level `mcpServers`) *and*
 		// per-project local-scope (`projects.<path>.mcpServers`) entries.
