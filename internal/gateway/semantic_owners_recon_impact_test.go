@@ -183,7 +183,7 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
-			// GAP-1197: the first-guardrail docs trigger.
+			// GAP-1197: a critical top-level directory itself.
 			name:   "recursive delete kernel pseudo-filesystem",
 			ruleID: "CMD-RM-RF",
 			input:  reconImpactCommand("rm -rf /proc"),

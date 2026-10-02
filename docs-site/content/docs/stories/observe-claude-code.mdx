@@ -123,6 +123,10 @@ The PreToolUse hook fires, the gateway scores the command, the default rule pack
 returns `CMD-RM-RF` at CRITICAL, and Claude Code receives a deny decision before
 the shell runs.
 
+Many models refuse to run this command at all. Then no tool call is made and
+there is nothing to block; use the harmless test rule in
+[First guardrail](/docs/get-started/first-guardrail) to see a block instead.
+
 </Step>
 
 <Step>
