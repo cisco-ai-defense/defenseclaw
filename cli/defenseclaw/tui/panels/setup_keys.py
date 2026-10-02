@@ -80,10 +80,10 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec("←/→", "group", "Previous / next task group (also [ and ])", None, ("left", "right", "[", "]")),
         KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
-        KeySpec("c", "config editor", "Edit config.yaml fields directly", None, ("c",)),
+        KeySpec("c", "config", "Edit config.yaml fields directly (config editor)", None, ("c",)),
         KeySpec("f", "fill missing keys", "Prompt for every missing required key", None, ("f",), when="credentials"),
         KeySpec("s", "set a key", "Set one API key", None, ("s",), when="credentials"),
-        KeySpec("r", "refresh keys", "Reload the list of API keys", None, ("r",)),
+        KeySpec("r", "refresh", "Reload the list of API keys", None, ("r",)),
         *_RESTART,
     ),
     "goals": (

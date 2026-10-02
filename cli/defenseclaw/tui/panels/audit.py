@@ -1213,7 +1213,9 @@ def _event_decision(event: Event) -> str:
 
 # Hidden flags that say a row did NOT block; free text "block" matched every
 # allow row through them (GAP-1780).
-_HAYSTACK_NOISE = re.compile(r"\bwould_block=(?:false|0)\b", re.IGNORECASE)
+# Hook rows carry it twice: ``would_block=false`` and an escaped JSON copy
+# ``\"would_block\":false`` that kept matching "block" (GAP-1780).
+_HAYSTACK_NOISE = re.compile(r'\bwould_block\\*"?\s*[:=]\s*(?:false|0)\b', re.IGNORECASE)
 
 
 def _search_haystack(event: Event) -> str:
