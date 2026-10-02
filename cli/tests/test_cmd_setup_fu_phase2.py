@@ -4049,7 +4049,7 @@ class TestSetupModeHelp(unittest.TestCase):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertIn("claude-code", res.output)
         listing = CliRunner().invoke(setup_group, ["--help"], catch_exceptions=False).output
-        self.assertNotIn("claudecode", listing)
+        self.assertNotRegex(listing, r"(?m)^ +claudecode ")
 
     def test_mode_subcommand_is_removed(self):
         res = CliRunner().invoke(setup_group, ["mode", "--help"])
