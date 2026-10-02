@@ -65,3 +65,40 @@ def test_make_all_keeps_it_before_installing() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     recipe = makefile[makefile.index("\nall: ") : makefile.index("\npath: ")]
     assert recipe.index("keep-pre-1.0-audit-history.py") < recipe.index("_source-dev-install")
+
+
+def test_a_history_is_kept_when_sqlite_cannot_open_it_read_only(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1792: Apple's /usr/bin/python3 cannot open a stopped gateway's WAL
+    # database with mode=ro; the keep step must still copy the history.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("keep_history", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    home = tmp_path / ".defenseclaw"
+    _audit_db(home, 29, 3)
+    real_connect = sqlite3.connect
+
+    def connect(database, *args, **kwargs):
+        if "mode=ro" in str(database):
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(module.sqlite3, "connect", connect)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+
+    assert module.main() == 0
+    kept = list((home / "backups").glob("audit-history-*.db"))
+    assert len(kept) == 1
+    assert real_connect(kept[0]).execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 3
+
+
+def test_an_unreadable_database_stops_make_all(tmp_path: Path) -> None:
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    (home / "audit.db").write_bytes(b"not a database" * 100)
+
+    result = _run(home)
+
+    assert result.returncode == 1
+    assert "Could not read" in result.stderr and "Nothing was changed" in result.stderr
