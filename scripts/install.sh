@@ -625,6 +625,11 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
+    if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
+        # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
+        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded are deleted when DefenseClaw ${VERSION} first opens its audit database"
+        info "A copy is kept in ${PREVIOUS}/data/audit.db until the next upgrade; 'defenseclaw rollback' brings it back"
+    fi
     ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
 fi
 if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" ]]; then
@@ -697,6 +702,9 @@ ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     printf "  Upgraded from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
+        printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
+    fi
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
     fi

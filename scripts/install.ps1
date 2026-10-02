@@ -1484,6 +1484,11 @@ function Invoke-Install {
     if ($PrevVersion -and $PrevVersion -eq $Ver) {
         if (-not (Confirm-Step "Reinstall DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
     } elseif ($PrevVersion) {
+        if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $DataDir "audit.db"))) {
+            # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
+            Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded are deleted when DefenseClaw $Ver first opens its audit database"
+            Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db') until the next upgrade; 'defenseclaw rollback' brings it back"
+        }
         if (-not (Confirm-Step "Upgrade DefenseClaw $PrevVersion -> ${Ver}?")) { Die "Cancelled; nothing was changed" }
     }
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
@@ -1573,6 +1578,9 @@ function Invoke-Install {
         Write-Host "  Replaced DefenseClaw Setup $PrevVersion; your config and data were kept."
     } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
         Write-Host "  Upgraded from $PrevVersion. Undo with: defenseclaw rollback"
+    }
+    if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $Previous "data\audit.db"))) {
+        Write-Host "  The audit history $PrevVersion recorded is not carried over to 1.0; a copy is in $(Join-Path $Previous 'data\audit.db')"
     }
     if ($NoPersistPath) {
         Write-Host "  Add $BinDir to your PATH to run defenseclaw from any terminal."

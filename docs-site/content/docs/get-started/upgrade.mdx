@@ -36,8 +36,10 @@ The installer:
 If any step fails, the installer puts the previous version back, restarts it,
 and keeps the failed attempt in `~/.defenseclaw/.failed-<time>` for
 troubleshooting. Your configuration (`config.yaml`, `.env`, policies), audit
-and inventory databases, device key, and connector setup are kept. Every run
-writes a log to `~/.defenseclaw/logs/`.
+and inventory databases, device key, and connector setup are kept (an upgrade
+from 0.x starts a new audit history; see
+[Upgrading from 0.x to 1.0](#upgrading-from-0x-to-10)). Every run writes a log
+to `~/.defenseclaw/logs/`.
 
 | Command | What it does |
 | --- | --- |
@@ -90,6 +92,13 @@ installed. Every path keeps your configuration and data.
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in
   `~/.defenseclaw/previous/legacy-setup`.
+- 1.0 starts a new audit history. The first time 1.0 opens the audit
+  database, it deletes the audit events, scan results and findings that 0.x
+  recorded (a one-time privacy cutover: 0.x history can hold unredacted
+  content). The installer says so before it upgrades and again in its summary.
+  Configuration, inventory and connector setup are kept. The 0.x database stays
+  in `~/.defenseclaw/previous/data/audit.db` until your next upgrade, and
+  `defenseclaw rollback` brings it back.
 - To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
   rollback command, so to return to 1.x from there, run the command the
   rollback prints:
