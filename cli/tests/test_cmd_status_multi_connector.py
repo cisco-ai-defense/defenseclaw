@@ -1041,3 +1041,6 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     assert "NOT RUNNING" in hermes_row and "not enforced" in hermes_row
     assert "defenseclaw setup hermes" in hermes_row
     assert "NOT RUNNING" not in codex_row
+    # GAP-1937: the Agents count matches `defenseclaw-gateway status`.
+    agents_row = next(line for line in out.splitlines() if "Agents" in line)
+    assert "1 active, 1 not running" in agents_row

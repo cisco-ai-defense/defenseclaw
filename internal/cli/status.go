@@ -497,7 +497,13 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		return
 	}
 
-	printGatewayKV("Agents", fmt.Sprintf("%d active", len(conns)))
+	// GAP-1937: name the connectors that failed setup in the count, the way
+	// `defenseclaw status` does ("4 active, 1 not running").
+	agents := fmt.Sprintf("%d active", len(conns))
+	if len(notStarted) > 0 {
+		agents += fmt.Sprintf(", %d not running", len(notStarted))
+	}
+	printGatewayKV("Agents", agents)
 	for i := range conns {
 		c := conns[i]
 		stateStr, detail := connectorDisplayState(&c, time.Now())
