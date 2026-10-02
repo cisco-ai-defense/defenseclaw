@@ -44,6 +44,9 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 SELECTION_FILENAME = "agent_selection.json"
+#: Connectors whose executable the last setup run could not verify. The gateway
+#: keeps their previously sealed version, so Doctor reports them (GAP-1711).
+UNVERIFIED_FILENAME = "agent_selection_unverified.json"
 SELECTION_SCHEMA_VERSION = 1
 SELECTION_LIFETIME = timedelta(minutes=15)
 _CODEX_WINDOWS_PLATFORM_VARIANTS = (
@@ -183,6 +186,48 @@ def publish_setup_agent_selections(
     }
     body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     atomic_write_private_bytes(os.path.join(target_dir, SELECTION_FILENAME), body)
+
+
+def record_unverified_setup_agents(
+    data_dir: str | os.PathLike[str],
+    errors: dict[str, str],
+    verified: Iterable[str],
+) -> None:
+    """Remember which connectors setup could not verify, and forget verified ones."""
+
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), UNVERIFIED_FILENAME)
+    current = unverified_setup_agents(data_dir)
+    for name in verified:
+        current.pop(name, None)
+    now = _format_rfc3339(datetime.now(timezone.utc))
+    for name, detail in errors.items():
+        current[name] = {"detail": str(detail)[:300], "at": now}
+    if not current:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    body = (json.dumps({"unverified": current}, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    atomic_write_private_bytes(path, body)
+
+
+def unverified_setup_agents(data_dir: str | os.PathLike[str]) -> dict[str, dict[str, str]]:
+    """Connectors the last setup could not verify: ``{name: {"detail", "at"}}``."""
+
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), UNVERIFIED_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            entries = json.load(fh).get("unverified")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        str(name): {"detail": str(entry.get("detail") or ""), "at": str(entry.get("at") or "")}
+        for name, entry in entries.items()
+        if isinstance(entry, dict)
+    }
 
 
 # Setup's protected selection probes the agent once more right after

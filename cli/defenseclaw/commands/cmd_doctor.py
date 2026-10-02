@@ -2063,6 +2063,29 @@ def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
     return not openclaw_implied_but_not_installed(cfg)
 
 
+def _unverified_executable_note(cfg, connector: str) -> tuple[str, str]:
+    """Detail suffix and next step when setup could not verify *connector*.
+
+    Setup skips a peer whose executable it cannot verify (for example a
+    replaced claude.exe whose version probe hangs) and the gateway keeps the
+    version it sealed before, so the version rows would otherwise PASS with
+    the old version (GAP-1711).
+    """
+    from defenseclaw.agent_selection import unverified_setup_agents
+    from defenseclaw.hook_integrity import setup_command
+
+    entry = unverified_setup_agents(str(getattr(cfg, "data_dir", "") or "")).get(connector)
+    if not entry:
+        return "", ""
+    reason = entry.get("detail") or "no reason recorded"
+    when = f" at {entry['at']}" if entry.get("at") else ""
+    detail = (
+        f"; setup could not verify the current executable{when} ({reason}), "
+        "so this is the version recorded before it changed"
+    )
+    return detail, f"run '{setup_command(connector)}' once the executable starts normally"
+
+
 def _check_component_connector_compatibility(
     cfg,
     connectors: list[str],
@@ -2171,6 +2194,12 @@ def _check_component_connector_compatibility(
                 remediation += (
                     " to verify the version and turn action mode back on (or --mode observe to keep observing)"
                 )
+        unverified_detail, unverified_step = _unverified_executable_note(cfg, finding.connector)
+        if unverified_detail:
+            detail += unverified_detail
+            remediation = unverified_step
+            if tag == "pass":
+                tag = "warn"
         _emit(
             tag,
             f"Connector compatibility: {finding.connector}",
@@ -7751,6 +7780,46 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         )
 
 
+_PRIVATE_UPSTREAM_REFUSAL = re.compile(r"\[guardrail\] refused private upstream: host=(\S+) ip=([0-9A-Fa-f:.]+);")
+
+
+def _check_private_upstream_refusals(cfg, r: _DoctorResult) -> None:
+    """WARN when the guardrail proxy refused an upstream on a private address.
+
+    An AWS VPC endpoint for Bedrock resolves to private IPs; the proxy then
+    refuses every call while the other rows stay green, and agent UIs cut the
+    fix out of the error (GAP-1703). The gateway logs each refusal in a fixed
+    format; addresses already in guardrail.allow_private_upstreams are
+    ignored, so an allowed endpoint stops warning. Emits nothing otherwise.
+    """
+    if not cfg.guardrail.enabled:
+        return
+    log_path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "gateway.log")
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - (1 << 20)))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return
+    allowed = {str(v).strip() for v in (cfg.guardrail.allow_private_upstreams or [])}
+    refused: dict[str, list[str]] = {}
+    for host, ip in _PRIVATE_UPSTREAM_REFUSAL.findall(tail):
+        if ip not in allowed and ip not in refused.setdefault(host, []):
+            refused[host].append(ip)
+    for host, ips in sorted(refused.items()):
+        if not ips:
+            continue
+        _emit(
+            "warn",
+            "Private upstream",
+            f"the guardrail proxy refused {host} because it resolved to private {', '.join(ips)} "
+            "(for example an AWS VPC endpoint), so LLM calls through it fail",
+            r=r,
+            remediation=f"if you trust it, run 'defenseclaw guardrail allow-private-upstream {host}'",
+        )
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -9474,6 +9543,7 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
+    _check_private_upstream_refusals(cfg, r)
     _check_judge_calls(cfg, r)
     _check_regional_provider_config(cfg, r)
     _check_custom_provider_overlay(cfg, r)
@@ -11730,7 +11800,11 @@ def _check_hook_contract_lock(
             remediation=f"update {connector} to a supported version, then run 'defenseclaw setup {connector}'",
         )
     elif status in {"known", "unversioned"}:
-        _emit("pass", "Hook contract", detail, r=r)
+        unverified_detail, unverified_step = _unverified_executable_note(cfg, connector)
+        if unverified_detail:
+            _emit("warn", "Hook contract", detail + unverified_detail, r=r, remediation=unverified_step)
+        else:
+            _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
 

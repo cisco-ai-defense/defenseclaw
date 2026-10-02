@@ -5458,6 +5458,12 @@ def _record_windows_setup_agent_selections(
     for connector in selected:
         if connector not in selections and connector not in selection_errors:
             selection_errors[connector] = "selection was not recorded"
+    try:
+        from defenseclaw.agent_selection import record_unverified_setup_agents
+
+        record_unverified_setup_agents(target_dir, selection_errors, selections)
+    except OSError:
+        pass  # Doctor's hint only; never fail setup over it.
     if selection_errors:
         # A peer's executable custody is not a prerequisite for the connector
         # being configured. This roster is the whole additive set, so on macOS

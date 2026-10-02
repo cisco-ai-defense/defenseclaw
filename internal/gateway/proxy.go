@@ -1328,9 +1328,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
 		if provider == "bedrock" {
-			writeBedrockUpstreamError(w, "upstream error: "+err.Error())
+			writeBedrockUpstreamError(w, upstreamErrorMessage("upstream error: ", err))
 		} else {
-			writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+			writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream error: ", err))
 		}
 		return
 	}
@@ -3053,7 +3053,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			llmCtx, r, req, providerName, promptID, "", "", lifecycleOutcome, "", nil,
 		)
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
-		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
 	responseModel := resp.Model
@@ -5495,7 +5495,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
 		failModel("upstream_error", err)
-		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
 	defer resp.Body.Close()
