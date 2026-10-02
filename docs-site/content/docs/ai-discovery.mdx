@@ -305,6 +305,17 @@ enabled:
 - `mode`, `include_shell_history`, `include_package_manifests` and
   `store_raw_local_paths` apply as usual.
 
+These per-user scans run on Linux and macOS. On Windows the gateway service
+scans every enrolled user's profile itself: the hook enumerator grants the
+service read access to each user's agent folders (`.claude`, `.codex`,
+`.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others), and
+nothing else in the profile. Each signal found in a profile, and each agent
+process started from one, carries that profile's account (`user.id` is the
+account SID, `defenseclaw.user.id_kind` is `windows_sid`,
+`defenseclaw.user.name` the account name). Folders outside the granted ones,
+such as the profile root that `scan_roots: ["~"]` names, are skipped
+without failing the scan.
+
 ### Tunable knobs
 
 `agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:

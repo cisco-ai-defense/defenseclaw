@@ -241,7 +241,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				}
 				return nil
 			}
-			if walkErr != nil && macOSPrivacyDenied(runtime.GOOS, walkErr) {
+			if walkErr != nil && s.discoveryAccessSkipped(walkErr) {
 				// Skipped like ~/Library itself: not an error of the scan.
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
@@ -872,7 +872,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		path = filepath.Clean(path)
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			if !os.IsNotExist(err) && !macOSPrivacyDenied(runtime.GOOS, err) {
+			if !os.IsNotExist(err) && !s.discoveryAccessSkipped(err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
 			}
 			return
@@ -883,7 +883,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			if !os.IsNotExist(err) && !macOSPrivacyDenied(runtime.GOOS, err) {
+			if !os.IsNotExist(err) && !s.discoveryAccessSkipped(err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
 			}
 			return
