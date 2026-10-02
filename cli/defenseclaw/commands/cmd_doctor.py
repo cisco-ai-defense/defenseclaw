@@ -1799,6 +1799,34 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
 
 
+_CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
+_REVIEW_BLOCK_ALLOW_LISTS = (
+    "check them with defenseclaw mcp list, skill list, plugin list and tool list, and block or allow them again."
+)
+
+
+def _moved_store_block_allow_summary(moved: Path) -> str:
+    """Say what the gateway's note (internal/audit/corrupt_store.go) recorded
+    about the block/allow entries it carried over from a moved store."""
+    try:
+        note = json.loads(Path(str(moved) + _CARRY_OVER_NOTE_SUFFIX).read_text(encoding="utf-8"))
+        kept = int(note.get("carried_over", 0))
+        error = str(note.get("error") or "")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return f"started a new store; {_REVIEW_BLOCK_ALLOW_LISTS}"
+    if not error:
+        return f"started a new store and carried over {kept} block/allow entries."
+    if kept == 0:
+        return (
+            "started a new store, but the old block/allow lists could not be read, so 0 entries were "
+            f"carried over and earlier blocks no longer apply; {_REVIEW_BLOCK_ALLOW_LISTS}"
+        )
+    return (
+        f"started a new store and carried over {kept} block/allow entries, but some could not be read; "
+        f"{_REVIEW_BLOCK_ALLOW_LISTS}"
+    )
+
+
 def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     """Report audit stores the gateway moved aside as corrupt.
 
@@ -1812,7 +1840,7 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
         moved = sorted(
             path
             for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
-            if not path.name.endswith(("-wal", "-shm", "-journal")) and path.is_file()
+            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
         )
     except OSError:
         return
@@ -1821,11 +1849,14 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     newest = moved[-1]
     size = _human_size(sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()))
     count = f"{len(moved)} corrupt audit stores were" if len(moved) > 1 else "the audit store was corrupt and was"
+    recover = f"Recover them with: sqlite3 {newest} .recover"
+    if shutil.which("sqlite3") is None:
+        recover += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
     _emit(
         "warn",
         "Audit store moved aside",
-        f"{count} moved aside by the gateway, which started a new store and kept the block/allow lists; "
-        f"older audit records stay in {newest} ({size}). Recover them with: sqlite3 {newest} .recover; "
+        f"{count} moved aside by the gateway, which {_moved_store_block_allow_summary(newest)} "
+        f"Older audit records stay in {newest} ({size}). {recover}; "
         f"delete {newest} and its -wal/-shm files when they are no longer needed",
         r=r,
         check_id="doctor.state.audit-db-moved-aside",

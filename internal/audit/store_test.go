@@ -608,7 +608,7 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 	moved, _ := filepath.Glob(dbPath + ".corrupt-*")
 	kept := 0
 	for _, name := range moved {
-		if !strings.HasSuffix(name, "-wal") && !strings.HasSuffix(name, "-shm") {
+		if !strings.HasSuffix(name, "-wal") && !strings.HasSuffix(name, "-shm") && !strings.HasSuffix(name, carryOverNoteSuffix) {
 			kept++
 		}
 	}
@@ -619,6 +619,53 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 	if listed := MovedCorruptStores(dbPath); len(listed) != 1 || listed[0].MovedAt.IsZero() ||
 		filepath.Base(listed[0].Path) == filepath.Base(dbPath) {
 		t.Fatalf("MovedCorruptStores = %+v; want the one moved store", listed)
+	} else if !listed[0].CarryOverKnown || listed[0].CarriedOver != 1 ||
+		!strings.Contains(listed[0].BlockAllowSummary(), "1 block/allow entries were carried over, but some could not be read") {
+		t.Fatalf("carry-over note = %+v (%s)", listed[0], listed[0].BlockAllowSummary())
+	}
+}
+
+// GAP-1958: with the file header damaged no block/allow entry can be read, and
+// start, status and doctor must say so instead of "the lists were kept".
+func TestOpenDaemonStoreReportsBlockListsLostWithAnUnreadableStore(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.SetActionForConnector("mcp", "drill-mcp", "", "", ActionState{Install: "block"}, "drill"); err != nil {
+		t.Fatalf("SetActionForConnector: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	file, err := os.OpenFile(dbPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open for damage: %v", err)
+	}
+	if _, err := file.WriteAt(bytes.Repeat([]byte{0}, 192), 0); err != nil {
+		t.Fatalf("damage header: %v", err)
+	}
+	_ = file.Close()
+
+	var warn bytes.Buffer
+	recovered, err := OpenDaemonStore(dbPath, &warn)
+	if err != nil {
+		t.Fatalf("OpenDaemonStore: %v", err)
+	}
+	defer recovered.Close()
+	listed := MovedCorruptStores(dbPath)
+	if len(listed) != 1 {
+		t.Fatalf("MovedCorruptStores = %+v; want one store and no note entry", listed)
+	}
+	summary := listed[0].BlockAllowSummary()
+	if !listed[0].CarryOverKnown || listed[0].CarriedOver != 0 || listed[0].CarryOverError == "" ||
+		!strings.Contains(summary, "0 entries were carried over") || strings.Contains(summary, "kept") ||
+		!strings.Contains(summary, "defenseclaw mcp list") {
+		t.Fatalf("summary = %q for %+v", summary, listed[0])
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -381,9 +382,13 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 	}
 	newest := moved[len(moved)-1]
 	fmt.Println()
-	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; a new store was started and the block/allow lists were kept.",
-		newest.Path, newest.MovedAt.Local().Format(time.RFC3339)))
-	Subhead("Recover older audit records with: sqlite3 " + newest.Path + " .recover")
+	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
+		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		recoverHint += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
+	}
+	Subhead(recoverHint)
 	Subhead("Delete the moved file and its -wal/-shm files when they are no longer needed.")
 }
 
