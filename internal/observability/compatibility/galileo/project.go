@@ -78,7 +78,7 @@ func Project(input redaction.Projection, configured Limits) Result {
 	if len(missing) > 0 {
 		return rejected(ReasonSchemaMissingRequired, missing...)
 	}
-	setGuardrailMetadata(projectedAttributes, envelope.Body["status"])
+	setSpanMetadata(projectedAttributes, envelope.Body["status"], envelope.Body["resource"])
 	correlationKeys, valid := mergeCanonicalCorrelationAttributes(projectedAttributes, envelope.Correlation)
 	if !valid {
 		return rejected(ReasonInvalidProjection)
@@ -1139,29 +1139,58 @@ func projectStatus(value any, maximum int) map[string]any {
 // Galileo shows as the span's metadata.
 var guardrailMetadataKeys = []string{
 	"defenseclaw.guardrail.action", "defenseclaw.guardrail.rule_id", "defenseclaw.guardrail.severity",
-	"user.id", "defenseclaw.user.name",
 }
 
-// setGuardrailMetadata copies a guardrail decision into the OpenInference
-// metadata attribute, a JSON object Galileo shows as the span's
-// user_metadata. Galileo's OTLP ingest reads neither the span status nor
-// other attributes into its span record, so a blocked tool call showed
-// status_code 0 and no rule or user there. Spans without a guardrail
-// decision are unchanged.
-func setGuardrailMetadata(attributes map[string]any, status any) {
-	if _, decided := stringAttribute(attributes, "defenseclaw.guardrail.action"); !decided {
-		return
+// userMetadataKeys name the user a span belongs to.
+var userMetadataKeys = []string{"user.id", "defenseclaw.user.name"}
+
+// resourceMetadataKeys are the resource attributes that tell gateways apart.
+// Galileo's OTLP ingest drops the resource, so a fleet whose hosts share a
+// computer name (a cloned VM) could not be split by deployment (GAP-1189).
+var resourceMetadataKeys = []string{"deployment.environment.name", "host.name", "defenseclaw.instance.id"}
+
+// setSpanMetadata writes the OpenInference metadata attribute, a JSON object
+// Galileo shows as the span's user_metadata: the gateway's deployment
+// environment, host and instance from the resource, the span's user, and a
+// guardrail decision. Galileo's OTLP ingest reads neither the resource, the
+// span status nor other attributes into its span record, so a blocked tool
+// call showed status_code 0 and no rule or user there, and no span said
+// which deployment sent it.
+func setSpanMetadata(attributes map[string]any, status any, resource any) {
+	metadata := make(map[string]string, len(resourceMetadataKeys)+len(userMetadataKeys)+len(guardrailMetadataKeys)+1)
+	if projected, ok := object(resource); ok {
+		if resourceAttributes, ok := object(projected["attributes"]); ok {
+			for _, key := range resourceMetadataKeys {
+				if value, ok := stringAttribute(resourceAttributes, key); ok && value != "" {
+					metadata[key] = value
+				}
+			}
+			if _, ok := metadata["deployment.environment.name"]; !ok {
+				if value, ok := stringAttribute(resourceAttributes, "deployment.environment"); ok && value != "" {
+					metadata["deployment.environment.name"] = value
+				}
+			}
+		}
 	}
-	metadata := make(map[string]string, len(guardrailMetadataKeys)+1)
-	for _, key := range guardrailMetadataKeys {
-		if value, ok := stringAttribute(attributes, key); ok {
+	for _, key := range userMetadataKeys {
+		if value, ok := stringAttribute(attributes, key); ok && value != "" {
 			metadata[key] = value
 		}
 	}
-	if projected := projectStatus(status, 256); projected != nil {
-		if code := strings.ToUpper(fmt.Sprint(projected["code"])); strings.Contains(code, "ERROR") || code == "2" {
-			metadata["status"] = "ERROR"
+	if _, decided := stringAttribute(attributes, "defenseclaw.guardrail.action"); decided {
+		for _, key := range guardrailMetadataKeys {
+			if value, ok := stringAttribute(attributes, key); ok {
+				metadata[key] = value
+			}
 		}
+		if projected := projectStatus(status, 256); projected != nil {
+			if code := strings.ToUpper(fmt.Sprint(projected["code"])); strings.Contains(code, "ERROR") || code == "2" {
+				metadata["status"] = "ERROR"
+			}
+		}
+	}
+	if len(metadata) == 0 {
+		return
 	}
 	if encoded, err := json.Marshal(metadata); err == nil {
 		attributes["metadata"] = string(encoded)
