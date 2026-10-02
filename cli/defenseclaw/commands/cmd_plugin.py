@@ -4089,13 +4089,15 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
     Displays plugin metadata, latest scan results from the DefenseClaw
     audit database, and enforcement actions.
     """
-    plugin_name = _validated_plugin_argument(name)
-
     if connector_flag:
         connector = _resolve_connector_scope(app, connector_flag)
+        # GAP-1624: accept the ids and names 'plugin list' shows for nested
+        # Hermes plugins (web/ddgs, a2a-platform), as 'plugin scan' does.
+        plugin_name, _path = _policy_plugin_target(app, name, connector)
         card = _plugin_info_card(app, plugin_name, connector=connector)
         cards = [card] if card is not None else []
     else:
+        plugin_name, _path = _policy_plugin_target(app, name, "")
         cards: list[dict[str, Any]] = []
         for connector in _active_plugin_connectors(app):
             card = _plugin_info_card(
@@ -4114,7 +4116,7 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
                 cards.append(fallback)
 
     if not cards:
-        click.echo(f"error: plugin {plugin_name!r} not found", err=True)
+        click.echo(f"error: plugin {name!r} not found", err=True)
         raise SystemExit(1)
 
     if as_json:
@@ -4170,7 +4172,8 @@ def _plugin_info_card(
             except click.ClickException:
                 hermes_match = None
             if hermes_match is not None and hermes_match[1] and os.path.exists(hermes_match[1]):
-                candidate = hermes_match[1]
+                # Key scan and policy rows by the listed id (GAP-1624).
+                plugin_name, candidate = hermes_match
         if candidate:
             info_map = _plugin_metadata_from_path(plugin_name, candidate)
         else:

@@ -1439,6 +1439,34 @@ class TestPluginInfo(PluginCommandTestBase):
         self.assertIn("not found", result.output)
 
 
+class TestPluginInfoNestedHermes(PluginCommandTestBase):
+    """GAP-1624: info resolves nested Hermes plugins by the listed id or name."""
+
+    def test_info_resolves_listed_id_and_manifest_name(self):
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        root = os.path.join(self.tmp_dir, "hermes-agent", "plugins")
+        rows = []
+        for pid, pname, rel in (
+            ("web/ddgs", "web-ddgs", "web/ddgs"),
+            ("a2a", "a2a-platform", "platforms/a2a"),
+        ):
+            path = os.path.join(root, *rel.split("/"))
+            os.makedirs(path)
+            rows.append({"id": pid, "name": pname, "host_path": path})
+        with patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=rows):
+            for arg, pid in (("web/ddgs", "web/ddgs"), ("ddgs", "web/ddgs"), ("a2a-platform", "a2a")):
+                result = self.invoke(["info", arg, "--connector", "hermes", "--json"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                data = json.loads(result.output)
+                self.assertTrue(data["installed"], arg)
+                self.assertEqual(data["name"], pid)
+            bare = self.invoke(["info", "web/ddgs"])
+            self.assertEqual(bare.exit_code, 0, bare.output)
+            self.assertIn("Installed:   True", bare.output)
+            miss = self.invoke(["info", "web/none", "--connector", "hermes"])
+            self.assertIn("'web/none' not found", miss.output)
+
+
 class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
     def setUp(self):
         super().setUp()
