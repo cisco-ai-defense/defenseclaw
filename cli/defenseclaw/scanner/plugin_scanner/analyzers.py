@@ -78,6 +78,11 @@ def check_permissions(
     target: str,
 ) -> None:
     if not manifest.permissions or len(manifest.permissions) == 0:
+        # No manifest at all is already MANIFEST-MISSING, and a Hermes
+        # plugin.yaml has no permissions field to declare, so the note
+        # would only point at a file that doesn't exist or can't hold it.
+        if manifest.source in ("none", "plugin.yaml", "plugin.yml"):
+            return
         findings.append(
             make_finding(
                 len(findings) + 1,

@@ -419,10 +419,11 @@ def _scan_one_plugin_dir(
         return
 
     sev = result.max_severity()
+    is_blocked = _plugin_scan_is_blocked(app, connector, plugin_id, target_name)
     _scan_ui.render_per_target_status(
         ctx,
         target=target_name,
-        verdict=_scan_ui.VERDICT_BLOCKED,
+        verdict=_plugin_scan_verdict(result, is_blocked),
         detail=f"max severity: {sev}",
         findings=len(result.findings),
     )
@@ -438,11 +439,33 @@ def _scan_one_plugin_dir(
     _scan_ui.render_summary(
         ctx,
         clean=0,
-        blocked=1,
+        blocked=1 if is_blocked else 0,
         errored=0,
         total=1,
+        findings=len(result.findings),
         duration_ms=int(result.duration.total_seconds() * 1000),
     )
+
+
+def _plugin_scan_is_blocked(app: AppContext, connector: str, *names: str) -> bool:
+    """True when DefenseClaw's block list holds the plugin for *connector*."""
+    if app.store is None:
+        return False
+    from defenseclaw.enforce import PolicyEngine
+
+    pe = PolicyEngine(app.store)
+    return any(name and pe.is_blocked_for_connector("plugin", name, connector) for name in names)
+
+
+def _plugin_scan_verdict(result: Any, blocked: bool) -> str:
+    """Scan findings are a warning; only the block list makes a plugin BLOCKED."""
+    from defenseclaw.commands import _scan_ui
+
+    if blocked:
+        return _scan_ui.VERDICT_BLOCKED
+    if str(result.max_severity()).upper() == "INFO":
+        return _scan_ui.VERDICT_INFO
+    return _scan_ui.VERDICT_WARN
 
 
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
@@ -975,7 +998,7 @@ def _scan_all_plugins(
         )
         _scan_ui.render_preamble(ctx, target_count=len(targets))
 
-        clean = blocked = errored = 0
+        clean = blocked = errored = findings_total = 0
         total_ms = 0
         group_results: list[dict[str, Any]] = []
         for pid, scan_dir, scope, project_path in targets:
@@ -1010,11 +1033,13 @@ def _scan_all_plugins(
                     findings=0,
                 )
             else:
-                blocked += 1
+                findings_total += len(result.findings)
+                is_blocked = _plugin_scan_is_blocked(app, connector, pid)
+                blocked += 1 if is_blocked else 0
                 _scan_ui.render_per_target_status(
                     ctx,
                     target=target_label,
-                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    verdict=_plugin_scan_verdict(result, is_blocked),
                     detail=f"max severity: {result.max_severity()}",
                     findings=len(result.findings),
                 )
@@ -1027,6 +1052,7 @@ def _scan_all_plugins(
                 blocked=blocked,
                 errored=errored,
                 total=len(targets),
+                findings=findings_total,
                 duration_ms=total_ms,
             )
 

@@ -152,12 +152,14 @@ class TestScanUXVerdictLines(_PluginScanUXBase):
         self.assertIn(self.plugin_name, result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_finding_emits_blocked_glyph(self, mock_scan) -> None:
+    def test_finding_emits_warn_glyph(self, mock_scan) -> None:
         mock_scan.return_value = self._blocked_result()
         result = self.invoke(["scan", self.plugin_name])
         # Exit code is still zero — scan only reports; install --action enforces.
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[BLOCKED]", result.output)
+        # GAP-1334: findings alone do not block anything.
+        self.assertIn("[WARN]", result.output)
+        self.assertNotIn("[BLOCKED]", result.output)
         # Finding count must be visible.
         self.assertIn("1 finding", result.output)
         # Severity surfaced via the "max severity:" detail string.
@@ -180,12 +182,24 @@ class TestScanUXSummary(_PluginScanUXBase):
         self.assertIn("blocked=0", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_summary_blocked(self, mock_scan) -> None:
+    def test_summary_findings_without_block(self, mock_scan) -> None:
         mock_scan.return_value = self._blocked_result()
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Summary: 1 plugin scanned", result.output)
         self.assertIn("clean=0", result.output)
+        self.assertIn("blocked=0", result.output)
+        self.assertIn("findings=1", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_summary_blocked_when_on_block_list(self, mock_scan) -> None:
+        from defenseclaw.enforce import PolicyEngine
+
+        PolicyEngine(self.app.store).block("plugin", self.plugin_name, "test")
+        mock_scan.return_value = self._blocked_result()
+        result = self.invoke(["scan", self.plugin_name])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED]", result.output)
         self.assertIn("blocked=1", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
