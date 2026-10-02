@@ -58,4 +58,14 @@ func TestPolicyTestAndValidateUseRegoDirWithoutOPA(t *testing.T) {
 	if err := policyTestCmd.RunE(policyTestCmd, nil); err == nil || !strings.Contains(out.String(), "FAIL") {
 		t.Fatalf("failing test: err=%v output=%q", err, out.String())
 	}
+
+	// Installed policy directories ship no *_test.rego: nothing to run is
+	// not a failure.
+	if err := os.Remove(filepath.Join(dir, "policy_test.rego")); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := policyTestCmd.RunE(policyTestCmd, nil); err != nil || !strings.Contains(out.String(), "nothing to run") {
+		t.Fatalf("no tests: err=%v output=%q", err, out.String())
+	}
 }

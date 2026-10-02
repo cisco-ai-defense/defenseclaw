@@ -132,7 +132,11 @@ var policyTestCmd = &cobra.Command{
 			return fmt.Errorf("policy test: %w", err)
 		}
 		if len(results) == 0 {
-			return fmt.Errorf("policy test: no tests found in %s", regoDir)
+			// The installed policy directories ship no *_test.rego files, so
+			// "nothing to test" is the normal answer there, not a failure
+			// (GAP-1091).
+			fmt.Fprintln(cmd.OutOrStdout(), noRegoTestsMessage(regoDir))
+			return nil
 		}
 		ch := make(chan *tester.Result, len(results))
 		failed := false
@@ -152,6 +156,12 @@ var policyTestCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// noRegoTestsMessage explains a Rego directory without unit tests.
+func noRegoTestsMessage(regoDir string) string {
+	return fmt.Sprintf("No Rego unit tests (*_test.rego) in %s; nothing to run. "+
+		"Add <module>_test.rego files next to your policies to test them.", regoDir)
 }
 
 // policyCommandRegoDir returns --rego-dir when given, else the configured

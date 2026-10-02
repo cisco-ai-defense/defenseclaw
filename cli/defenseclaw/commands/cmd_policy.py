@@ -874,6 +874,15 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         ux.err(f"error: rego directory not found: {rd}")
         raise SystemExit(1)
 
+    if not _has_rego_tests(rd):
+        # Installed policy directories ship no *_test.rego files, so this is
+        # the normal answer there, not a failure (GAP-1091).
+        click.echo(
+            f"No Rego unit tests (*_test.rego) in {rd}; nothing to run. "
+            "Add <module>_test.rego files next to your policies to test them."
+        )
+        return
+
     cmd = _rego_tool_cmd(["test", rd], ["policy", "test", "--rego-dir", rd])
     if cmd is None:
         ux.err("error: neither 'opa' nor 'defenseclaw-gateway' was found")
@@ -1533,6 +1542,14 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         f.write("\n")
 
     click.echo(ux.dim(f"OPA data.json synced at {data_json_path}"))
+
+
+def _has_rego_tests(rego_dir: str) -> bool:
+    """True when rego_dir (recursively, like 'opa test') holds a *_test.rego."""
+    for _root, _dirs, files in os.walk(rego_dir):
+        if any(f.endswith("_test.rego") for f in files):
+            return True
+    return False
 
 
 def _rego_tool_cmd(opa_args: list[str], gateway_args: list[str]) -> list[str] | None:
