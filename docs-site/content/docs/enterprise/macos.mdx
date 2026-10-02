@@ -381,6 +381,46 @@ Full Disk Access (`SystemPolicyAllFiles`) to
 gateway, the guardian (`enterprise hooks watch`) and the enumerator. Identify
 it by its Developer ID code requirement, which needs a signed build.
 
+### AI Discovery Plane C (Endpoint Security)
+
+Runtime Plane C (`ai_discovery.runtime.enable_host_plane: true` with `c` in
+`planes`) reads process and file events through Apple's `eslogger`. On a
+managed Mac the root sensor helper,
+`/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper`
+(`com.cisco.defenseclaw.sensor-helper`), runs `eslogger`. launchd starts the
+helper directly, so macOS treats the helper as the responsible process, and
+the helper is the binary that needs Full Disk Access. Without it, Endpoint
+Security refuses the client (`ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED`), Plane C
+reports `running: false` with that reason, and the runtime snapshot stays
+degraded. Planes A and B keep working.
+
+Grant the access with a PPPC payload (`com.apple.TCC.configuration-profile-policy`)
+under `SystemPolicyAllFiles`:
+
+```xml
+<key>Services</key>
+<dict>
+  <key>SystemPolicyAllFiles</key>
+  <array>
+    <dict>
+      <key>Identifier</key>
+      <string>/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper</string>
+      <key>IdentifierType</key>
+      <string>path</string>
+      <key>CodeRequirement</key>
+      <string>(the designated requirement printed by codesign -dr - on that path)</string>
+      <key>Allowed</key>
+      <true/>
+    </dict>
+  </array>
+</dict>
+```
+
+The code requirement needs a signed build. On an unsigned test build, grant
+Full Disk Access to that path by hand in System Settings > Privacy & Security >
+Full Disk Access. Then restart the helper with
+`sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`.
+
 ## Machine policy
 
 For Codex, Claude Code, Cursor, GitHub Copilot and OpenCode, DefenseClaw adds

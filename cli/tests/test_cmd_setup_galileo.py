@@ -217,6 +217,46 @@ def test_v8_status_uses_masked_plan_and_sanitized_health(tmp_path, monkeypatch) 
     assert "do-not-print" not in result.output
 
 
+def test_v8_status_text_is_readable_and_names_next_step_when_failing(tmp_path, monkeypatch) -> None:
+    app = _app(tmp_path, monkeypatch)
+    monkeypatch.setenv("GALILEO_API_KEY", "do-not-print")
+    health = {
+        "telemetry": {
+            "details": {
+                "destinations": [
+                    {
+                        "name": "galileo",
+                        "state": "failing",
+                        "reason": "circuit_open",
+                        "queue": {"items": 0, "max_items": 2048, "dropped": 0},
+                        "last_failure": "2026-10-02T05:03:18Z",
+                        "last_error_class": "queue_rejected",
+                    }
+                ]
+            }
+        }
+    }
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_galileo._require_v8_operator_status",
+            return_value=_status(configured=True),
+        ),
+        patch("defenseclaw.commands.cmd_setup_galileo._gateway_health_snapshot", return_value=health),
+    ):
+        result = CliRunner().invoke(galileo, ["status"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "{" not in out and "True" not in out
+    assert "Signals         traces" in out
+    assert "Config version  8" in out
+    assert "Health          failing (circuit_open)" in out
+    assert "Queue           0 / 2048 items, 0 dropped" in out
+    assert "Last failure    2026-10-02T05:03:18Z (queue_rejected)" in out
+    assert "Next step:" in out and "defenseclaw setup galileo test" in out
+    assert "do-not-print" not in out
+
+
 @pytest.mark.parametrize(
     ("arguments", "helper", "expected"),
     [

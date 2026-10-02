@@ -1110,6 +1110,11 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		if summary, ok := payload["defenseclaw.health.error_summary"].(string); ok && strings.TrimSpace(summary) != "" {
 			return label + ": " + strings.TrimSpace(summary)
 		}
+		// Delivery failures carry only a stable failure code (for example
+		// request_timeout); name it so the alert says why it fired.
+		if code, ok := payload["defenseclaw.schema.error_code"].(string); ok && strings.TrimSpace(code) != "" {
+			return label + ": " + strings.TrimSpace(code)
+		}
 		return label
 	}
 	return fallback

@@ -1353,7 +1353,7 @@ class LocalStackController:
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317",
             "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
             "OTEL_SERVICE_NAME": "defenseclaw",
-            "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment=local-dev"),
+            "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment.name=local-dev"),
         }
 
 
