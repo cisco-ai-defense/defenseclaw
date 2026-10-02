@@ -117,6 +117,18 @@ func RemoveUserBinaries(home, dataDir string, uid int) ([]string, error) {
 	if _, err := os.Lstat(custody); err == nil && owned(custody) {
 		remove(custody)
 	}
+	// Like the per-user uninstall --all --binaries: a ~/.local/bin the
+	// removal emptied goes, and so does ~/.local when that leaves it empty.
+	if len(errs) == 0 && len(removed) > 0 {
+		if entries, err := os.ReadDir(binDir); err == nil && len(entries) == 0 && owned(binDir) {
+			if os.Remove(binDir) == nil {
+				local := filepath.Dir(binDir)
+				if entries, err := os.ReadDir(local); err == nil && len(entries) == 0 && owned(local) {
+					_ = os.Remove(local)
+				}
+			}
+		}
+	}
 	if len(errs) > 0 {
 		return removed, fmt.Errorf("enterprise hooks: remove the per-user binaries: %w", errors.Join(errs...))
 	}

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // BackedUpConnectors lists the connectors that still keep DefenseClaw's
@@ -47,6 +48,11 @@ func BackedUpConnectors(dataDir string) ([]string, error) {
 // teardown restores from are part of this state. An agent still running
 // with a hook it loaded before the teardown gets a missing script, which
 // it treats as a failed, non-blocking hook until it restarts.
+//
+// The folders below the home that DefenseClaw created for the agents (the
+// list in watcher-created-dirs.json: ~/.claude/commands, ~/.copilot/hooks,
+// ~/.config/opencode/plugins and the like) go first, those still empty,
+// because the list goes with the data directory.
 func PurgeUserState(dataDir string) error {
 	entries, err := os.ReadDir(dataDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -54,6 +60,12 @@ func PurgeUserState(dataDir string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if home := strings.TrimSpace(userHomeDir()); home != "" && filepath.IsAbs(home) {
+		removeCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), filepath.Clean(home))
+		if entries, err = os.ReadDir(dataDir); err != nil {
+			return err
+		}
 	}
 	var errs []error
 	for _, entry := range entries {

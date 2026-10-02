@@ -57,3 +57,44 @@ func TestPurgeUserStateRemovesEverything(t *testing.T) {
 		t.Fatalf("rerun: %v", err)
 	}
 }
+
+// The purge deleted ~/.defenseclaw, and with it the list of the agent
+// folders DefenseClaw had created, so those folders stayed in the purged
+// home, empty. They go first; a listed folder with content stays.
+func TestPurgeUserStateRemovesTheEmptyFoldersDefenseClawCreated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the purge runs for the Linux and macOS standalone profile")
+	}
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	created := []string{
+		filepath.Join(home, ".copilot"), filepath.Join(home, ".copilot", "hooks"),
+		filepath.Join(home, ".claude", "commands"), filepath.Join(home, ".config", "opencode", "plugins"),
+	}
+	for _, dir := range append(created, dataDir) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userFile := filepath.Join(home, ".claude", "commands", "mine.md")
+	if err := os.WriteFile(userFile, []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordWatcherCreatedDirs(dataDir, created); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithUserHomeDir(home, func() error { return PurgeUserState(dataDir) }); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{dataDir, filepath.Join(home, ".copilot"), filepath.Join(home, ".config", "opencode", "plugins")} {
+		if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%s stayed after the purge: %v", dir, err)
+		}
+	}
+	if _, err := os.Stat(userFile); err != nil {
+		t.Fatalf("a listed folder with the user's file in it must stay: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "opencode")); err != nil {
+		t.Fatalf("an unlisted parent must stay: %v", err)
+	}
+}

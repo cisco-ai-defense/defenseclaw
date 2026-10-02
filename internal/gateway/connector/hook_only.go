@@ -208,7 +208,7 @@ func capturePluginArtifactRegistrationSnapshot(
 		return nil, errors.New("connector does not own a managed plugin artifact")
 	}
 	pluginPath := conn.configPath(opts)
-	if err := prepareOpenCodePluginArtifactDestination(pluginPath); err != nil {
+	if err := prepareOpenCodePluginArtifactDestination(pluginPath, opts.DataDir); err != nil {
 		return nil, fmt.Errorf("prepare %s plugin destination: %w", conn.name, err)
 	}
 	backupPath := managedFileBackupPath(opts.DataDir, conn.name, "config")
@@ -1597,7 +1597,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		return err
 	}
 	path := c.configPath(opts)
-	if err := prepareOpenCodePluginArtifactDestination(path); err != nil {
+	if err := prepareOpenCodePluginArtifactDestination(path, opts.DataDir); err != nil {
 		return fmt.Errorf("%s prepare plugin destination: %w", c.name, err)
 	}
 	backupPath := managedFileBackupPath(opts.DataDir, c.name, "config")

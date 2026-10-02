@@ -107,7 +107,7 @@ def test_unix_scripts_parse_and_lint(os_dir: str, name: str) -> None:
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --json <"$secret"' in text
+    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json <"$secret"' in text
     assert "--from-file" not in text
     # The inline-config block warns against credentials and there is no
     # inline-secret setting.

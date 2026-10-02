@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -128,6 +130,11 @@ type CopilotVSCodeUserResult struct {
 	Kept       []string `json:"kept,omitempty"`
 	PluginOK   bool     `json:"plugin_ok,omitempty"`
 	HookFileOK bool     `json:"hook_file_ok,omitempty"`
+	// CreatedDirs are the folders below the home this call created for
+	// the files (~/.copilot, ~/.copilot/hooks and the like). The caller
+	// keeps them and passes them back as RemoveDirs, so the removal takes
+	// them out again once they are empty.
+	CreatedDirs []string `json:"created_dirs,omitempty"`
 }
 
 // CopilotVSCodeUserRequest selects what the user's home should hold. It runs
@@ -144,6 +151,9 @@ type CopilotVSCodeUserRequest struct {
 	// DryRun reports in Changed and Removed what would change, touching
 	// nothing (verify).
 	DryRun bool
+	// RemoveDirs are folders below Home an earlier call created
+	// (CreatedDirs); each one still empty after this call is removed.
+	RemoveDirs []string
 }
 
 // EnsureCopilotVSCodeUser writes or removes DefenseClaw's Local hook file
@@ -169,20 +179,27 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	}
 	owned := GuardRequest{GOOS: goos, HookBinary: req.HookBinary}
 	ownedHooks := func(data []byte) bool { return owned.ownedHooksDocument(data) || inertHooksDocument(data) }
-	var errs []error
+	manifest, err := renderCopilotPluginManifest()
+	if err != nil {
+		return result, err
+	}
 	result.HookFile = CopilotVSCodeLocalHookFilePath(home)
+	result.PluginDir = CopilotPluginDir(home)
+	pluginHooks := filepath.Join(result.PluginDir, "hooks", "hooks.json")
+	pluginManifest := filepath.Join(result.PluginDir, "plugin.json")
+	var missing []string
+	if !req.DryRun {
+		home = filepath.Clean(home)
+		for _, path := range []string{result.HookFile, pluginHooks, pluginManifest} {
+			missing = append(missing, missingDirsBelow(home, path)...)
+		}
+	}
+	var errs []error
 	if ok, err := ensureOwnedUserFile(&result, result.HookFile, hooks, true, nil, req.HookFile, req.DryRun); err != nil {
 		errs = append(errs, err)
 	} else {
 		result.HookFileOK = ok
 	}
-	result.PluginDir = CopilotPluginDir(home)
-	manifest, err := renderCopilotPluginManifest()
-	if err != nil {
-		return result, err
-	}
-	pluginHooks := filepath.Join(result.PluginDir, "hooks", "hooks.json")
-	pluginManifest := filepath.Join(result.PluginDir, "plugin.json")
 	hooksOK, err := ensureOwnedUserFile(&result, pluginHooks, hooks, false, ownedHooks, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
@@ -198,7 +215,63 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 			_ = os.Remove(dir)
 		}
 	}
+	for _, dir := range missing {
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() && !slices.Contains(result.CreatedDirs, dir) {
+			result.CreatedDirs = append(result.CreatedDirs, dir)
+		}
+	}
+	if !req.DryRun {
+		removeEmptyDirsBelow(home, req.RemoveDirs)
+	}
 	return result, errors.Join(errs...)
+}
+
+// missingDirsBelow returns the missing folders between home and path,
+// deepest first.
+func missingDirsBelow(home, path string) []string {
+	var missing []string
+	for dir := filepath.Dir(filepath.Clean(path)); strictlyBelow(home, dir); dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+			break
+		}
+		missing = append(missing, dir)
+	}
+	return missing
+}
+
+// removeEmptyDirsBelow removes, deepest first, each of dirs that is strictly
+// below home and still an empty folder reached through real folders from
+// home; anything else stays.
+func removeEmptyDirsBelow(home string, dirs []string) {
+	home = filepath.Clean(home)
+	sorted := append([]string(nil), dirs...)
+	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
+	for _, dir := range sorted {
+		dir = filepath.Clean(dir)
+		if !strictlyBelow(home, dir) {
+			continue
+		}
+		real := true
+		for current := dir; current != home; current = filepath.Dir(current) {
+			if info, err := os.Lstat(current); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				real = false
+				break
+			}
+		}
+		if real {
+			_ = os.Remove(dir) // only an empty folder goes
+		}
+	}
+}
+
+// strictlyBelow reports whether path is inside root and not root itself.
+func strictlyBelow(root, path string) bool {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(path) {
+		return false
+	}
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
 // ensureOwnedUserFile makes path hold want (keep) or not exist (!keep). An

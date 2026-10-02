@@ -268,6 +268,43 @@ func removeDirIfEmpty(path string) error {
 	return os.Remove(path)
 }
 
+// trustedInputFile refuses an administrator input (--config) that another
+// account could have changed before the run read it, as the MDM wrapper
+// does (mdm_untrusted_input): the file must be owned by root (or the
+// account running the lifecycle) and not writable by group or other, and
+// so must each of its folders, except a sticky one such as /tmp.
+func trustedInputFile(path, label string) error {
+	uid, _, mode, err := statOwnerMode(path)
+	if err != nil {
+		return err
+	}
+	owned := func(uid int) bool { return uid == 0 || uid == os.Geteuid() }
+	if mode.Perm()&0o022 != 0 {
+		return fmt.Errorf("%s %s is writable by group or other (%04o), so another account could have changed it; make it root-owned and not group- or world-writable (chmod 0600 %s), then rerun", label, path, mode.Perm(), path)
+	}
+	if !owned(uid) {
+		return fmt.Errorf("%s %s is owned by uid %d, so that account could have changed it; make it root-owned (chown 0 %s), then rerun", label, path, uid, path)
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	for {
+		uid, _, mode, err := statOwnerMode(dir)
+		if err != nil {
+			return err
+		}
+		if !owned(uid) || (mode.Perm()&0o022 != 0 && mode&os.ModeSticky == 0) {
+			return fmt.Errorf("%s %s is in %s, which another account can write (uid %d, %04o); stage it in a root-owned folder that only root can write, then rerun", label, path, dir, uid, mode.Perm())
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
 // statOwnerMode reports a path's uid, gid and permission bits without
 // following a symlink.
 func statOwnerMode(path string) (int, int, os.FileMode, error) {
