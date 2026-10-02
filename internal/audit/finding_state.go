@@ -456,15 +456,25 @@ func findingLifecycleScopeKey(scannerName, targetType, target string) string {
 	return strings.Join(parts, "\x00")
 }
 
+// FindingLifecycleExcludesScanner reports whether scanner records guardrail
+// decisions (hook rules, inline CodeGuard, AI Defense, the LLM guardrail, ...)
+// that the finding lifecycle behind 'audit findings' never tracks.
+func FindingLifecycleExcludesScanner(scannerName string) bool {
+	switch strings.ToLower(strings.TrimSpace(scannerName)) {
+	case "hook-rules", "inline-codeguard", "ai-defense", "asset-policy",
+		"tool-call-inspect", "inspect-http", "guardrail-llm", "mid-stream", "rescan":
+		return true
+	}
+	return false
+}
+
 func findingLifecycleEligible(summary scanner.ScanSummaryParams) bool {
 	if summary.ExitCode != 0 || strings.TrimSpace(summary.ScanError) != "" ||
 		strings.TrimSpace(summary.EvaluationID) != "" {
 		return false
 	}
 	scannerName := strings.ToLower(strings.TrimSpace(summary.Scanner))
-	switch scannerName {
-	case "hook-rules", "inline-codeguard", "ai-defense", "asset-policy",
-		"tool-call-inspect", "inspect-http", "guardrail-llm", "mid-stream", "rescan":
+	if FindingLifecycleExcludesScanner(scannerName) {
 		return false
 	}
 	targetType := strings.ToLower(strings.TrimSpace(summary.TargetType))

@@ -76,6 +76,12 @@ func runAuditFindings(cmd *cobra.Command, _ []string) error {
 	if auditFindingsNewOnly && since == nil {
 		return fmt.Errorf("audit findings: --new-only requires --since")
 	}
+	if audit.FindingLifecycleExcludesScanner(auditFindingsScanner) {
+		// GAP-1301: a guardrail scanner always reports count 0 here; say why
+		// on stderr so the JSON on stdout stays machine-readable.
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: --scanner %s records guardrail decisions, which audit findings does not track; "+
+			"see 'defenseclaw alerts' or 'defenseclaw-gateway audit export' for them.\n", strings.TrimSpace(auditFindingsScanner))
+	}
 	if auditFindingsTarget != "" && scanner.NormalizeFindingStateTarget(auditFindingsTarget) == "" {
 		return fmt.Errorf("audit findings: --target must identify a usable scan target")
 	}
