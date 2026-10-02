@@ -21,6 +21,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_REDACTION_POLICY
 from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
@@ -479,7 +480,11 @@ def profile_show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
         None,
     )
     if found is None:
-        raise click.ClickException(f"no compiled profile named {name!r}")
+        # GAP-1928: name the profiles show can print, without compiler jargon.
+        known = (item.get("name") for item in profiles or [] if isinstance(item, Mapping) and item.get("name"))
+        raise click.ClickException(
+            ux.not_found_message("redaction profile", name, known, "defenseclaw setup redaction profile list")
+        )
     if emit_json:
         click.echo(json.dumps(found, indent=2, sort_keys=True))
         return

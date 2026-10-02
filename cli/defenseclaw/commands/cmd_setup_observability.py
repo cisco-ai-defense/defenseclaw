@@ -871,19 +871,15 @@ def _v8_source_destination_index(data_dir: str, name: str) -> int:
             raise click.ClickException(
                 "local-sqlite is mandatory and cannot be disabled or removed"
             )
-        known = ", ".join(
-            sorted(
-                str(destination.get("name"))
-                for destination in destinations
-                if isinstance(destination, dict) and destination.get("name")
-            )
+        # GAP-1928: the shared not-found shape, without "v8" jargon.
+        known = (
+            destination.get("name")
+            for destination in destinations
+            if isinstance(destination, dict) and destination.get("name")
         )
-        suffix = (
-            f"; configured destinations: {known}"
-            if known
-            else "; no optional destinations are configured"
+        raise click.ClickException(
+            ux.not_found_message("observability destination", name, known, "defenseclaw setup observability list")
         )
-        raise click.ClickException(f"no configurable v8 destination named {name!r}{suffix}")
     return matches[0]
 
 

@@ -1414,5 +1414,7 @@ def test_v8_remove_unknown_destination_fails_before_the_prompt(
     result = CliRunner().invoke(observability, ["remove", "nosuchdest"], obj=app, input="n\n")
     assert result.exit_code == 1, result.output
     assert "Remove destination" not in result.output
-    assert "no configurable v8 destination named 'nosuchdest'" in result.output
-    assert "configured destinations:" in result.output
+    # GAP-1928: the shared not-found shape, no "v8" jargon.
+    assert "Error: observability destination 'nosuchdest' not found. Available: " in result.output
+    assert "Run `defenseclaw setup observability list` for details." in result.output
+    assert "v8" not in result.output

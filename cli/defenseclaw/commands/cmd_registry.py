@@ -174,8 +174,13 @@ def _find_source(cfg: Config, sid: str) -> RegistrySource:
     for s in cfg.registries.sources:
         if s.id == sid:
             return s
-    click.echo(f"error: no registry source named {sid!r}", err=True)
-    raise SystemExit(2)
+    # GAP-1928: the shared not-found shape, with the valid ids, and exit 1
+    # (exit 2 stays for usage errors).
+    message = ux.not_found_message(
+        "registry source", sid, (s.id for s in cfg.registries.sources), "defenseclaw registry list"
+    )
+    click.echo(f"Error: {message}", err=True)
+    raise SystemExit(1)
 
 
 def _require_cfg(app: AppContext) -> Config:
