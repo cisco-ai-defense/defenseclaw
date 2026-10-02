@@ -28,7 +28,11 @@ from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
-_MAX_DIGEST_FILE = 128 * 1024 * 1024
+# The gateway records the digest of the whole hook launcher with no size cap.
+# An unstripped Windows source build (make all) of defenseclaw-hook.exe is
+# about 148 MiB, so a 128 MiB cap hashed it as '' and reported
+# registration-digest-stale on every check (GAP-1922).
+_MAX_DIGEST_FILE = 1024 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')

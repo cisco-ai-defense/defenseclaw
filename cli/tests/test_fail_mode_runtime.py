@@ -741,6 +741,19 @@ def test_runtime_digest_hashes_raw_windows_binary_bytes(tmp_path: Path) -> None:
     assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + hashlib.sha256(body).hexdigest()
 
 
+def test_runtime_digest_hashes_a_launcher_larger_than_128_mib(tmp_path: Path) -> None:
+    # GAP-1922: a source-built defenseclaw-hook.exe is about 148 MiB.
+    artifact = tmp_path / "defenseclaw-hook.exe"
+    size = 150 * 1024 * 1024
+    with artifact.open("wb") as stream:
+        stream.truncate(size)
+    digest = hashlib.sha256()
+    chunk = bytes(1024 * 1024)
+    for _ in range(size // len(chunk)):
+        digest.update(chunk)
+    assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + digest.hexdigest()
+
+
 def test_v2_shared_digest_is_authoritative_over_legacy_entry_duplicate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

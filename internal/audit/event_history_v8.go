@@ -430,7 +430,7 @@ func (writer *EventHistoryWriter) AppendContext(
 				_ = tx.Rollback()
 				return appendErr
 			}
-			if commitErr := writer.commitAppendTransaction(tx, outcome); commitErr != nil {
+			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcome); commitErr != nil {
 				_ = tx.Rollback()
 				return eventHistoryFailure(
 					EventHistoryHealthWriteFailed,
@@ -444,7 +444,7 @@ func (writer *EventHistoryWriter) AppendContext(
 		// Health reporters may persist their own mandatory record through the
 		// same single-connection Store. Every failed attempt has ended before
 		// invoking external code so failure reporting cannot self-deadlock.
-		writer.stageAppendError(err)
+		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
 		releaseReady()
 		writer.flushHealth()
 		return err
@@ -758,16 +758,48 @@ func (writer *EventHistoryWriter) reportAppendError(err error) {
 }
 
 func (writer *EventHistoryWriter) stageAppendError(err error) {
+	writer.stageAppendErrorClass(err, "")
+}
+
+func (writer *EventHistoryWriter) stageAppendErrorClass(err error, classOverride EventHistorySQLiteClass) {
 	var healthErr *eventHistoryHealthError
 	if errors.As(err, &healthErr) {
-		writer.stageHealthFailure(healthErr.code, err, "")
+		writer.stageHealthFailure(healthErr.code, err, classOverride)
 	}
+}
+
+// eventHistoryCallerGaveUpClass is class deadline for a write that failed
+// because its caller stopped waiting. An OTLP exporter that times out behind
+// a slow write on a large audit.db cancels its request; the write then fails
+// with context.Canceled or sql.ErrTxDone, which classify as other, and start
+// treated that as a broken store (GAP-1790). It is a timed-out write: start
+// waits it out like any deadline and the next commit clears it. A failure
+// with a real SQLite class (busy, full, I/O, ...) keeps that class.
+func eventHistoryCallerGaveUpClass(ctx context.Context, err error) EventHistorySQLiteClass {
+	if ctx == nil || ctx.Err() == nil {
+		return ""
+	}
+	if class, _ := classifyEventHistorySQLiteFailure(err); class != EventHistorySQLiteOther {
+		return ""
+	}
+	return EventHistorySQLiteDeadline
 }
 
 // commitAppendTransaction serializes commit order with signed/unsigned health
 // state staging. It never invokes external reporter code; callers must release
 // Store lifecycle ownership before flushHealth.
 func (writer *EventHistoryWriter) commitAppendTransaction(
+	tx *sql.Tx,
+	outcome eventHistoryAppendOutcome,
+) error {
+	return writer.commitAppendTransactionContext(context.Background(), tx, outcome)
+}
+
+// commitAppendTransactionContext is commitAppendTransaction for a transaction
+// begun with ctx, so a commit that failed because ctx ended is reported as a
+// timed-out write (GAP-1790).
+func (writer *EventHistoryWriter) commitAppendTransactionContext(
+	ctx context.Context,
 	tx *sql.Tx,
 	outcome eventHistoryAppendOutcome,
 ) error {
@@ -778,7 +810,8 @@ func (writer *EventHistoryWriter) commitAppendTransaction(
 	defer writer.appendCommitMu.Unlock()
 	if err := tx.Commit(); err != nil {
 		writer.enqueueHealthFailure(
-			writer.nextHealthSequence(), EventHistoryHealthWriteFailed, err, "",
+			writer.nextHealthSequence(), EventHistoryHealthWriteFailed, err,
+			eventHistoryCallerGaveUpClass(ctx, err),
 		)
 		return err
 	}

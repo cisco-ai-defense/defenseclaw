@@ -1065,10 +1065,33 @@ func emptyConfigFileMessage(path string) (string, bool) {
 	}
 	return fmt.Sprintf(
 		"%s is empty: it holds no settings (as after a crash or a full disk). "+
-			"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml "+
-			"(an upgrade keeps the previous one in %s), or remove the empty file and run 'defenseclaw init'.",
-		path, filepath.Join(filepath.Dir(path), "previous", "data"),
+			"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml%s, "+
+			"or remove the empty file and run 'defenseclaw init'.",
+		path, previousConfigHint(filepath.Dir(path)),
 	), true
+}
+
+// previousConfigHint names the config the last version upgrade kept, with its
+// version and date, in the Python CLI's words (cli/defenseclaw/config.py):
+// previous/ is refreshed only by an upgrade to another version, so the copy
+// can be much older than the config just lost (GAP-1786, GAP-1876).
+func previousConfigHint(home string) string {
+	previous := filepath.Join(home, "previous")
+	kept := filepath.Join(previous, "data", "config.yaml")
+	info, err := os.Stat(kept)
+	if err != nil {
+		return ""
+	}
+	label := "the config"
+	if file, err := os.Open(filepath.Join(previous, "VERSION")); err == nil {
+		raw, _ := io.ReadAll(io.LimitReader(file, 64))
+		_ = file.Close()
+		if version := strings.TrimSpace(string(raw)); version != "" {
+			label = "the DefenseClaw " + version + " config"
+		}
+	}
+	return fmt.Sprintf(" (the last version upgrade kept %s from %s in %s; it lacks every change made since then)",
+		label, info.ModTime().UTC().Format("2006-01-02 15:04 UTC"), kept)
 }
 
 func onlyYAMLComments(raw []byte) bool {

@@ -591,10 +591,14 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
             f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; '
-            f"connector) echo \"{version} $*\" >> '{calls}' ;; esac\n",
+            f"connector) echo \"{version} $*\" >> '{calls}'; rm -f '{dc_home}'/hooks/.otlp-*.token ;; esac\n",
             encoding="utf-8",
         )
         gateway.chmod(0o755)
+    # GAP-1925: teardown revokes the connector OTLP tokens; the data kept for a
+    # roll forward keeps them, so an agent exporter's token stays valid.
+    (dc_home / "hooks").mkdir(mode=0o700)
+    (dc_home / "hooks" / ".otlp-claudecode.token").write_text("kept-token\n", encoding="utf-8")
     state = '{"version": 3, "names": ["copilot", "opencode", "openclaw"], "inactive_names": []}'
     (dc_home / "active_connector.json").write_text(state, encoding="utf-8")
     (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
@@ -610,6 +614,8 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     ]
     # The 1.0.1 data kept for a roll forward still names its connectors.
     assert (dc_home / "previous" / "data" / "active_connector.json").read_text(encoding="utf-8") == state
+    kept = dc_home / "previous" / "data" / "hooks" / ".otlp-claudecode.token"
+    assert kept.read_text(encoding="utf-8") == "kept-token\n"
 
     calls.unlink()
     forward = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")

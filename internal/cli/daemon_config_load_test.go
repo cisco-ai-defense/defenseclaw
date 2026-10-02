@@ -132,3 +132,44 @@ func TestGatewayConfigLoadErrorsCallAnEmptyConfigEmpty(t *testing.T) {
 		t.Fatalf("a non-empty config was called empty: %v", err)
 	}
 }
+
+// GAP-1876: the gateway's empty-config message dates the copy the last
+// upgrade kept, as the Python CLI does (GAP-1786), and drops the clause when
+// there is no copy.
+func TestGatewayEmptyConfigMessageDatesThePreviousCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(config.ConfigPath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loadErr := errors.New("failed to load config: config.yaml: [yaml_root_mapping_required] $: the YAML document root must be a mapping")
+	if msg := gatewayStatusConfigLoadError(loadErr).Error(); strings.Contains(msg, "previous") {
+		t.Fatalf("no previous copy, but the message names one: %q", msg)
+	}
+	kept := filepath.Join(home, "previous", "data", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(kept), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kept, []byte("config_version: 7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "previous", "VERSION"), []byte("0.8.10\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Date(2026, 10, 2, 4, 40, 0, 0, time.UTC)
+	if err := os.Chtimes(kept, when, when); err != nil {
+		t.Fatal(err)
+	}
+	want := "Restore your copy of config.yaml (the last version upgrade kept the DefenseClaw 0.8.10 config from " +
+		"2026-10-02 04:40 UTC in " + kept + "; it lacks every change made since then), " +
+		"or remove the empty file and run 'defenseclaw init'."
+	for _, err := range []error{
+		daemonConfigLoadError("start", loadErr),
+		daemonConfigLoadError("restart", loadErr),
+		gatewayStatusConfigLoadError(loadErr),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}

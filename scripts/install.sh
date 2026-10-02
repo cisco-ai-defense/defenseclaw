@@ -1415,9 +1415,13 @@ swap_with_previous() {
 # gateway adds its own next to them and runs every hook twice (GAP-1521).
 # Remove them with this install's own teardown before the swap; the restored
 # gateway registers its own when it starts. active_connector.json is put back,
-# so the data kept for a roll forward still names the same connectors.
+# so the data kept for a roll forward still names the same connectors. So are
+# the connector OTLP tokens teardown revokes: a roll forward that minted new
+# ones left an agent exporter still holding the old token rejected, and doctor
+# warned about an unattributed OTLP credential (GAP-1925).
 remove_connector_registrations_for_legacy() {
     local state="${DEFENSECLAW_HOME}/active_connector.json" gateway="${BIN_DIR}/defenseclaw-gateway" saved name names
+    local hooks="${DEFENSECLAW_HOME}/hooks" tokens token
     [[ -f "${state}" && -x "${VENV}/bin/python" && -x "${gateway}" ]] || return 0
     names="$("${VENV}/bin/python" -I - "${state}" <<'PY' 2>/dev/null
 import json, re, sys
@@ -1429,13 +1433,22 @@ PY
     [[ -n "${names}" ]] || return 0
     saved="$(mktemp)" || return 0
     cp -p "${state}" "${saved}" || { rm -f "${saved}"; return 0; }
+    tokens="$(mktemp -d)" || { rm -f "${saved}"; return 0; }
+    for token in "${hooks}"/.otlp-*.token; do
+        [[ -f "${token}" && ! -L "${token}" ]] && cp -p "${token}" "${tokens}/"
+    done
     info "Removing the connector registrations of DefenseClaw ${current}; ${back_to} writes its own when its gateway starts"
     for name in ${names}; do
         "${gateway}" connector teardown --connector "${name}" >>"${LOG}" 2>&1 \
             || warn "Could not remove the ${name} registrations of DefenseClaw ${current}; ${back_to} may run its ${name} hooks twice until you run: defenseclaw setup ${name}"
     done
     cp -p "${saved}" "${state}" || warn "Could not restore ${state}; run 'defenseclaw init' if a roll forward leaves a connector unguarded"
-    rm -f "${saved}"
+    for token in "${tokens}"/.otlp-*.token; do
+        [[ -f "${token}" ]] || continue
+        { mkdir -p -m 700 "${hooks}" && cp -p "${token}" "${hooks}/"; } \
+            || warn "Could not keep $(basename "${token}"); after a roll forward run 'defenseclaw setup' for that connector"
+    done
+    rm -rf "${saved}" "${tokens}"
 }
 
 # The gateway writes the OpenClaw plugin when it starts; OpenClaw loads it only
