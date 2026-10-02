@@ -281,20 +281,44 @@ class CommandExecutor:
         # the cut part into the next read (GAP-1543).
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         carry = ""
+        # A read can also end inside a line; showing each piece as its own
+        # line broke words ("amp, cl" / "audecode"). Hold the unfinished line
+        # until its newline, or show it after a short pause so a prompt
+        # without a newline still appears (GAP-1772), as the pipe path does.
+        partial = ""
+        read: asyncio.Future[bytes] | None = None
         try:
             while True:
-                if process.returncode is not None:
-                    break
+                if read is None:
+                    if process.returncode is not None:
+                        break
+                    read = asyncio.ensure_future(asyncio.to_thread(os.read, master_fd, 4096))
+                if partial:
+                    done, _ = await asyncio.wait({read}, timeout=_PIPE_FRAGMENT_FLUSH_SECONDS)
+                    if not done:
+                        for text in _split_terminal_chunk(partial):
+                            yield CommandEvent("output", text)
+                        partial = ""
+                        continue
                 try:
-                    chunk = await asyncio.to_thread(os.read, master_fd, 4096)
+                    chunk = await read
                 except OSError:
                     break
+                finally:
+                    read = None
                 if not chunk:
                     break
                 ready, carry = _hold_incomplete_escape(carry + decoder.decode(chunk))
-                for text in _split_terminal_chunk(ready):
+                text_so_far = partial + ready
+                cut = max(text_so_far.rfind("\n"), text_so_far.rfind("\r")) + 1
+                complete, partial = text_so_far[:cut], text_so_far[cut:]
+                for text in _split_terminal_chunk(complete):
                     yield CommandEvent("output", text)
-            for text in _split_terminal_chunk(carry + decoder.decode(b"", final=True)):
+                while len(partial) >= _PIPE_FRAGMENT_MAX_CHARS:
+                    bounded, partial = partial[:_PIPE_FRAGMENT_MAX_CHARS], partial[_PIPE_FRAGMENT_MAX_CHARS:]
+                    for text in _split_terminal_chunk(bounded):
+                        yield CommandEvent("output", text)
+            for text in _split_terminal_chunk(partial + carry + decoder.decode(b"", final=True)):
                 yield CommandEvent("output", text)
             exit_code = await process.wait()
         finally:

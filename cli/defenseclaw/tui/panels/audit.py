@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1150,11 +1151,23 @@ def _matches_search_query(event: Event, query: str) -> bool:
         return True
     for term in terms:
         field, separator, value = term.partition(":")
-        if separator and field in {"action", "actor", "connector", "details", "id", "run", "run_id", "severity", "target", "type"}:
+        if separator and field in {
+            "action",
+            "actor",
+            "connector",
+            "decision",
+            "details",
+            "id",
+            "run",
+            "run_id",
+            "severity",
+            "target",
+            "type",
+        }:
             if value not in _event_field(event, field):
                 return False
             continue
-        if term not in _event_haystack(event):
+        if term not in _search_haystack(event):
             return False
     return True
 
@@ -1165,7 +1178,12 @@ def _event_field(event: Event, field: str) -> str:
     if field == "run" or field == "run_id":
         return event.run_id.lower()
     if field == "action":
-        return event.action.lower()
+        # The hint's own example is action:block; the raw action of a hook or
+        # guardrail block is connector-hook/guardrail-verdict, so the decision
+        # the DETAILS column shows counts too (GAP-1780).
+        return f"{event.action} {_event_decision(event)}".lower()
+    if field == "decision":
+        return _event_decision(event)
     if field == "actor":
         return event.actor.lower()
     # connector and severity match what the CONNECTOR and SEVERITY columns
@@ -1181,6 +1199,27 @@ def _event_field(event: Event, field: str) -> str:
     if field == "type":
         return _target_type_from_action(event.action).lower()
     return ""
+
+
+def _event_decision(event: Event) -> str:
+    """The decision a row records (block, allow, ...), or "" when it has none."""
+
+    if _matches_common_filter(event, "blocks"):
+        return "block"
+    if event.action.lower() == "connector-hook":
+        return (connector_hook_decision(event.details, event.structured, event.enforced) or "").lower()
+    return (_structured_text(event.structured, "defenseclaw.guardrail.effective_action") or "").lower()
+
+
+# Hidden flags that say a row did NOT block; free text "block" matched every
+# allow row through them (GAP-1780).
+_HAYSTACK_NOISE = re.compile(r"\bwould_block=(?:false|0)\b", re.IGNORECASE)
+
+
+def _search_haystack(event: Event) -> str:
+    """Free-text search scope: what the row shows plus its decision."""
+
+    return f"{_HAYSTACK_NOISE.sub('', _event_haystack(event))} {_event_decision(event)}"
 
 
 def _event_haystack(event: Event) -> str:
