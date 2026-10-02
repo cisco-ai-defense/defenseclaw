@@ -677,3 +677,33 @@ def test_a_failed_python_build_removes_what_it_wrote() -> None:
     failure = text[text.index('if ! make_venv "${STAGING}/venv"; then') :][:400]
     assert 'rm -rf "${STAGING}"' in failure
     assert '[[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"' in failure
+
+
+def _install_sh_functions(*names: str) -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    helpers = text[text.index("version_key() {") : text.index("sha256_of() {")]
+    bodies = []
+    for name in names:
+        start = text.index(f"{name}() {{")
+        bodies.append(text[start : text.index("\n}\n", start) + 3])
+    return helpers + "".join(bodies)
+
+
+def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> None:
+    # GAP-1349: the restore said "Your previous install is back" while the
+    # gateway that ran before stayed down.
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + "start_gateway() { return 1; }\n"
+        + _install_sh_functions("restart_old")
+        + f'DEFENSECLAW_HOME="{tmp_path}" WAS_RUNNING=true RESTORED_NOTE="Your previous install is back."\n'
+        + 'restart_old; echo "note: ${RESTORED_NOTE}"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "warn: The gateway that was running before did not start again" in out, out
+    assert "info: Start it with: defenseclaw-gateway start" in out
+    assert "note: Your previous install is back, but its gateway is not running (see above)." in out

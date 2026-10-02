@@ -673,6 +673,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
 fi
 
 WAS_RUNNING=false
+RESTORED_NOTE="Your previous install is back."
 [[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
 if [[ "${WAS_RUNNING}" == true ]]; then
     info "Stopping the gateway"
@@ -691,7 +692,7 @@ snapshot || { undo_snapshot; restart_old; die "Could not save the current instal
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
     restore_snapshot
-    die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
+    die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
 fi
 START_RC=0
 if [[ "${WAS_RUNNING}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
@@ -708,7 +709,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         err "The ${VERSION} gateway did not become healthy; restoring ${PREV_VERSION:-the previous state}"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         restore_snapshot
-        die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
+        die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
 fi
 finish_swap
@@ -1060,7 +1061,11 @@ restore_snapshot() {
 
 restart_old() {
     if [[ "${WAS_RUNNING}" == true ]]; then
-        start_gateway >/dev/null 2>&1 || warn "The gateway did not restart; run 'defenseclaw-gateway start'"
+        start_gateway >/dev/null 2>&1 && return 0
+        # Say plainly that the gateway that ran before is down now (GAP-1349).
+        RESTORED_NOTE="Your previous install is back, but its gateway is not running (see above)."
+        warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
+        info "Start it with: defenseclaw-gateway start (log: ${DEFENSECLAW_HOME}/gateway.log). On a large audit database its first start can take several minutes"
     fi
 }
 

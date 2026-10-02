@@ -265,3 +265,15 @@ def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
     assert "$deadline = (Get-Date).AddMinutes(3)" in body
     assert 'Invoke-Native $gateway @("status") -Quiet' in body
     assert 'Write-Ok "The gateway finished starting"; return 0' in body
+
+
+def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
+    # GAP-1349: "Your previous install is back" while the gateway that ran
+    # before stayed down and fail-closed connectors blocked every tool call.
+    body = _ps1_function("Restart-Old")
+    assert "$Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)" in body
+    assert "did not start again, so agent hooks are not guarded" in body
+    assert "but its gateway is not running" in _ps1_function("Get-RestoredNote")
+    text = _text()
+    assert text.count("$(Get-RestoredNote) Log: $($Run.Log)") == 2
+    assert "Your previous install is back. Log:" not in text

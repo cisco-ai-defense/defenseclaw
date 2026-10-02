@@ -108,7 +108,7 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
     $env:PSModulePath = $modulePath -join ";"
 }
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -952,10 +952,18 @@ function Install-New {
 }
 
 function Restart-Old {
-    if ($Setup) { Restore-SetupInstall; return }
-    if ($WasRunning -and (Start-Gateway) -notin @(0, 3)) {
-        Write-Warn "The gateway did not restart; run 'defenseclaw-gateway start'"
+    if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+    # Say plainly when the gateway that ran before is down now (GAP-1349).
+    $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    if ($Run.OldGatewayDown) {
+        Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
+        Write-Info "Start it with: defenseclaw-gateway start (log: $(Join-Path $DataDir 'gateway.log')). On a large audit database its first start can take several minutes"
     }
+}
+
+function Get-RestoredNote {
+    if ($Run.OldGatewayDown) { return "Your previous install is back, but its gateway is not running (see above)." }
+    return "Your previous install is back."
 }
 
 function Get-ExternalConfig {
@@ -1569,7 +1577,7 @@ function Invoke-Install {
     if (-not $installed) {
         Write-Err "Installing $Ver failed; restoring $previousLabel"
         Restore-Snapshot
-        Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
+        Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
     }
     $startRc = 0
     # A 0.x import leaves the agent executables its connectors run in a receipt
@@ -1597,7 +1605,7 @@ function Invoke-Install {
             Write-Err "The $Ver gateway did not become healthy; restoring $previousLabel"
             [void](Stop-Gateway)
             Restore-Snapshot
-            Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
+            Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
     }
     Complete-Swap
