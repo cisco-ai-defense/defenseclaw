@@ -178,3 +178,27 @@ func TestManagedFailClosedStopOutsideStandaloneIsUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1257: a foreign-hook block on Cursor's workspaceOpen or sessionStart
+// (the first start in a folder) answers the neutral allow instead of exit 2,
+// which left cursor-agent on "Trusting workspace..."; its tool calls and
+// prompts stay blocked with the reason.
+func TestForeignHookBlockLetsCursorOpenTheWorkspace(t *testing.T) {
+	cause := sessionStopCauses[len(sessionStopCauses)-1]
+	if !cause.foreign {
+		t.Fatal("the last cause is not the foreign-hook block")
+	}
+	for _, event := range []string{"workspaceOpen", "sessionStart"} {
+		r, log := runSessionStop(t, cause, sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"` + event + `"}`}, true)
+		if r.code != 0 || strings.TrimSpace(r.stdout) != "{}" || !strings.Contains(log, `"fail_mode":"open"`) ||
+			!strings.Contains(r.stderr, "/repo/.claude/settings.local.json") {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q log=%s", event, r.code, r.stdout, r.stderr, log)
+		}
+	}
+	for _, payload := range []string{`{"hook_event_name":"beforeSubmitPrompt"}`, `{"hook_event_name":"beforeShellExecution"}`} {
+		r, _ := runSessionStop(t, cause, sessionStopEvent{connector: "cursor", payload: payload}, true)
+		if !strings.Contains(r.stdout, "/repo/.claude/settings.local.json") {
+			t.Fatalf("%s: want the block with its reason, got code=%d stdout=%q", payload, r.code, r.stdout)
+		}
+	}
+}

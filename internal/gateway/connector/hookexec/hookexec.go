@@ -1353,6 +1353,16 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (a block would keep the agent running); tool calls stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
+	if foreignHookCursorOpenEvent(sp.connector, opts.Event) {
+		// Cursor has no block response for these events, and the generic
+		// exit-2 block on the first start in a folder left cursor-agent on
+		// "Trusting workspace..." with no message (GAP-1257). The session
+		// block is already recorded, so the first prompt or tool call gets
+		// the block and its reason.
+		logHookFailure(opts, sp, reason, "policy", "open")
+		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (Cursor cannot show a block there); prompts and tool calls in this session stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
+		return emitHookResult(opts, sp, sp.openAllow)
+	}
 	logHookFailure(opts, sp, reason, "policy", "closed")
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
@@ -1386,6 +1396,19 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 	// Claude Code shows stderr on its exit-2 block; the rest keep their
 	// strict failure response.
 	return emitHookResult(opts, sp, sp.unreachableStrict)
+}
+
+// foreignHookCursorOpenEvent reports Cursor's workspaceOpen and sessionStart,
+// which run while cursor-agent opens and trusts a folder.
+func foreignHookCursorOpenEvent(connector, event string) bool {
+	if connector != "cursor" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case "workspaceopen", "sessionstart":
+		return true
+	}
+	return false
 }
 
 // foreignHookStopEvent reports the stop and session-end events of the
