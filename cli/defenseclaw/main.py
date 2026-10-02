@@ -601,9 +601,20 @@ def main() -> None:
         click.echo(f"Error: the gateway did not confirm the audit event: {exc}", err=True)
         sys.exit(1)
     except OSError as exc:
-        if not _output_pipe_closed(exc):
+        if _output_pipe_closed(exc):
+            _silence_closed_stdout()
+            sys.exit(1)
+        import errno
+
+        if exc.errno != errno.ENOSPC:
             raise
-        _silence_closed_stdout()
+        # GAP-1838: a full disk is an environment problem, not a crash.
+        target = f" {exc.filename}" if exc.filename else " a file"
+        click.echo(
+            f"Error: the disk is full, so DefenseClaw could not write{target}. "
+            "Free some space and run the command again.",
+            err=True,
+        )
         sys.exit(1)
 
 

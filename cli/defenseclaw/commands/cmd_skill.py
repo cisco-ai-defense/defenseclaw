@@ -3957,6 +3957,30 @@ def _materialize_legacy_skill_quarantine(
         return
 
 
+def _shared_dir_quarantine_records(
+    app: AppContext, skill_name: str, connector: str,
+) -> list[Any]:
+    """Quarantine records filed under a peer that shares *connector*'s skill dir.
+
+    GAP-1259: Claude Code and Amp both read ``~/.claude/skills``. The watcher
+    files a quarantine there under its own connector (for example amp), so
+    ``--connector claudecode`` restore found nothing while list/info for
+    claudecode showed the skill quarantined. A record whose original path lies
+    in one of *connector*'s skill directories belongs to that connector too.
+    """
+    if app.store is None or not callable(getattr(app.cfg, "skill_dirs", None)):
+        return []
+    roots = [os.path.realpath(root) for root in app.cfg.skill_dirs(connector) if root]
+    if not roots:
+        return []
+    return [
+        record
+        for record in app.store.list_quarantine_records("skill", skill_name)
+        if record.original_path
+        and any(_strict_path_within(os.path.realpath(record.original_path), root) for root in roots)
+    ]
+
+
 def _skill_quarantine_records(
     app: AppContext,
     pe: Any,
@@ -3969,8 +3993,11 @@ def _skill_quarantine_records(
     if connector_flag:
         connector = _resolve_connector_scope(app, connector_flag)
         _materialize_legacy_skill_quarantine(app, pe, skill_name, connector)
-        return connector, app.store.list_quarantine_records(
+        records = app.store.list_quarantine_records(
             "skill", skill_name, connector,
+        )
+        return connector, records or _shared_dir_quarantine_records(
+            app, skill_name, connector,
         )
 
     entries = [entry for entry in pe.list_by_type("skill") if entry.target_name == skill_name]
@@ -4160,6 +4187,45 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 # skill unblock
 # ---------------------------------------------------------------------------
 
+def _report_inherited_skill_state(
+    app: AppContext,
+    pe: Any,
+    skill_name: str,
+    connector: str,
+    physical_records: list[Any],
+) -> bool:
+    """Explain a connector-scoped unblock that has nothing of its own to clear.
+
+    GAP-1259: list/info for a connector show the global decision (and a peer's
+    decision on a shared skill dir) it inherits, so "no enforcement state" or
+    "already unblocked" read as wrong. Name the scope that holds the state and
+    the command that clears it. Returns True when something was reported.
+    """
+    peers = {c for record in physical_records for c in record.connectors if c}
+    peers.update(_skill_policy_fanout_connectors(app, pe, skill_name))
+    peers.discard(connector)
+    owners = sorted(c for c in peers if _skill_has_connector_enforcement(app, skill_name, c))
+    global_state = bool(app.store) and (
+        pe.is_blocked("skill", skill_name)
+        or pe.is_quarantined("skill", skill_name)
+        or app.store.has_action("skill", skill_name, "runtime", "disable")
+    )
+    if not global_state and not owners:
+        return False
+    scope = "a global decision that covers every connector" if global_state else (
+        f"connector={', '.join(owners)}, which shares this skill directory"
+    )
+    click.echo(
+        f"[skill] {skill_name!r} has no enforcement state of its own on {connector}; "
+        f"it is blocked by {scope}"
+    )
+    if global_state:
+        click.echo(f"  Clear it for every connector: defenseclaw skill unblock {skill_name}")
+    for owner in owners:
+        click.echo(f"  Clear it for {owner}: defenseclaw skill unblock {skill_name} --connector {owner}")
+    return True
+
+
 @skill.command()
 @click.argument("name")
 @click.option(
@@ -4203,6 +4269,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             or app.store.has_action("skill", skill_name, "runtime", "disable", connector)
         )
         if not has_state:
+            if _report_inherited_skill_state(app, pe, skill_name, connector, physical_records):
+                return
             if physical_records:
                 click.echo(
                     f"[skill] {skill_name!r} is already unblocked for {connector}; "
