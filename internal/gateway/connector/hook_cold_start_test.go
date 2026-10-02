@@ -178,17 +178,21 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 	cases := map[string]struct {
 		prepare func(string)
 		env     []string
+		hint    string
 	}{
+		// The hook names the way back (SWEEP-16): an explicit stop is never
+		// undone by a hook, so the user has to start the gateway.
 		"stopped with defenseclaw-gateway stop": {prepare: func(dataDir string) {
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
-		}},
+		}, hint: "stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection"},
 		"install in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
-		}},
+		}, hint: "gateway is not running; run `defenseclaw-gateway start`"},
 		"no configuration": {prepare: func(dataDir string) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
-		}},
-		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}},
+		}, hint: "gateway is not running; run `defenseclaw-gateway start`"},
+		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, hint: "run `defenseclaw-gateway start`"},
+		"managed hook":  {env: []string{"DEFENSECLAW_MANAGED_HOOK=1"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -201,6 +205,12 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			}
 			if !strings.Contains(run.stderr, "gateway unreachable") {
 				t.Fatalf("stderr = %q, want the unreachable report", run.stderr)
+			}
+			if tc.hint != "" && !strings.Contains(run.stderr, tc.hint) {
+				t.Errorf("stderr = %q, want the next step %q", run.stderr, tc.hint)
+			}
+			if tc.hint == "" && strings.Contains(run.stderr, "defenseclaw-gateway start") {
+				t.Errorf("stderr = %q, want no start advice", run.stderr)
 			}
 		})
 	}
