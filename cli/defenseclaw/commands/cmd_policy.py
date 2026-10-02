@@ -825,7 +825,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
         ux.ok(f"Removed your edited copy of built-in policy '{name}'; the built-in version is back.")
         _log_policy_action(app, "policy-delete", name, "reverted edited built-in", done="Copy removed")
         if is_active:
-            _activate_policy(app, name)
+            _reactivate_after_delete(app, name)
         return
 
     if is_active and not force:
@@ -847,7 +847,14 @@ def delete(app: AppContext, name: str, force: bool) -> None:
     # above blocks the implicit case).
     if is_active:
         ux.warn(f"'{name}' was the active policy — re-activating 'default'.")
-        _activate_policy(app, "default")
+        _reactivate_after_delete(app, "default")
+
+
+def _reactivate_after_delete(app: AppContext, name: str) -> None:
+    """Re-activate *name* and apply it to the running gateway like ``policy activate`` (GAP-1723)."""
+    before = _restart_only_config(app.cfg)
+    _activate_policy(app, name)
+    _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
 
 
 # ---------------------------------------------------------------------------

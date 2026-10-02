@@ -321,6 +321,22 @@ class TestPolicyDelete(PolicyCommandTestBase):
         # A second delete has nothing left to revert.
         self.assertNotEqual(self.invoke(["delete", "strict"]).exit_code, 0)
 
+    def test_delete_active_edited_builtin_reloads_gateway(self):
+        """GAP-1723: the restored built-in reaches the running gateway and the output says so."""
+        from unittest.mock import patch
+
+        self.assertEqual(self.invoke(["activate", "strict", "--no-reload"]).exit_code, 0)
+        result = self.invoke(["edit", "guardrail", "-p", "strict", "--block-threshold", "3", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        with patch(
+            "defenseclaw.commands.cmd_policy._reload_gateway_policy", return_value=("reloaded", "")
+        ) as reload:
+            result = self.invoke(["delete", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("built-in version is back", result.output)
+        self.assertIn("Gateway reloaded the policy", result.output)
+        reload.assert_called_once()
+
     def test_delete_nonexistent(self):
         result = self.invoke(["delete", "nope"])
         self.assertNotEqual(result.exit_code, 0)
