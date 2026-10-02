@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
-
 from defenseclaw.agent_selection import SetupAgentSelection
 from defenseclaw.commands import cmd_setup
 
