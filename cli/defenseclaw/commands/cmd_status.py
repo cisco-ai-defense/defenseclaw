@@ -640,7 +640,9 @@ def _print_agents(
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
                 ux.echo(f"                {dim_text}{suffix}")
             else:
-                ux.echo(f"                {dim_text}")
+                # A drifted or removed hook registration shows with the
+                # gateway stopped too (GAP-1230).
+                ux.echo(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}")
 
 
 def _canonical_data_dir(value) -> str | None:
@@ -774,11 +776,11 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
 
 
 def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
-    """`` — DEGRADED (...)`` when a hook script or token drifted (GAP-1141, GAP-1138)."""
+    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
+        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
 
-        problems = hook_runtime_problems(cfg, connector)
+        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:

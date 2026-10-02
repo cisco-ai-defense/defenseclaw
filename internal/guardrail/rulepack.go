@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strings"
 	"syscall"
@@ -895,7 +896,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				return rulePackErr(rel, "duplicate_rule_id", fmt.Sprintf("rule %d id duplicates another rule", ruleIndex))
 			}
 			seenIDs[ruleID] = struct{}{}
-			if err := validateRequiredRegex(rel, fmt.Sprintf("rule %d pattern", ruleIndex), rule.Pattern); err != nil {
+			if err := validateRequiredRegex(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
 				return err
 			}
 			hasExpression := rule.Expression != "" || (rule.decoded && rule.expressionSet)
@@ -1280,9 +1281,31 @@ func validateRequiredRegex(rel, field, pattern string) error {
 		return rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
 	}
 	if _, err := regexp.Compile(pattern); err != nil {
-		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression")
+		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
 	}
 	return nil
+}
+
+// safeRuleIDPattern bounds the rule ids echoed in validation errors.
+var safeRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+
+// ruleFieldLabel names a rule by its id and its 1-based place in the file, so
+// an author can find it (GAP-1225). An id outside the safe set is left out.
+func ruleFieldLabel(index int, id string) string {
+	if safeRuleIDPattern.MatchString(id) {
+		return fmt.Sprintf("rule %s (entry %d)", id, index+1)
+	}
+	return fmt.Sprintf("rule entry %d", index+1)
+}
+
+// regexErrorReason returns the RE2 reason (for example "missing closing ]")
+// without the expression text, so no source regex reaches the error.
+func regexErrorReason(err error) string {
+	var syntaxErr *syntax.Error
+	if errors.As(err, &syntaxErr) && syntaxErr.Code != "" {
+		return ": " + string(syntaxErr.Code)
+	}
+	return ""
 }
 
 func validSeverity(severity string) bool {

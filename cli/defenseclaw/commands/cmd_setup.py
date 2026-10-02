@@ -992,6 +992,13 @@ def setup_llm(
         )
         return
 
+    if not non_interactive and provider and model:
+        # Flags typed on the command line answer their prompts; asking
+        # "Pick provider [anthropic]" again would let Enter undo --provider
+        # (GAP-1290).
+        ux.subhead("Using --provider and --model from the command line; nothing to ask.")
+        non_interactive = True
+
     if non_interactive:
         _configure_llm_non_interactive(
             cfg,
@@ -5628,9 +5635,10 @@ def _resolve_judge_hook_gate(
     type=_PlatformConnectorChoice(_CONNECTOR_NAMES, case_sensitive=False),
     default=None,
     help=(
-        "Agent framework connector. Alias: --agent. Defaults to "
-        "<data_dir>/picked_connector when set by the installer, "
-        "else filesystem auto-detection, else openclaw."
+        "Agent framework connector. Alias: --agent. When omitted: the "
+        "connector an earlier run saved, else the one picked at install "
+        "time, else openclaw (the interactive wizard also suggests a "
+        "connector it finds on this machine)."
     ),
 )
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None, help="Guardrail mode")
@@ -5936,7 +5944,7 @@ def setup_guardrail(
     Use --connector (alias: --agent) to pick the agent connector. It
     decides how LLM traffic is intercepted, how tool calls are inspected
     and which subprocess policy applies. When omitted, it is the connector
-    picked at install time, then the one an earlier run saved; with neither
+    an earlier run saved, then the one picked at install time; with neither
     it falls back to OpenClaw, so pass --connector on hosts without OpenClaw.
 
     Two modes:
@@ -13761,7 +13769,7 @@ def _wait_for_connector_runtime(
         return True, gateway_generation, _ConnectorRuntimeReadiness(True)
 
     def validate_transaction(deadline: float, *, accept_opencode_pending: bool = False) -> _ConnectorRuntimeReadiness:
-        from defenseclaw.commands.cmd_doctor import connector_setup_readiness
+        from defenseclaw.commands.cmd_doctor import _hermes_host_running, connector_setup_readiness
 
         results: queue.Queue[_ConnectorRuntimeReadiness] = queue.Queue(maxsize=1)
         cancelled = threading.Event()
@@ -13799,6 +13807,11 @@ def _wait_for_connector_runtime(
                             and "live=false" in detail
                             and ("pending-reload" in detail or "unverified" in detail)
                         ):
+                            # With no Hermes host running there is nothing to
+                            # reload: the next host starts with the hooks, as
+                            # doctor reports (GAP-1235).
+                            if _hermes_host_running() is False:
+                                continue
                             # Hermes hosts cache callbacks. A fresh protected
                             # lock plus exact on-disk registration is a valid
                             # committed Setup outcome, but it must remain
@@ -13817,6 +13830,15 @@ def _wait_for_connector_runtime(
                                 "pending-reload",
                                 failure.detail,
                             )
+                            continue
+                        if (
+                            must_converge
+                            and failure.connector not in must_converge
+                            and _opencode_awaiting_restart(failure)
+                        ):
+                            # An idle OpenCode peer has a current plugin and
+                            # simply has not reported a load: nothing to skip
+                            # or re-run (GAP-1271).
                             continue
                         if must_converge and failure.connector not in must_converge:
                             # A peer's own registration problem is not this

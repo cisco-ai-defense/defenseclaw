@@ -91,3 +91,50 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
             problems.append(f"hook token {token_path} is missing, so every hook call fails")
         break
     return problems
+
+
+_CONFIG_LIMIT = 2 * 1024 * 1024
+
+
+def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
+    """Report hook config files that no longer mention DefenseClaw at all.
+
+    Setup records the agent config files it registered hooks in
+    (``locations.hook_config_paths``). When every one of them that exists has
+    lost its DefenseClaw entries (for example the ``hooks`` key was deleted
+    from ``~/.claude/settings.json``), the agent runs unguarded; status says
+    so instead of showing the connector as normal (GAP-1230).
+    """
+
+    if os.name == "nt":
+        return []
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    lock_path = Path(data_dir, "hook_contract_lock.json")
+    try:
+        if not data_dir or lock_path.stat().st_size > _LOCK_LIMIT:
+            return []
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    connectors = lock.get("connectors") if isinstance(lock, dict) else None
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    locations = entry.get("locations") if isinstance(entry, dict) else None
+    raw_paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
+    if not isinstance(raw_paths, list):
+        return []
+    existing: list[Path] = []
+    for raw in raw_paths:
+        path = Path(str(raw or ""))
+        if not str(raw or "").strip():
+            continue
+        try:
+            if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
+                continue
+            if "defenseclaw" in path.read_text(encoding="utf-8", errors="replace").lower():
+                return []
+        except OSError:
+            continue
+        existing.append(path)
+    if not existing:
+        return []
+    return [f"no DefenseClaw hooks are registered in {existing[0]}"]

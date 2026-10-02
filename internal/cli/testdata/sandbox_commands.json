@@ -11,6 +11,11 @@
         "default": "false"
       },
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -32,6 +37,11 @@
     "use": "approvals",
     "short": "List the asks waiting for you (doors into your machine or network)",
     "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "output",
         "shorthand": "o",
@@ -224,6 +234,11 @@
     "short": "List the harness images",
     "flags": [
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -267,6 +282,11 @@
     "short": "List sandboxes",
     "flags": [
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -304,6 +324,11 @@
     "short": "List the built-in and custom packs with their sha256 digests",
     "flags": [
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -316,6 +341,11 @@
     "use": "show \u003cpack\u003e",
     "short": "Print a pack and its sha256 digest (for openshell.admin.required_pack_digest)",
     "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "output",
         "shorthand": "o",
@@ -357,6 +387,11 @@
       {
         "name": "harness",
         "type": "string"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
       },
       {
         "name": "output",
@@ -403,6 +438,11 @@
         "type": "string"
       },
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -437,6 +477,11 @@
     "use": "suggest",
     "short": "Suggest an egress allowlist from the destinations sandboxes reached",
     "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "output",
         "shorthand": "o",
@@ -479,6 +524,11 @@
         "default": "false"
       },
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -513,6 +563,11 @@
     "flags": [
       {
         "name": "diff",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "json",
         "type": "bool",
         "default": "false"
       },
@@ -732,6 +787,11 @@
     "short": "Show the sandbox subsystem, or one sandbox in detail",
     "flags": [
       {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -796,6 +856,11 @@
     "use": "undo \u003cname\u003e",
     "short": "Restore the project folder to its pre-session snapshot",
     "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "keep-refs",
         "type": "bool",

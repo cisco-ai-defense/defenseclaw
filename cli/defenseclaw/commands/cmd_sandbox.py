@@ -85,6 +85,8 @@ class _Cmd:
 
 
 _OUTPUT = _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT")
+# --json is the same as --output json (GAP-1247).
+_JSON = _Flag("json", "bool", "same as --output json")
 _YES = _Flag("yes", "bool", "answer every question with its default", short="y")
 # run and connect: a mount's changes are kept, a copy's stay in the sandbox.
 _SESSION_YES = _Flag(
@@ -98,6 +100,7 @@ _SESSION_YES = _Flag(
 def _policy_flags() -> tuple[_Flag, ...]:
     return (
         _OUTPUT,
+        _JSON,
         _Flag("sandbox", "string", "the policy of this sandbox", metavar="NAME"),
         _Flag("harness", "string", "resolve for this harness", metavar="HARNESS"),
         _Flag("pack", "string", "resolve with this pack", metavar="PACK"),
@@ -178,7 +181,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ),
         flags=(
             _OUTPUT,
-            _Flag("json", "bool", "same as --output json"),
+            _JSON,
             _Flag("fix", "bool", "apply the fixes doctor can make as your user (asks first)"),
             _Flag("yes", "bool", "apply fixes without asking", short="y"),
         ),
@@ -304,12 +307,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "defenseclaw sandbox run claude --credential STRIPE_API_KEY=api.stripe.com -- --model sonnet"
         ),
     ),
-    _Cmd(("list",), "List sandboxes", flags=(_OUTPUT,)),
+    _Cmd(("list",), "List sandboxes", flags=(_OUTPUT, _JSON)),
     _Cmd(
         ("status",),
         "Show the sandbox subsystem, or one sandbox in detail",
         args=(_Arg("name", required=False),),
-        flags=(_OUTPUT,),
+        flags=(_OUTPUT, _JSON),
     ),
     _Cmd(
         ("connect",),
@@ -378,6 +381,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         "Show the live activity feed: destinations, blocks, asks, tool blocks, findings",
         flags=(
             _OUTPUT,
+            _JSON,
             _Flag("sandbox", "string", "only this sandbox", metavar="NAME"),
             _Flag("follow", "bool", "keep following the feed", short="f"),
             _Flag("since", "uint64", "start after this event sequence number", default="0", metavar="SEQ"),
@@ -389,6 +393,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _OUTPUT,
+            _JSON,
             _Flag("yes", "bool", "do not ask after the preview", short="y"),
             _Flag("preview", "bool", "only show what undo would change"),
             _Flag("restart", "bool", "start the sandbox again afterwards"),
@@ -405,13 +410,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "--output json it prints the pull's result."
         ),
         args=(_Arg("name"),),
-        flags=(_OUTPUT, _Flag("diff", "bool", "print the unified diff too")),
+        flags=(_OUTPUT, _JSON, _Flag("diff", "bool", "print the unified diff too")),
     ),
     _Cmd(
         ("approvals",),
         "List the asks waiting for you (doors into your machine or network)",
         flags=(
             _OUTPUT,
+            _JSON,
             _Flag("sandbox", "string", "only this sandbox", metavar="NAME"),
             _Flag("watch", "bool", "keep watching for new asks"),
         ),
@@ -433,6 +439,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _OUTPUT,
+            _JSON,
             _Flag("apply", "bool", "merge the changes into your working tree (3-way)"),
             _Flag("branch", "bool", "put the changes on branch dc/<name>"),
             _Flag("branch-name", "string", "put the changes on this branch", metavar="BRANCH"),
@@ -451,7 +458,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("policy", "suggest"),
         "Suggest an egress allowlist from the destinations sandboxes reached",
-        flags=(_OUTPUT, _Flag("sandbox", "string", "only this sandbox's destinations", metavar="NAME")),
+        flags=(_OUTPUT, _JSON, _Flag("sandbox", "string", "only this sandbox's destinations", metavar="NAME")),
     ),
     _Cmd(
         ("policy", "allow"),
@@ -460,12 +467,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(("policy", "block"), "Add hosts to openshell.egress.block", args=(_Arg("hosts", many=True),)),
     _Cmd(("pack",), "Inspect sandbox policy packs"),
-    _Cmd(("pack", "list"), "List the built-in and custom packs with their sha256 digests", flags=(_OUTPUT,)),
+    _Cmd(("pack", "list"), "List the built-in and custom packs with their sha256 digests", flags=(_OUTPUT, _JSON)),
     _Cmd(
         ("pack", "show"),
         "Print a pack and its sha256 digest (for openshell.admin.required_pack_digest)",
         args=(_Arg("pack"),),
-        flags=(_OUTPUT,),
+        flags=(_OUTPUT, _JSON),
     ),
     _Cmd(("pack", "validate"), "Validate a pack file strictly", args=(_Arg("path"),)),
     _Cmd(("image",), "Build, list, prune and remove the harness images"),
@@ -478,7 +485,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("verbose", "bool", "stream the docker build output"),
         ),
     ),
-    _Cmd(("image", "list"), "List the harness images", flags=(_OUTPUT,)),
+    _Cmd(("image", "list"), "List the harness images", flags=(_OUTPUT, _JSON)),
     _Cmd(
         ("image", "prune"),
         "Remove superseded harness images",

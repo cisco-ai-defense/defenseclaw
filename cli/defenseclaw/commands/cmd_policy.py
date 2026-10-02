@@ -390,8 +390,12 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
     if guardrail:
         click.echo()
         click.echo("Guardrail:")
-        click.echo(f"  block_threshold:    {guardrail.get('block_threshold', 4)} (severity rank)")
-        click.echo(f"  alert_threshold:    {guardrail.get('alert_threshold', 2)} (severity rank)")
+        click.echo(f"  block_threshold:    {_severity_rank_label(guardrail.get('block_threshold', 4))}")
+        click.echo(f"  alert_threshold:    {_severity_rank_label(guardrail.get('alert_threshold', 2))}")
+        click.echo(
+            "  (these thresholds apply to LLM traffic through the guardrail proxy; "
+            "tool-call blocking uses 'defenseclaw guardrail block-at')"
+        )
         hilt = guardrail.get("hilt", {}) or {}
         click.echo(
             f"  hilt:               enabled={bool(hilt.get('enabled', False))} "
@@ -468,6 +472,12 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
                 "was not recorded.",
                 err=True,
             )
+    # The policy's guardrail thresholds are not the tool-call block level
+    # (GAP-1228).
+    click.echo(
+        "  Its guardrail thresholds govern LLM traffic through the proxy; tool-call "
+        "blocking is unchanged (see 'defenseclaw guardrail status' and 'guardrail block-at')."
+    )
     if not reload_gateway:
         return
     _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
@@ -491,6 +501,20 @@ def _gateway_pid_alive(app: AppContext) -> bool:
         return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
+
+
+_SEVERITY_RANK_NAMES = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
+
+
+def _severity_rank_label(value: object) -> str:
+    """'MEDIUM (2)' for a policy severity rank; the raw value when it is not a known rank (GAP-1228)."""
+
+    try:
+        rank = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    name = _SEVERITY_RANK_NAMES.get(rank)
+    return f"{name} ({rank})" if name else str(value)
 
 
 def _reload_and_report(app: AppContext, name: str, *, needs_restart: bool = False) -> None:
