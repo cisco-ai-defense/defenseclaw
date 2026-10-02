@@ -894,6 +894,25 @@ defenseclaw_emit_unreachable_stderr() {
   fi
 }
 
+# defenseclaw_unreachable_notice_json prints a one-line hook result whose
+# systemMessage tells the user that DefenseClaw is not checking this session
+# and how to resume, when this account's own per-user gateway is down. A
+# fail-open hook exits 0, and Claude Code and Codex do not show stderr then:
+# the systemMessage is the only text the user sees. It prints nothing when
+# the gateway is not this account's to start (managed or socket hooks).
+defenseclaw_unreachable_notice_json() {
+  local next="" text=""
+  next="$(defenseclaw_unreachable_next_step)"
+  [ -n "$next" ] || return 0
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ -e "${data}/gateway.stopped" ]; then
+    text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
+  else
+    text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection.'
+  fi
+  printf '{"systemMessage":"%s"}\n' "$(defenseclaw_json_escape "$text")"
+}
+
 # defenseclaw_unreachable_next_step prints the next step for a per-user
 # account whose own gateway is down: after `defenseclaw-gateway stop` the
 # hooks deliberately do not start it again, so say how to resume. Managed

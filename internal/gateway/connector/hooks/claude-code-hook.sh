@@ -162,7 +162,14 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
-  exit 0
+{{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+  # that this account's gateway is down and how to start it again.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{end}}  exit 0
 }
 
 fail_response() {
