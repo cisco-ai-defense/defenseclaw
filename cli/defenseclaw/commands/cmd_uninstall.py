@@ -61,6 +61,9 @@ import click
 
 from defenseclaw import config as config_module
 from defenseclaw import legacy_connector, ux
+# Imported here, not where it is used: by then the data removal has deleted
+# the virtual environment this CLI runs from (GAP-1397).
+from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -1390,8 +1393,6 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
     if plan.remove_data_dir and not plan.preserve_data_entries:
         _remove_empty_plugin_cache()
-        from defenseclaw.bootstrap import remove_own_api_port_claims
-
         remove_own_api_port_claims()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))

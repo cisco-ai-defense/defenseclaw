@@ -1551,5 +1551,60 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             self.assertFalse(plugin.parent.exists())
 
 
+class _BlockDefenseClawImports:
+    """A meta path finder that fails any new defenseclaw import, as Python
+    does once the data removal has deleted the venv this CLI runs from."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "defenseclaw" or fullname.startswith("defenseclaw."):
+            raise ModuleNotFoundError(f"No module named {fullname!r}")
+        return None
+
+
+class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
+    def test_all_binaries_finishes_after_the_venv_is_gone(self):
+        # GAP-1397: a function-level import after the data removal raised
+        # ModuleNotFoundError, so binary removal never ran.
+        blocker = _BlockDefenseClawImports()
+        evicted = {name: mod for name, mod in sys.modules.items() if name == "defenseclaw.bootstrap"}
+
+        def remove_data(*_args, **_kwargs):
+            for name in evicted:
+                sys.modules.pop(name, None)
+            sys.meta_path.insert(0, blocker)
+
+        def restore():
+            with contextlib.suppress(ValueError):
+                sys.meta_path.remove(blocker)
+            sys.modules.update(evicted)
+
+        self.addCleanup(restore)
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="linux",
+            data_dir="/tmp/dc-gap1397/.defenseclaw",
+            install_root="/tmp/dc-gap1397/.local/bin",
+            remove_data_dir=True,
+            remove_binaries=True,
+        )
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway"),
+            patch.object(cmd_uninstall, "_remove_created_dirs"),
+            patch.object(cmd_uninstall, "_remove_orphan_copilot_plugin"),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=False),
+            patch.object(cmd_uninstall, "_remove_data_dir", side_effect=remove_data),
+            patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+            patch.object(cmd_uninstall, "remove_own_api_port_claims") as claims,
+            patch.object(cmd_uninstall, "_remove_binaries") as binaries,
+            capture_click_output(),
+        ):
+            result = cmd_uninstall._execute_plan(plan)
+
+        self.assertTrue(result.succeeded)
+        self.assertEqual([p.name for p in result.phases][-2:], ["data removal", "binary removal"])
+        claims.assert_called_once_with()
+        binaries.assert_called_once_with(plan)
+
+
 if __name__ == "__main__":
     unittest.main()
