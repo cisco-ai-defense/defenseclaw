@@ -343,6 +343,7 @@ defenseclaw policy edit guardrail --block-threshold 3   # active policy blocks H
 | --- | --- |
 | `defenseclaw keys list [--json]` | Show every credential DefenseClaw knows about and where its value comes from. |
 | `defenseclaw keys set NAME [--value V \| --value-stdin]` | Save a credential to `~/.defenseclaw/.env`. Without a value option it prompts with hidden input. `--value-stdin` reads the first line of standard input (trailing newline removed) and never echoes it, so the secret stays out of shell history and process listings; an empty line exits `1`. `--value` and `--value-stdin` can't be combined. |
+| `defenseclaw keys remove NAME [--yes]` | Delete a stored credential from `~/.defenseclaw/.env` (any name, including ones outside the registry). It asks for confirmation unless `--yes` is given; a value exported in your shell is left alone. `keys list` names any `.env` entries that are not in the registry. |
 
 ```bash
 printf '%s\n' "$VT_KEY" | defenseclaw keys set VIRUSTOTAL_API_KEY --value-stdin

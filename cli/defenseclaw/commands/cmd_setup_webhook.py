@@ -462,7 +462,7 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     click.echo()
     click.echo(
         f"  {ux.bold('Testing webhook')} {ux.bold(v.name)} [{v.type}] "
-        f"{ux.dim('→')} {v.url}"
+        f"{ux.dim('→')} {redact_webhook_url(v.url)}"
     )
     if dry_run:
         ux.subhead("(dry-run) formatting only, no delivery")

@@ -724,7 +724,7 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
     Checks:\n
       1. data.json is valid JSON with required top-level keys\n
       2. All severity levels in actions and scanner_overrides have valid fields\n
-      3. Rego modules compile without errors (requires 'opa' binary or Go daemon)
+      3. Rego modules compile without errors ('opa' if installed, else defenseclaw-gateway)
     """
     rd = rego_dir or _rego_dir()
     errors: list[str] = []
@@ -806,7 +806,8 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
 def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     """Run OPA Rego unit tests.
 
-    Requires 'opa' binary on PATH. Install: https://www.openpolicyagent.org/docs/latest/#running-opa
+    Uses the 'opa' binary when it is on PATH, otherwise the OPA test runner
+    built into defenseclaw-gateway (no separate install needed).
     """
     rd = rego_dir or _rego_dir()
 
@@ -814,22 +815,24 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         ux.err(f"error: rego directory not found: {rd}")
         raise SystemExit(1)
 
-    cmd = ["opa", "test", rd]
+    cmd = _rego_tool_cmd(["test", rd], ["policy", "test", "--rego-dir", rd])
+    if cmd is None:
+        ux.err("error: neither 'opa' nor 'defenseclaw-gateway' was found")
+        ux.subhead(
+            "Reinstall DefenseClaw, or install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa",
+            indent="  ",
+        )
+        raise SystemExit(1)
     if verbose:
         cmd.append("-v")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
-        ux.err("error: 'opa' binary not found on PATH")
-        ux.subhead(
-            "Install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa",
-            indent="  ",
-        )
-        ux.subhead("Or: brew install opa", indent="  ")
+        ux.err(f"error: {cmd[0]} not found")
         raise SystemExit(1)
     except subprocess.TimeoutExpired:
-        ux.err("error: opa test timed out after 60s")
+        ux.err("error: Rego tests timed out after 60s")
         raise SystemExit(1)
 
     if result.stdout:
@@ -1448,50 +1451,67 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     click.echo(ux.dim(f"OPA data.json synced at {data_json_path}"))
 
 
+def _rego_tool_cmd(opa_args: list[str], gateway_args: list[str]) -> list[str] | None:
+    """Return the argv for a Rego check: 'opa' when installed, else the gateway.
+
+    defenseclaw-gateway embeds OPA (``policy validate`` / ``policy test``), so
+    a standard install can validate and test Rego without a separate 'opa'
+    binary (GAP-1091). Returns None when neither is available.
+    """
+    import shutil
+
+    opa = shutil.which("opa")
+    if opa:
+        return [opa, *opa_args]
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    gateway = resolve_gateway_binary()
+    if gateway:
+        return [gateway, *gateway_args]
+    return None
+
+
 def _try_rego_compile(rego_dir: str) -> bool:
     """Try to compile Rego modules. Returns True on success."""
-    # Try opa binary first
-    try:
-        rego_files = [
-            os.path.join(rego_dir, f) for f in os.listdir(rego_dir)
-            if f.endswith(".rego") and not f.endswith("_test.rego")
-        ]
-        if not rego_files:
-            ux.err("FAIL: no .rego files found")
-            return False
+    rego_files = [
+        os.path.join(rego_dir, f) for f in os.listdir(rego_dir)
+        if f.endswith(".rego") and not f.endswith("_test.rego")
+    ]
+    if not rego_files:
+        ux.err("FAIL: no .rego files found")
+        return False
 
-        cmd = ["opa", "check", "--strict"] + rego_files
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            ux.ok(f"Rego compilation: OK ({len(rego_files)} modules)")
-            return True
-        else:
-            ux.err("Rego compilation errors:")
-            if result.stderr:
-                click.echo(result.stderr.rstrip())
-            if result.stdout:
-                click.echo(result.stdout.rstrip())
-            return False
-    except FileNotFoundError:
-        # returning True here turned a missing `opa`
-        # binary into a clean "Rego compilation: OK" verdict, so a
-        # malformed bundle could pass `defenseclaw policy validate`
-        # in any environment where OPA was not installed. Operators
-        # can opt out of strict mode (and accept that no compilation
-        # actually happened) with DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1,
-        # but the default is to fail closed because the bundle is
-        # being validated for activation.
+    cmd = _rego_tool_cmd(["check", "--strict", *rego_files], ["policy", "validate", "--rego-dir", rego_dir])
+    if cmd is None:
+        # A missing checker must not turn into a clean "Rego compilation: OK"
+        # verdict, so the default fails closed. Operators can opt out with
+        # DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1.
         if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
-            click.echo("  'opa' binary not found — skipping Rego compilation (opt-in).")
-            click.echo("  Install OPA for full validation: brew install opa")
+            click.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
             return True
-        ux.err("FAIL: 'opa' binary not found — install OPA to validate Rego bundles.")
-        click.echo("  Install OPA for full validation: brew install opa")
+        ux.err("FAIL: no Rego checker found (neither 'opa' nor 'defenseclaw-gateway').")
+        click.echo("  Reinstall DefenseClaw, or install OPA for full validation.")
         click.echo(
             "  Set DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1 to bypass "
             "(NOT recommended for production)."
         )
         return False
-    except subprocess.TimeoutExpired:
-        ux.err("FAIL: opa check timed out")
+
+    via = "opa" if os.path.basename(cmd[0]).startswith("opa") else "defenseclaw-gateway"
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        ux.err(f"FAIL: {cmd[0]} not found")
         return False
+    except subprocess.TimeoutExpired:
+        ux.err("FAIL: Rego compilation timed out")
+        return False
+    if result.returncode == 0:
+        ux.ok(f"Rego compilation: OK ({len(rego_files)} modules, {via})")
+        return True
+    ux.err("Rego compilation errors:")
+    if result.stderr:
+        click.echo(result.stderr.rstrip())
+    if result.stdout:
+        click.echo(result.stdout.rstrip())
+    return False

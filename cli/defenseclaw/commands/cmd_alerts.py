@@ -101,7 +101,15 @@ def _detail_tokens(raw: str) -> list[str]:
     return tokens
 
 
+def _strip_details_json(raw: str) -> str:
+    """Drop the trailing ``details_json=`` blob; it repeats the key=value fields."""
+    if raw.startswith("details_json="):
+        return ""
+    return raw.split(" details_json=", 1)[0]
+
+
 def _humanize_details(raw: str) -> str:
+    raw = _strip_details_json(raw or "")
     if not raw:
         return ""
     tokens = _detail_tokens(raw)
@@ -191,6 +199,64 @@ def _event_connector(event) -> str:
     return _kv(event.details or "").get("connector", "").lower()
 
 
+def _hook_decision(hook_details: list[str]) -> str:
+    """Decision of the connector-hook rows recorded for the same request."""
+    decision = ""
+    for raw in hook_details:
+        kv = _kv(_strip_details_json(raw))
+        action = kv.get("action", "").lower()
+        if action == "block":
+            return "blocked"
+        if kv.get("would_block", "").lower() == "true":
+            decision = "would block (observe mode)"
+        elif not decision and action:
+            decision = action
+    return decision
+
+
+def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | None:
+    """Readable facts for a canonical finding row (GAP-1080).
+
+    The audit row behind a hook-rule finding has an empty target and only
+    ``finding.observed`` as details; the rule, target and scanner live in its
+    structured payload and the decision in the connector-hook row of the same
+    request.
+    """
+    structured = getattr(e, "structured", None)
+    if e.action != "scan-finding" or not isinstance(structured, dict):
+        return None
+    rule_id = str(structured.get("defenseclaw.finding.rule_id") or "").strip()
+    if not rule_id:
+        return None
+    title = str(structured.get("defenseclaw.finding.title") or "").strip()
+    facts = {
+        "target": e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip(),
+        "decision": _hook_decision(hook_details.get(e.id, [])),
+        "connector": _event_connector(e),
+        "rule": f"{rule_id}: {title}" if title else rule_id,
+        "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
+    }
+    return facts
+
+
+def _finding_details(facts: dict[str, str]) -> str:
+    return " ".join(
+        f"{key}={facts[key]}" for key in ("decision", "connector", "rule", "scanner") if facts.get(key)
+    )
+
+
+def _hook_details_for(store, alert_list: list) -> dict[str, list[str]]:
+    lookup = getattr(store, "hook_details_for_alerts", None)
+    ids = [e.id for e in alert_list if e.action == "scan-finding" and getattr(e, "id", "")]
+    if lookup is None or not ids:
+        return {}
+    try:
+        result = lookup(ids)
+    except Exception:  # an older or locked audit DB only loses the decision
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
 def _filter_by_connector(alert_list: list, connector: str | None) -> list:
     """Keep only alerts whose connector matches ``connector`` (substring,
     case-insensitive — same match rule as the TUI ``connector:`` token).
@@ -221,7 +287,8 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     table = Table(
         title=f"Security Alerts (last {len(alert_list)}){scope}",
         caption=(
-            "Run [bold]defenseclaw alerts --show #[/bold] for full details, "
+            "Run [bold]defenseclaw alerts --show #[/bold] for full details and the alert ID "
+            "(for [bold]alerts acknowledge/dismiss --id[/bold]), "
             "or [bold]defenseclaw tui[/bold] for the interactive Alerts panel."
         ),
         show_lines=False,
@@ -241,6 +308,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         "LOW":      "cyan",
     }
 
+    hook_details = _hook_details_for(store, alert_list)
     for idx, e in enumerate(alert_list, 1):
         sev_style = sev_styles.get(e.severity, "")
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
@@ -249,7 +317,11 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         target = _trunc_path(e.target or "", _W_TARGET)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
-        if e.action == "scan" and scanner_name and e.target:
+        facts = _finding_facts(e, hook_details)
+        if facts is not None:
+            target = _trunc_path(facts["target"], _W_TARGET)
+            raw_details = _finding_details(facts)
+        elif e.action == "scan" and scanner_name and e.target:
             findings = store.get_findings_for_target(e.target, scanner_name)
             raw_details = _findings_json(findings, w_details) if findings else _humanize_details(e.details or "")
         else:
@@ -367,18 +439,32 @@ def _alerts_default(
             "LOW": "cyan",
             "INFO": "white",
         }.get(e.severity, "bright_black")
+        def label(name: str) -> str:
+            return ux._style(f"{name}:".ljust(10), fg="bright_black", bold=True)
+
+        facts = _finding_facts(e, _hook_details_for(app.store, [e]))
         click.echo(f"{ux.bold(f'Alert #{show_idx}')}")
-        click.echo(f"  {ux._style('Severity:', fg='bright_black', bold=True)}  ", nl=False)
+        if e.id:
+            click.echo(f"  {label('ID')} {e.id}")
+        click.echo(f"  {label('Severity')} ", nl=False)
         click.echo(ux._style(e.severity, fg=sev_fg, bold=e.severity in ("CRITICAL", "HIGH")))
         ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
-        click.echo(f"  {ux._style('Timestamp:', fg='bright_black', bold=True)} {ts}")
-        click.echo(f"  {ux._style('Action:', fg='bright_black', bold=True)}    {e.action}")
-        if e.target:
-            click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}    {e.target}")
-        if e.details:
+        click.echo(f"  {label('Timestamp')} {ts}")
+        click.echo(f"  {label('Action')} {e.action}")
+        target = facts["target"] if facts else e.target
+        if target:
+            click.echo(f"  {label('Target')} {target}")
+        if facts:
+            for key, name in (("decision", "Decision"), ("connector", "Connector"),
+                              ("rule", "Rule"), ("scanner", "Scanner")):
+                if facts.get(key):
+                    click.echo(f"  {label(name)} {facts[key]}")
+        elif e.details:
+            if connector_name := _event_connector(e):
+                click.echo(f"  {label('Connector')} {connector_name}")
             human = _humanize_details(e.details)
             if human:
-                click.echo(f"  {ux._style('Details:', fg='bright_black', bold=True)}   {human}")
+                click.echo(f"  {label('Details')} {human}")
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         if e.action == "scan" and scanner_name and e.target:
@@ -400,6 +486,8 @@ def _alerts_default(
         hint = _alert_next_step(e)
         if hint:
             click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")
+        if e.id:
+            click.echo(ux.dim(f"  Acknowledge: defenseclaw alerts acknowledge --id {e.id}"))
         return
 
     if tui:

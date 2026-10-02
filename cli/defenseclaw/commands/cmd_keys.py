@@ -64,7 +64,7 @@ def _emit_bound_endpoint_hint(spec: CredentialSpec | None, cfg, *, indent: str) 
 
 @click.group("keys")
 def keys_cmd() -> None:
-    """Inspect and manage DefenseClaw API keys."""
+    """Inspect and manage DefenseClaw API keys (list, set, remove, check)."""
 
 
 @keys_cmd.command("list")
@@ -91,6 +91,21 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
         return
 
     _render_table(statuses, show_values=show_values)
+    if not missing_only:
+        _render_unregistered(app, statuses)
+
+
+def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> None:
+    """Name .env entries that are not in the registry so they can be removed."""
+    import os
+
+    known = {s.resolution.env_name for s in statuses} | {s.spec.env_name for s in statuses}
+    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+    extra = sorted(name for name in _dotenv_names(dotenv_path) if name not in known)
+    if not extra:
+        return
+    click.echo(f"  {ux.bold('Other entries in .env')} {ux.dim('(not in the registry):')} {', '.join(extra)}")
+    click.echo(f"  {ux.dim('Remove one with: defenseclaw keys remove <ENV_NAME>')}")
 
 
 @keys_cmd.command("set")
@@ -147,6 +162,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
 
     if not value:
         ux.err("No value provided — nothing saved.")
+        ux.subhead(f"To clear a stored key, run: defenseclaw keys remove {env_name}", indent="  ")
         raise click.Abort()
 
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -191,6 +207,104 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
             )
     ux.ok(f"Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
+
+
+@keys_cmd.command("remove")
+@click.argument("env_name")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
+    """Remove a credential from ``~/.defenseclaw/.env``.
+
+    Works for any name stored there, including keys that are not in the
+    DefenseClaw registry. A value exported in your shell is not touched.
+    """
+    import os
+
+    env_name = env_name.strip()
+    if not env_name:
+        raise click.UsageError("env_name must be non-empty")
+
+    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+    if env_name not in _dotenv_names(dotenv_path):
+        ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
+        return
+    if not yes and not click.confirm(f"  Remove {env_name} from {dotenv_path}?", default=False):
+        raise click.Abort()
+
+    if not _remove_dotenv_key(dotenv_path, env_name):
+        ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
+        return
+    from defenseclaw import credential_provenance
+
+    shell_value = os.environ.get(env_name, "")
+    from_dotenv = bool(shell_value) and credential_provenance.was_injected_from_dotenv(
+        app.cfg.data_dir, env_name, shell_value
+    )
+    if from_dotenv:
+        os.environ.pop(env_name, None)
+    if app.logger:
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        try:
+            app.logger.log_activity(
+                actor="cli:operator",
+                action=ACTION_CONFIG_UPDATE,
+                target_type="config",
+                target_id=f"dotenv:{env_name}",
+                before={"env": env_name, "had_value": True},
+                after={"env": env_name, "had_value": False},
+                diff=[{"path": f"/.env/{env_name}", "op": "remove", "before": "set", "after": "unset"}],
+            )
+        except CanonicalObservabilityUnavailableError:
+            click.echo(
+                "  ⚠ Key removed, but the gateway runtime is unavailable; the audit event was not recorded.",
+                err=True,
+            )
+    ux.ok(f"Removed {env_name} from {dotenv_path}", indent="  ")
+    if shell_value and not from_dotenv:
+        ux.subhead(f"{env_name} is still exported in this shell; unset it there too.", indent="    ")
+
+
+def _dotenv_names(dotenv_path: str) -> list[str]:
+    """Return the key names stored in a dotenv file (never the values)."""
+    from defenseclaw.commands.cmd_setup import _load_dotenv
+
+    try:
+        return list(_load_dotenv(dotenv_path))
+    except OSError:
+        return []
+
+
+def _remove_dotenv_key(dotenv_path: str, env_name: str) -> bool:
+    """Drop every ``env_name=`` line from the dotenv file; keep all other bytes."""
+    import os
+
+    from defenseclaw.commands.cmd_setup import _rotate_token_snapshot_locked
+    from defenseclaw.config import locked_file_update
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    wanted = env_name.encode("utf-8")
+    if os.name == "nt":
+        wanted = wanted.upper()
+    with locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        if not snapshot.existed:
+            return False
+        kept: list[bytes] = []
+        removed = False
+        for line in snapshot.body.splitlines(keepends=True):
+            key, sep, _value = line.strip().partition(b"=")
+            key = key.strip()
+            if os.name == "nt":
+                key = key.upper()
+            if sep and key == wanted:
+                removed = True
+                continue
+            kept.append(line)
+        if removed:
+            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+        return removed
 
 
 @keys_cmd.command("fill-missing")
