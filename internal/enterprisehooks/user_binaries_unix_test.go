@@ -132,3 +132,39 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 		t.Fatalf("PurgeUserState without ~/.local/bin: %v", err)
 	}
 }
+
+// The purge removed the binaries but left the ~/.local/bin (and ~/.local)
+// the per-user install had made, empty (dc-ubuntu-eh). Like the per-user
+// uninstall --all --binaries, an emptied ~/.local/bin goes, and ~/.local
+// when that leaves it empty; one that still holds anything stays.
+func TestRemoveUserBinariesRemovesTheEmptiedLocalBin(t *testing.T) {
+	skipIfRoot(t)
+	for _, keep := range []string{"", ".local/share/opencode/log"} {
+		home := newTestHome(t)
+		binDir := filepath.Join(home, ".local", "bin")
+		if err := os.MkdirAll(binDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte("gateway"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if keep != "" {
+			if err := os.MkdirAll(filepath.Join(home, filepath.FromSlash(keep)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := RemoveUserBinaries(home, filepath.Join(home, ".defenseclaw"), os.Getuid()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(binDir); !os.IsNotExist(err) {
+			t.Fatalf("keep %q: the emptied ~/.local/bin stayed: %v", keep, err)
+		}
+		_, err := os.Lstat(filepath.Join(home, ".local"))
+		if keep == "" && !os.IsNotExist(err) {
+			t.Fatalf("the emptied ~/.local stayed: %v", err)
+		}
+		if keep != "" && err != nil {
+			t.Fatalf("~/.local with other content must stay: %v", err)
+		}
+	}
+}

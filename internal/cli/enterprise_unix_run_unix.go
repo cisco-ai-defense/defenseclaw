@@ -75,6 +75,8 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		AllowDowngrade:       opts.allowDowngrade,
 		Purge:                opts.purge,
 		RemoveServiceAccount: opts.removeServiceAccount,
+		KeepState:            opts.keepState,
+		KeepServiceAccount:   opts.keepServiceAccount,
 		ProductVersion:       opts.productVersion,
 		Reason:               opts.reason,
 	})

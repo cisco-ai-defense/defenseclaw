@@ -510,7 +510,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
 				return err
 			}
-			if err := conn.Setup(ctx, setupOpts); err != nil {
+			// The folders Setup creates below the home (~/.codex in an
+			// account that never ran Codex, say) are recorded, so the purge
+			// and a per-user uninstall --all remove them once empty.
+			if err := connector.SetupRecordingCreatedDirs(ctx, conn, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
 			}
 			// Setup found the folders made above already there, so it did

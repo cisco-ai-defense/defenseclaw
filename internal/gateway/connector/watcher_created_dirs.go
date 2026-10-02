@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -49,36 +50,63 @@ func RecordWatcherCreatedDirs(dataDir string, dirs []string) error {
 func SetupRecordingCreatedDirs(ctx context.Context, conn Connector, opts SetupOpts) error {
 	missing := missingConfigDirs(conn, opts)
 	err := conn.Setup(ctx, opts)
+	recordDirsNowPresent(opts.DataDir, missing)
+	return err
+}
+
+// recordDirsNowPresent adds to the data directory's list each of missing,
+// folders that did not exist before a DefenseClaw write, that is a folder
+// now. Best effort.
+func recordDirsNowPresent(dataDir string, missing []string) {
+	if strings.TrimSpace(dataDir) == "" {
+		return
+	}
 	var created []string
 	for _, dir := range missing {
 		if info, statErr := os.Lstat(dir); statErr == nil && info.Mode().Type() == fs.ModeDir {
 			created = append(created, dir)
 		}
 	}
-	if len(created) > 0 && strings.TrimSpace(opts.DataDir) != "" {
-		_ = recordCreatedDirs(filepath.Join(opts.DataDir, watcherCreatedDirsFile), created)
+	if len(created) > 0 {
+		_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
 	}
+}
+
+// prepareOpenCodePluginArtifactDestination creates the plugin folder of
+// path (~/.config/opencode/plugins) and records the folders below the home
+// it had to create, so uninstall removes them again once they are empty:
+// the folder is made before any connector Setup runs (the gateway's
+// registration snapshot), so SetupRecordingCreatedDirs never sees it
+// missing, and the plugin file is not one of the hook config paths.
+func prepareOpenCodePluginArtifactDestination(path, dataDir string) error {
+	var missing []string
+	if home := strings.TrimSpace(userHomeDir()); home != "" && filepath.IsAbs(path) {
+		missing = missingParentDirs(filepath.Clean(home), path)
+	}
+	err := createOpenCodePluginArtifactDestination(path)
+	recordDirsNowPresent(dataDir, missing)
 	return err
 }
 
 // RemovalLeavingNoNewDirs runs fn, a removal of conn's registration for a
-// target that may never have had DefenseClaw's per-user state. When the data
-// directory did not exist, what fn put there (the disabled hook scripts and
-// locks a teardown writes so an agent's cached registration stays harmless;
-// none can be cached, as no hook script was ever there) goes again, and so do
-// the agent config folders below the home it created and left empty.
+// target. The agent config folders below the home that fn itself created
+// and left empty go again (removing Codex's hooks made an empty ~/.codex in
+// an account where Codex never ran, and the purge then left it). When the
+// data directory did not exist, what fn put there (the disabled hook
+// scripts and locks a teardown writes so an agent's cached registration
+// stays harmless; none can be cached, as no hook script was ever there)
+// goes too.
 func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) error {
 	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
 	_, statErr := os.Lstat(dataDir)
 	dataDirMissing := strings.TrimSpace(opts.DataDir) != "" && errors.Is(statErr, fs.ErrNotExist)
 	missing := missingConfigDirs(conn, opts)
 	err := fn()
-	if !dataDirMissing {
-		return err
-	}
-	if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
-		if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
-			err = removeErr
+	if dataDirMissing {
+		if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
+			if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
+				err = removeErr
+			}
 		}
 	}
 	sort.Slice(missing, func(i, j int) bool { return len(missing[i]) > len(missing[j]) })
@@ -89,24 +117,47 @@ func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) er
 }
 
 // missingConfigDirs returns the missing folders between the home directory
-// and each agent config file conn writes, deepest first.
+// and each agent file conn writes, deepest first: its hook config files and
+// the agent files its Setup patches (AgentPaths: OpenCode's plugin and
+// opencode.json, say, which make ~/.config/opencode in a home where OpenCode
+// never ran). Files in the data directory are DefenseClaw's own and go with it.
 func missingConfigDirs(conn Connector, opts SetupOpts) []string {
 	home := strings.TrimSpace(userHomeDir())
 	if home == "" || conn == nil {
 		return nil
 	}
 	home = filepath.Clean(home)
+	paths := HookConfigPathsForConnector(conn, opts)
+	if provider, ok := conn.(AgentPathProvider); ok {
+		paths = append(paths, provider.AgentPaths(opts).PatchedFiles...)
+	}
+	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
 	var missing []string
-	for _, path := range HookConfigPathsForConnector(conn, opts) {
+	for _, path := range uniqueNonEmptyStrings(paths) {
 		if !filepath.IsAbs(path) {
 			continue
 		}
-		for dir := filepath.Dir(filepath.Clean(path)); belowDir(home, dir); dir = filepath.Dir(dir) {
-			if _, statErr := os.Lstat(dir); !errors.Is(statErr, fs.ErrNotExist) {
-				break
-			}
-			missing = append(missing, dir)
+		if strings.TrimSpace(opts.DataDir) != "" && (filepath.Clean(path) == dataDir || belowDir(dataDir, path)) {
+			continue
 		}
+		for _, dir := range missingParentDirs(home, path) {
+			if !slices.Contains(missing, dir) {
+				missing = append(missing, dir)
+			}
+		}
+	}
+	return missing
+}
+
+// missingParentDirs returns the missing folders between home and path,
+// deepest first.
+func missingParentDirs(home, path string) []string {
+	var missing []string
+	for dir := filepath.Dir(filepath.Clean(path)); belowDir(home, dir); dir = filepath.Dir(dir) {
+		if _, statErr := os.Lstat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+			break
+		}
+		missing = append(missing, dir)
 	}
 	return missing
 }
