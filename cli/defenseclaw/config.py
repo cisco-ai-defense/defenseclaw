@@ -33,6 +33,7 @@ import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -215,9 +216,35 @@ def empty_config_message(path: str | None = None) -> str:
     home = os.path.dirname(cfg_file) or "."
     return (
         f"{cfg_file} is empty: it holds no settings (as after a crash or a full disk). "
-        "It is not an older configuration, and nothing was changed. Restore your copy of config.yaml "
-        f"(an upgrade keeps the previous one in {os.path.join(home, 'previous', 'data')}), "
+        "It is not an older configuration, and nothing was changed. Restore your copy of config.yaml"
+        f"{_previous_config_hint(home)}, "
         "or remove the empty file and run 'defenseclaw init'."
+    )
+
+
+def _previous_config_hint(home: str) -> str:
+    """Name the config the last version upgrade kept, with its version and date.
+
+    previous/ is refreshed only by an upgrade to another version, so the copy
+    can be much older than the config just lost (GAP-1786).
+    """
+
+    previous = os.path.join(home, "previous")
+    kept = os.path.join(previous, "data", "config.yaml")
+    try:
+        mtime = os.stat(kept).st_mtime
+    except OSError:
+        return ""
+    try:
+        with open(os.path.join(previous, "VERSION"), encoding="utf-8") as stream:
+            version = stream.read(64).strip()
+    except (OSError, UnicodeError):
+        version = ""
+    label = f"the DefenseClaw {version} config" if version else "the config"
+    when = datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f" (the last version upgrade kept {label} from {when} in {kept}; "
+        "it lacks every change made since then)"
     )
 
 

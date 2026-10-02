@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -40,6 +41,23 @@ def test_empty_config_is_named_not_migrated(data_dir: Path, content: str) -> Non
     with pytest.raises(dcconfig.ConfigVersionError, match="nothing was changed"):
         dcconfig.require_v8_config(path=str(path))
     assert path.read_text(encoding="utf-8") == content
+
+
+def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
+    # GAP-1786: previous/ only changes on a version upgrade, so say how old it is.
+    path = data_dir / "config.yaml"
+    path.write_text("", encoding="utf-8")
+    assert "previous" not in dcconfig.empty_config_message(str(path))
+    kept = data_dir / "previous" / "data" / "config.yaml"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("config_version: 8\n", encoding="utf-8")
+    (data_dir / "previous" / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    os.utime(kept, (1790916000, 1790916000))
+
+    message = dcconfig.empty_config_message(str(path))
+
+    assert f"kept the DefenseClaw 1.0.1 config from 2026-10-02 04:40 UTC in {kept}" in message
+    assert "lacks every change made since then" in message
 
 
 def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
