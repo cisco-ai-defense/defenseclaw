@@ -589,10 +589,21 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		if encodeErr != nil {
 			return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, encodeErr)
 		}
-		legacyTarget = nullStr(legacy.Target)
+		// The source values fill the historical columns only where the local
+		// profile kept them unchanged; otherwise the projected value is kept,
+		// so a strict store never holds the content it removed (GAP-1945).
+		projected, _ := projection.Payload().Object()
+		if value, kept := keptCompatibilityValue(projected, "target", legacy.Target); kept {
+			legacyTarget = nullStr(value)
+		}
 		legacyActor = legacy.Actor
-		legacyDetails = legacy.Details
-		legacyStructured = structured
+		if value, kept := keptCompatibilityValue(projected, "details", legacy.Details); kept {
+			legacyDetails = value
+		}
+		if encoded, err := json.Marshal(legacy.Structured); len(legacy.Structured) == 0 ||
+			(err == nil && projected["structured_json"] == string(encoded)) {
+			legacyStructured = structured
+		}
 		legacySeverity = nullStr(legacy.Severity)
 		legacySchemaVersion = nullInt(legacy.SchemaVersion)
 		legacyContentHash = nullStr(legacy.ContentHash)
@@ -1235,6 +1246,22 @@ func enforcementBlockCompatibility(ctx context.Context, tx *sql.Tx, evaluationID
 		return "", ""
 	}
 	return direction, strings.Join(parts, " ")
+}
+
+// keptCompatibilityValue returns the value a historical column may hold for a
+// compatibility-only body field: the source value when the profile kept it,
+// the projected value when the profile rewrote it, and false when the profile
+// removed it (the caller keeps its projected default).
+func keptCompatibilityValue(projected map[string]any, field, source string) (string, bool) {
+	value, present := projected[field].(string)
+	switch {
+	case source == "" || value == source:
+		return source, true
+	case present:
+		return value, true
+	default:
+		return "", false
+	}
 }
 
 func projectedCompatibilityString(
