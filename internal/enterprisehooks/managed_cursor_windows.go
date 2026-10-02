@@ -1034,6 +1034,52 @@ func windowsCursorManagedTombstone() []byte {
 	return []byte("# defenseclaw-managed-cursor-tombstone v1\r\n[Console]::Out.Write('{\"continue\":true}')\r\nexit 0\r\n")
 }
 
+// PurgeWindowsCursorManagedTombstone removes, for the standalone uninstall
+// with purge, the allow-only Cursor adapter tombstone the teardown left for
+// Cursor processes that were still running, and then the Cursor transaction
+// lock, so the delete-everything option leaves no DefenseClaw file in
+// ProgramData\Cursor (GAP-1567). Only the exact tombstone goes; ownership
+// state, a receipt or an active adapter fail. A missing folder is not an
+// error and is not created.
+func PurgeWindowsCursorManagedTombstone() error {
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		return err
+	}
+	present := false
+	for _, path := range []string{paths.Adapter, paths.Lock} {
+		if _, statErr := os.Lstat(path); statErr == nil {
+			present = true
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("enterprise hooks: inspect %s: %w", path, statErr)
+		}
+	}
+	if !present {
+		return nil
+	}
+	return withWindowsCursorManagedTransaction(purgeWindowsCursorManagedTombstoneUnlocked)
+}
+
+func purgeWindowsCursorManagedTombstoneUnlocked() error {
+	artifacts, err := snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		return err
+	}
+	if artifacts.state.existed || artifacts.receipt.existed {
+		return errors.New("enterprise hooks: Cursor managed ownership state remains, so the Cursor hook tombstone stays")
+	}
+	if !artifacts.adapter.existed {
+		return nil
+	}
+	if !bytes.Equal(artifacts.adapter.data, windowsCursorManagedTombstone()) {
+		return fmt.Errorf("enterprise hooks: %s is not the DefenseClaw Cursor hook tombstone, so it stays", artifacts.adapter.path)
+	}
+	if err := os.Remove(artifacts.adapter.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enterprise hooks: remove the Cursor hook tombstone: %w", err)
+	}
+	return nil
+}
+
 func removeWindowsCursorManagedPolicyTarget(targetSID *windows.SID) error {
 	if targetSID == nil {
 		return errors.New("enterprise hooks: Cursor target SID is required")

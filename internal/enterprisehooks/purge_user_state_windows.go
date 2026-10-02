@@ -40,6 +40,42 @@ func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	if err != nil {
 		return err
 	}
+	failures := []error{purgeWindowsUserStateFolder(home, sid, dataDir)}
+	// A rolled-back enrollment can keep a copy of the folder aside as
+	// .defenseclaw.rollback-<random> beside it; that is DefenseClaw per-user
+	// data too (GAP-1567).
+	kept, err := windowsUserStateRollbackFolders(home)
+	failures = append(failures, err)
+	for _, folder := range kept {
+		failures = append(failures, purgeWindowsUserStateFolder(home, sid, folder))
+	}
+	return errors.Join(failures...)
+}
+
+// windowsUserStateRollbackFolders lists the .defenseclaw.rollback-<random>
+// folders a rolled-back enrollment kept in home.
+func windowsUserStateRollbackFolders(home string) ([]string, error) {
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var folders []string
+	for _, entry := range entries {
+		random, found := strings.CutPrefix(entry.Name(), windowsManagedRuntimeRollbackPrefix)
+		if !found || len(random) != 2*windowsManagedRuntimeStageRandomBytes || strings.Trim(random, "0123456789abcdef") != "" {
+			continue
+		}
+		folders = append(folders, filepath.Join(home, entry.Name()))
+	}
+	return folders, nil
+}
+
+// purgeWindowsUserStateFolder removes one DefenseClaw per-user folder of the
+// account (see PurgeWindowsUserState).
+func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) error {
 	info, err := os.Lstat(dataDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

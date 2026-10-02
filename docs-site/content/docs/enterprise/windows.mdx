@@ -676,7 +676,11 @@ SYSTEM, not Administrators, so this also needs the uninstall to run as
 LocalSystem. As on Linux and macOS, the whole folder goes: the hook
 scripts, and the account's own hooks that the foreign-hook policy moved
 aside (`foreign-hooks-backup`; copy it first if the account wants them
-back). The purge also removes the DefenseClaw launchers, binaries, the `uv`
+back). A `%USERPROFILE%\.defenseclaw.rollback-<random>` copy that a
+rolled-back enrollment kept aside goes too. The purge also removes the
+allow-only `defenseclaw-hook.ps1` placeholder and its lock file, which the
+default uninstall keeps in `C:\ProgramData\Cursor` for Cursor windows that
+are still open, and the DefenseClaw launchers, binaries, the `uv`
 the per-user installer added (when unchanged) and its bookkeeping from
 `%USERPROFILE%\.local\bin`. When that leaves the folder empty, the folder
 goes, and so does its entry in the account's user `Path`; a folder other

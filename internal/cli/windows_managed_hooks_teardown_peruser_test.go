@@ -205,6 +205,18 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 
 	// A purge removes each folder as LocalSystem, whether or not the account
 	// is signed in, and names each one that stays with the reason.
+	// GAP-1567: only a purge removes the Cursor hook tombstone.
+	originalCursor := windowsManagedHooksStandaloneCursorTombstonePurger
+	t.Cleanup(func() { windowsManagedHooksStandaloneCursorTombstonePurger = originalCursor })
+	cursorPurges := 0
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error {
+		cursorPurges++
+		return nil
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if cursorPurges != 0 {
+		t.Fatal("an uninstall without purge removed the Cursor hook tombstone")
+	}
 	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
 	originalIdentity, originalPurger := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger
 	originalBinaries := windowsManagedHooksStandaloneUserBinariesPurger
@@ -232,6 +244,16 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	if purged != 1 || binaries != 1 || len(report.UserStateRemaining) != 0 {
 		t.Fatalf("purge ran %d/%d time(s), remaining %v", purged, binaries, report.UserStateRemaining)
 	}
+	if cursorPurges != 1 {
+		t.Fatalf("the purge removed the Cursor hook tombstone %d time(s)", cursorPurges)
+	}
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return errors.New("access denied") }
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.UserRegistrationsFailed) == 0 ||
+		!strings.Contains(strings.Join(report.UserRegistrationsFailed, ";"), "cursor/machine policy: the Cursor hook tombstone") {
+		t.Fatalf("a tombstone that stays is not named: %v", report.UserRegistrationsFailed)
+	}
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
 	// The report names each account whose data went.
 	if len(report.UserStatePurged) != 1 || !strings.HasSuffix(report.UserStatePurged[0], `\.defenseclaw`) {
 		t.Fatalf("purged accounts = %v", report.UserStatePurged)
