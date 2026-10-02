@@ -519,6 +519,17 @@ class EnableCommandTests(unittest.TestCase):
         self.assertFalse(app.cfg.guardrail.enabled)
         app.cfg.save.assert_not_called()
 
+    def test_enable_hook_connector_without_model(self):
+        # GAP-1562: hook connectors were enabled by init without a model,
+        # so enable must stay the inverse of disable for them.
+        runner = CliRunner()
+        app = make_ctx(enabled=False, connector="claudecode", model="", llm_model="")
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("guardrail.model is not set", result.output)
+        self.assertTrue(app.cfg.guardrail.enabled)
+
     def test_enable_uses_top_level_llm_model_as_fallback(self):
         runner = CliRunner()
         app = make_ctx(enabled=False, connector="codex", model="", llm_model="openai/gpt-4o")

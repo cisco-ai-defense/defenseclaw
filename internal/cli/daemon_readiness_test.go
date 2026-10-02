@@ -836,6 +836,36 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	}
 }
 
+func TestVerifyRotationConnectorOTLPAuthenticationSkipsOpenHandsWithoutExporter(t *testing.T) {
+	// GAP-1513: OpenHands has no native OTLP exporter off macOS, so setup
+	// mints no scoped credential and rotation must not require one.
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	codexToken := strings.Repeat("c", 64)
+	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
+		if scope == connector.OTLPScopeCodex {
+			return codexToken, nil
+		}
+		return "", nil
+	}
+	seen := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.Header.Get("X-DefenseClaw-Source")]++
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", t.TempDir(), []string{"codex", "openhands"},
+	)
+	if err != nil {
+		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v, want OpenHands skipped", err)
+	}
+	if seen["codex"] != 1 || seen["openhands"] != 0 {
+		t.Fatalf("probes = %v, want one codex probe and none for openhands", seen)
+	}
+}
+
 func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCredential(t *testing.T) {
 	originalLoader := loadRotationOTLPPathToken
 	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })

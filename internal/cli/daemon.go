@@ -1740,6 +1740,12 @@ func verifyRotationConnectorOTLPAuthentication(
 			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
 		}
 		token = strings.TrimSpace(token)
+		if token == "" && scope == connector.OTLPScopeOpenHands {
+			// GAP-1513: OpenHands exports native OTLP only on macOS. Elsewhere
+			// setup mints no scoped OTLP credential, so there is nothing for
+			// the rotated gateway to converge on.
+			continue
+		}
 		if token == "" {
 			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
 		}
@@ -1749,7 +1755,7 @@ func verifyRotationConnectorOTLPAuthentication(
 		probeURL.RawQuery = ""
 		probeURL.Fragment = ""
 		switch scope {
-		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
+		case connector.OTLPScopeCodex, connector.OTLPScopeClaude, connector.OTLPScopeOpenHands:
 			probeURL.Path = "/v1/logs"
 		default:
 			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
@@ -1760,7 +1766,8 @@ func verifyRotationConnectorOTLPAuthentication(
 			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
 		}
 		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
-		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
+		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude ||
+			scope == connector.OTLPScopeOpenHands {
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("X-DefenseClaw-Source", name)
 		}

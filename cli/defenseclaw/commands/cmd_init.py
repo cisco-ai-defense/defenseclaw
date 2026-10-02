@@ -676,7 +676,11 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             data_dir=data_dir,
         )
     if start_gateway is None:
-        start_gateway = False
+        # GAP-1539: a running gateway loads its connector set only at start,
+        # so a scripted re-init reconciles (restarts) it instead of leaving
+        # it on the old roster with the new connector unhooked. A stopped
+        # gateway still starts only with --start-gateway.
+        start_gateway = _gateway_already_running(str(data_dir))
     if verify is None:
         verify = True
 
@@ -2399,6 +2403,16 @@ def _sandboxes_possible() -> bool:
 # The Sidecar step bootstrap records when init does not start the gateway;
 # init words it by how that was decided.
 _SIDECAR_SKIPPED_DETAIL = "not started (--no-start-gateway)"
+
+
+def _gateway_already_running(data_dir: str) -> bool:
+    """Report whether this account's gateway sidecar is running now."""
+    from defenseclaw.bootstrap import _pid_file_running
+
+    try:
+        return _pid_file_running(os.path.join(data_dir, "gateway.pid"))
+    except Exception:
+        return False
 
 
 def _word_sidecar_skip(report, *, prompted: bool, flag: bool | None) -> None:

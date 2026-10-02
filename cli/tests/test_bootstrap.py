@@ -832,6 +832,23 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertEqual(len(recorder), 1, "exactly one subprocess invocation expected on drift")
         self.assertEqual(recorder[0][1], "restart", "must call `defenseclaw-gateway restart`, not `start`")
 
+    def test_hook_fail_mode_change_restarts_without_roster_drift(self):
+        # GAP-1551: quickstart --fail-mode open on a running gateway with the
+        # same roster must restart it so the hooks are rewritten fail-open.
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        self.cfg.guardrail.connector = "openclaw"
+        self._write_pid_file()
+        self._write_active_connector("openclaw")
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg, hook_fail_mode_changed=True)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted to apply the new hook fail mode")
+        self.assertEqual([cmd[1] for cmd in recorder], ["restart"])
+
     def test_drift_restart_failure_surfaces_warn_with_remediation(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
