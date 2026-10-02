@@ -8989,9 +8989,131 @@ class DefenseClawTUI(App[None]):
             f"  credentials    {keys_line}\n\n"
             f"[bold {TOKENS.accent_pink}]DOCTOR[/]  {doctor_summary}\n" + "\n".join(doctor_lines) + "\n\n"
             f"[bold {TOKENS.accent_cyan}]DISCOVERED AI AGENTS[/]\n" + "\n".join(ai_lines) + "\n\n"
-            f"[bold {TOKENS.text_primary}]ACTIONS[/]  {quick}\n"
+            + self._hardware_profile_section()
+            + f"[bold {TOKENS.text_primary}]ACTIONS[/]  {quick}\n"
             "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, and Setup.[/]"
         )
+
+    def _hardware_profile_section(self) -> str:
+        """Build the HARDWARE PROFILE section for the overview."""
+        try:
+            profile = self._get_hardware_profile()
+            if profile is None:
+                return ""
+            tier_colors = {
+                "server": TOKENS.accent_green,
+                "workstation": TOKENS.accent_cyan,
+                "desktop": TOKENS.accent_blue,
+                "laptop": TOKENS.accent_amber,
+                "edge": TOKENS.accent_red,
+            }
+            tier = profile.get("hardware_tier", "unknown")
+            tier_color = tier_colors.get(tier, TOKENS.text_secondary)
+            gpu_lines = []
+            for gpu in profile.get("gpus", []):
+                name = gpu.get("name", "unknown")
+                vram = gpu.get("vram_total_gb", 0)
+                backend = gpu.get("backend", "")
+                unified = " (unified)" if gpu.get("unified_memory") else ""
+                gpu_lines.append(f"  {name}  {vram:.0f}GB {backend}{unified}")
+            if not gpu_lines:
+                gpu_lines.append("  No GPU detected")
+            max_fp16 = profile.get("max_model_fp16_gb", 0)
+            max_int4 = profile.get("max_model_int4_gb", 0)
+            return (
+                f"[bold {TOKENS.accent_violet}]HARDWARE PROFILE[/]\n"
+                f"  CPU              {profile.get('cpu_name', 'unknown')} ({profile.get('cpu_cores', 0)} cores)\n"
+                f"  RAM              {profile.get('total_ram_gb', 0):.0f} GB\n"
+                f"  Tier             [{tier_color} bold]{tier.upper()}[/]\n"
+                + "\n".join(gpu_lines) + "\n"
+                f"  Max model (FP16) {max_fp16:.0f} GB  |  Max model (INT4) {max_int4:.0f} GB\n\n"
+            )
+        except Exception:
+            return ""
+
+    def _get_hardware_profile(self) -> dict | None:
+        """Detect hardware profile. Cached after first call."""
+        if hasattr(self, "_hw_profile_cache"):
+            return self._hw_profile_cache
+        import platform
+        import subprocess
+        import json as _json
+        profile: dict = {
+            "platform": platform.system().lower(),
+            "arch": platform.machine(),
+            "cpu_name": "",
+            "cpu_cores": 0,
+            "total_ram_gb": 0,
+            "has_gpu": False,
+            "gpus": [],
+            "total_gpu_vram_gb": 0,
+            "unified_memory": False,
+            "hardware_tier": "unknown",
+            "max_model_fp16_gb": 0,
+            "max_model_int4_gb": 0,
+        }
+        try:
+            import os
+            profile["cpu_cores"] = os.cpu_count() or 0
+            if platform.system() == "Darwin":
+                out = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
+                profile["cpu_name"] = out
+                ram_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip())
+                profile["total_ram_gb"] = ram_bytes / (1024**3)
+                if platform.machine() == "arm64":
+                    sp = subprocess.check_output(["system_profiler", "SPDisplaysDataType", "-json"], text=True)
+                    displays = _json.loads(sp).get("SPDisplaysDataType", [])
+                    for d in displays:
+                        name = d.get("sppci_model", "")
+                        if name:
+                            profile["gpus"].append({
+                                "name": name,
+                                "vram_total_gb": profile["total_ram_gb"],
+                                "unified_memory": True,
+                                "backend": "metal",
+                            })
+                            profile["has_gpu"] = True
+                            profile["unified_memory"] = True
+                            profile["total_gpu_vram_gb"] = profile["total_ram_gb"]
+            elif platform.system() == "Linux":
+                try:
+                    with open("/proc/cpuinfo") as f:
+                        for line in f:
+                            if line.startswith("model name"):
+                                profile["cpu_name"] = line.split(":", 1)[1].strip()
+                                break
+                except FileNotFoundError:
+                    pass
+                try:
+                    with open("/proc/meminfo") as f:
+                        for line in f:
+                            if line.startswith("MemTotal"):
+                                kb = int(line.split()[1])
+                                profile["total_ram_gb"] = kb / (1024**2)
+                                break
+                except FileNotFoundError:
+                    pass
+        except Exception:
+            pass
+        # Classify tier
+        effective = profile["total_gpu_vram_gb"] if profile["total_gpu_vram_gb"] > 0 else profile["total_ram_gb"] * 0.7
+        if profile["unified_memory"]:
+            effective = profile["total_ram_gb"]
+        if effective <= 4:
+            profile["hardware_tier"] = "edge"
+        elif effective <= 16:
+            profile["hardware_tier"] = "laptop"
+        elif effective <= 48:
+            profile["hardware_tier"] = "desktop"
+        elif effective <= 160:
+            profile["hardware_tier"] = "workstation"
+        else:
+            profile["hardware_tier"] = "server"
+        usable = effective * 0.75
+        profile["max_model_fp16_gb"] = usable / 2.0
+        profile["max_model_int4_gb"] = usable / 0.6
+        self._hw_profile_cache = profile
+        return profile
 
     def _inventory_body_text(self) -> str:
         tabs = "  ".join(
