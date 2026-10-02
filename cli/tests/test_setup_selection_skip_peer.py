@@ -8,6 +8,8 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import click
+
 from defenseclaw.agent_selection import SetupAgentSelection
 from defenseclaw.commands import cmd_setup
 
@@ -45,3 +47,53 @@ def test_skipped_peer_publishes_verified_subset_receipt():
         assert verified.record_for("amp") == amp
         with open(receipt, encoding="utf-8") as fh:
             assert set(json.load(fh)["selections"]) == {"amp"}
+
+
+def test_skipped_peer_is_not_required_by_the_readiness_wait():
+    """GAP-1052: the gateway may refuse a peer whose executable did not verify;
+    setup of the selected connector must still converge."""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.realpath(tmp)
+        record_test_setup_agent_selections(data_dir, ["codex", "claudecode"])
+        receipt = os.path.join(data_dir, "agent_selection.json")
+        _, _, generation = cmd_setup._capture_protected_setup_file(
+            receipt, cmd_setup._AGENT_SELECTION_MAX_BYTES, "agent_selection.json"
+        )
+        codex = SetupAgentSelection(
+            connector="codex",
+            executable=os.path.join(data_dir, "codex.exe"),
+            raw_version="0.159.3",
+            normalized_version="0.159.3",
+            sha256="b" * 64,
+        )
+        with click.Context(click.Command("setup")), patch(
+            "defenseclaw.platform_support.host_os", return_value="windows"
+        ), patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({"codex": codex}, {"claudecode": "version probe timed out"}),
+        ):
+            cmd_setup._record_windows_setup_agent_selections(
+                data_dir,
+                ("codex", "claudecode"),
+                _prior_snapshot=SimpleNamespace(agent_selection_generation=generation),
+                required={"codex"},
+            )
+            unverified = cmd_setup._unverified_setup_peers()
+
+        assert unverified == {"claudecode"}
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            os.path.join(data_dir, "hook_contract_lock.json"),
+            {"codex", "claudecode"},
+            required={"codex"},
+            unverified=unverified,
+        )
+        assert keep == {"codex"}
+        assert "claudecode" in tolerated
+        # The connector being set up is never skipped.
+        keep, _ = cmd_setup._partition_unconvergeable_peers(
+            os.path.join(data_dir, "hook_contract_lock.json"),
+            {"codex", "claudecode"},
+            required={"codex"},
+            unverified=frozenset({"codex"}),
+        )
+        assert keep == {"codex", "claudecode"}

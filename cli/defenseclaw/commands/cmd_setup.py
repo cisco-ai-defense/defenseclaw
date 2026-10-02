@@ -149,6 +149,8 @@ _SETUP_RESTART_HANDLED_KEY = SETUP_RESTART_HANDLED_META_KEY
 _SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
 # The connectors this batch configured; the rest of the readiness roster are peers.
 _SETUP_BATCH_REQUIRED_KEY = "defenseclaw._setup_batch_required_connectors"
+# Peers this setup run skipped because their executable did not verify.
+_SETUP_UNVERIFIED_PEERS_KEY = "defenseclaw._setup_unverified_peers"
 _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 # Deferred per-connector audit records for a restarting bare batch. The result
 # callback emits these only after the gateway is healthy, so a fresh quickstart
@@ -5249,6 +5251,28 @@ def _windows_opencode_requires_exact_selection(connector: str) -> bool:
     return normalize_connector(connector) == "opencode" and platform_support.host_os() == "windows"
 
 
+def _remember_unverified_setup_peers(names: Any) -> None:
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is None:
+        return
+    peers = set(ctx.meta.get(_SETUP_UNVERIFIED_PEERS_KEY) or ())
+    peers.update(normalize_connector(name) for name in names if name)
+    ctx.meta[_SETUP_UNVERIFIED_PEERS_KEY] = frozenset(peers)
+
+
+def _unverified_setup_peers() -> frozenset[str]:
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is None:
+        return frozenset()
+    return frozenset(ctx.meta.get(_SETUP_UNVERIFIED_PEERS_KEY) or ())
+
+
 def _protected_selection_targets(connectors: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     """Connectors whose executable setup must verify on this OS."""
 
@@ -5325,6 +5349,9 @@ def _record_windows_setup_agent_selections(
             f"defenseclaw setup {'claude-code' if name == 'claudecode' else name}" for name in sorted(selection_errors)
         )
         ux.subhead(f"Continuing with the rest of the roster. Once the executable verifies, re-run: {rerun}")
+        # The gateway may refuse a skipped peer it cannot vouch for, so the
+        # readiness wait must not require it either (GAP-1052).
+        _remember_unverified_setup_peers(selection_errors)
         selected = tuple(name for name in selected if name not in selection_errors)
         if not selected:
             return None
@@ -13160,8 +13187,12 @@ def _restart_services(
         readiness_kwargs: dict[str, Any] = {}
         # The connector this run is for must converge or fail; only its
         # peers may be skipped.
+        unverified_peers: frozenset[str] = frozenset()
         if len(wait_targets) > 1 and connector:
             readiness_kwargs["required"] = {normalize_connector(connector)}
+            unverified_peers = _unverified_setup_peers() - {normalize_connector(connector)}
+            if unverified_peers:
+                readiness_kwargs["unverified"] = unverified_peers
         readiness = _wait_for_connector_runtime(
             data_dir,
             wait_targets,
@@ -13177,7 +13208,7 @@ def _restart_services(
             if not _wait_for_defense_gateway_api(
                 data_dir,
                 previous_generation=gateway_generation_before,
-                expected_connectors=wait_targets,
+                expected_connectors=[name for name in wait_targets if name not in unverified_peers],
             ):
                 readiness = _ConnectorRuntimeReadiness(
                     False,
@@ -13682,6 +13713,7 @@ def _partition_unconvergeable_peers(
     expected: set[str],
     *,
     required: set[str] | None,
+    unverified: frozenset[str] = frozenset(),
 ) -> tuple[set[str], frozenset[str]]:
     """Split the desired roster into peers that can converge and ones that cannot.
 
@@ -13692,20 +13724,23 @@ def _partition_unconvergeable_peers(
 
     Connectors in ``required`` are never skipped. Anything unreadable is left
     in ``expected`` so a missing or malformed lock still fails the gate rather
-    than being quietly tolerated.
+    than being quietly tolerated. ``unverified`` peers were already skipped
+    (and reported) because their executable did not verify in this run.
     """
 
     keep = set(expected)
     must_keep = {normalize_connector(name) for name in (required or set()) if name}
     if not must_keep:
         return keep, frozenset()
+    quiet = {normalize_connector(name) for name in unverified if name} - must_keep
+    keep -= quiet
     try:
         lock, _ = _read_stable_regular_json(lock_path)
     except (OSError, ValueError):
-        return keep, frozenset()
+        return keep, frozenset(quiet)
     entries = lock.get("connectors") if isinstance(lock, dict) else None
     if not isinstance(entries, dict):
-        return keep, frozenset()
+        return keep, frozenset(quiet)
     skipped: dict[str, str] = {}
     for name in sorted(expected - must_keep):
         entry = entries.get(name)
@@ -13729,6 +13764,8 @@ def _partition_unconvergeable_peers(
             continue
         if invariant := connector_lock_contract_invariant(name, entries[raw_name]):
             skipped[name] = _lock_contract_failure_detail(name, entries[raw_name], invariant)
+    for name in quiet:
+        skipped.pop(name, None)
     for name in skipped:
         keep.discard(name)
     if skipped:
@@ -13739,7 +13776,7 @@ def _partition_unconvergeable_peers(
             "Continuing with the rest of the roster. "
             f"Re-run setup for {', '.join(sorted(skipped))} after fixing the above."
         )
-    return keep, frozenset(skipped)
+    return keep, frozenset(skipped) | frozenset(quiet)
 
 def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
     """OpenCode's plugin is current, but no OpenCode has loaded it since the restart.
@@ -13772,6 +13809,7 @@ def _wait_for_connector_runtime(
     gateway_generation: str | None = None,
     require_gateway_health: bool = False,
     required: set[str] | None = None,
+    unverified: frozenset[str] = frozenset(),
 ) -> _ConnectorRuntimeReadiness:
     ordered = tuple(dict.fromkeys(normalize_connector(name) for name in connectors if name))
     expected = set(ordered)
@@ -13789,6 +13827,7 @@ def _wait_for_connector_runtime(
         os.path.join(data_dir, "hook_contract_lock.json"),
         expected,
         required=required,
+        unverified=unverified,
     )
     if not expected:
         return _ConnectorRuntimeReadiness(True)
