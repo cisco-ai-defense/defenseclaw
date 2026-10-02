@@ -358,10 +358,12 @@ def disable_cmd(app: AppContext, name: str) -> None:
 @pass_ctx
 def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
     """Delete an optional canonical destination."""
+    _require_v8_operator_status(app.cfg.data_dir)
+    # GAP-1707: reject an unknown name before asking to remove it.
+    _v8_source_destination_index(app.cfg.data_dir, name)
     if not yes and not click.confirm(f"  Remove destination {name!r}?", default=False):
         click.echo("  Aborted.")
         return
-    _require_v8_operator_status(app.cfg.data_dir)
     _remove_v8_destination(app.cfg.data_dir, name, "")
 
 

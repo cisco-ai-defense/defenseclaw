@@ -1354,3 +1354,18 @@ def test_setup_v8_destination_test_unknown_name_lists_configured_names() -> None
     message = raised.value.message
     assert "no observability destination is named 'otlp'" in message
     assert "configured: otlp-127-0-0-1, terminal" in message
+
+
+def test_v8_remove_unknown_destination_fails_before_the_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1707: an unknown name asked "Remove destination ...?" and "Aborted." exited 0.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    (tmp_path / "config.yaml").write_text(_source())
+    result = CliRunner().invoke(observability, ["remove", "nosuchdest"], obj=app, input="n\n")
+    assert result.exit_code == 1, result.output
+    assert "Remove destination" not in result.output
+    assert "no configurable v8 destination named 'nosuchdest'" in result.output
+    assert "configured destinations:" in result.output
