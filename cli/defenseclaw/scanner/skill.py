@@ -294,6 +294,10 @@ class SkillScannerWrapper:
                 description=getattr(sf, "description", ""),
                 location=location,
                 remediation=getattr(sf, "remediation", "") or "",
+                # The scanner's own rule id (COMMAND_INJECTION_EVAL, ...), the
+                # same one the watcher files; without it the gateway made up
+                # a title slug for path scans (GAP-1683).
+                rule_id=str(getattr(sf, "rule_id", "") or ""),
                 # Canonical finding identity names the producer, not the
                 # upstream SDK's internal analyzer, which remains in tags.
                 scanner=scanner_name,
