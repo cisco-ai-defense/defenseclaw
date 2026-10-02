@@ -157,3 +157,15 @@ func TestSetupRecordingCreatedDirsRecordsPatchedFileParents(t *testing.T) {
 		}
 	}
 }
+
+// The enterprise installer made ~/.copilot/hooks (and the like) before
+// Setup, so Setup found them and did not list them; only Kiro kept a list.
+// Every connector's now go into the created-folder list the purge clears.
+func TestRecordHookConfigParentDirsListsEveryConnectorsFolders(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	dir := filepath.Join(filepath.Dir(dataDir), ".copilot", "hooks")
+	RecordHookConfigParentDirs("copilot", dataDir, []string{dir})
+	if got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs; !slices.Equal(got, []string{dir}) {
+		t.Fatalf("recorded %v, want %v", got, []string{dir})
+	}
+}
