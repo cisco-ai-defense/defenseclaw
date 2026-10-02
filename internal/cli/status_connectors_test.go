@@ -636,7 +636,7 @@ func TestPrintConnectorsNamesConnectorsNotStarted(t *testing.T) {
 			Guardrail:  gateway.SubsystemHealth{Details: map[string]interface{}{"connectors_not_started": notStarted}},
 		}
 		out := captureStdout(t, func() { printConnectors(snap) })
-		for _, want := range []string{"1 active", "(hermes)", "NOT RUNNING", "not enforced", "defenseclaw-gateway restart"} {
+		for _, want := range []string{"1 active", "(hermes)", "NOT RUNNING", "not enforced", "defenseclaw setup hermes"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("%T: output %q does not contain %q", notStarted, out, want)
 			}

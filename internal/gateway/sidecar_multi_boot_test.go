@@ -1871,6 +1871,35 @@ func TestSetupConnectorsIsolated_SlowVersionProbeKeepsExistingHooks(t *testing.T
 	}
 }
 
+// GAP-1856: an agent executable that changed since setup is refused before
+// Setup writes anything. Only that connector is skipped, with its hooks and
+// lock left alone, and the gateway keeps the other connectors.
+func TestSetupConnectorsIsolated_ChangedExecutableSkipsOnlyThatConnector(t *testing.T) {
+	s := multiBootSidecar(t)
+	changed := &bootStubConnector{
+		stubConnector: stubConnector{name: "claudecode"},
+		setupErr: fmt.Errorf("Hermes executable admission: selected executable digest does not match protected evidence: %w",
+			connector.ErrExecutableAdmission),
+	}
+	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	transaction, err := s.setupConnectorsIsolatedTransaction(
+		context.Background(), []connector.Connector{changed, peer},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolatedTransaction: %v", err)
+	}
+	if want := []string{"codex"}; !reflect.DeepEqual(transaction.succeeded, want) {
+		t.Fatalf("survivors=%v, want %v", transaction.succeeded, want)
+	}
+	if want := []string{"claudecode"}; !reflect.DeepEqual(transaction.admissionRefused, want) {
+		t.Fatalf("admissionRefused=%v, want %v", transaction.admissionRefused, want)
+	}
+	if changed.setupCalls != 1 || changed.teardownCalls != 0 {
+		t.Fatalf("changed-executable connector setup=%d teardown=%d, want 1/0", changed.setupCalls, changed.teardownCalls)
+	}
+}
+
 // TestSetupConnectorsIsolated_AllFailReturnsEmpty confirms that when every
 // connector fails the result is empty (the caller turns this into a loud boot
 // failure rather than idling on a gateway that protects nothing).

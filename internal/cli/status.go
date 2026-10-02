@@ -465,7 +465,7 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 	for _, name := range notStarted {
 		fmt.Printf("             %s (%s)%s\n", friendlyConnectorName(name), name, styledConnectorStateVerb("NOT RUNNING"))
 		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
-			"see gateway.log, then run: defenseclaw-gateway restart"))
+			"see gateway.log, then run: defenseclaw setup "+name))
 	}
 	fmt.Println()
 }

@@ -671,7 +671,7 @@ def _print_agents(
                 # Setup failed when the gateway started (GAP-1714).
                 suffix = _connector_state_verb("not running") + ux.dim(
                     " (setup failed when the gateway started, so it is not enforced; "
-                    "see gateway.log, then run: defenseclaw-gateway restart)"
+                    f"see gateway.log, then run: defenseclaw setup {conn.strip().lower()})"
                 )
                 ux.echo(f"                {dim_text}{suffix}")
             else:

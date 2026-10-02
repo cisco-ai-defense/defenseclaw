@@ -5110,8 +5110,17 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			// Desktop vs Agent CLI probing the same cursor-hooks-v1 contract).
 			// A version probe that ran out of time on a busy host is the same:
 			// it removed working Hermes hooks on a plain restart (GAP-1587).
-			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) {
-				if restoreErr := restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock); restoreErr != nil {
+			// An agent executable that no longer matches its setup evidence is
+			// refused before Setup changes anything, so there is no lock to
+			// restore either: restoring it re-checks the same evidence and
+			// failed the whole gateway start (GAP-1856).
+			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) ||
+				errors.Is(err, connector.ErrExecutableAdmission) {
+				var restoreErr error
+				if !errors.Is(err, connector.ErrExecutableAdmission) {
+					restoreErr = restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock)
+				}
+				if restoreErr != nil {
 					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v; restore prior hook contract lock: %v\n", registration.conn.Name(), err, restoreErr)
 					continue
 				}

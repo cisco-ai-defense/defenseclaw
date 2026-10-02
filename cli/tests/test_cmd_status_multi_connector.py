@@ -1001,5 +1001,5 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     hermes_row = next(line for line in out.splitlines() if "Hermes (hermes)" in line)
     codex_row = next(line for line in out.splitlines() if "Codex (codex)" in line)
     assert "NOT RUNNING" in hermes_row and "not enforced" in hermes_row
-    assert "defenseclaw-gateway restart" in hermes_row
+    assert "defenseclaw setup hermes" in hermes_row
     assert "NOT RUNNING" not in codex_row
