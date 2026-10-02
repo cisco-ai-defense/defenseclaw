@@ -4148,6 +4148,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     next_hint = suggested_next_action(label, exit_code)
                     self.activity_model.finish_entry(
                         exit_code,
+                        # The header said "exit 0 (0:00:00)" for a 13 s run
+                        # because the duration was never passed (GAP-1160).
+                        timedelta(seconds=float(event.duration or 0.0)),
                         cancelled=event.cancelled,
                         config_reloaded=config_reloaded,
                         restart_completed=restart_completed,

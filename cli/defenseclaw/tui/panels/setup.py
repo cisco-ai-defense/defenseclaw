@@ -3992,9 +3992,9 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
         return f"AI discovery: {enabled}  ·  Mode: {mode}"
     if wizard == SetupWizard.GATEWAY:
-        host = _cfg_str(cfg, "gateway.host") or "localhost"
-        port = _cfg_str(cfg, "gateway.port") or "9090"
-        return f"Gateway: {host}:{port}"
+        host = _cfg_str(cfg, "gateway.api_bind") or "127.0.0.1"
+        port = _cfg_str(cfg, "gateway.api_port") or "?"
+        return f"Gateway API: {host}:{port}"
     return ""
 
 

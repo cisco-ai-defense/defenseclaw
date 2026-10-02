@@ -105,11 +105,10 @@ class ActivityEntry:
     def status_label(self) -> str:
         if not self.done:
             return "running"
+        took = f"{self.duration.total_seconds():.1f}s"
         if self.cancelled:
-            return f"cancelled ({self.duration})"
-        if self.exit_code == 0:
-            return f"exit 0 ({self.duration})"
-        return f"exit {self.exit_code} ({self.duration})"
+            return f"cancelled ({took})"
+        return f"exit {self.exit_code} ({took})"
 
     @property
     def meta_footer(self) -> str:

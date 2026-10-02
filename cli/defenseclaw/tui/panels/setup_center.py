@@ -99,6 +99,8 @@ def status_cell(model: Any, wizard: SetupWizard, status: TaskStatus) -> str:
         return f"… {(info.status if info else run).rstrip('.')}"
     if run == "failed":
         return "! last run failed"
+    if run == "done":
+        return f"{status.label} · ran ok"
     return status.label
 
 

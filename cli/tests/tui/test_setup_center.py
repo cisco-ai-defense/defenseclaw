@@ -362,3 +362,29 @@ def test_config_aside_masks_secrets_and_shows_the_old_value() -> None:
 def test_glyph_style_colours_only_task_states() -> None:
     assert setup_center.glyph_style("✓ on") and setup_center.glyph_style("! 2 missing")
     assert setup_center.glyph_style("active") == ""
+
+
+def test_rules_only_install_and_gateway_api_port(config) -> None:
+    """GAP-1160: a rules-only hook install needs no LLM, and the Gateway task
+    shows the sidecar API listener, not the OpenClaw gateway port."""
+
+    from defenseclaw.tui.panels.activity import ActivityEntry
+    from defenseclaw.tui.services.setup_state import build_readiness_checks
+
+    config.claw.mode = "claudecode"
+    config.guardrail.connector = "claudecode"
+    config.guardrail.judge.enabled = False
+    config.llm.provider = ""
+    config.llm.model = ""
+    config.gateway.api_port = 19000
+    checks = {check.title: check for check in build_readiness_checks(config, None, None, ())}
+    llm = checks["LLM Config"]
+    assert llm.status == "pass" and "not required" in llm.detail
+
+    gateway = _status(SetupWizard.GATEWAY, config)
+    assert gateway.text.endswith(":19000")
+
+    from datetime import timedelta
+
+    entry = ActivityEntry("defenseclaw setup claude-code --yes", exit_code=0, done=True, duration=timedelta(seconds=13.01))
+    assert entry.status_label == "exit 0 (13.0s)"
