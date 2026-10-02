@@ -9105,6 +9105,14 @@ def _write_connector_identity(
             )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
+        # Setting a connector up means guarding it. `guardrail disable
+        # --connector X` leaves enabled=false, which the gateway honours by
+        # keeping X out of its active set, so setup waited for a connector that
+        # could never start and then rolled back (GAP-1950).
+        override = _existing_connector_override(gc, connector)
+        if override is not None and override.enabled is False:
+            override.enabled = None
+            click.echo(f"  ✓ {connector} guardrail re-enabled (it was turned off with guardrail disable --connector)")
         primary = (
             existing_primary if preserve_primary and existing_primary in gc.connectors else sorted(gc.connectors)[0]
         )
