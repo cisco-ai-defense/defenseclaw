@@ -626,3 +626,20 @@ func TestJudgeProblemNextStepMatchesCause(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1714: a connector whose setup failed at start is listed as not running
+// and not enforced, from in-process and JSON-decoded details alike.
+func TestPrintConnectorsNamesConnectorsNotStarted(t *testing.T) {
+	for _, notStarted := range []interface{}{[]string{"hermes"}, []interface{}{"hermes"}} {
+		snap := &gateway.HealthSnapshot{
+			Connectors: []gateway.ConnectorHealth{{Name: "codex", State: "running"}},
+			Guardrail:  gateway.SubsystemHealth{Details: map[string]interface{}{"connectors_not_started": notStarted}},
+		}
+		out := captureStdout(t, func() { printConnectors(snap) })
+		for _, want := range []string{"1 active", "(hermes)", "NOT RUNNING", "not enforced", "defenseclaw-gateway restart"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%T: output %q does not contain %q", notStarted, out, want)
+			}
+		}
+	}
+}

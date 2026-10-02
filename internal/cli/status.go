@@ -445,7 +445,8 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		conns = []gateway.ConnectorHealth{*snap.Connector}
 	}
 
-	if len(conns) == 0 {
+	notStarted := guardrailConnectorsNotStarted(snap.Guardrail.Details)
+	if len(conns) == 0 && len(notStarted) == 0 {
 		printGatewayKV("Agents", Dim("(no active connector)"))
 		fmt.Println()
 		return
@@ -460,7 +461,30 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		fmt.Printf("             %s\n", header)
 		printConnectorBody(&c)
 	}
+	// A connector whose setup failed at start is not enforced (GAP-1714).
+	for _, name := range notStarted {
+		fmt.Printf("             %s (%s)%s\n", friendlyConnectorName(name), name, styledConnectorStateVerb("NOT RUNNING"))
+		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
+			"see gateway.log, then run: defenseclaw-gateway restart"))
+	}
 	fmt.Println()
+}
+
+// guardrailConnectorsNotStarted reads the guardrail's connectors_not_started
+// detail, a []string in process and a []interface{} after a JSON round trip.
+func guardrailConnectorsNotStarted(details map[string]interface{}) []string {
+	var names []string
+	switch raw := details["connectors_not_started"].(type) {
+	case []string:
+		names = append(names, raw...)
+	case []interface{}:
+		for _, value := range raw {
+			if name, ok := value.(string); ok && strings.TrimSpace(name) != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines

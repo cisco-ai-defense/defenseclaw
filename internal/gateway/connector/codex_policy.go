@@ -92,6 +92,12 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 	policy, err := codexPolicyInspector(ctx, opts)
 	if err != nil {
+		// An app-server that ran out of time on a busy host says nothing
+		// about the policy, and this runs before Setup writes anything: keep
+		// the working hooks and let the gateway retry (GAP-1714).
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return fmt.Errorf("inspect effective Codex managed requirements: %w (%w)", err, ErrAgentVersionProbeTimeout)
+		}
 		return fmt.Errorf("inspect effective Codex managed requirements: %w", err)
 	}
 	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly && !codexUsesManagedHookLayer(opts) {
