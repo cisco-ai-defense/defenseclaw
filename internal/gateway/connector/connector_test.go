@@ -9109,6 +9109,24 @@ func TestClaudeCode_TeardownDropsOrphanedEarlierReleasePromptFlag(t *testing.T) 
 			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOG_USER_PROMPTS":"1"}}`,
 			want:     map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOG_USER_PROMPTS": "1"},
 		},
+		// GAP-1107: what an earlier teardown left of a DefenseClaw block
+		// (loopback endpoints and the capture pins, telemetry not enabled).
+		"orphaned loopback block": {
+			pristine: `{"env":{"AWS_REGION":"us-east-1",` +
+				`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:18971",` +
+				`"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":"http://127.0.0.1:18971/v1/logs",` +
+				`"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":"http://127.0.0.1:18971/v1/metrics",` +
+				`"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":"http://127.0.0.1:18971/v1/traces",` +
+				`"OTEL_LOG_ASSISTANT_RESPONSES":"0","OTEL_LOG_RAW_API_BODIES":"0","OTEL_LOG_TOOL_CONTENT":"0",` +
+				`"OTEL_LOG_TOOL_DETAILS":"0","OTEL_LOG_USER_PROMPTS":"0"}}`,
+			want: map[string]interface{}{"AWS_REGION": "us-east-1"},
+		},
+		"operator loopback collector": {
+			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1",` +
+				`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:4318","OTEL_LOG_TOOL_DETAILS":"0"}}`,
+			want: map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318", "OTEL_LOG_TOOL_DETAILS": "0"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

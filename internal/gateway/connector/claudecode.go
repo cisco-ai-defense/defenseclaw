@@ -1896,6 +1896,61 @@ func claudeCodeEnvValueIsOrphanedEarlierRelease(snapshot map[string]interface{},
 	return true
 }
 
+// claudeCodeEnvSnapshotIsOrphanedDefenseClawBlock reports whether every
+// telemetry key in snapshot is one an earlier DefenseClaw teardown can leave
+// of its own block (GAP-1107): OTLP endpoints on a loopback gateway and the
+// content-capture pins at "0" (or an earlier release's prompt flag), with at
+// least one of each and Claude telemetry itself not enabled. Without
+// CLAUDE_CODE_ENABLE_TELEMETRY those keys configure nothing, and an
+// operator's own telemetry setup also sets exporters, a protocol or headers.
+func claudeCodeEnvSnapshotIsOrphanedDefenseClawBlock(snapshot map[string]interface{}) bool {
+	endpoint, pin := false, false
+	for _, key := range claudeCodeOtelEnvKeys {
+		value, present := snapshot[key]
+		if !present || key == "DEFENSECLAW_FAIL_MODE" {
+			continue
+		}
+		got, _ := value.(string)
+		switch {
+		case strings.HasPrefix(key, "OTEL_LOG_"):
+			if got != "0" && claudeCodeEarlierReleaseEnv[key] != got {
+				return false
+			}
+			pin = true
+		case strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_ENDPOINT"):
+			if !claudeCodeLoopbackGatewayEndpoint(got) {
+				return false
+			}
+			endpoint = true
+		default:
+			return false
+		}
+	}
+	return endpoint && pin
+}
+
+// claudeCodeLoopbackGatewayEndpoint reports whether value is a plain http
+// endpoint on a loopback host and port with a path DefenseClaw's gateway
+// serves: none, an OTLP signal path or a scoped /otlp/ path.
+func claudeCodeLoopbackGatewayEndpoint(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.Port() == "" {
+		return false
+	}
+	switch parsed.Hostname() {
+	case "127.0.0.1", "localhost", "::1":
+	default:
+		return false
+	}
+	switch path := strings.TrimRight(parsed.Path, "/"); {
+	case path == "", path == "/v1/logs", path == "/v1/metrics", path == "/v1/traces":
+		return true
+	default:
+		return strings.HasPrefix(path, "/otlp/")
+	}
+}
+
 // claudeCodeEnvSnapshotIsDefenseClawWritten reports whether a "pristine" env
 // snapshot was really taken from a DefenseClaw env block, for example after a
 // rollback to an earlier release dropped the restore metadata. Only
@@ -2093,6 +2148,10 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// earlier release's env block, so the values DefenseClaw writes in it
 				// are not the operator's either.
 				predecessorSnapshot := claudeCodeEnvSnapshotIsDefenseClawWritten(originalEnv, managedEnv)
+				// A snapshot whose telemetry keys are only what an earlier
+				// teardown left of a DefenseClaw block is not the operator's
+				// either: its keys go instead of coming back (GAP-1107).
+				orphanBlock := claudeCodeEnvSnapshotIsOrphanedDefenseClawBlock(originalEnv)
 				// The exact file snapshot can be such a snapshot too: an upgrade
 				// takes it from the settings.json an earlier release still manages
 				// while the env backup keeps the operator's real env. The restored
@@ -2113,6 +2172,10 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if key == "DEFENSECLAW_FAIL_MODE" {
 						// Only DefenseClaw hooks read this key, so whatever value it
 						// holds is DefenseClaw config: never keep or restore it.
+						delete(envMap, key)
+						continue
+					}
+					if orphanBlock && present && claudeCodeEnvValueUnchanged(originalEnv, key, current) {
 						delete(envMap, key)
 						continue
 					}
@@ -2143,7 +2206,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if !owned {
 						continue
 					}
-					if original, existed := originalEnv[key]; existed &&
+					if original, existed := originalEnv[key]; existed && !orphanBlock &&
 						!claudeCodeOtelValueLooksManaged(key, original, written) &&
 						!(predecessorSnapshot && claudeCodeOtelValueWrittenByDefenseClaw(key, original, written)) &&
 						!claudeCodeEnvValueIsOrphanedEarlierRelease(originalEnv, key) {
@@ -2160,7 +2223,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if _, operatorSupplied := envMap[key]; operatorSupplied {
 						continue
 					}
-					if original, existed := originalEnv[key]; existed {
+					if original, existed := originalEnv[key]; existed && !orphanBlock {
 						envMap[key] = original
 					}
 				}
