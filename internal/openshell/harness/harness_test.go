@@ -833,6 +833,36 @@ func TestSpecModel(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeOnMantleRefusesBedrockRuntimeIDs: on the Mantle profile a
+// Bedrock Runtime model id (and CLAUDE_CODE_USE_BEDROCK) fails before a
+// sandbox exists, naming the Mantle id to use (GAP-1286).
+func TestClaudeCodeOnMantleRefusesBedrockRuntimeIDs(t *testing.T) {
+	mantle := profiles.ClaudeBedrockMantleID
+	launch := func(profile string, args ...string) error {
+		_, err := ClaudeCode.LaunchArgv(LaunchOptions{Mode: Interactive, CredentialProfile: profile, Args: args})
+		return err
+	}
+	for _, model := range []string{"us.anthropic.claude-haiku-4-5-20251001-v1:0", "anthropic.claude-haiku-4-5-20251001-v1:0", "global.anthropic.claude-haiku-4-5"} {
+		if err := launch(mantle, "--model", model); err == nil || !strings.Contains(err.Error(), "run with -- --model anthropic.claude-haiku-4-5,") {
+			t.Fatalf("--model %s: %v", model, err)
+		}
+	}
+	for _, args := range [][]string{nil, {"--model", "anthropic.claude-haiku-4-5"}, {"--model=haiku"}} {
+		if err := launch(mantle, args...); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if err := launch(profiles.AnthropicID, "--model", "us.anthropic.claude-haiku-4-5-20251001-v1:0"); err != nil {
+		t.Fatalf("anthropic profile: %v", err)
+	}
+	if err := LaunchEnvProblem(mantle, map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"}); err == nil || !strings.Contains(err.Error(), "Leave it out") {
+		t.Fatalf("CLAUDE_CODE_USE_BEDROCK on mantle: %v", err)
+	}
+	if err := LaunchEnvProblem(profiles.AnthropicID, map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"}); err != nil {
+		t.Fatalf("CLAUDE_CODE_USE_BEDROCK elsewhere: %v", err)
+	}
+}
+
 // TestCredentialProfilesPinTheModelProvider: the Codex profiles name the
 // model provider the manager pins in the run's managed config (the session
 // flags name the same one, and Mantle's serves only function tools), with a
