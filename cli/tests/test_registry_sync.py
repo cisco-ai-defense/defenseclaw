@@ -495,3 +495,21 @@ class TestCacheIO(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_sync_table_spells_out_promoted_skills_and_mcps(capsys):
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_registry
+
+    assert cmd_registry._promoted_label(0, 0) == "0"
+    assert cmd_registry._promoted_label(0, 1) == "1 MCP"
+    assert cmd_registry._promoted_label(2, 3) == "2 skills, 3 MCPs"
+    report = SimpleNamespace(
+        source_id="sf1-local", fetched=1, scanned=1, promoted_skills=0, promoted_mcps=1,
+        errors=[], ok=lambda: True,
+    )
+    cmd_registry._print_sync_reports([report])
+    out = capsys.readouterr().out
+    assert "1 MCP" in out
+    assert "0/1" not in out
