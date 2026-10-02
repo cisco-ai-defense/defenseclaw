@@ -495,10 +495,25 @@ func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing
 	if ready || err != nil {
 		t.Fatalf("io readiness = %v, error = %v; want retryable not-ready", ready, err)
 	}
+	for _, primary := range []float64{0, 9} {
+		snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+		snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = primary
+		ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+		if ready || err != nil {
+			t.Fatalf("deadline/%v readiness = %v, error = %v; want retryable not-ready", primary, ready, err)
+		}
+	}
 	snap.Telemetry.Details["event_history_last_sqlite_class"] = "full"
 	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(13)
 	if _, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true}); err == nil {
 		t.Fatal("a full disk must still fail at once")
+	}
+	startupRetriesSQLiteIO = false
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(9)
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil || !strings.Contains(err.Error(), "event_history=sqlite_write_failed/deadline") {
+		t.Fatalf("deadline elsewhere = %v; want an immediate failure naming the class", err)
 	}
 }
 
@@ -564,9 +579,9 @@ func TestGatewaySnapshotReadyReportsBoundedTelemetryFailureBranches(t *testing.T
 	t.Run("event history", func(t *testing.T) {
 		got := telemetryReadinessFatalError(t, map[string]interface{}{
 			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
-			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+			"event_history_last_sqlite_class": "full", "event_history_last_sqlite_primary_code": float64(13),
 		})
-		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed)"
+		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed/full)"
 		if got != want {
 			t.Fatalf("telemetry event-history diagnostic = %q, want %q", got, want)
 		}
