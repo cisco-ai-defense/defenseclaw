@@ -152,7 +152,7 @@ def config_validate(quiet: bool) -> None:
 @click.option(
     "--provenance",
     is_flag=True,
-    help="Include canonical Go provenance annotations for the effective configuration.",
+    help="With --effective, also show where each observability setting comes from.",
 )
 @click.option(
     "--section",

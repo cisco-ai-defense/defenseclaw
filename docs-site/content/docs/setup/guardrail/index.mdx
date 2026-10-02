@@ -483,7 +483,7 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | [`defenseclaw agent discover`](/docs/ai-discovery) | ✗ no prompts | ✓ flags / `--json` | Read-only inventory command. |
 | [`defenseclaw aibom scan`](/docs/ai-discovery#aibom-ai-bill-of-materials) | ✗ no prompts | ✓ flags only | Read-only. |
 | `defenseclaw policy ...` | ✗ no prompts | ✓ flags only | Pure CLI for repeatable policy authoring. |
-| `defenseclaw tui` | ✓ full TUI | — | Interactive only — Textual dashboard with audit, alerts, logs, inventory, and setup panels. |
+| `defenseclaw tui` | ✓ full TUI | — | Interactive only — terminal dashboard with audit, alerts, logs, inventory, and setup panels. |
 | `defenseclaw alerts` | ✗ no prompts | ✓ `--limit`, `--show <n>`, `acknowledge` / `dismiss` subcommands | Snapshot view of recent alerts; not a live tail. |
 | `defenseclaw-gateway audit export` (Go binary) | ✗ no prompts | ✓ `--output`, `--limit`, `--include-activity` | Legacy v7 JSONL export of `audit_events` for compatibility and migration; not the canonical v8 projection stream. |
 | `defenseclaw-gateway` (sidecar daemon) | ✗ no prompts | ✓ flags only | Long-running gateway — `--config`, `--port`, `--log-level`. Started for you by `setup guardrail --restart`. |

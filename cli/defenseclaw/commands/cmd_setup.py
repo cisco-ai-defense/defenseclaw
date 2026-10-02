@@ -5882,8 +5882,8 @@ def _resolve_judge_hook_gate(
     "--rule-pack-dir",
     default=None,
     help=(
-        "Custom rule-pack DIRECTORY (free-text path) — CLI parity with the "
-        "TUI's free-text field. Use instead of --rule-pack to point at a pack "
+        "Path to a custom rule-pack directory. Use instead of --rule-pack "
+        "to point at a pack "
         "outside the built-in default/strict/permissive presets. Scoped "
         "per-connector when --connector names a multi-install peer, else "
         'global. Mutually exclusive with --rule-pack; pass "" to clear.'
@@ -10969,8 +10969,8 @@ def _hook_guardrail_options(fn):
     "--rule-pack-dir",
     default=None,
     help=(
-        "Custom rule-pack DIRECTORY for THIS connector (free-text path; CLI "
-        "parity with the TUI). Use instead of --rule-pack to point at a pack "
+        "Path to a custom rule-pack directory for this connector. Use "
+        "instead of --rule-pack to point at a pack "
         "outside the built-in presets; same per-connector scoping. Mutually "
         'exclusive with --rule-pack; pass "" to clear an override.'
     ),
@@ -11123,8 +11123,8 @@ def setup_codex(
     "--rule-pack-dir",
     default=None,
     help=(
-        "Custom rule-pack DIRECTORY for THIS connector (free-text path; CLI "
-        "parity with the TUI). Use instead of --rule-pack to point at a pack "
+        "Path to a custom rule-pack directory for this connector. Use "
+        "instead of --rule-pack to point at a pack "
         "outside the built-in presets; same per-connector scoping. Mutually "
         'exclusive with --rule-pack; pass "" to clear an override.'
     ),
@@ -11581,8 +11581,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         "--rule-pack-dir",
         default=None,
         help=(
-            "Custom rule-pack DIRECTORY for THIS connector (free-text path; "
-            "CLI parity with the TUI). Use instead of --rule-pack to point at "
+            "Path to a custom rule-pack directory for this connector. Use "
+            "instead of --rule-pack to point at "
             "a pack outside the built-in presets; same per-connector scoping. "
             'Mutually exclusive with --rule-pack; pass "" to clear an override.'
         ),
@@ -11954,8 +11954,8 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         "--rule-pack-dir",
         default=None,
         help=(
-            "Custom rule-pack directory (free-text path; CLI parity with the "
-            'TUI). Mutually exclusive with --rule-pack; pass "" to clear.'
+            "Path to a custom rule-pack directory. Mutually exclusive with "
+            '--rule-pack; pass "" to clear.'
         ),
     )
     @click.option("--judge-model", default=None, help="LLM judge model.")

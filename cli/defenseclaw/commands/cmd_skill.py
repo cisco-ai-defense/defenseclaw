@@ -383,9 +383,9 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
     installed under a connector (use ``skill list`` for that).
 
     \b
-    F-1481: by default this refuses to let ``npx`` fetch+execute the clawhub
-    package from the network at search time; pass --allow-remote-fetch to opt
-    into the original fetch-on-search behavior (supply-chain risk).
+    By default search does not let npx download and run the clawhub
+    package from the network. Pass --allow-remote-fetch to allow that
+    download (it runs third-party code from the npm registry).
 
     \b
     Examples:

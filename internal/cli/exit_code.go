@@ -10,7 +10,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -74,7 +73,7 @@ func usageFlagError(c *cobra.Command, err error) error {
 			}
 		}
 	}
-	return withExitCode(fmt.Errorf("%w\nUsage: %s\nTry '%s --help' for help.", err, c.UseLine(), c.CommandPath()), 2)
+	return usageError(c, err)
 }
 
 func init() {
