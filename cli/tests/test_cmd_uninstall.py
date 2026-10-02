@@ -386,6 +386,16 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 with patch.object(cmd_uninstall.time, "sleep"), self.assertRaises(OSError):
                     cmd_uninstall._remove_binaries(plan)
 
+    def test_failed_phase_prints_its_reason_once(self):
+        plan = cmd_uninstall.UninstallPlan(platform_name="win32", remove_binaries=True)
+        refusal = click.ClickException("refusing Windows binary removal:\n  Remove-Item -LiteralPath 'x'")
+        buf = io.StringIO()
+        with patch.object(cmd_uninstall, "_validate_plan", side_effect=refusal), contextlib.redirect_stdout(buf):
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._execute_plan(plan)
+        self.assertIn("plan validation: failed", buf.getvalue())
+        self.assertNotIn("Remove-Item", buf.getvalue())
+
     def test_windows_developer_install_refusal_names_the_files_to_remove(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "bin"

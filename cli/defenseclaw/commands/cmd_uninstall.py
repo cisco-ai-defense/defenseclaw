@@ -919,7 +919,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         try:
             action()
         except Exception as exc:
-            phases.append(ExecutionPhaseResult(name, "failed", str(exc)))
+            # The raised error below carries the full reason (and any recovery
+            # recipe); repeating it in the ledger printed long guidance twice.
+            phases.append(ExecutionPhaseResult(name, "failed", "see the error below"))
             _render_execution_result(ExecutionResult(tuple(phases)))
             if isinstance(exc, click.ClickException):
                 raise
