@@ -163,6 +163,19 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("upstream-enforced fail-open", result.output)
         self.assertIn("configured provenance: closed", result.output)
 
+    def test_status_copilot_reports_upstream_fail_open_in_text_and_json(self):
+        # GAP-1246: guardrail status said "closed" while status said open.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("upstream-enforced fail-open", result.output)
+        app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn('"fail_mode": "open"', result.output)
+        self.assertNotIn('"fail_mode": "closed"', result.output)
+
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
         # layout as a fan-out install: one connector roster table, no
