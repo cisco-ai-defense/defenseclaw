@@ -15,9 +15,10 @@ script that writes the policy artifacts and runs
 `defenseclaw policy activate <name>`. Verify that script in a throwaway home
 before running it against a shared installation.
 
-You need both DefenseClaw binaries. `defenseclaw policy test` also requires the
-`opa` binary on `PATH`; `policy validate` can use the same installation to
-compile the generated Rego.
+You need both DefenseClaw binaries. `defenseclaw policy validate` and
+`defenseclaw policy test` use the `opa` binary when it is on `PATH`, and
+otherwise the OPA engine built into `defenseclaw-gateway`, so no separate OPA
+install is needed.
 
 ## 1. Inspect and isolate
 
@@ -84,8 +85,9 @@ defenseclaw policy test \
   --verbose
 ```
 
-An `opa binary not found` error from `policy test` means the optional OPA CLI is
-missing; it does not mean the generated YAML failed to activate.
+A `neither 'opa' nor 'defenseclaw-gateway' was found` error from `policy test`
+means the gateway binary is not installed or not on `PATH`; it does not mean
+the generated YAML failed to activate.
 
 ## 5. Dry-run an admission decision
 
