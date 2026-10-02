@@ -1944,6 +1944,12 @@ class TestCheckHookHealth(unittest.TestCase):
             ("vim notes.txt", False),
             ("claude --system-prompt You are polly, not hermes", False),
             ("claude hermes help", False),
+            # GAP-1804: arguments of another Python program are its own.
+            ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
+            ("python3 -c import --connector hermes", False),
+            ("python3 -u /u/.local/bin/hermes chat", True),
+            ("python3 -Wignore -m hermes_cli", None),
+            ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
