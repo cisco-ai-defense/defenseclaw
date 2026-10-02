@@ -1,0 +1,32 @@
+{
+  "scanner": "codeguard",
+  "target": "/workspace/app/exec.py",
+  "timestamp": "2026-04-20T12:00:00Z",
+  "findings": [
+    {
+      "id": "CG-EXEC-001",
+      "severity": "HIGH",
+      "title": "Unsafe command execution",
+      "description": "os.system(cmd)",
+      "location": "/workspace/app/exec.py:2",
+      "remediation": "Use parameterized execution or an allowlist of commands",
+      "scanner": "codeguard",
+      "tags": [
+        "codeguard"
+      ],
+      "rule_id": "CG-EXEC-001",
+      "line_number": 2,
+      "category": null,
+      "confidence": null
+    }
+  ],
+  "duration": "65.826125ms",
+  "scan_id": "01428dbb-136f-4360-88d7-e674bd5a6cd8",
+  "schema_version": 7,
+  "content_hash": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
+  "generation": 1,
+  "binary_version": "1.0.0",
+  "agent_id": null,
+  "agent_instance_id": null,
+  "sidecar_instance_id": null
+}

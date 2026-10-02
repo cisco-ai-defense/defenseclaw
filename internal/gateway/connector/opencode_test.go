@@ -17,7 +17,6 @@
 package connector
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -33,6 +32,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,15 +232,20 @@ func TestOpenCodeSetupRollsBackPluginAndReceiptWhenFinalPublicationFails(t *test
 }
 
 func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the OpenCode plugin rotation test")
-	}
 	aToken := strings.Repeat("a", 64)
 	bToken := strings.Repeat("b", 64)
-	authorizations := make(chan string, 3)
+	var authorizationsMu sync.Mutex
+	var authorizations []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorizations <- r.Header.Get("Authorization")
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if payload.Event == "tool.execute.before" {
+			authorizationsMu.Lock()
+			authorizations = append(authorizations, r.Header.Get("Authorization"))
+			authorizationsMu.Unlock()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
 	}))
@@ -283,11 +288,19 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 			t.Fatal("rendered OpenCode plugin contains a rotation credential")
 		}
 	}
+	// The harness applies the config hook before it is ready, as OpenCode
+	// does at startup: its load heartbeat pays the process's first gateway
+	// request (fetch's first use and connection), which on a fresh or busy
+	// Windows runner can outlast the plugin's own 10s gateway timeout, and an
+	// evaluation that timed out would fail open without reaching the stub.
 	harness := `
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
-const loaded = await import(pathToFileURL(process.argv[1]).href);
+const href = pathToFileURL(process.argv[1]).href;
+const loaded = await import(href);
 const plugin = await loaded.DefenseClaw({ directory: "" });
+await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
+console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const _ of lines) {
   try {
@@ -301,79 +314,36 @@ for await (const _ of lines) {
   }
 }
 `
-	processCtx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(processCtx, node, "--input-type=module", "-e", harness, pluginPath)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
-	scanner := bufio.NewScanner(stdout)
+	session := startNodeHarnessSession(t, harness, pluginPath)
 	for index, token := range []string{aToken, bToken, aToken} {
 		if index > 0 {
 			if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := fmt.Fprintln(stdin, "evaluate"); err != nil {
-			t.Fatal(err)
-		}
-		if !scanner.Scan() {
-			t.Fatalf("read OpenCode evaluation %d: %v; stderr=%s", index, scanner.Err(), stderr.String())
-		}
-		if got := scanner.Text(); got != "allow" {
+		if got := session.request(fmt.Sprintf("evaluation %d", index), "evaluate"); got != "allow" {
 			t.Fatalf("OpenCode evaluation %d = %q, want allow", index, got)
 		}
 	}
 	if err := atomicWriteFile(tokenPath, []byte("malformed-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fmt.Fprintln(stdin, "evaluate-invalid"); err != nil {
-		t.Fatal(err)
-	}
-	if !scanner.Scan() {
-		t.Fatalf("read OpenCode credential failure: %v; stderr=%s", scanner.Err(), stderr.String())
-	}
-	if got := scanner.Text(); got != "block:DefenseClaw hook credential is unavailable." {
+	if got := session.request("malformed credential", "evaluate-invalid"); got != "block:DefenseClaw hook credential is unavailable." {
 		t.Fatalf("OpenCode credential failure = %q, want redacted unconditional block", got)
 	}
 	if err := atomicWriteFile(tokenPath, []byte(strings.Repeat("x", 4097)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fmt.Fprintln(stdin, "evaluate-oversized"); err != nil {
-		t.Fatal(err)
-	}
-	if !scanner.Scan() {
-		t.Fatalf("read OpenCode oversized credential failure: %v; stderr=%s", scanner.Err(), stderr.String())
-	}
-	if got := scanner.Text(); got != "block:DefenseClaw hook credential is unavailable." {
+	if got := session.request("oversized credential", "evaluate-oversized"); got != "block:DefenseClaw hook credential is unavailable." {
 		t.Fatalf("OpenCode oversized credential failure = %q, want redacted unconditional block", got)
 	}
-	if err := stdin.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("OpenCode rotation process: %v; stderr=%s", err, stderr.String())
-	}
+	session.close()
 
-	for index, want := range []string{"Bearer " + aToken, "Bearer " + bToken, "Bearer " + aToken} {
-		if got := <-authorizations; got != want {
-			t.Fatalf("OpenCode authorization %d = %q, want restored generation", index, got)
-		}
+	authorizationsMu.Lock()
+	got := append([]string(nil), authorizations...)
+	authorizationsMu.Unlock()
+	if want := []string{"Bearer " + aToken, "Bearer " + bToken, "Bearer " + aToken}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OpenCode sent %d authorizations, want the 3 restored generations in order", len(got))
 	}
 	pluginAfter, err := os.ReadFile(pluginPath)
 	if err != nil {

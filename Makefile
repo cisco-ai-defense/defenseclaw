@@ -69,7 +69,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
@@ -1059,13 +1059,22 @@ check-provider-coverage: sync-openclaw-extension
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
 
 # check-llm-catalog cross-references the suggested model ids in
-# bundles/llm/model_catalog.json against LiteLLM's bundled registry,
-# failing on ids LiteLLM no longer knows or has marked deprecated. The
-# curated catalog carries provider/auth/region metadata LiteLLM does not
-# model (so it stays hand-maintained), but the model list still rots as
-# providers ship and retire models — this gate catches that drift.
+# bundles/llm/model_catalog.json against LiteLLM's registry, failing on ids
+# LiteLLM no longer knows or has marked deprecated. The curated catalog
+# carries provider/auth/region metadata LiteLLM does not model (so it stays
+# hand-maintained), but the model list still rots as providers ship and
+# retire models.
+#
+# check-llm-catalog is the hermetic PR gate: the registry snapshot bundled
+# in the locked litellm wheel, judged as of GATE_AS_OF in the script, so an
+# upstream deprecation date passing cannot fail unrelated PRs.
+# check-llm-catalog-live is the drift radar (upstream registry, today's
+# date), run on a schedule by .github/workflows/llm-catalog-radar.yml.
 check-llm-catalog: pycli
 	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py
+
+check-llm-catalog-live: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py --live
 
 # ---------------------------------------------------------------------------
 # Lint targets

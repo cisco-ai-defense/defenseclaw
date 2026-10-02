@@ -492,7 +492,7 @@ func withAtomicTransformBoundProtocolLock(
 		return err
 	}
 	overlapped := new(windows.Overlapped)
-	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
+	if err := lockWindowsFileExclusive(handle, overlapped, filepath.Join(dir.path, name)); err != nil {
 		return fmt.Errorf("acquire bound V2 protocol lock: %w", err)
 	}
 	defer func() { _ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped) }()

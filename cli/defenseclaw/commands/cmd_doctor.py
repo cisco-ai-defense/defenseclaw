@@ -4901,6 +4901,10 @@ _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS = (
     _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS + _CURSOR_WINDOWS_RUNTIME_PROCESS_OVERHEAD_SECONDS
 )
 _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS = 2
+_CURSOR_WINDOWS_PROBE_CORE_MODULES = ", ".join(
+    f'"$PSHOME\\Modules\\{name}\\{name}.psd1"'
+    for name in ("Microsoft.PowerShell.Management", "Microsoft.PowerShell.Utility")
+)
 _CURSOR_WINDOWS_RUNTIME_TREE_REAP_SECONDS = 2.0
 
 
@@ -5066,8 +5070,18 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         # This mirrors Cursor's Windows PowerShell command-hook boundary. Paths are
         # encoded as PowerShell literals, the whole script is UTF-16LE/base64,
         # and subprocess receives an argv list (never shell=True).
+        #
+        # Get-Content here and the adapter's only cmdlets (Test-Path,
+        # New-Object) live in the two core modules imported first by their
+        # $PSHOME path. Without the import, the first auto-loaded cmdlet in a
+        # fresh Windows profile makes Windows PowerShell search and analyze
+        # the modules on PSModulePath before it runs. On a busy host that can
+        # use the whole probe budget, and an attempt killed at its deadline
+        # never saves the analysis cache, so the retry pays the same cost.
         script = (
             "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "Import-Module -ErrorAction Stop -Name "
+            f"{_CURSOR_WINDOWS_PROBE_CORE_MODULES}; "
             f"Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw | "
             f"& {{ $input | & {_powershell_literal(adapter_path)} }}"
         )

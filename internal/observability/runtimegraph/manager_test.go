@@ -1754,6 +1754,55 @@ func TestCloseWaitsForSequencedReloadBatchBeforeClosingReporter(t *testing.T) {
 	}
 }
 
+func TestCloseKeepsReporterOpenUntilItsDrainFailureBatchIsAdmitted(t *testing.T) {
+	manager, reporter, _ := newTestManager(
+		t, testConfig(t, "shared", 90, true), []ComponentFactory{successfulFactory("exporter", &lifecycleLog{})},
+	)
+	flushReports(t, manager)
+	lease, err := manager.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close hands retirement to the asynchronous cleanup because the lease
+	// outlives its expired deadline. Let that cleanup finish, including its
+	// final reporter-close check, before Close builds its drain-failure batch.
+	manager.testHooks = &managerTestHooks{afterCloseRetire: func(*Graph) {
+		lease.Release()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := manager.WaitCleanup(ctx); err != nil {
+			t.Errorf("asynchronous retirement did not finish: %v", err)
+		}
+		manager.maybeCloseReporter()
+	}}
+	expired, cancel := context.WithCancel(t.Context())
+	cancel()
+	if closeErr := manager.Close(expired); closeErr == nil || closeErr.ComponentName() != "inflight-users" {
+		t.Fatalf("expired close error = %v", closeErr)
+	}
+	ctx, cancelWait := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelWait()
+	if err := manager.FlushReports(ctx); err != nil {
+		t.Fatalf("close drain-failure reports were not delivered: %v", err)
+	}
+	if err := manager.WaitReporter(ctx); err != nil {
+		t.Fatalf("reporter did not stop after close: %v", err)
+	}
+	if reports := reporter.snapshot(); countReportCode(reports, ReportDrainFailed) != 2 {
+		t.Fatalf("reports=%#v", reports)
+	}
+}
+
+func countReportCode(reports []recordedReport, code ReportCode) int {
+	count := 0
+	for _, report := range reports {
+		if report.value.Code == code {
+			count++
+		}
+	}
+	return count
+}
+
 func TestReporterPanicIsRetainedForRetryAndVisibleToFlush(t *testing.T) {
 	log := &lifecycleLog{}
 	reporter := &panicOnceReporter{}
