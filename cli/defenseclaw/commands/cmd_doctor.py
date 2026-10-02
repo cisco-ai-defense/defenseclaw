@@ -9422,6 +9422,7 @@ def doctor(
     # never-configured OpenClaw install reported as broken.
     inventory_connectors = _doctor_active_connectors(cfg)
     _check_component_connector_compatibility(cfg, inventory_connectors, r)
+    _check_windows_hook_binary_release(cfg, r)
     if not inventory_connectors:
         _emit(
             "skip",
@@ -10208,6 +10209,62 @@ def _component_compatibility_problems_for_executable(
         finding
         for finding in findings
         if finding.component in required and finding.status is not HealthStatus.SUPPORTED
+    )
+
+
+def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, str, str]:
+    """Compare one defenseclaw-hook binary with this CLI's release (GAP-1415).
+
+    Returns ``(tag, detail, remediation)``. A partial upgrade or a restored
+    backup can leave an older hook beside a newer gateway; every agent hook
+    call runs it, so doctor names it instead of reporting healthy hooks.
+    """
+    from defenseclaw.doctor_health import _safe_semver
+
+    reinstall = "rerun the DefenseClaw installer (install.ps1) for this release to replace it"
+    expected = _safe_semver(cli_version)
+    try:
+        proc = subprocess.run(
+            [hook_path, "--version-json"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        installed = _safe_semver(json.loads(proc.stdout or "{}").get("version")) if proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        installed = ""
+    if not installed:
+        return "warn", f"{hook_path} did not report its release", reinstall
+    if expected and installed != expected:
+        return "warn", f"{hook_path} is {installed}; this CLI is {expected}", reinstall
+    return "pass", f"{installed}, the same release as this CLI", ""
+
+
+def _check_windows_hook_binary_release(cfg, r: _DoctorResult) -> None:
+    """Render the hook binary release row on Windows per-user installs."""
+    if os.name != "nt":
+        return
+    try:
+        gateway_executable = _gateway_lifecycle_selection(cfg).executable
+    except Exception:  # noqa: BLE001 - the gateway rows report selection problems.
+        return
+    if not gateway_executable:
+        return
+    hook_path = os.path.join(os.path.dirname(gateway_executable), "defenseclaw-hook.exe")
+    if not os.path.isfile(hook_path):
+        return
+    from defenseclaw import __version__
+
+    tag, detail, remediation = _hook_binary_release_check(hook_path, __version__)
+    _emit(
+        tag,
+        "Component compatibility: hook",
+        detail,
+        r=r,
+        check_id="doctor.component.hook.compatibility",
+        remediation=remediation,
     )
 
 

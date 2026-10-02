@@ -356,6 +356,24 @@ def test_retention_days_is_read_from_config_yaml(tmp_path, monkeypatch) -> None:
     assert cmd_doctor._configured_local_retention_days(cfg) == 30
 
 
+def test_hook_binary_from_another_release_is_named() -> None:
+    # GAP-1415: an older defenseclaw-hook.exe beside a newer gateway read as healthy hooks.
+    import subprocess
+
+    def ran(stdout: str, rc: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(["hook"], rc, stdout=stdout, stderr="")
+
+    hook = r"C:\Users\u\.local\bin\defenseclaw-hook.exe"
+    with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran('{"version":"1.0.0"}')):
+        tag, detail, remediation = cmd_doctor._hook_binary_release_check(hook, "1.0.1")
+    assert (tag, detail) == ("warn", f"{hook} is 1.0.0; this CLI is 1.0.1")
+    assert "install.ps1" in remediation
+    with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran('{"version":"1.0.1"}')):
+        assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[0] == "pass"
+    with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran("", rc=2)):
+        assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[:2] == ("warn", f"{hook} did not report its release")
+
+
 def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     # GAP-1298: with no Hermes process for the account there is nothing to reload.
     from defenseclaw.doctor_hooks import WindowsHookCheck
