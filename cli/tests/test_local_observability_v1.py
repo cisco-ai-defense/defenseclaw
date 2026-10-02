@@ -110,6 +110,8 @@ def test_collector_preserves_three_signal_pipeline_and_agent360_dimensions() -> 
     pipelines = collector["service"]["pipelines"]
 
     assert pipelines["metrics"]["processors"] == ["resource", "deltatocumulative", "batch"]
+    # A rare counter (a block every few minutes) must keep its total.
+    assert collector["processors"]["deltatocumulative"]["max_stale"] == "24h"
     assert pipelines["metrics"]["exporters"].count("prometheusremotewrite/prometheus") == 1
     assert "deltatocumulative" not in pipelines["logs"]["processors"]
     assert "deltatocumulative" not in pipelines["traces"]["processors"]

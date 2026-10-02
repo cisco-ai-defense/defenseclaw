@@ -33,7 +33,13 @@ processors:
   # stateful conversion gauges arrived but lifecycle/tool/token counters were
   # silently absent from Prometheus after the single-ingestion-path cleanup.
   # Keep this in the metrics pipeline only.
+  #
+  # max_stale keeps each stream's running total across quiet periods. With
+  # the 5m default a counter that saw no new delta for five minutes was
+  # dropped, the next event restarted it at 1, and Prometheus never saw the
+  # increase: two blocks eight minutes apart read as one.
   deltatocumulative:
+    max_stale: 24h
 
   # Generated pipeline canaries must remain queryable in Tempo, but they are
   # synthetic health probes rather than user activity and therefore must not
