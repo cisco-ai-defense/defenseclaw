@@ -32,6 +32,18 @@ def test_windows_launcher_timeout_outlasts_the_gateway_readiness_wait():
     assert _go_seconds("daemon_readiness_other.go") == 60
 
 
+def test_posix_launcher_timeout_outlasts_the_gateway_readiness_wait():
+    # GAP-1909: setup killed the launcher at 30 s while the gateway waited up
+    # to 60 s (180 s with setup progress), stopping a first start that was
+    # still migrating a large 0.x audit database.
+    readiness = _go_seconds("daemon_readiness_other.go")
+    text = (_REPO / "internal" / "cli" / "daemon_readiness_other.go").read_text(encoding="utf-8")
+    factor = int(re.search(r"startReadinessProgressFactor = (\d+)", text).group(1))
+    assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX > readiness * factor + 20
+    if os.name != "nt":
+        assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS == cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX
+
+
 def test_rollback_lock_identity_ignores_amp_release_age():
     # GAP-1206: the rollback restart wrote Amp's lock entry an hour bucket
     # later ("7h ago" -> "8h ago"); the identity check called that a change
