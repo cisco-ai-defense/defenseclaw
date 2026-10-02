@@ -3394,6 +3394,30 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(gc.connector, "hermes")
         self.assertEqual(self.app.cfg.claw.mode, "hermes")
 
+    def test_add_detected_skips_unverifiable_newcomer_and_adds_the_rest(self):
+        # GAP-1148: on macOS a uv-tool OpenHands outside the trusted prefixes
+        # failed `setup --add-detected` (and `make all`) for every connector.
+        self._seed_map("hermes")
+        gc = self.app.cfg.guardrail
+        refusal = "not in a built-in or operator-approved trusted prefix"
+
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex", "openhands"],
+        ), patch("defenseclaw.platform_support.host_os", return_value="darwin"), patch(
+            "defenseclaw.agent_selection.setup_agent_selection_connectors",
+            side_effect=lambda names: tuple(n for n in names if n == "openhands"),
+        ), patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {"openhands": refusal}),
+        ):
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(set(gc.connectors), {"codex", "hermes"})
+        self.assertIn("skipping openhands", res.output)
+        self.assertIn("re-run: defenseclaw setup openhands", res.output)
+
     def test_add_detected_restarting_batch_audits_after_gateway_is_ready(self):
         self._seed_map("codex")
         gateway_ready = False

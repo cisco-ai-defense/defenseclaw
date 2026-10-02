@@ -218,7 +218,7 @@ quickstart: _source-install-preflight
 		elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then \
 			echo "  • Existing config kept ($$cfg_file); change connectors or modes with: defenseclaw init"; \
 			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
-				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
+				echo "  Could not add newly detected connectors — fix the error above, then re-run: defenseclaw setup --add-detected --yes"; \
 				exit 1; \
 			fi; \
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
@@ -237,7 +237,7 @@ quickstart: _source-install-preflight
 				exit 1; \
 			fi; \
 			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
-				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
+				echo "  Could not add newly detected connectors — fix the error above, then re-run: defenseclaw setup --add-detected --yes"; \
 				exit 1; \
 			fi; \
 		fi; \
