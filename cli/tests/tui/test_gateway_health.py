@@ -559,7 +559,7 @@ def test_missing_pid_file_reads_as_not_running_with_start_hint(
     monkeypatch.setattr(
         "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
         lambda _config: SimpleNamespace(
-            trusted=False, pid=0, code="missing", detail="the gateway is not running (no PID file)"
+            trusted=False, pid=0, code="missing", detail="the gateway is not running (PID file is missing)"
         ),
     )
     result = _fetch_gateway_health(_config())

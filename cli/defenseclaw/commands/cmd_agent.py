@@ -4154,7 +4154,7 @@ def _render_ai_usage_table(
     # wide terminal is not squeezed into 120 columns.
     import shutil
 
-    width = max(120, shutil.get_terminal_size((120, 24)).columns)
+    width = max(160 if wide else 120, shutil.get_terminal_size((120, 24)).columns)
     console = Console(file=stream, force_terminal=False, color_system=None, width=width)
 
     title = "AI visibility"
