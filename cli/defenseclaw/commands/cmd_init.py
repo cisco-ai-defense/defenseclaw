@@ -2106,6 +2106,12 @@ def _activate_additional_connectors(
                 )
             mode = "observe"
         pc.mode = "action" if mode == "action" else "observe"
+        # An observe extra under a global observe mode follows the global
+        # mode (empty override), as the primary does, so a later global
+        # `guardrail mode action` moves it too. A downgraded action request
+        # keeps its explicit observe.
+        if pc.mode == "observe" and (gc.mode or "observe").lower() == "observe" and not s.get("mode_warning"):
+            pc.mode = ""
         if s["fail_mode"]:
             pc.hook_fail_mode = "closed" if s["fail_mode"].lower() == "closed" else "open"
         if s["human_approval"] is not None:
