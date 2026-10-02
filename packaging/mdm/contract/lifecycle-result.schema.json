@@ -69,6 +69,7 @@
             "properties": {
               "account": { "type": "string" },
               "sid": { "type": "string" },
+              "reason": { "type": "string", "description": "Why a connector of this account is pending or failed, and what happens next." },
               "connectors": {
                 "type": "object",
                 "additionalProperties": { "enum": ["enrolled", "pending", "failed"] }

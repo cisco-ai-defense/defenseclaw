@@ -55,15 +55,26 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 			reasons = append(reasons, reason)
 		}
 	}
-	if pending := result.Enrollment.Pending; pending > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) are pending", pending))
+	pending, failed := result.Enrollment.Pending, result.Enrollment.Failed
+	if pending > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) are pending (waiting for an active, connected session of that account)", pending))
 	}
-	if failed := result.Enrollment.Failed; failed > 0 {
+	if failed > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) failed", failed))
 	}
-	if len(reasons) == 0 {
+	noReason := len(reasons) == 0
+	if noReason {
 		reasons = append(reasons, "the installer gave no reason")
 	}
-	result.AddWarning("security_incomplete", "security is not complete: "+strings.Join(reasons, "; ")+
-		"; the guardian log and each account's detail name the cause")
+	// Point at per-account detail only when an account is pending or
+	// failed, and at the guardian log only when the guardian is the cause
+	// or nothing else is named (GAP-1733).
+	where := ""
+	switch {
+	case pending > 0 || failed > 0:
+		where = "; each pending or failed account's Account line (enrollment.accounts[].reason in --json) says why"
+	case !result.Readiness.Guardian || noReason:
+		where = "; the guardian log names the cause"
+	}
+	result.AddWarning("security_incomplete", "security is not complete: "+strings.Join(reasons, "; ")+where)
 }

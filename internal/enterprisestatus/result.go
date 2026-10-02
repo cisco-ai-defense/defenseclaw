@@ -32,6 +32,9 @@ const (
 	WindowsExitBusy        = 1618 // ERROR_INSTALL_ALREADY_RUNNING: MDMs retry
 	WindowsExitInvalidArgs = 1639 // ERROR_INVALID_COMMAND_LINE
 	WindowsExitReboot      = 3010 // reserved: success, reboot required
+	// WindowsExitAccessDenied (ERROR_ACCESS_DENIED): a standard account ran
+	// status or verify, which only an elevated prompt can check.
+	WindowsExitAccessDenied = 5
 
 	UnixExitFailure     = 1
 	UnixExitInvalidArgs = 2
@@ -93,6 +96,9 @@ type EnrollmentAccount struct {
 	Account    string            `json:"account"`
 	SID        string            `json:"sid,omitempty"`
 	Connectors map[string]string `json:"connectors"`
+	// Reason says why a connector is pending or failed, and what happens
+	// next; empty when every connector is enrolled.
+	Reason string `json:"reason,omitempty"`
 }
 
 // PortHolder is a process, other than the DefenseClaw gateway, listening

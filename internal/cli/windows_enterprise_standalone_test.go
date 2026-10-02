@@ -1266,7 +1266,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
 	signedOut := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":[]}`)
-	if len(signedOut) != 1 || !strings.Contains(signedOut[0].Message, "because those accounts were signed out") {
+	if len(signedOut) != 1 || !strings.Contains(signedOut[0].Message, "because those accounts had no active (connected) session (signed out, or signed in with a disconnected session)") {
 		t.Fatalf("signed-out warnings = %+v", signedOut)
 	}
 	if labels := windowsEnterpriseRegistrationsByAccount([]string{"amp/S-1-5-18", "kiro/S-1-5-18", "orphan"}); len(labels) != 2 ||

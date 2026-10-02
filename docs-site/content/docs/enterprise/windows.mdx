@@ -491,7 +491,9 @@ registrations stay and point at the removed hook binary, and each account is
 named with "because Setup did not run as LocalSystem". Only the failed run's
 result lists them, because a later `/status` finds no deployment, so keep
 that result. Fix the cause of the failure, then run `/ensure` and
-`/uninstall` as LocalSystem while the accounts are signed in, as in [Run
+`/uninstall` as LocalSystem while the accounts have an active (connected)
+session (a signed-in account whose session is disconnected counts as signed
+out), as in [Run
 Setup as LocalSystem](#run-setup-as-localsystem). An empty
 `C:\Program Files\ClaudeCode\managed-settings.d` can also stay; see
 [Remove](#remove).
@@ -693,7 +695,8 @@ container profile is not on the computer while it is signed out. Remove
 what it names as LocalSystem. A purge that did not run as LocalSystem
 removes the machine deployment but none of these folders, so it fails
 (non-zero exit) and names each account: run Setup `/ensure` and then
-`/uninstall PURGE=1`, both as LocalSystem while the accounts are signed in.
+`/uninstall PURGE=1`, both as LocalSystem while the accounts have an active
+(connected) session.
 
 The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.

@@ -35,9 +35,19 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	message := result.Warnings[0].Message
 	if !strings.Contains(message, "claudecode machine policy") || strings.Contains(message, "codex machine policy") ||
 		!strings.Contains(message, "/repair ATTESTCLAUDEEFFECTIVEPOLICY=1") ||
-		!strings.Contains(message, "4 per-user enrollment(s) are pending") {
+		!strings.Contains(message, "4 per-user enrollment(s) are pending (waiting for an active, connected session") ||
+		!strings.Contains(message, "each pending or failed account's Account line (enrollment.accounts[].reason in --json) says why") {
 		t.Fatalf("message = %q", message)
 	}
+	// GAP-1733: with nothing pending, only the attestation is named, not a
+	// per-account cause.
+	result.Enrollment.Pending = 0
+	result.Warnings = nil
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if message := result.Warnings[0].Message; strings.Contains(message, "account") || strings.Contains(message, "guardian log") {
+		t.Fatalf("nothing pending, message = %q", message)
+	}
+	result.Enrollment.Pending = 4
 
 	result.SecurityComplete = true
 	result.Warnings = nil

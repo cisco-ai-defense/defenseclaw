@@ -656,7 +656,13 @@ def _rooted(text: str, replacements: dict[str, str]) -> str:
 class _Host:
     """A temporary host: stub tools on PATH, a stub gateway and a call log."""
 
-    def __init__(self, tmp_path: Path, gateway_rc: int = 0, apply_path_active: bool = False):
+    def __init__(
+        self,
+        tmp_path: Path,
+        gateway_rc: int = 0,
+        apply_path_active: bool = False,
+        gateway_out: str = '{"schema_version":2,"ok":true}',
+    ):
         self.tmp = tmp_path
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
@@ -677,7 +683,9 @@ esac""")
         for tool in ("systemd-sysusers", "systemd-tmpfiles"):
             _write_stub(self.bin, tool, f"""echo "{tool} $*" >>'{self.log}'""")
         _write_stub(self.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{self.log}'
-echo '{{"schema_version":2,"ok":true}}'
+cat <<'JSON'
+{gateway_out}
+JSON
 exit {gateway_rc}""")
 
     def run(self, script: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -727,6 +735,23 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
     assert result.returncode == 0  # a package install never fails on the lifecycle
     assert message in result.stderr
     assert host.calls()[-1] == f"systemctl start {APPLY_PATH}"
+
+
+# GAP-1744: dnf printed only "run verify"; the cause (a missing protected
+# credential) was only in last-package-result.json.
+def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path) -> None:
+    result_line = (
+        '{"schema_version":2,"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":'
+        '"protected credential \\"galileo-api-key\\" is not stored; store it with `enterprise secret set --name galileo-api-key`"}]}'
+    )
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=result_line)
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
+    assert result.returncode == 0
+    assert (
+        'config_invalid: protected credential "galileo-api-key" is not stored; store it with '
+        "`enterprise secret set --name galileo-api-key`"
+    ) in result.stderr
+    assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
 
 
 # Preremove ran uninstall with the 5 s default and exited 0

@@ -222,7 +222,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep)
+			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
@@ -437,7 +437,8 @@ func (l *lifecycle) freshInstall(ctx context.Context) int {
 		channel = ChannelPackage
 	}
 	if l.opts.PayloadDir == "" && !l.opts.FromPackage {
-		r.AddError(codeInvalidArguments, "install needs --payload or --from-package")
+		r.AddError(codeInvalidArguments, "install needs --payload <dir> or --from-package; to apply the installed package, run `"+
+			env.lifecycleCommand(ActionEnsure)+" --from-package`")
 		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 	}
 	var adopting *adoption
@@ -1864,10 +1865,25 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
 	if !l.opts.Purge {
-		lines = append(lines, "kept: each enrolled user's ~/.defenseclaw and per-user binaries; `"+
-			env.lifecycleCommand(ActionUninstall)+" --purge` removes them too")
+		lines = append(lines, "kept: each enrolled user's ~/.defenseclaw and per-user binaries; "+l.keptPerUserNextStep(record))
 	}
 	return lines
+}
+
+// keptPerUserNextStep says how to remove the per-user data a default
+// uninstall keeps. --purge needs the gateway binary, which this uninstall
+// removed unless the deb/rpm owns it, so the next step must not name a
+// binary that is gone (GAP-1721).
+func (l *lifecycle) keptPerUserNextStep(record *Deployment) string {
+	env := l.env
+	purge := "`" + env.lifecycleCommand(ActionUninstall) + " --purge`"
+	if !exists(env.P(filepath.Join(env.Layout.BinDir, binGateway))) {
+		return "this uninstall removed the DefenseClaw binaries, so to remove them too, install the DefenseClaw enterprise package again and run " + purge
+	}
+	if record != nil && record.Channel == ChannelPackage && env.GOOS == "linux" {
+		return purge + " removes them too while the defenseclaw-enterprise package is installed (once the package is removed, install it again first)"
+	}
+	return purge + " removes them too"
 }
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with

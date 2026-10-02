@@ -67,8 +67,17 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	if record == nil {
 		r.Installed = false
+		failure := env.lastPackageInstallFailure()
 		if l.opts.Action == ActionVerify {
-			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
+			message := "DefenseClaw enterprise is not installed"
+			if failure != "" {
+				message += "; the package's own install run failed (see the " + codePackageInstallFailed + " warning)"
+			}
+			r.AddError(codeNotInstalled, message)
+		}
+		if failure != "" {
+			r.AddWarning(codePackageInstallFailed, "the package was installed, but its own install run did not complete, so no deployment is active: "+
+				failure+"; fix that, then finish the install with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
 		}
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
 			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx))
@@ -339,6 +348,40 @@ func (e *Env) lifecycleCommand(action string) string {
 		group = "macos"
 	}
 	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
+}
+
+// codePackageInstallFailed names the failed ensure of the package's own
+// postinstall when no deployment is committed (GAP-1744).
+const codePackageInstallFailed = "package_install_failed"
+
+// lastPackageResultFile is the result the deb/rpm and the macOS pkg
+// postinstall keep of their own `ensure --from-package` run.
+const lastPackageResultFile = "last-package-result.json"
+
+// lastPackageInstallFailure returns "code: message" of the first error of the
+// package postinstall's failed install run, or "" when there is none. dnf
+// printed only "run verify", and verify then said not_installed without the
+// cause (a missing protected credential) that the result names (GAP-1744).
+func (e *Env) lastPackageInstallFailure() string {
+	raw, err := readBounded(e.P(filepath.Join(e.Layout.LifecycleDir, lastPackageResultFile)), maxInputBytes)
+	if err != nil {
+		return ""
+	}
+	var last struct {
+		OK     bool                       `json:"ok"`
+		Action string                     `json:"action"`
+		Errors []enterprisestatus.Message `json:"errors"`
+	}
+	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
+		return ""
+	}
+	switch last.Action {
+	case ActionEnsure, ActionInstall, ActionUpgrade:
+	default:
+		return ""
+	}
+	first := last.Errors[0]
+	return strings.TrimSpace(first.Code + ": " + first.Message)
 }
 
 // leftoversNextStep tells the administrator what to do about machine state
