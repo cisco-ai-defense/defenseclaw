@@ -84,17 +84,32 @@ func foreignGatewayListenerFix(cfg *config.Config) string {
 	)
 }
 
-// freeGatewayAPIPort returns the first port after from that host can bind
-// right now, or 0 when none of the next few is free.
+// gatewayAPIPortStep keeps a suggested API port clear of the sandbox ingress
+// and egress ports a gateway uses next to its own (api_port+1 and +2), the
+// same step init uses when it moves a new account off a held port.
+const gatewayAPIPortStep = 10
+
+// freeGatewayAPIPort returns the first port after from, in steps of
+// gatewayAPIPortStep, that host can bind right now together with its two
+// sandbox ports, or 0 when none of the next few is free.
 func freeGatewayAPIPort(host string, from int) int {
-	for port := from + 1; port <= from+32 && port <= 65535; port++ {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
-		if err == nil {
-			_ = ln.Close()
+	for port := from + gatewayAPIPortStep; port+2 <= 65535 && port <= from+10*gatewayAPIPortStep; port += gatewayAPIPortStep {
+		if gatewayPortsBindable(host, port, port+1, port+2) {
 			return port
 		}
 	}
 	return 0
+}
+
+func gatewayPortsBindable(host string, ports ...int) bool {
+	for _, port := range ports {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			return false
+		}
+		_ = ln.Close()
+	}
+	return true
 }
 
 func gatewayPortAcceptsConnections(addr string) bool {
