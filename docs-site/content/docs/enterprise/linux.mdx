@@ -360,7 +360,8 @@ module, mount, raw-I/O, reboot and swap calls. Config, binaries and the ledger
 are read-only to it; it can write only its data, log and runtime directories.
 The guardian runs as root bounded to `CAP_CHOWN CAP_DAC_OVERRIDE
 CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, and the enumerator to
-`CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID` with homes read-only.
+`CAP_CHOWN CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID` with homes
+read-only.
 Do not edit the units; `verify` reports local overrides. Put host-specific
 settings in a drop-in, and never widen the gateway sandbox: user discovery and
 hook repair are the guardian's job.
