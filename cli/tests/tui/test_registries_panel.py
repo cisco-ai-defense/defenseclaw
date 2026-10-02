@@ -440,3 +440,25 @@ def test_registry_badge_truncates_long_ids() -> None:
     assert registry_badge("") == ""
     assert registry_badge("corp-skills") == "registry:corp-skills"
     assert registry_badge("very-long-corporate-registry") == "registry:very-long-corpo..."
+
+
+def test_registry_result_summary_reads_the_json_result() -> None:
+    """The finished card named the result, not the closing "]" (GAP-1681)."""
+    from defenseclaw.tui.panels.registries import entry_status_label, registry_result_summary
+
+    sync = [{"source_id": "corp", "fetched": 1, "scanned": 1, "promoted_skills": 0,
+             "promoted_mcps": 1, "blocked": 0, "errors": []}]
+    assert registry_result_summary(json.dumps(sync, indent=2)) == (
+        "corp: fetched 1, scanned 1, promoted 1 MCP, blocked 0"
+    )
+    approve = {"action": "approve", "promoted_mcps": 1, "promoted_skills": 0,
+               "verdict": {"name": "wiki", "type": "mcp", "status": "pending"}}
+    assert registry_result_summary(json.dumps(approve, indent=2)) == (
+        "mcp:wiki approved · policy now has 1 MCP from this source"
+        " · status pending until the next sync scans it"
+    )
+    reject = {"action": "reject", "verdict": {"name": "wiki", "type": "mcp", "status": "blocked"}}
+    assert registry_result_summary(json.dumps(reject)) == "mcp:wiki rejected"
+    assert registry_result_summary("not json") == ""
+    assert entry_status_label("pending").startswith("pending (no scan verdict yet")
+    assert entry_status_label("clean") == "clean"
