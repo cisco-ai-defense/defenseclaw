@@ -82,13 +82,8 @@ def strip_width(labels: Sequence[str]) -> int:
 
 
 # Cells kept free when choosing which tabs get a name, so the names don't
-# change as you switch panels (the active tab always shows its full name)
-# or as unread badges come and go (GAP-1155).
+# change as unread badges come and go (GAP-1155).
 BADGE_RESERVE = 6
-
-
-def _active_reserve(panels: Sequence[tuple[str, str, str]]) -> int:
-    return max((len(label) + 1 for _name, _key, label in panels), default=0)
 
 
 def fit_tab_labels(
@@ -102,9 +97,10 @@ def fit_tab_labels(
     ``panels`` is the visible ``(name, key, label)`` rows in order. A width
     of 0 or less means "unknown" and returns full labels.
 
-    Which tabs get a name depends only on the width: the active tab's full
-    name and the unread badges come out of a fixed reserve, so moving between
-    panels or a new badge never renames another tab.
+    Which tabs get a name depends only on the width (badges come out of a
+    fixed reserve), so moving between panels or a new badge never renames
+    another tab. The active tab shows its full name when the room left over
+    allows it.
     """
 
     full = {name: _label(key, label, unread.get(name, 0)) for name, key, label in panels}
@@ -119,7 +115,7 @@ def fit_tab_labels(
     )
     # 1. Names from the width alone. Stop at the first tab that doesn't fit,
     #    so a named tab is always more important than every letter-only one.
-    budget = width - _active_reserve(panels) - BADGE_RESERVE
+    budget = width - BADGE_RESERVE
     names = dict(keys)
     for tier in (plain_short, plain_full):
         for name in ranked:
@@ -127,18 +123,25 @@ def fit_tab_labels(
             if strip_width(tuple(candidate.values())) > budget:
                 break
             names = candidate
-    # 2. The active tab shows its full name; badges go on every tab.
+    # 2. Badges go on every tab.
     named = {name: names[name] != keys[name] for name in names}
     tier_label = {name: plain_full[name] == names[name] for name in names}
     labels: dict[str, str] = {}
     for name, key, label in panels:
-        if name == active or tier_label[name]:
+        if tier_label[name]:
             labels[name] = _label(key, label, unread.get(name, 0))
         elif named[name]:
             labels[name] = _label(key, SHORT_LABELS.get(name, label), unread.get(name, 0))
         else:
             labels[name] = _label(key, "", unread.get(name, 0))
-    # 3. Only when the reserve is not enough (many large badges on a tiny
+    # 3. The active tab gets its full name from the room that is left, so
+    #    no other tab changes for it.
+    if active in labels:
+        key, label = keys[active], next(label for name, _key, label in panels if name == active)
+        candidate = {**labels, active: _label(key, label, unread.get(active, 0))}
+        if strip_width(tuple(candidate.values())) <= width:
+            labels = candidate
+    # 4. Only when the reserve is not enough (many large badges on a tiny
     #    terminal): drop the least important badges, then names.
     for name in reversed(ranked):
         if strip_width(tuple(labels.values())) <= width:
