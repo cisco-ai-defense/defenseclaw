@@ -28,3 +28,12 @@ import "time"
 // still making progress and connector setup then failed (GAP-1206, GAP-1396).
 // A gateway that exits is still reported at once.
 const platformStartReadinessTimeout = 240 * time.Second
+
+// startupRetriesSQLiteIO lets readiness wait out an event-history SQLite I/O
+// error as it does BUSY/LOCKED contention. On Windows an antivirus scan of a
+// large audit.db (just copied for the upgrade rollback) can hold the file past
+// SQLite's own sharing-violation retries, which surfaces as SQLITE_IOERR; the
+// writer clears it after its next commit. An upgrade with a 1.3 GB audit.db
+// rolled back that way, and the restored gateway failed the same way, while a
+// start a minute later worked (GAP-1519).
+var startupRetriesSQLiteIO = true

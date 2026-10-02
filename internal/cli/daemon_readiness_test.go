@@ -389,6 +389,9 @@ func TestGatewaySnapshotReadyRetriesUnavailableTelemetryHealth(t *testing.T) {
 }
 
 func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *testing.T) {
+	previous := startupRetriesSQLiteIO
+	t.Cleanup(func() { startupRetriesSQLiteIO = previous })
+	startupRetriesSQLiteIO = false
 	for _, primary := range []float64{5, 6} {
 		t.Run(fmt.Sprintf("sqlite-primary-%v", primary), func(t *testing.T) {
 			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
@@ -471,6 +474,31 @@ func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *tes
 				t.Fatalf("fatal telemetry readiness = %v, error = %v; want immediate failure", ready, err)
 			}
 		})
+	}
+}
+
+// GAP-1519: on Windows an event-history SQLite I/O error during startup (an
+// antivirus scan holding a large audit.db) is waited out, not fatal.
+func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing.T) {
+	previous := startupRetriesSQLiteIO
+	t.Cleanup(func() { startupRetriesSQLiteIO = previous })
+	startupRetriesSQLiteIO = true
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Telemetry = gateway.SubsystemHealth{
+		State: gateway.StateError,
+		Details: map[string]interface{}{
+			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+		},
+	}
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if ready || err != nil {
+		t.Fatalf("io readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "full"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(13)
+	if _, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true}); err == nil {
+		t.Fatal("a full disk must still fail at once")
 	}
 }
 

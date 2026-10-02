@@ -303,3 +303,10 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history() -> None:
     assert '$label = "audit-history"' in body
     assert '[version]$version -lt [version]"1.0.0"' in body
     assert "backups\\$label-$version-" in body
+
+
+def test_the_rollback_copy_states_its_size_and_the_free_space() -> None:
+    # GAP-1519: an upgrade with a 1.3 GB audit.db never said how much it copied.
+    body = _text()[_text().index("function Save-Snapshot") :][:1400]
+    assert "Saving a rollback copy of the data folder ({0:N0} MB needed{1})" in body
+    assert body.index("Saving a rollback copy") < body.index("Not enough free disk space")

@@ -23,3 +23,7 @@ import "time"
 // platformStartReadinessTimeout bounds how long start and restart wait for a
 // launched gateway to report READY before stopping it.
 const platformStartReadinessTimeout = 60 * time.Second
+
+// startupRetriesSQLiteIO: see daemon_readiness_windows.go. Elsewhere an
+// event-history I/O error stays an immediate startup failure.
+var startupRetriesSQLiteIO = false

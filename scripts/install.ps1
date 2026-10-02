@@ -878,6 +878,10 @@ function Save-Snapshot {
     foreach ($entry in $entries) { $need += Get-TreeSize $entry.FullName }
     $free = [long]-1
     try { $free = ([IO.DriveInfo][IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir))).AvailableFreeSpace } catch { }
+    # A large audit.db makes this copy (and the antivirus scan of it) slow;
+    # say how big it is and what is free (GAP-1519).
+    $freeText = if ($free -ge 0) { ", {0:N0} MB free" -f ([double]$free / 1MB) } else { "" }
+    Write-Info ("Saving a rollback copy of the data folder ({0:N0} MB needed{1})" -f ([double]$need / 1MB), $freeText)
     if ($free -ge 0 -and $free -lt $need + 100MB) {
         Write-Err "Not enough free disk space next to $DataDir for a rollback copy"
         return $false
