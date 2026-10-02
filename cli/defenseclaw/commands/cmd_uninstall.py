@@ -61,6 +61,9 @@ import click
 
 from defenseclaw import config as config_module
 from defenseclaw import legacy_connector, ux
+# Imported here, not where it is used: by then the data removal has deleted
+# the virtual environment this CLI runs from (GAP-1397).
+from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -1345,6 +1348,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+        if not plan.remove_data_dir:
+            _turn_guardrail_off(plan.data_dir)
     if plan.stop_gateway and plan.data_dir:
         # The gateway is stopped, so its watcher no longer uses them.
         _remove_created_dirs(plan.data_dir)
@@ -1390,8 +1395,6 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
     if plan.remove_data_dir and not plan.preserve_data_entries:
         _remove_empty_plugin_cache()
-        from defenseclaw.bootstrap import remove_own_api_port_claims
-
         remove_own_api_port_claims()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
@@ -1411,6 +1414,29 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
     return result
+
+
+def _turn_guardrail_off(data_dir: str) -> None:
+    """Record in the kept config that the connectors are torn down (GAP-1312).
+
+    The default uninstall keeps ~/.defenseclaw. With guardrail.enabled still
+    true, status listed every torn-down connector as active, and the next
+    gateway start set their hooks up again. Off is what
+    ``setup guardrail --disable`` writes; ``setup guardrail`` turns it back on
+    with the kept connectors and modes.
+    """
+    if not data_dir or not config_module.config_path_for_data_dir(data_dir).is_file():
+        return
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if not cfg.guardrail.enabled:
+            return
+        cfg.guardrail.enabled = False
+        cfg.save()
+    except Exception as exc:  # noqa: BLE001 - the hooks are already gone
+        ux.warn(f"could not turn the guardrail off in the kept config ({exc}); run: defenseclaw setup guardrail --disable")
+        return
+    ux.ok("guardrail turned off in the kept config (guardrail.enabled = false)")
 
 
 def _remove_data_bound_launchers(plan: UninstallPlan) -> None:
