@@ -315,7 +315,9 @@ class RegistriesPanelModel:
 
     def data_table_columns(self) -> tuple[str, ...]:
         if self.current_tab == RegistriesTab.SOURCES:
-            return ("ID", "Kind", "Content", "On", "Last Sync", "Status", "Entries", "Clean", "Warn", "Block", "Error")
+            # Verdict counts share one clean/warn/block/error ("C/W/B/E") column so the
+            # table fits 80 columns instead of clipping "Error" (GAP-1166).
+            return ("ID", "Kind", "Content", "On", "Last Sync", "Status", "Entries", "C/W/B/E")
         return ("Source", "Name", "Type", "Status", "Severity", "A/R", "Location")
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
@@ -329,10 +331,7 @@ class RegistriesPanelModel:
                     row.last_sync or "(never)",
                     row.status_label,
                     str(row.entry_count),
-                    str(row.clean_count),
-                    str(row.warning_count),
-                    str(row.blocked_count),
-                    str(row.error_count),
+                    f"{row.clean_count}/{row.warning_count}/{row.blocked_count}/{row.error_count}",
                 )
                 for row in self.sources
             )

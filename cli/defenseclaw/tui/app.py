@@ -601,7 +601,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     .panel-controls {
-        height: 3;
+        /* Buttons that don't fit scroll sideways (a scrollbar row appears)
+           instead of being cut off mid-word at 80 columns (GAP-1166). */
+        height: auto;
+        max-height: 4;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-size-horizontal: 1;
         margin-bottom: 1;
         padding: 0 1;
         border: round TOKEN_BORDER_MUTED;
@@ -2555,6 +2561,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except Exception:  # noqa: BLE001 - persistence is cosmetic
             pass
         self._schedule_state_save()
+
+        # A load message from the panel we just left ("MCPs: 0 loaded." on
+        # Sandboxes) is about that panel, not this one (GAP-1166).
+        if _is_load_status(self.status_text) and not self.command_running:
+            self._set_status(self._status_text())
 
         self._panel_render_generation += 1
         generation = self._panel_render_generation
@@ -15103,6 +15114,13 @@ def _truncate_for_strip(value: str, width: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+_LOAD_STATUS_RE = re.compile(r"^(Loading .+\.\.\.|.+: \d+ loaded\.|Inventory updated\.)$")
+
+
+def _is_load_status(text: object) -> bool:
+    return bool(_LOAD_STATUS_RE.match(str(text or "")))
 
 
 def _service_reported(state: str) -> bool:
