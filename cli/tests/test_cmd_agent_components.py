@@ -485,6 +485,22 @@ class ComponentsListingTests(unittest.TestCase):
         # below the threshold.
         self.assertEqual(names, {("pypi", "openai")})
 
+    def test_disabled_discovery_says_how_to_enable_it(self):
+        runner = CliRunner()
+        app = _make_ctx()
+
+        class DisabledClient(_FakeClient):
+            components_payload = {"enabled": False, "components": []}
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", DisabledClient):
+            result = runner.invoke(cmd_agent.components_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("AI discovery is disabled", result.output)
+        self.assertIn("defenseclaw agent discovery enable", result.output)
+        self.assertNotIn("AI components (0 unique)", result.output)
+
     def test_listing_does_not_crash_on_unreachable_sidecar(self):
         runner = CliRunner()
         app = _make_ctx()

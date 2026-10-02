@@ -719,3 +719,19 @@ class DoctorWebhookProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_private_webhook_target_refusal_explains_the_guard_and_next_step(monkeypatch):
+    import pytest as _pytest
+
+    from defenseclaw.webhooks.writer import validate_webhook_url
+
+    monkeypatch.delenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", raising=False)
+    with _pytest.raises(ValueError) as lan:
+        validate_webhook_url("https://10.0.1.26/hook")
+    assert "private or reserved address" in str(lan.value)
+    assert "SSRF guard" in str(lan.value) and "public endpoint or relay" in str(lan.value)
+    assert "ALLOW_LOCALHOST" not in str(lan.value)
+    with _pytest.raises(ValueError) as loop:
+        validate_webhook_url("http://127.0.0.1:9/hook")
+    assert "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1" in str(loop.value)

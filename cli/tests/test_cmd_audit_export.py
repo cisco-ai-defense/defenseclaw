@@ -71,3 +71,49 @@ def test_a_missing_gateway_binary_is_a_plain_error(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 1
     assert "defenseclaw-gateway is not installed" in result.output
     assert "Traceback" not in result.output
+
+
+def test_findings_alias_execs_the_gateway_findings_without_loading_config(
+    exec_capture: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv = ["audit", "findings", "--scanner", "skill", "--limit", "5"]
+    monkeypatch.setattr(sys, "argv", ["defenseclaw", *argv])
+    result = CliRunner().invoke(main_module.cli, argv, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert exec_capture == [[GATEWAY, GATEWAY, *argv]]
+
+
+def test_audit_help_names_findings_and_logs() -> None:
+    result = CliRunner().invoke(cmd_audit.audit, ["--help"])
+    assert result.exit_code == 0
+    assert "findings" in result.output
+    assert "logs" in result.output
+
+
+def _logs_app(tmp_path):
+    from types import SimpleNamespace
+
+    from defenseclaw.context import AppContext
+
+    app = AppContext()
+    app.cfg = SimpleNamespace(data_dir=str(tmp_path))
+    return app
+
+
+def test_logs_prints_the_newest_matching_lines(tmp_path) -> None:
+    (tmp_path / "gateway.log").write_text(
+        "".join(f"line {i} {'hook' if i % 2 else 'other'}\n" for i in range(10)),
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(
+        cmd_audit.audit, ["logs", "-n", "2", "--grep", "HOOK"], obj=_logs_app(tmp_path)
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["line 7 hook", "line 9 hook"]
+
+
+def test_logs_without_a_log_file_says_what_to_do(tmp_path) -> None:
+    result = CliRunner().invoke(cmd_audit.audit, ["logs", "--source", "watchdog"], obj=_logs_app(tmp_path))
+    assert result.exit_code == 1
+    assert "no watchdog log yet" in result.output
+    assert "Traceback" not in result.output

@@ -209,11 +209,14 @@ func openCommandAuditStore(path string) (*audit.Store, error) {
 var rootCmd = &cobra.Command{
 	Use:   "defenseclaw-gateway",
 	Short: "DefenseClaw gateway sidecar daemon",
-	Long: `DefenseClaw gateway sidecar — connects to the OpenClaw gateway WebSocket,
-monitors tool_call and tool_result events, enforces policy in real time,
-and exposes a local REST API for the Python CLI.
+	Long: `DefenseClaw gateway sidecar — the per-user policy runtime. It answers the
+hook calls of connected agents (Claude Code, Codex, Cursor, ...), runs the
+guardrail proxy for LLM traffic, writes the audit log, and exposes the local
+REST API used by the defenseclaw CLI and TUI. With OpenClaw configured it also
+monitors the OpenClaw gateway WebSocket.
 
-Run without arguments to start the sidecar daemon.`,
+Run without arguments to start the sidecar daemon in the foreground; use
+'defenseclaw-gateway start' to run it in the background.`,
 	PersistentPreRunE: rootPersistentPreRunE,
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if auditLog != nil {

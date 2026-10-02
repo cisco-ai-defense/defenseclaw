@@ -738,8 +738,8 @@ class MaskTests(unittest.TestCase):
         self.assertEqual(C.mask("abc"), "****")
         self.assertEqual(C.mask("abcdefgh"), "****")
 
-    def test_long_secrets_reveal_edges(self):
-        self.assertEqual(C.mask("abcdefghij"), "abcd…ghij")
+    def test_long_secrets_reveal_only_the_last_four(self):
+        self.assertEqual(C.mask("abcdefghij"), "…ghij")
 
 
 class ClassifyTests(unittest.TestCase):

@@ -189,7 +189,7 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
 
 
 def _is_audit_export(ctx: click.Context) -> bool:
-    """Return whether this is the ``audit export`` alias for the gateway command.
+    """Return whether this is the ``audit export``/``findings`` gateway alias.
 
     The gateway binary loads the configuration and opens the audit database
     read-only itself, so the CLI must not open the store for writing first.
@@ -201,7 +201,7 @@ def _is_audit_export(ctx: click.Context) -> bool:
         index = argv.index("audit")
     except ValueError:
         return False
-    return index + 1 < len(argv) and argv[index + 1] == "export"
+    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings"}
 
 
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:

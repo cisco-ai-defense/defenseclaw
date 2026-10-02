@@ -332,7 +332,10 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
         # a bare view keyword (curated/all-time/trending/hot), or a
         # full https URL with query params are all accepted.
         if kind not in ("clawhub", "skills_sh") and not url:
-            url = click.prompt("Manifest URL", default="")
+            url = click.prompt(
+                "Manifest path (absolute)" if kind == "file" else "Manifest URL",
+                default="",
+            )
         if not auth_env and click.confirm(
             "Use an auth token (read from an env var)?", default=False,
         ):
@@ -865,6 +868,16 @@ def sync_cmd(  # noqa: PLR0913
     _print_sync_reports(reports)
 
 
+def _promoted_label(skills: int, mcps: int) -> str:
+    """Spell out promoted counts: ``0``, ``1 MCP``, ``2 skills, 1 MCP``."""
+    parts = []
+    if skills:
+        parts.append(f"{skills} skill" + ("" if skills == 1 else "s"))
+    if mcps:
+        parts.append(f"{mcps} MCP" + ("" if mcps == 1 else "s"))
+    return ", ".join(parts) or "0"
+
+
 def _print_sync_reports(reports: list[SyncReport]) -> None:
     if not reports:
         ux.subhead("Nothing to sync.")
@@ -872,16 +885,16 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
     click.echo()
     ux.section("Sync results")
     click.echo(
-        f"  {'SOURCE':<24} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<10} {'STATUS'}"
+        f"  {'SOURCE':<24} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<20} {'STATUS'}"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 8} {'-' * 8} {'-' * 10} {'-' * 32}"
+        f"  {'-' * 24} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
     )
     for r in reports:
-        promoted = f"{r.promoted_skills}/{r.promoted_mcps}"
+        promoted = _promoted_label(r.promoted_skills, r.promoted_mcps)
         status = "ok" if r.ok() else "error"
         click.echo(
-            f"  {r.source_id:<24} {r.fetched:<8} {r.scanned:<8} {promoted:<10} {status}"
+            f"  {r.source_id:<24} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
         )
     for r in reports:
         for err in r.errors:

@@ -996,8 +996,10 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
                    set_severity_mapping: tuple, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit guardrail thresholds, patterns, and severity mappings.
 
-    Thresholds are severity ranks (4=CRITICAL, 3=HIGH, 2=MEDIUM, 1=LOW) and
-    apply to every connector that uses this policy.
+    Thresholds are severity ranks (4=CRITICAL, 3=HIGH, 2=MEDIUM, 1=LOW).
+    They govern LLM traffic through the guardrail proxy only. Tool calls
+    from hook connectors (Claude Code, Codex, ...) are blocked at the level
+    set with 'defenseclaw guardrail block-at' / 'alert-at' instead.
     """
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -1042,6 +1044,12 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 
     synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Guardrail updated: {', '.join(changed)}")
+    if block_threshold is not None or alert_threshold is not None:
+        click.echo(
+            "  Note: these thresholds apply to LLM traffic through the guardrail proxy. "
+            "To change when hook tool calls are blocked, run "
+            "'defenseclaw guardrail block-at LEVEL [--connector NAME]'."
+        )
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 

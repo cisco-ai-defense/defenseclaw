@@ -638,7 +638,7 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
     CredentialSpec(
         env_name="SPLUNK_ACCESS_TOKEN",
         feature="observability.splunk",
-        description="Token referenced by an enabled canonical Splunk destination",
+        description="Splunk access token (used only when a Splunk observability destination is enabled)",
         required=_splunk_token,
         effective_env_name=_splunk_env,
     ),
@@ -1063,10 +1063,10 @@ def resolve(env_name: str, data_dir: str) -> Resolution:
 
 
 def mask(secret: str) -> str:
-    """Reveal only 4 chars on each side; short secrets are fully masked."""
+    """Reveal only the last 4 chars; short secrets are fully masked."""
     if len(secret) <= 8:
         return "****" if secret else ""
-    return f"{secret[:4]}…{secret[-4:]}"
+    return f"…{secret[-4:]}"
 
 
 # ---------------------------------------------------------------------------
