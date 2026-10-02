@@ -161,6 +161,14 @@ def apply_secret(
     return [f"{preset.token_env}: written to {path}"]
 
 
+def secret_note_is_info(preset: Preset, message: str) -> bool:
+    """Whether an :func:`apply_secret` message reports a write, not a problem."""
+
+    return bool(preset.token_env) and message.startswith(
+        (f"{preset.token_env}: written to ", f"{preset.token_env}: (would write to ")
+    )
+
+
 def parse_bool(value: str) -> bool:
     normalized = str(value).strip().lower()
     if normalized in {"1", "true", "yes", "y", "on"}:
@@ -207,4 +215,5 @@ __all__ = [
     "render_header_template",
     "render_template",
     "resolve_inputs",
+    "secret_note_is_info",
 ]

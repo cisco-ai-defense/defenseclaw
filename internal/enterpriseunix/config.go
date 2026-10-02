@@ -15,6 +15,7 @@ package enterpriseunix
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -254,6 +255,72 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+// checkRulePacksReadable refuses an administrator rule pack the gateway's
+// service account cannot read. The lifecycle runs as root, which reads any
+// mode, so a pack written under umask 077 passed every other check and
+// failed only when the gateway started; an unset rule_pack_dir resolves to
+// the same <policy_dir>/guardrail/default folder, so the rollback failed too.
+func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
+	for _, label := range sortedKeys(v.RulePacks) {
+		dir := v.RulePacks[label]
+		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
+			continue
+		}
+		if err := e.rulePackReadable(dir, account); err != nil {
+			return fmt.Errorf("config %s %q: %w", label, dir, err)
+		}
+	}
+	return nil
+}
+
+func (e *Env) rulePackReadable(dir string, account Account) error {
+	for parent := filepath.Dir(dir); parent != "/" && parent != "."; parent = filepath.Dir(parent) {
+		uid, gid, mode, err := statOwnerMode(e.P(parent))
+		if err == nil && mode.IsDir() && !accountMayAccess(uid, gid, mode, account, 0o1) {
+			return fmt.Errorf("%s is %04o, so the %s service account cannot reach the rule pack below it; make it traversable (for example: chmod o+x %s) and retry", parent, mode.Perm(), e.Layout.ServiceUser, parent)
+		}
+	}
+	root := e.P(dir)
+	return filepath.WalkDir(root, func(full string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		uid, gid, mode, err := statOwnerMode(full)
+		if err != nil {
+			return err
+		}
+		need := os.FileMode(0o4)
+		switch {
+		case mode.IsDir():
+			need = 0o5
+		case !mode.IsRegular():
+			return nil
+		}
+		if accountMayAccess(uid, gid, mode, account, need) {
+			return nil
+		}
+		shown := dir
+		if rel, relErr := filepath.Rel(root, full); relErr == nil && rel != "." {
+			shown = filepath.Join(dir, rel)
+		}
+		return fmt.Errorf("%s is %04o, so the %s service account cannot read the rule pack; make it readable (for example: chmod -R u=rwX,go=rX %s) and retry", shown, mode.Perm(), e.Layout.ServiceUser, dir)
+	})
+}
+
+// accountMayAccess reports whether account has the need bits (4 read,
+// 1 search) on a path with this owner, group and mode. Supplementary
+// groups are not considered: the service account has none.
+func accountMayAccess(uid, gid int, mode os.FileMode, account Account, need os.FileMode) bool {
+	perm := mode.Perm()
+	switch {
+	case uid == account.UID:
+		perm >>= 6
+	case gid == account.GID:
+		perm >>= 3
+	}
+	return perm&need == need
 }
 
 // effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the

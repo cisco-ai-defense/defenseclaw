@@ -641,6 +641,8 @@ fi
 
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
+elif [[ "${RUN_QUICKSTART}" == true ]]; then
+    warn "Skipped --quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
 fi
 rm -rf "${STAGING}"
 ensure_path_hint
@@ -897,6 +899,11 @@ swap_app() {
 
 restore_snapshot() {
     local failed binary link name
+    # Only the latest failed install is kept: with a large audit database
+    # each copy holds gigabytes, and an earlier one is not used again.
+    for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
+        if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}"; fi
+    done
     failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "${failed}/data"
     for binary in ${MANAGED_BINARIES}; do
@@ -926,7 +933,8 @@ restore_snapshot() {
     restore_external_config "${SNAP}"
     rm -rf "${SNAP}"
     restart_old
-    warn "The failed ${VERSION} install was kept in ${failed} for troubleshooting"
+    warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
+    info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
 }
 
 restart_old() {
@@ -960,7 +968,10 @@ finish_swap() {
     rm -f "${tmp}"
     rm -rf "${DEFENSECLAW_HOME}/.upgrade-recovery" "${DEFENSECLAW_HOME}/.upgrade-receipts" \
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
-    find "${TMPDIR:-/tmp}" -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
+    # Pre-1.0 installers kept retired binaries in the temp folder they ran
+    # with. On macOS that is often /tmp although TMPDIR now names a per-user
+    # folder, so look in both.
+    find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
 }
@@ -971,8 +982,9 @@ keep_rolled_back_data() {
     [[ -f "${PREVIOUS}/ROLLED_BACK" && -d "${PREVIOUS}/data" ]] || return 0
     local kept
     kept="${DEFENSECLAW_HOME}/backups/rolled-back-$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" \
-        && info "Kept the data from before the last rollback in ${kept}"
+    mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" || return 1
+    info "Kept the data from before the last rollback in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
+    info "It is not used again; once you no longer need its audit history, remove it with: rm -rf '${kept}'"
 }
 
 # stash_live SLOT: move the live install (binaries copied, everything else

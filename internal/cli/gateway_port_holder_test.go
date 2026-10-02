@@ -33,6 +33,10 @@ func TestForeignGatewayListenerNamesHolderPID(t *testing.T) {
 		!strings.Contains(problem, "not by this account's gateway") {
 		t.Fatalf("foreign listener = %q, want it to contain %q", problem, want)
 	}
+	// The fix names the command that moves this account's gateway.
+	if fix := foreignGatewayListenerFix(c); !strings.Contains(fix, "defenseclaw setup gateway --api-port ") {
+		t.Fatalf("fix = %q, want the setup gateway --api-port command", fix)
+	}
 	listener.Close()
 	if problem := foreignGatewayListener(c); problem != "" {
 		t.Fatalf("free port reported as held: %q", problem)

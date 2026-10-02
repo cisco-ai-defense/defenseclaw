@@ -33,6 +33,7 @@ from defenseclaw.observability.v8_status import (
     destination_health_from_gateway,
     retention_health_from_gateway,
 )
+from defenseclaw.platform_support import PROXY_CONNECTORS
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
 from defenseclaw.tui.services.runtime_state import RuntimeOverview
@@ -941,6 +942,11 @@ class OverviewPanelModel:
             return "unknown"
         match key:
             case "gateway":
+                # ``health.gateway`` is the OpenClaw fleet uplink. A hook-only
+                # roster never uses it, so its "disabled" says nothing about
+                # the sidecar; show the sidecar's availability instead.
+                if self._fleet_uplink_unused():
+                    return self.gateway_availability().state
                 return self.health.gateway.state
             case "agent":
                 # 8.13: a multi-connector install rolls the per-connector
@@ -1018,7 +1024,7 @@ class OverviewPanelModel:
     def gateway_detail(self) -> str:
         if self.health is None:
             return ""
-        if self.health.gateway.state.strip().lower() == "disabled":
+        if self.health.gateway.state.strip().lower() == "disabled" and not self._fleet_uplink_unused():
             if summary := string_detail(self.health.gateway.details, "summary"):
                 return summary
         uptime = timedelta(milliseconds=self.health.uptime_ms)
@@ -1026,8 +1032,24 @@ class OverviewPanelModel:
             return f"up {format_duration(uptime)}"
         return ""
 
+    def _fleet_uplink_unused(self) -> bool:
+        """True when the fleet uplink is off and no connector would use it.
+
+        Only proxy connectors (OpenClaw, ZeptoClaw) talk to an OpenClaw fleet.
+        With no connector configured yet the daemon's own wording stays.
+        """
+
+        if self.health is None or self.health.gateway.state.strip().lower() != "disabled":
+            return False
+        if self.cfg is None:
+            return False
+        names = {c.strip().lower() for c, _m in self.cfg.connector_modes if c}
+        names.add(self.active_connector_name().strip().lower())
+        names.discard("")
+        return bool(names) and not (names & PROXY_CONNECTORS)
+
     def gateway_standalone_hint(self) -> str:
-        if self.health is None:
+        if self.health is None or self._fleet_uplink_unused():
             return ""
         return string_detail(self.health.gateway.details, "hint") or string_detail(
             self.health.gateway.details,

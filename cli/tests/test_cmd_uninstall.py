@@ -300,6 +300,53 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             cmd_uninstall._remove_binaries(plan)
             self.assertTrue(unrelated.is_file())
 
+    def test_binaries_removes_folders_a_replaced_windows_setup_left(self):
+        # WIN-R1-17: after the installer replaces DefenseClaw Setup, its hook
+        # launcher and transaction log stay under %LOCALAPPDATA%\DefenseClaw.
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp).resolve()
+            hook = local / "DefenseClaw" / "HookRuntime" / "defenseclaw-hook.exe"
+            hook.parent.mkdir(parents=True)
+            hook.write_bytes(b"MZ")
+            (local / "DefenseClaw" / "InstallerState").mkdir()
+            with patch.object(cmd_uninstall.windows_native_uninstall, "_known_folder_path", return_value=str(local)):
+                leftovers = cmd_uninstall._windows_setup_leftovers("win32")
+                self.assertEqual(len(leftovers), 2)
+                cmd_uninstall._remove_setup_leftovers(leftovers)
+                self.assertFalse((local / "DefenseClaw").exists())
+                # A live Setup hook runtime keeps its folders.
+                (local / "DefenseClaw" / "HookRuntime").mkdir(parents=True)
+                (local / "DefenseClaw" / "HookRuntime" / "hook-runtime-state.json").write_text("{}")
+                self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
+
+    def test_binary_removal_drops_install_bookkeeping_and_pip_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "bin"
+            custody = root / ".defenseclaw-install-custody" / "retired"
+            custody.mkdir(parents=True)
+            (custody / "old").write_text("x", encoding="utf-8")
+            (root / ".defenseclaw-source-root").write_text("checkout", encoding="utf-8")
+            legacy_tmp = Path(tmp).resolve() / "tmp"
+            (legacy_tmp / ".defenseclaw-install-custody-1-abc" / "retired-x").mkdir(parents=True)
+            (legacy_tmp / "unrelated").mkdir()
+            gateway = "defenseclaw-gateway.exe" if sys.platform == "win32" else "defenseclaw-gateway"
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name=sys.platform,
+                install_root=str(root),
+                gateway_path=str(root / gateway),
+                binary_targets=(),
+                remove_binaries=True,
+            )
+            with (
+                patch.object(cmd_uninstall.shutil, "which", return_value=None),
+                patch.object(cmd_uninstall, "_legacy_custody_parents", return_value=[str(legacy_tmp)]),
+                patch.object(cmd_uninstall.ux, "subhead") as subhead,
+            ):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertEqual(sorted(os.listdir(root)), [])
+            self.assertEqual(os.listdir(legacy_tmp), ["unrelated"])
+            subhead.assert_not_called()
+
     def test_binary_failure_propagates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve() / "bin"

@@ -229,11 +229,16 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
             os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
         )
         ps_args = [_powershell_flag(arg) for arg in args]
+        # A PowerShell 7 session puts its own module folders in PSModulePath.
+        # Windows PowerShell 5.1 then cannot load its built-in modules (Get-Acl
+        # fails), so let it build its default module path.
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
         try:
             subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 cwd=workdir,
+                env=env,
             )
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)

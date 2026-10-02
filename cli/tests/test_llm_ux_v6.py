@@ -890,5 +890,27 @@ class TestLocalModelListing(unittest.TestCase):
         )
 
 
+    def test_bedrock_instance_role_is_asked_before_and_skips_the_key(self) -> None:
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = _make_cfg(data_dir)
+            with (
+                mock.patch.object(_llm_picker, "pick_provider", return_value="bedrock"),
+                mock.patch.object(_llm_picker, "list_custom_instances", return_value=[]),
+                mock.patch.object(_llm_picker, "pick_model", return_value="bedrock/anthropic.claude-sonnet-4"),
+                mock.patch.object(_llm_picker, "pick_region", return_value="us-east-1"),
+                mock.patch.object(_llm_picker, "pick_auth_mode", return_value="instance_role"),
+                mock.patch.object(_llm_picker, "pick_key_env") as key_env,
+                mock.patch.object(_llm_picker, "summary_panel"),
+                mock.patch.object(cmd_setup, "_prompt_and_save_secret") as save_secret,
+                mock.patch.object(cmd_setup.click, "prompt", side_effect=["", 30, 2]),
+            ):
+                cmd_setup._configure_llm(cfg, data_dir)
+
+        key_env.assert_not_called()
+        save_secret.assert_not_called()
+        self.assertEqual(cfg.llm.bedrock.auth_mode, "instance_role")
+        self.assertEqual(cfg.llm.api_key_env, "")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

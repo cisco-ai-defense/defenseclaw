@@ -57,7 +57,10 @@ OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
 # standard-library-only; select the venv interpreter when it already exists
 # and otherwise use the host Python available on every supported installer/CI
 # platform. Dependency-bearing scripts continue to use $(VENV_BIN)/python.
-BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%s' "$(VENV_BIN)/python$(EXE)"; elif command -v python3 >/dev/null 2>&1; then command -v python3; elif command -v python >/dev/null 2>&1; then command -v python; else printf '%s' python; fi)
+# On Windows, "python3" is often the Microsoft Store alias, which is on PATH
+# but only prints an install hint. Use the first interpreter that runs.
+HOST_PYTHON := $(shell for p in python3 python "py -3"; do if $$p -c 'import sys' >/dev/null 2>&1; then printf '%s' "$$p"; exit 0; fi; done; printf '%s' python3)
+BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%s' "$(VENV_BIN)/python$(EXE)"; else printf '%s' "$(HOST_PYTHON)"; fi)
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
@@ -116,7 +119,7 @@ set-version:
 # runtime schema, or reviewed source-install identity disagrees. Mirrors the
 # contract enforced by scripts/stamp-version.sh and the protected release job.
 check-version-sync:
-	@python3 scripts/source_release_identity.py check
+	@$(HOST_PYTHON) scripts/source_release_identity.py check
 
 # ---------------------------------------------------------------------------
 # `make all` — one-shot build → install → PATH → quickstart
@@ -145,9 +148,20 @@ all: _source-install-dev-preflight
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
 	@echo ""
-	@echo "╭────────────────────────────────────────────────────────────╮"
-	@echo "│  DefenseClaw is installed and ready.                       │"
-	@echo "╰────────────────────────────────────────────────────────────╯"
+	@# Say "ready" only when this account's gateway answers; a gateway that
+	@# could not start (for example, its port is held by another account)
+	@# is otherwise easy to miss above the LLM setup output.
+	@if "$(INSTALL_DIR)/defenseclaw-gateway" status >/dev/null 2>&1; then \
+		echo "╭────────────────────────────────────────────────────────────╮"; \
+		echo "│  DefenseClaw is installed and ready.                       │"; \
+		echo "╰────────────────────────────────────────────────────────────╯"; \
+	else \
+		echo "╭────────────────────────────────────────────────────────────╮"; \
+		echo "│  DefenseClaw is installed, but its gateway is not running. │"; \
+		echo "╰────────────────────────────────────────────────────────────╯"; \
+		echo "  defenseclaw-gateway status   # shows why, and the fix"; \
+		echo "  defenseclaw-gateway start    # start it"; \
+	fi
 	@echo ""
 	@echo "Try it out:"
 	@echo "  defenseclaw            # launch the TUI"
@@ -548,14 +562,14 @@ _source-dev-install: _source-install-dev-preflight
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@if [ -x "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" ]; then \
-		python3 ./scripts/source-install-publish.py symlink \
+		$(HOST_PYTHON) ./scripts/source-install-publish.py symlink \
 			"$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" || true; \
 	fi
 	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
 	             mcp-scanner mcp-scanner-api; do \
 		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
 		if [ -x "$$src" ]; then \
-			python3 ./scripts/source-install-publish.py symlink \
+			$(HOST_PYTHON) ./scripts/source-install-publish.py symlink \
 				"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true; \
 		fi; \
 	done
@@ -593,7 +607,7 @@ cli-install: _source-install-preflight
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@if [ -x "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" ]; then \
-		python3 ./scripts/source-install-publish.py symlink \
+		$(HOST_PYTHON) ./scripts/source-install-publish.py symlink \
 			"$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" || true; \
 	fi
 	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
@@ -609,7 +623,7 @@ cli-install: _source-install-preflight
 	             mcp-scanner mcp-scanner-api; do \
 		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
 		if [ -x "$$src" ]; then \
-			python3 ./scripts/source-install-publish.py symlink \
+			$(HOST_PYTHON) ./scripts/source-install-publish.py symlink \
 				"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true; \
 		fi; \
 	done

@@ -285,9 +285,13 @@ upgrade_lane() {
     assert_healthy
     if [[ "${name}" == upgrade-previous ]]; then
         log "${name}: moving to another version keeps the data a rollback parked"
-        must install_candidate "${PREVIOUS_ASSETS}" || return 1
+        local out
+        out="$(install_candidate "${PREVIOUS_ASSETS}" 2>&1)" || { printf '%s\n' "${out}"; fail "step failed: install_candidate"; return 1; }
+        printf '%s\n' "${out}"
         assert_versions "${from}"
         ls -d "${DC_HOME}"/backups/rolled-back-* >/dev/null 2>&1 || fail "rolled-back data was not kept in backups/"
+        grep -q "remove it with: rm -rf '${DC_HOME}/backups/rolled-back-" <<<"${out}" \
+            || fail "the installer did not say how to remove the kept rolled-back data"
     fi
     stop_lane
 }

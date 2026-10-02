@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
+from defenseclaw.commands.cmd_doctor import _HOOK_ENFORCED_CONNECTORS as _DOCTOR_HOOK_ENFORCED
 from defenseclaw.commands.cmd_init import _normalize_connector_arg, init_cmd
 from defenseclaw.commands.cmd_sandbox import sandbox as sandbox_group
 from defenseclaw.commands.cmd_setup import (
@@ -32,6 +33,7 @@ from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
 )
 from defenseclaw.context import AppContext
+from defenseclaw.credentials import _HOOK_POLICY_ONLY_CONNECTORS
 from defenseclaw.platform_support import (
     ACP_ONLY_CONNECTORS,
     NOT_CERTIFIED,
@@ -256,6 +258,10 @@ def test_all_connector_lists_share_one_taxonomy() -> None:
     assert {choice.wire for choice in MODE_PICKER_CHOICES} == active
     assert set(CONNECTOR_CHOICES) == active
     assert set(_HOOK_ENFORCED_CONNECTORS) == active - set(PROXY_CONNECTORS)
+    # Doctor's proxy-port check and the LLM key requirement use their own
+    # copies; a missing name made a rules-only Kiro setup demand an LLM key.
+    assert set(_DOCTOR_HOOK_ENFORCED) == active - set(PROXY_CONNECTORS)
+    assert set(_HOOK_POLICY_ONLY_CONNECTORS) == active - set(PROXY_CONNECTORS)
 
 
 def test_windows_views_include_supported_and_labeled_preview_connectors() -> None:

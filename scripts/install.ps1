@@ -96,6 +96,14 @@ $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copil
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.
 $RunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
+# Windows PowerShell 5.1 started from a PowerShell 7 session (through cmd, or
+# an older `defenseclaw upgrade`) inherits the PowerShell 7 module folders and
+# then cannot load its own built-in modules, so Get-Acl fails. Drop them.
+if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath) {
+    $modulePath = @($env:PSModulePath -split ";" | Where-Object { $_ -and $_ -notmatch '\\PowerShell\\(7[^\\]*\\)?Modules\\?$' })
+    if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
+    $env:PSModulePath = $modulePath -join ";"
+}
 $Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
@@ -657,10 +665,16 @@ function Remove-SetupInstall {
         if ($location -and (Test-SamePath $location $Setup.Root)) { Remove-Item -LiteralPath $SetupUninstallKey -Recurse -Force }
     }
     Invoke-Quietly { Remove-Tree $SetupCache }
-    foreach ($setting in @(@("CODEX_HOME", $Setup.CodexHome), @("CLAUDE_CONFIG_DIR", $Setup.ClaudeConfigDir))) {
-        if ($setting[1]) {
-            Write-Warn "DefenseClaw Setup set $($setting[0])=$($setting[1]) for DefenseClaw; set it for your user account to keep that location guarded"
-        }
+    foreach ($setting in @(@("CODEX_HOME", "Codex", ".codex", $Setup.CodexHome),
+            @("CLAUDE_CONFIG_DIR", "Claude Code", ".claude", $Setup.ClaudeConfigDir))) {
+        $name, $agent, $folder, $value = $setting
+        # The agent's default folder needs no variable, and neither does a
+        # value the account already has.
+        if (-not $value -or (Test-SamePath $value (Join-Path $env:USERPROFILE $folder)) -or
+            (Test-SamePath ([string][Environment]::GetEnvironmentVariable($name, "User")) $value)) { continue }
+        Write-Warn "DefenseClaw guards $agent in $value, but only DefenseClaw Setup had $name set to it"
+        Write-Host "  Set it for your account so $agent keeps using that folder, then open a new terminal:"
+        Write-Host "    [Environment]::SetEnvironmentVariable('$name', '$value', 'User')" -ForegroundColor Cyan
     }
 }
 
@@ -878,6 +892,11 @@ function Restore-ExternalConfig([string]$Slot) {
 
 function Restore-Slot([string]$Slot) {
     # Put the install saved in $Slot back; what it replaces goes to .failed-<time>.
+    # Only the latest failed install is kept: with a large audit database
+    # each copy holds gigabytes, and an earlier one is not used again.
+    foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)) {
+        Invoke-Quietly { Remove-Tree $old.FullName }
+    }
     $failed = Join-Path $DataDir (".failed-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-InstallDirectory $failed
     New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
@@ -900,7 +919,9 @@ function Restore-Slot([string]$Slot) {
 function Restore-Snapshot {
     $failed = Restore-Slot $Snap
     Restart-Old
-    Write-Warn "The failed $Ver install was kept in $failed for troubleshooting"
+    $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
+    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: Remove-Item -Recurse -Force '$failed'"
 }
 
 function Save-RolledBackData {
@@ -911,7 +932,9 @@ function Save-RolledBackData {
     $kept = Join-Path $DataDir ("backups\rolled-back-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
-    Write-Info "Kept the data from before the last rollback in $kept"
+    $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Info ("Kept the data from before the last rollback in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
+    Write-Info "It is not used again; once you no longer need its audit history, remove it with: Remove-Item -Recurse -Force '$kept'"
 }
 
 function Save-Live([string]$Slot) {
@@ -1476,7 +1499,11 @@ function Invoke-Install {
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
-    if (-not $PrevVersion) { Invoke-FirstInstallExtras }
+    if (-not $PrevVersion) {
+        Invoke-FirstInstallExtras
+    } elseif ($Quickstart) {
+        Write-Warn "Skipped -Quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+    }
     $setupBin = if ($Setup) { Join-Path $Setup.Root "bin" } else { "" }
     $pathChanged = Update-UserPath -Add $BinDir -Remove $setupBin
     Write-Host ""
@@ -1533,7 +1560,10 @@ try {
 }
 Wait-BeforeClose
 if ($RunAsFile) { exit $code }
-if ($code -eq 4) { throw "DefenseClaw is installed, but quickstart failed; see above" }
-if ($code -ne 0 -and $code -ne 3) { throw "DefenseClaw was not installed" }
+# `irm | iex` cannot exit, so a failure ends in a terminating error. Raising
+# it from a one-line script block keeps PowerShell 7 from printing an excerpt
+# of this file under the failure that was already reported above.
+if ($code -eq 4) { & ([scriptblock]::Create('throw "DefenseClaw is installed, but quickstart failed; see above"')) }
+if ($code -ne 0 -and $code -ne 3) { & ([scriptblock]::Create('throw "DefenseClaw was not installed; see above"')) }
 }
 # DefenseClaw Windows installer complete v2

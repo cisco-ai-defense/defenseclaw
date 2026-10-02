@@ -422,7 +422,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
         hint(
-            "Free the port:  stop that process, or set gateway.api_port to a free port"
+            "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port <free port>"
             if holder
             else "Start sidecar:  defenseclaw-gateway start",
             "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",

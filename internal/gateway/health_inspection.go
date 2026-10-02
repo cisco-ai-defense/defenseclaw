@@ -26,9 +26,10 @@ import (
 //     is verified), "disabled" when the guardrail is turned off or stopped,
 //     "unknown" otherwise;
 //   - ai_defense: "disabled" unless enterprise.inspection.ai_defense is
-//     enabled, then "ok", or "unavailable:<code>" with the reason the
-//     guardrail detail reports, or "unknown" before the guardrail has
-//     published its AI Defense state.
+//     enabled, then "ok" once a request was answered, or
+//     "unavailable:<code>" with the reason the guardrail detail reports, or
+//     "unknown" before the guardrail has published its AI Defense state or
+//     while a newly built client has not proven its credential yet.
 func standaloneInspectionPosture(cfg *config.Config, guardrail SubsystemHealth) map[string]string {
 	local := "unknown"
 	switch guardrail.State {
@@ -41,9 +42,9 @@ func standaloneInspectionPosture(cfg *config.Config, guardrail SubsystemHealth) 
 	if cfg != nil && cfg.Enterprise.Inspection.AIDefense.Enabled {
 		aiDefense = "unknown"
 		if available, ok := guardrail.Details["ai_defense_available"].(bool); ok {
-			if available {
+			if verified, known := guardrail.Details["ai_defense_verified"].(bool); available && (!known || verified) {
 				aiDefense = "ok"
-			} else {
+			} else if !available {
 				reason, _ := guardrail.Details["ai_defense_error"].(string)
 				aiDefense = "unavailable:" + aiDefenseUnavailableCode(reason)
 			}

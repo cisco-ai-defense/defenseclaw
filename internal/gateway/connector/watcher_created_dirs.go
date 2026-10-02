@@ -34,7 +34,11 @@ func RecordWatcherCreatedDirs(dataDir string, dirs []string) error {
 	if strings.TrimSpace(dataDir) == "" || len(dirs) == 0 {
 		return nil
 	}
-	path := filepath.Join(dataDir, watcherCreatedDirsFile)
+	return recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), dirs)
+}
+
+// recordCreatedDirs adds dirs to the created-folder list at path.
+func recordCreatedDirs(path string, dirs []string) error {
 	record := readWatcherCreatedDirs(path)
 	known := make(map[string]struct{}, len(record.Dirs)+len(dirs))
 	for _, dir := range record.Dirs {
@@ -70,7 +74,11 @@ func removeWatcherCreatedDirs(dataDir, root string) {
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(root) == "" {
 		return
 	}
-	path := filepath.Join(dataDir, watcherCreatedDirsFile)
+	removeCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), root)
+}
+
+// removeCreatedDirs is removeWatcherCreatedDirs for the list at path.
+func removeCreatedDirs(path, root string) {
 	record := readWatcherCreatedDirs(path)
 	if len(record.Dirs) == 0 {
 		return

@@ -197,6 +197,9 @@ type Sidecar struct {
 	inspectionMu        sync.RWMutex
 	inspectionAvailable bool
 	inspectionDetail    string
+	// inspectionObserved is false while a freshly built client has not
+	// had a request answered yet: its credential is not proven.
+	inspectionObserved bool
 	// inspectionEpoch advances on every setInspectionAvailability, so an
 	// observer bound to a replaced inspector stops publishing (see
 	// inspectionAvailabilityObserver).
@@ -2599,6 +2602,7 @@ func (s *Sidecar) setInspectionAvailability(err error) {
 	defer s.inspectionMu.Unlock()
 	s.inspectionEpoch++
 	s.recordInspectionAvailabilityLocked(err)
+	s.inspectionObserved = err != nil
 }
 
 func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
@@ -2625,6 +2629,7 @@ func (s *Sidecar) inspectionAvailabilityObserver() func(error) {
 			return
 		}
 		s.recordInspectionAvailabilityLocked(err)
+		s.inspectionObserved = true
 	}
 }
 
@@ -2653,6 +2658,12 @@ func (s *Sidecar) addStandaloneAIDefenseHealth(detail map[string]interface{}) {
 	available, reason := s.inspectionAvailability()
 	detail["ai_defense_available"] = available
 	if available {
+		// Building the client does not contact AI Defense, so a rejected
+		// key only shows after the first inspection: until then the
+		// credential is unproven and the posture reports "unknown".
+		s.inspectionMu.RLock()
+		detail["ai_defense_verified"] = s.inspectionObserved
+		s.inspectionMu.RUnlock()
 		return
 	}
 	if reason == "" {
@@ -3838,7 +3849,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				detail := map[string]interface{}{
 					"summary":             summary,
 					"connector":           conn.Name(),
-					"mode":                "observability",
+					"mode":                policyMode,
+					"data_path":           "direct-to-upstream",
 					"policy_mode":         policyMode,
 					"enforcement_enabled": verifiedEnforcement,
 					"enforcement_surface": surface,
@@ -3866,7 +3878,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
 			"summary":             summary,
 			"connector":           conn.Name(),
-			"mode":                "observability",
+			"mode":                policyMode,
+			"data_path":           "direct-to-upstream",
 			"policy_mode":         policyMode,
 			"enforcement_enabled": enforcementEnabled,
 			"enforcement_surface": surface,

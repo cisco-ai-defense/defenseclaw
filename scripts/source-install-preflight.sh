@@ -34,6 +34,26 @@ if [[ "${OS:-}" == "Windows_NT" ]]; then
     IS_WINDOWS=1
 fi
 
+# On Windows, "python3" is often the Microsoft Store alias, which is on PATH
+# but only prints an install hint. Use the first interpreter that runs. A
+# python3 function the caller already defined (BASH_ENV) is kept.
+if ! declare -F python3 >/dev/null; then
+    PYTHON_CMD=()
+    for candidate in python3 python "py -3"; do
+        read -r -a candidate_argv <<< "${candidate}"
+        if command "${candidate_argv[@]}" -c 'import sys' >/dev/null 2>&1; then
+            PYTHON_CMD=("${candidate_argv[@]}")
+            break
+        fi
+    done
+    if [[ ${#PYTHON_CMD[@]} -eq 0 ]]; then
+        echo "source install refused: no working Python 3 interpreter (tried python3, python and py -3); install Python 3 and put it on PATH" >&2
+        exit 1
+    fi
+    readonly PYTHON_CMD
+    python3() { command "${PYTHON_CMD[@]}" "$@"; }
+fi
+
 DEV_RECLAIM_SOURCE=0
 case "${REQUESTED_MODE}" in
     check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp)
@@ -47,12 +67,25 @@ case "${REQUESTED_MODE}" in
 esac
 readonly MODE DEV_RECLAIM_SOURCE
 
+FOREIGN_INSTALL=0
 refuse() {
     echo "error: source install refused: $1" >&2
     echo "No installed files or services were changed." >&2
     echo "Release installs upgrade with: defenseclaw upgrade (or re-run the release install.sh / install.ps1)." >&2
-    echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
+    if [[ "${FOREIGN_INSTALL}" -eq 1 && "${IS_WINDOWS}" -eq 0 ]]; then
+        echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
+        echo "  defenseclaw uninstall --binaries --yes && make all" >&2
+    else
+        echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
+    fi
     exit 1
+}
+
+# Another install (usually a release install) owns an executable this checkout
+# would publish; name the developer path out of it.
+refuse_foreign() {
+    FOREIGN_INSTALL=1
+    refuse "$1"
 }
 
 [[ -d "${REPO_ROOT_INPUT}" ]] || {
@@ -265,7 +298,7 @@ check_owner() {
                 || refuse "${CLI_PATH} is not the CLI symlink owned by this checkout"
             cli_target="$(readlink "${CLI_PATH}")"
             [[ "${cli_target}" == "${EXPECTED_CLI}" ]] \
-                || refuse "${CLI_PATH} points to another installation (${cli_target})"
+                || refuse_foreign "${CLI_PATH} points to another installation (${cli_target})"
         fi
         cli_owned=1
     fi
@@ -278,7 +311,7 @@ check_owner() {
         path_cli="${path_cli}.exe"
     fi
     if [[ -n "${path_cli}" && "${path_cli}" != "${CLI_PATH}" && "${path_cli}" != "${EXPECTED_CLI}" ]]; then
-        refuse "PATH resolves ${PATH_COMMAND} to another installation (${path_cli})"
+        refuse_foreign "PATH resolves ${PATH_COMMAND} to another installation (${path_cli})"
     fi
 
     if [[ "${marker_reclaim}" -eq 1 && "${cli_owned}" -ne 1 ]]; then
@@ -309,10 +342,10 @@ check_owner() {
         fi
     elif [[ "${owned}" -ne 1 ]]; then
         if [[ -e "${GATEWAY_PATH}" || -L "${GATEWAY_PATH}" ]]; then
-            refuse "an unowned gateway already exists at ${GATEWAY_PATH}"
+            refuse_foreign "an unowned gateway already exists at ${GATEWAY_PATH}"
         fi
         if [[ -e "${ACP_PATH}" || -L "${ACP_PATH}" ]]; then
-            refuse "an unowned ACP guard already exists at ${ACP_PATH}"
+            refuse_foreign "an unowned ACP guard already exists at ${ACP_PATH}"
         fi
         # `make all` is the explicit developer takeover surface. Existing
         # user state alone is not evidence of a conflicting executable and is

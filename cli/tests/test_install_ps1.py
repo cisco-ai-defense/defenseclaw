@@ -190,4 +190,7 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4() -> None:
     summary = text[text.index('Write-Host "  DefenseClaw $Ver is installed."') : text.index("$savedEnv = @{}")]
     assert summary.index("if ($Run.QuickstartRerun)") < summary.index("return 4") < summary.index("return $startRc")
     # `irm | iex` cannot exit; it reports the installed-but-not-set-up outcome instead.
-    assert text.index("if ($code -eq 4) { throw") < text.index('throw "DefenseClaw was not installed"')
+    tail = text[text.index("Wait-BeforeClose\nif ($RunAsFile) { exit $code }") :]
+    assert tail.index("if ($code -eq 4) { & ([scriptblock]::Create('throw") < tail.index(
+        "if ($code -ne 0 -and $code -ne 3) { & ([scriptblock]::Create('throw"
+    )

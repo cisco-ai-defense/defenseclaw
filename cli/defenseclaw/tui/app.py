@@ -529,11 +529,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         width: 100%;
     }
 
+    /* Two rows: the tabs and their own underline. A border under that
+       drew a second full-width rule and cost a row on an 80x24 screen. */
     #header {
-        height: 3;
+        height: 2;
         padding: 0 1;
         background: TOKEN_SURFACE_PANEL;
-        border-bottom: heavy TOKEN_BORDER_MUTED;
     }
 
     #title {
@@ -3570,7 +3571,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._strip_clear()
             self._set_status("Cleared command status.")
             return
-        self._set_status("q is local close/no-op. Press Ctrl+C to quit.")
+        # Nothing to close. The status line is not drawn on every tab, so a
+        # toast says how to quit wherever the operator is.
+        self._set_status("Nothing to close. Press Ctrl+C to quit.")
+        self.notify("Nothing to close. Press Ctrl+C to quit DefenseClaw.", timeout=4)
 
     def action_cancel_or_quit(self) -> None:
         if self.command_running or self.executor.is_running:
@@ -12803,17 +12807,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         command_line = " ".join((intent.binary, *intent.args))
+        consequence = getattr(intent, "consequence", "") or ""
         return ConsequenceModalModel(
             title=f"Confirm: {intent.label}",
             summary="This is a destructive action and cannot be undone.",
             details=(f"Will run: {command_line}",),
-            consequence="This deletes files from disk.",
+            consequence=consequence or "This deletes files from disk.",
             actions=(
                 ConsequenceAction(
                     action_id="run",
                     hotkey="d",
                     label=intent.label,
-                    description="Runs the command and deletes the files from disk.",
+                    description=(
+                        "Runs the command." if consequence else "Runs the command and deletes the files from disk."
+                    ),
                     variant="error",
                     danger=True,
                 ),

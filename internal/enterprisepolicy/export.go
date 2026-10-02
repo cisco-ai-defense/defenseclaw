@@ -27,6 +27,11 @@ var ExportFormats = []string{"toml", "json", "claude-hklm-json", "reg", "plist",
 func Export(opts Options, connectorName, format string) ([]byte, error) {
 	target, ok := TargetFor(connectorName)
 	if !ok {
+		if RouteFor(connectorName, opts.goos()) == RoutePerUser {
+			// show and verify list a per-user connector as a complete row;
+			// say why export has nothing for it instead of a bare refusal.
+			return nil, fmt.Errorf("%w: %s is protected per user (DefenseClaw writes each enrolled user's own config), so it has no machine policy entries to export; show and verify report its coverage", ErrUnsupported, connectorName)
+		}
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, connectorName)
 	}
 	return target.Export(opts, strings.ToLower(strings.TrimSpace(format)))

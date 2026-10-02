@@ -1673,8 +1673,9 @@ func TestPrintDaemonStartResultOnlyRendersReadySuccess(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDaemonStartResult(42, readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
 	})
-	if !strings.Contains(out, "OK (PID 42)") || !strings.Contains(out, "routing:off") || strings.Contains(out, "STARTING") {
-		t.Fatalf("output = %q, want READY-only success rendering", out)
+	// A disabled subsystem is not in use, so it is not listed as "off".
+	if !strings.Contains(out, "OK (PID 42)") || strings.Contains(out, "routing") || strings.Contains(out, "STARTING") {
+		t.Fatalf("output = %q, want READY-only success rendering without unused subsystems", out)
 	}
 }
 

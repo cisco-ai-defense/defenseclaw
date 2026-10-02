@@ -202,6 +202,21 @@ def test_doctor_human_rows_retain_unicode_on_modern_console() -> None:
     assert "↪ retry → now" in rendered
 
 
+def test_windows_output_piped_through_a_legacy_console_uses_ascii_glyphs() -> None:
+    # `defenseclaw ... | Out-Host` in PowerShell decodes UTF-8 with the OEM code
+    # page, so a direct click.echo glyph must be downgraded at the stream.
+    piped = _Stream(tty=False)
+    with (
+        mock.patch.object(ux.sys, "platform", "win32"),
+        mock.patch.object(ux, "_console_output_code_page", return_value=437),
+    ):
+        stream = ux.ascii_safe_redirected_stream(piped)
+        console = _Stream(tty=True)
+        assert ux.ascii_safe_redirected_stream(console) is console
+    stream.write("restarting... ✓ — Málaga")
+    assert piped.getvalue() == "restarting... OK - Málaga"
+
+
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:
     events: list[str] = []
     with (

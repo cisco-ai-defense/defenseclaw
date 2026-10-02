@@ -41,6 +41,7 @@ OpenClaw, never against the other adapters — calling
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -164,6 +165,10 @@ class UninstallPlan:
     # sandbox_teardown_skipped is set when there is sandbox state but
     # --skip-sandbox-teardown leaves it (Docker or OpenShell are gone, say).
     sandbox_teardown_skipped: bool = False
+    # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
+    # DefenseClaw Setup left after the installer replaced it (Windows,
+    # --binaries only).
+    setup_leftovers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -495,7 +500,61 @@ def _build_plan(
         ),
         binary_targets=binary_targets,
         data_bound_launchers=data_bound_launchers,
+        setup_leftovers=_windows_setup_leftovers(platform_name) if binaries else (),
     )
+
+
+# DefenseClaw Setup keeps its hook launcher and transaction log under
+# %LOCALAPPDATA%\DefenseClaw. When the installer replaces Setup it keeps the
+# launcher, because agent hooks that Setup wrote may still run it until each
+# connector is set up again (it moves the launcher's state file aside, which
+# turns the launcher off), so nothing else removes these folders.
+_WINDOWS_SETUP_LEFTOVERS = ("HookRuntime", "InstallerState")
+
+
+def _windows_setup_leftovers(platform_name: str) -> tuple[str, ...]:
+    if platform_name != "win32":
+        return ()
+    try:
+        local_app_data = windows_native_uninstall._known_folder_path(windows_native_uninstall._LOCAL_APP_DATA_FOLDER_ID)
+    except Exception:  # noqa: BLE001 - no Known Folder means nothing to clean.
+        return ()
+    root = os.path.join(local_app_data, "DefenseClaw") if local_app_data else ""
+    if (
+        not root
+        or os.path.lexists(os.path.join(local_app_data, "Programs", "DefenseClaw"))
+        or os.path.lexists(os.path.join(root, "InstallerCache"))
+        or os.path.lexists(os.path.join(root, "HookRuntime", "hook-runtime-state.json"))
+    ):
+        # A Setup install, or its cleanup after the next sign-in, still owns them.
+        return ()
+    return tuple(
+        path for path in (os.path.join(root, name) for name in _WINDOWS_SETUP_LEFTOVERS) if os.path.lexists(path)
+    )
+
+
+def _remove_setup_leftovers(paths: tuple[str, ...]) -> None:
+    for path in paths:
+        try:
+            if _is_reparse_path(path):
+                if os.path.isdir(path):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
+    parents = {os.path.dirname(path) for path in paths}
+    for parent in parents:
+        with contextlib.suppress(OSError):
+            os.rmdir(parent)
 
 
 def _launcher_link_target(path: str) -> str:
@@ -810,6 +869,8 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         for target in plan.binary_targets:
             if os.path.lexists(target):
                 click.echo(f"      {ux.dim('·')} {target}")
+        for path in plan.setup_leftovers:
+            click.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
     elif plan.remove_data_dir:
         # The launchers into the data dir stop working with it, so they go
         # too; the rest keep working and stay until --binaries.
@@ -867,6 +928,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # scripts and config patches. This helper is idempotent and
         # reports "not installed" when OpenClaw was never used.
         run_phase("plugin removal", lambda: _remove_plugin(plan))
+    if plan.setup_leftovers:
+        # After connector teardown, so no agent hook still runs the launcher.
+        run_phase("Setup leftovers removal", lambda: _remove_setup_leftovers(plan.setup_leftovers))
     deferred = _requires_deferred_cleanup(plan)
     if deferred:
         status: list[str] = []
@@ -1861,10 +1925,60 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     if failures:
         raise OSError("; ".join(failures))
 
-    # Clean up the pip-installed Python package symlink if operators
-    # used ``pip install defenseclaw`` — we don't shell out to pip
-    # because we can't be sure which environment they used.
-    ux.subhead("if you installed the Python CLI via pip, run 'pip uninstall defenseclaw' manually")
+    _remove_install_bookkeeping(plan.install_root)
+
+    # A pip-installed CLI is outside this plan; we don't shell out to pip
+    # because we can't be sure which environment was used. Mention it only
+    # when another defenseclaw is still on PATH.
+    remaining = shutil.which("defenseclaw")
+    if remaining:
+        ux.subhead(
+            f"another defenseclaw remains at {remaining}; if you installed it with pip, run 'pip uninstall defenseclaw'"
+        )
+
+
+# Hidden files the installers keep next to the launchers: the source-install
+# marker and the publish custody directory. Neither is useful once the
+# launchers are gone.
+_INSTALL_BOOKKEEPING = (".defenseclaw-source-root", ".defenseclaw-install-custody")
+
+
+def _legacy_custody_parents() -> list[str]:
+    """Temp folders where pre-1.0 installers parked retired binaries."""
+    if sys.platform == "win32":
+        return []
+    return sorted({tempfile.gettempdir(), "/tmp"})
+
+
+def _remove_install_bookkeeping(install_root: str) -> None:
+    paths = [os.path.join(install_root, name) for name in _INSTALL_BOOKKEEPING]
+    for parent in _legacy_custody_parents():
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        paths.extend(os.path.join(parent, name) for name in names if name.startswith(".defenseclaw-install-custody-"))
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not inspect {path}: {exc}")
+            continue
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            if os.path.dirname(path) == install_root:
+                ux.warn(f"left {path}: it is not owned by this account")
+            continue
+        try:
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
 
 
 def _expand(p: str) -> str:

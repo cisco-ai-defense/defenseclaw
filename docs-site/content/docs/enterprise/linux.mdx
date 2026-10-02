@@ -262,15 +262,19 @@ enterprise:
       credential: ai-defense-api-key
 ```
 
-Then store the key. The deployment must be installed first, because the
-command needs the service account and runs `ensure` right after it writes
-the key:
+Then store the key, before or after the install. After the install, run:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
   --name ai-defense-api-key --from-file /root/ai-defense.key --json
 sudo rm /root/ai-defense.key
 ```
+
+Before the install, run the same command with the `defenseclaw-gateway` from
+the extracted tarball (`$PAYLOAD/defenseclaw-gateway`). The key stays
+readable by root only, the command reports `not_installed` as a warning and
+exits 0, and the install gives the gateway its access, so a config that
+references the key installs at once.
 
 See [AI Defense key](/docs/enterprise/ai-defense-key) for rotation and
 removal.

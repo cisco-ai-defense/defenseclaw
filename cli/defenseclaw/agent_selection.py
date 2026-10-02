@@ -156,11 +156,18 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         rejection = "the exact official SST WinGet opencode.exe image was not found or was not trusted"
     else:
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
+    untrusted_found = ""
     for candidate in _setup_agent_candidates(connector, spec, data_dir):
         protected_windows_opencode = connector == "opencode" and os.name == "nt"
         protected_darwin_openhands = connector == "openhands" and sys.platform == "darwin"
         identity = _stable_selection_identity(candidate) if protected_darwin_openhands else None
         if protected_darwin_openhands and identity is None:
+            # A uv-tool install puts a symlink on PATH (~/.local/bin/openhands
+            # -> ~/.local/share/uv/tools/openhands/bin/openhands). Name the
+            # real file so the refusal gives the trusted-paths command for it.
+            target = os.path.realpath(os.path.abspath(candidate))
+            if not untrusted_found and os.path.isfile(target):
+                untrusted_found = target
             continue
         if protected_windows_opencode:
             trusted = _is_windows_opencode_setup_binary(candidate)
@@ -169,6 +176,8 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         else:
             trusted = is_setup_trusted_binary(candidate, data_dir)
         if not trusted or (protected_darwin_openhands and _stable_selection_identity(candidate) != identity):
+            if not trusted and not untrusted_found:
+                untrusted_found = os.path.realpath(os.path.abspath(candidate))
             continue
         executable = os.path.realpath(os.path.abspath(candidate))
         digest = ""
@@ -230,6 +239,14 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             raw_version=raw_version,
             normalized_version=normalized,
             sha256=digest,
+        )
+    if untrusted_found and rejection.startswith("no installed executable"):
+        # Name what was found and the one command that admits it; a bare
+        # "no installed executable" reads as if the agent were missing.
+        rejection = (
+            f"{untrusted_found} is not in a built-in or operator-approved trusted prefix; "
+            "if you installed it, run `defenseclaw setup trusted-paths add "
+            f"{os.path.dirname(untrusted_found)}` and re-run setup"
         )
     raise OSError(f"cannot select {connector} executable: {rejection}")
 

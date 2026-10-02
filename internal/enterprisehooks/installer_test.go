@@ -1811,6 +1811,11 @@ func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
 	if stub := defaultHookConfigStubForConnector(conn, pinned, home); stub.ContentPath != "" {
 		t.Fatalf("pinned-workspace OpenHands stub = %q, want none", stub.ContentPath)
 	}
+	// A user who installed OmniGent but never ran it gets an empty config.
+	omni := defaultHookConfigStubForConnector(connector.NewOmnigentConnector(), connector.SetupOpts{}, home)
+	if want := filepath.Join(home, ".omnigent", "config.yaml"); omni.ContentPath != want || string(omni.Contents) != "{}\n" {
+		t.Fatalf("OmniGent stub = %q %q, want %q", omni.ContentPath, omni.Contents, want)
+	}
 }
 
 // The OpenHands and Antigravity hook-config stubs are a standalone-profile
@@ -1820,7 +1825,7 @@ func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
 func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T) {
 	setStandaloneProfileForTest(t, false)
 	home := t.TempDir()
-	for _, conn := range []connector.Connector{connector.NewOpenHandsConnector(), connector.NewAntigravityConnector()} {
+	for _, conn := range []connector.Connector{connector.NewOpenHandsConnector(), connector.NewAntigravityConnector(), connector.NewOmnigentConnector()} {
 		if stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home); stub.ContentPath != "" {
 			t.Fatalf("%s stub outside the standalone profile = %q, want none", conn.Name(), stub.ContentPath)
 		}

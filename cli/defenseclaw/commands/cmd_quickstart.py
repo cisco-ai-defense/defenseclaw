@@ -185,7 +185,9 @@ def quickstart_cmd(
                 "  ✗ Multiple connectors detected/configured: "
                 f"{', '.join(candidates)}.\n"
                 "    Quickstart configures one connector.\n"
-                "    Re-run with --connector <name>.",
+                "    Re-run with --connector <name>, then add the others with\n"
+                "    'defenseclaw setup <connector>'. To pick several at once,\n"
+                "    run 'defenseclaw init' (the picker 'make all' uses).",
                 err=True,
             )
             sys.exit(2)

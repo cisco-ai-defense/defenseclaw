@@ -253,7 +253,53 @@ def read_cached_discovery(data_dir: str) -> Any | None:
         return None
     from defenseclaw.inventory.agent_discovery import _read_cache
 
-    return _read_cache(data_dir=data_dir)
+    return _read_cache(data_dir=data_dir) or _discovery_from_hook_contract_lock(data_dir)
+
+
+@dataclass(frozen=True)
+class _LockDiscovery:
+    """Agent versions the gateway recorded; it covers only the connectors it lists."""
+
+    agents: Mapping[str, Any]
+    partial: bool = True
+
+
+def _discovery_from_hook_contract_lock(data_dir: str) -> _LockDiscovery | None:
+    """Agent versions from the gateway's hook_contract_lock.json.
+
+    The gateway probes each hook connector's agent at start and records the
+    version it selected the contract from. The discovery cache expires after
+    a day, and an upgrade starts without one, so Doctor falls back to this
+    evidence instead of reporting compatibility as unknown. It reads a file;
+    it never runs an agent.
+    """
+
+    import json
+    import os
+
+    from defenseclaw.inventory.agent_discovery import AgentSignal
+
+    path = os.path.join(data_dir, "hook_contract_lock.json")
+    try:
+        if os.path.getsize(path) > 4 << 20:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    entries = lock.get("connectors") if isinstance(lock, Mapping) else None
+    if not isinstance(entries, Mapping):
+        return None
+    agents: dict[str, Any] = {}
+    for name, entry in entries.items():
+        if not isinstance(name, str) or not isinstance(entry, Mapping):
+            continue
+        version = entry.get("raw_agent_version")
+        if isinstance(version, str) and version.strip():
+            agents[name] = AgentSignal(
+                name=name, installed=True, config_path="", binary_path="", version=version, error=""
+            )
+    return _LockDiscovery(agents=agents) if agents else None
 
 
 def assess_component_health(
@@ -386,15 +432,18 @@ def assess_connector_health(
             continue
 
         signal = signals.get(connector)
-        if discovery is None:
+        if discovery is None or (signal is None and getattr(discovery, "partial", False)):
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,
                     status=HealthStatus.UNAVAILABLE,
                     reason_code="agent-discovery-unavailable",
-                    summary=f"{public_name} compatibility cannot be checked without discovery evidence",
+                    summary=(
+                        f"{public_name} compatibility cannot be checked without discovery evidence; "
+                        "run: defenseclaw agent discover --refresh"
+                    ),
                     supported_agent_ranges=ranges,
-                    remediations=_unavailable_connector_remediations(public_name),
+                    remediations=(_refresh_discovery_choice(),),
                 )
             )
             continue
@@ -494,7 +543,9 @@ def assess_connector_health(
                     status=HealthStatus.UNSUPPORTED,
                     reason_code="connector-version-outside-contract",
                     summary=(
-                        f"{public_name} agent version is below the supported floor or on the known-broken list"
+                        f"{public_name} agent version is on the known-broken list"
+                        if "known broken" in (compatibility.reason or "")
+                        else f"{public_name} agent version is not covered by a tested connector contract"
                     ),
                     installed_version=normalized,
                     supported_agent_ranges=ranges,
@@ -737,7 +788,7 @@ def _unsupported_connector_remediations(
     connector: str,
     ranges: tuple[VersionRange, ...],
 ) -> tuple[RemediationChoice, ...]:
-    range_text = ", ".join(_range_label(item) for item in ranges) or "a registered version"
+    range_text = supported_range_text(ranges) or "a registered version"
     return (
         RemediationChoice(
             choice_id="install-supported-connector-version",
@@ -749,6 +800,27 @@ def _unsupported_connector_remediations(
         ),
         _refresh_discovery_choice(),
     )
+
+
+def supported_range_text(ranges: Iterable[VersionRange]) -> str:
+    """Render supported agent ranges, joining contracts that continue each other.
+
+    claudecode-hooks-v1 (>=2.1.154 <2.1.219) and claudecode-hooks-v2
+    (>=2.1.219) read as ">=2.1.154", not as two overlapping-looking ranges.
+    """
+
+    merged: list[VersionRange] = []
+    for item in ranges:
+        last = merged[-1] if merged else None
+        if last is not None and last.max_exclusive and last.max_exclusive == item.min_inclusive:
+            merged[-1] = VersionRange(
+                contract_id=last.contract_id,
+                min_inclusive=last.min_inclusive,
+                max_exclusive=item.max_exclusive,
+            )
+        else:
+            merged.append(item)
+    return ", ".join(_range_label(item) for item in merged)
 
 
 def _range_label(value: VersionRange) -> str:

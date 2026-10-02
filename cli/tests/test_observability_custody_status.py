@@ -279,6 +279,31 @@ def test_doctor_reports_external_invalid_drop_only_and_managed_drift() -> None:
     assert checks["Native OTLP credentials"]["status"] == "warn"
 
 
+def test_doctor_managed_exporter_drift_alone_warns_with_next_step() -> None:
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000003",
+                connector="codex",
+                custody="defenseclaw",
+                profile_version="codex-v1",
+                default=True,
+                managed_config_state="drifted",
+            ),
+        ),
+    )
+    result = _DoctorResult()
+
+    _check_connector_export_custody(report, result)
+
+    codex = {item["label"]: item for item in result.checks}["Connector OTLP: codex"]
+    assert codex["status"] == "warn"
+    assert "run 'defenseclaw setup codex' to re-apply" in codex["detail"]
+
+
 def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(capsys) -> None:
     report = ConnectorCustodyReport(
         state="available",

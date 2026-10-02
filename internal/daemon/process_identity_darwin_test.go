@@ -100,7 +100,7 @@ func TestDarwinLocalizedOriginMainIdentityUsesBoundedLaunchGeneration(t *testing
 		t.Fatal("bounded origin/main launch generation did not qualify for authenticated migration")
 	}
 
-	info.StartTime = startedAt - int64(childPIDRegistrationTimeout/time.Second) - 1
+	info.StartTime = startedAt - int64(legacyStartIdentityWindow/time.Second) - 1
 	if d.verifyProcessForAuthenticatedMigration(info) {
 		t.Fatal("out-of-window launch generation qualified for authenticated migration")
 	}

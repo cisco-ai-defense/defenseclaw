@@ -934,6 +934,14 @@ class Store:
         columns, _tables = self._audit_projection_schema()
         legacy_explicit = self._legacy_explicit_alert_clause(columns)
         connector_hook = self._connector_hook_alert_clause(columns)
+        # An enforced hook block keeps the outer INFO severity; show the
+        # matched rule's CRITICAL instead of the generic HIGH.
+        hook_severity = "'HIGH'"
+        if "structured_json" in columns:
+            rule_severity = self._safe_json_extract("structured_json", "$.severity")
+            hook_severity = (
+                f"CASE WHEN UPPER(COALESCE({rule_severity}, '')) = 'CRITICAL' THEN 'CRITICAL' ELSE 'HIGH' END"
+            )
         if {"bucket", "event_name"}.issubset(columns):
             outcomes = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
             canonical_outcome = self._canonical_alert_outcome_expression(columns)
@@ -943,7 +951,7 @@ class Store:
                  AND {canonical_outcome} IN ({outcomes}) THEN 'WARNING'
                 WHEN bucket = 'enforcement.action'
                  AND {canonical_outcome} IN ({outcomes}) THEN 'HIGH'
-                WHEN {connector_hook} THEN 'HIGH'
+                WHEN {connector_hook} THEN {hook_severity}
                 WHEN bucket IS NULL AND {legacy_explicit} THEN 'HIGH'
                 ELSE COALESCE(severity, 'INFO')
             END"""

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -122,6 +123,56 @@ func (s *Store) startupQuickCheck(warn io.Writer) error {
 		fmt.Fprintf(warn, "[audit] startup integrity check skipped: %v\n", err)
 		return nil
 	}
+}
+
+// MovedCorruptStore is an audit store OpenDaemonStore moved aside as corrupt.
+type MovedCorruptStore struct {
+	Path    string
+	MovedAt time.Time
+}
+
+const movedCorruptStoreTimeLayout = "20060102T150405Z"
+
+// MovedCorruptStores lists the stores moved aside next to dbPath, oldest
+// first, so start and status can tell the operator instead of only the log.
+func MovedCorruptStores(dbPath string) []MovedCorruptStore {
+	if dbPath == "" || dbPath == ":memory:" {
+		return nil
+	}
+	absolute, err := filepath.Abs(filepath.Clean(dbPath))
+	if err != nil {
+		return nil
+	}
+	names, _ := filepath.Glob(absolute + ".corrupt-*")
+	var stores []MovedCorruptStore
+	for _, name := range names {
+		if hasAuditDBSidecarSuffix(name) {
+			continue
+		}
+		stamp := strings.TrimPrefix(name, absolute+".corrupt-")
+		if len(stamp) < len(movedCorruptStoreTimeLayout) {
+			continue
+		}
+		movedAt, err := time.Parse(movedCorruptStoreTimeLayout, stamp[:len(movedCorruptStoreTimeLayout)])
+		if err != nil {
+			continue
+		}
+		if info, err := os.Lstat(name); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		stores = append(stores, MovedCorruptStore{Path: name, MovedAt: movedAt})
+	}
+	sort.Slice(stores, func(i, j int) bool { return stores[i].MovedAt.Before(stores[j].MovedAt) })
+	return stores
+}
+
+func hasAuditDBSidecarSuffix(name string) bool {
+	for _, suffix := range auditDBSQLiteSidecarSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // quarantineCorruptAuditDB renames the database and its sidecars to

@@ -284,6 +284,9 @@ def test_alert_mutation_intents_always_send_actual_ids() -> None:
     filtered = model.handle_key("c")
     assert filtered.intent is not None
     assert filtered.intent.args == ("alerts", "dismiss", "--id", "a1")
+    # Bulk dismiss goes through the danger modal (second keypress), not the
+    # Run-focused preview a stray "c" plus Enter would confirm.
+    assert filtered.intent.risk == "destructive"
 
     all_loaded = model.handle_key("C")
     assert all_loaded.intent is not None

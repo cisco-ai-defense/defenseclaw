@@ -161,6 +161,10 @@ If a destination with the same name already exists, the bridge updates it in
 place rather than adding a duplicate. Other telemetry destinations and notifier
 webhooks are left untouched.
 
+To send to a collector of your own on this computer or a private network, add
+`--allow-private-networks` to `defenseclaw setup observability add otlp`. It
+writes the same `network_safety` setting.
+
 ## Bundled Grafana dashboards
 
 The bundle ships a full board set in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:

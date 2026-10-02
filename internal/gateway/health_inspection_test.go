@@ -55,6 +55,9 @@ func TestHealthPublishesTheStandaloneInspectionPosture(t *testing.T) {
 		{"local engine only", false, StateRunning, nil, "active", "disabled"},
 		{"guardrail failed", false, StateError, nil, "unknown", "disabled"},
 		{"ai defense ok", true, StateRunning, map[string]interface{}{"ai_defense_available": true}, "active", "ok"},
+		{"ai defense key not yet used", true, StateRunning, map[string]interface{}{
+			"ai_defense_available": true, "ai_defense_verified": false,
+		}, "active", "unknown"},
 		{"ai defense key rejected", true, StateRunning, map[string]interface{}{
 			"ai_defense_available": false, "ai_defense_error": "ai_defense: the API key was rejected (HTTP 401)",
 		}, "active", "unavailable:auth_failed"},

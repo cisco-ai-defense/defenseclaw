@@ -152,6 +152,27 @@ def test_setup_v8_accepts_observability_token_from_environment(
     assert dotenv_values(tmp_path / ".env").get("DD_API_KEY") == secret
 
 
+def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # WIN-R1-18: the schema error named a YAML key that add could not set.
+    _stub_canonical_v8_gateway(monkeypatch)
+    args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
+    args += ["--protocol", "grpc"]
+
+    refused = CliRunner().invoke(observability, args, obj=_setup_app(tmp_path))
+    assert refused.exit_code != 0
+    assert "--allow-private-networks" in refused.output
+
+    result = CliRunner().invoke(
+        observability, [*args, "--allow-private-networks"], obj=_setup_app(tmp_path), catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert source["observability"]["destinations"][0]["network_safety"] == {"allow_private_networks": True}
+
+
 def test_setup_v8_explicit_token_takes_precedence_over_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

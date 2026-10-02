@@ -272,7 +272,7 @@ def _log_setup_action(
             ) from exc
         click.echo(
             "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
-            "event was not recorded. Start defenseclaw-gateway before the next change.",
+            "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change.",
             err=True,
         )
 
@@ -1340,6 +1340,54 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
             flag_value=None,
             non_interactive=False,
         )
+        # Provider-typed prompts: region + auth-mode for bedrock / vertex / azure.
+        # Asked before the key: Bedrock IAM, profile and instance-role auth use
+        # no API key, so the key prompt is skipped for them.
+        prov = (llm.provider or "").strip().lower()
+        auth_value = ""
+        if prov in ("bedrock", "vertex_ai", "vertex", "gemini", "azure", "azure_openai"):
+            region_default = ""
+            if prov == "bedrock" and llm.bedrock is not None:
+                region_default = llm.bedrock.region
+            elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
+                region_default = llm.vertex.region
+            region_value = pick_region(
+                provider=prov,
+                current=region_default,
+                flag_value=None,
+                non_interactive=False,
+            )
+            auth_default = ""
+            if prov == "bedrock" and llm.bedrock is not None:
+                auth_default = llm.bedrock.auth_mode
+            elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
+                auth_default = llm.vertex.auth_mode
+            elif prov in ("azure", "azure_openai") and llm.azure is not None:
+                auth_default = llm.azure.auth_mode
+            auth_value = pick_auth_mode(
+                provider=prov,
+                current=auth_default,
+                flag_value=None,
+                non_interactive=False,
+            )
+            if prov == "bedrock":
+                _apply_llm_provider_typed_flags(
+                    llm,
+                    bedrock_region=region_value,
+                    bedrock_auth_mode=auth_value,
+                )
+            elif prov in ("vertex_ai", "vertex", "gemini"):
+                _apply_llm_provider_typed_flags(
+                    llm,
+                    vertex_region=region_value,
+                    vertex_auth_mode=auth_value,
+                )
+            elif prov in ("azure", "azure_openai"):
+                _apply_llm_provider_typed_flags(
+                    llm,
+                    azure_auth_mode=auth_value,
+                )
+
         # Cloud providers: prompt once for the unified key and store it
         # under DEFENSECLAW_LLM_KEY so every scanner / guardrail call
         # picks it up via Config.resolve_llm(...).
@@ -1354,68 +1402,27 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
         # Surface LiteLLM's native env-var name as a hint when the
         # operator hasn't already pinned a custom one (so they can
         # reuse an existing ANTHROPIC_API_KEY / OPENAI_API_KEY).
-        guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
-        if not existing_env and guessed and guessed != "LLM_API_KEY" and guessed != DEFENSECLAW_LLM_KEY_ENV:
-            click.echo(f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}.")
-        env_name = pick_key_env(
-            provider=llm.provider,
-            current=suggested_env,
-            flag_value=None,
-            non_interactive=False,
-        )
-        _prompt_and_save_secret(env_name, llm.api_key, data_dir)
-        llm.api_key = ""
-        llm.api_key_env = env_name
+        if prov == "bedrock" and auth_value and auth_value != "api_key":
+            llm.api_key = ""
+            llm.api_key_env = ""
+        else:
+            guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
+            if not existing_env and guessed and guessed != "LLM_API_KEY" and guessed != DEFENSECLAW_LLM_KEY_ENV:
+                click.echo(f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}.")
+            env_name = pick_key_env(
+                provider=llm.provider,
+                current=suggested_env,
+                flag_value=None,
+                non_interactive=False,
+            )
+            _prompt_and_save_secret(env_name, llm.api_key, data_dir)
+            llm.api_key = ""
+            llm.api_key_env = env_name
         llm.base_url = click.prompt(
             "  LLM base URL (leave blank to use provider default)",
             default=llm.base_url or "",
             show_default=bool(llm.base_url),
         )
-
-    # Provider-typed prompts: region + auth-mode for bedrock / vertex / azure.
-    prov = (llm.provider or "").strip().lower()
-    if prov in ("bedrock", "vertex_ai", "vertex", "gemini", "azure", "azure_openai"):
-        region_default = ""
-        if prov == "bedrock" and llm.bedrock is not None:
-            region_default = llm.bedrock.region
-        elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
-            region_default = llm.vertex.region
-        region_value = pick_region(
-            provider=prov,
-            current=region_default,
-            flag_value=None,
-            non_interactive=False,
-        )
-        auth_default = ""
-        if prov == "bedrock" and llm.bedrock is not None:
-            auth_default = llm.bedrock.auth_mode
-        elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
-            auth_default = llm.vertex.auth_mode
-        elif prov in ("azure", "azure_openai") and llm.azure is not None:
-            auth_default = llm.azure.auth_mode
-        auth_value = pick_auth_mode(
-            provider=prov,
-            current=auth_default,
-            flag_value=None,
-            non_interactive=False,
-        )
-        if prov == "bedrock":
-            _apply_llm_provider_typed_flags(
-                llm,
-                bedrock_region=region_value,
-                bedrock_auth_mode=auth_value,
-            )
-        elif prov in ("vertex_ai", "vertex", "gemini"):
-            _apply_llm_provider_typed_flags(
-                llm,
-                vertex_region=region_value,
-                vertex_auth_mode=auth_value,
-            )
-        elif prov in ("azure", "azure_openai"):
-            _apply_llm_provider_typed_flags(
-                llm,
-                azure_auth_mode=auth_value,
-            )
 
     llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
     llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries or 2)
@@ -4077,6 +4084,7 @@ def setup_gateway(
     optionally fetched from AWS SSM Parameter Store.
     """
     gw = app.cfg.gateway
+    previous_api_port = gw.api_port
 
     data_dir = app.cfg.data_dir
 
@@ -4115,14 +4123,22 @@ def setup_gateway(
         _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir)
 
     app.cfg.save()
-    _print_gateway_summary(gw)
+    uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
+    # A new API port takes effect only when the gateway (re)starts, so nothing
+    # listens on it yet: the connectivity check and the audit event cannot
+    # succeed until then, and the gateway may be down precisely because the
+    # old port was taken.
+    api_port_changed = gw.api_port != previous_api_port
+    _print_gateway_summary(gw, openclaw=uses_openclaw, api_port_changed=api_port_changed)
 
-    if verify:
+    if verify and not api_port_changed:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
         r = _DoctorResult()
-        _check_openclaw_gateway(app.cfg, r)
+        # Hook-only installs have no OpenClaw gateway to reach.
+        if uses_openclaw:
+            _check_openclaw_gateway(app.cfg, r)
         _check_sidecar(app.cfg, r)
         click.echo()
         if r.failed:
@@ -4138,7 +4154,7 @@ def setup_gateway(
         # the sidecar has started. Suppress only definite runtime
         # unavailability; server rejections and every other admission failure
         # remain fatal through _log_setup_action.
-        allow_offline=not verify,
+        allow_offline=not verify or api_port_changed,
     )
 
 
@@ -4916,7 +4932,8 @@ def _check_connector_version_supported_for_setup(
         probe_error = signal.error or ""
 
     compatibility = resolve_connector_contract(connector, raw_version)
-    version_display = raw_version or "(not probed)"
+    # Some CLIs end their version banner with a period ("... 1.0.90.").
+    version_display = raw_version.rstrip(".") or "(not probed)"
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
@@ -4989,7 +5006,7 @@ def _check_connector_version_supported_for_setup(
                 _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
                 if _trusted_prompt_cache is not None:
                     _trusted_prompt_cache[parent] = True
-                ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env); re-checking…")
+                ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml); re-checking…")
                 ux.subhead(
                     "  Note: if this path is version-specific it may need re-trusting "
                     "after an upgrade — `defenseclaw setup trusted-paths add <dir>`."
@@ -5863,7 +5880,11 @@ def setup_guardrail(
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        raise click.ClickException(f"cannot establish guardrail setup rollback point: {exc}") from exc
+        raise click.ClickException(
+            f"cannot establish guardrail setup rollback point: {exc}\n"
+            "Nothing was changed. Run the command again; if it still fails, run "
+            "'defenseclaw doctor' and include the bracketed reference in a report."
+        ) from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
     selection_attempted = False
@@ -6579,7 +6600,10 @@ _AGENT_SELECTION_MAX_BYTES = 64 << 10
 _HOOK_CONTRACT_LOCK_MAX_BYTES = 16 << 20
 _SETUP_CONFIG_MAX_BYTES = 16 << 20
 _ACTIVE_CONNECTOR_STATE_MAX_BYTES = 64 << 10
-_SETUP_RUNTIME_ARTIFACT_MAX_BYTES = 16 << 20
+# Runtime evidence is hashed in chunks and never held in memory. The Windows
+# hook executable (about 115 MB) is one of these files, so the cap only stops
+# an endless read.
+_SETUP_RUNTIME_ARTIFACT_MAX_BYTES = 1 << 30
 _SETUP_RUNTIME_RECEIPT_MAX_FILES = 128
 _SETUP_RUNTIME_REGISTRATION_MAX_FILES = 128
 _SETUP_RUNTIME_SNAPSHOT_ATTEMPTS = 6
@@ -6689,8 +6713,12 @@ def _capture_protected_setup_file(
     *,
     repair_owned_read_bits: bool = False,
     skip_if_untrusted: bool = False,
+    hasher: Any = None,
 ) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
     """Read one bounded private regular file without following path redirects.
+
+    With ``hasher``, the content is fed to it in chunks and the returned body
+    is empty, so a large file is fingerprinted without being held in memory.
 
     ``repair_owned_read_bits`` tightens an owner-only file that is merely
     group/other-readable (no extra write bits) so an informational hint
@@ -6743,15 +6771,20 @@ def _capture_protected_setup_file(
                         return False, b"", None
                     raise OSError(f"{label} rollback source is not private")
         body = bytearray()
-        while len(body) <= maximum:
-            chunk = os.read(fd, min(64 << 10, maximum + 1 - len(body)))
+        size = 0
+        while size <= maximum:
+            chunk = os.read(fd, min(1 << 20, maximum + 1 - size))
             if not chunk:
                 break
-            body.extend(chunk)
-        if len(body) > maximum:
+            size += len(chunk)
+            if hasher is None:
+                body.extend(chunk)
+            else:
+                hasher.update(chunk)
+        if size > maximum:
             raise OSError(f"{label} rollback source grew while reading")
         after = os.fstat(fd)
-        if after.st_size != len(body) or not os.path.samestat(info, after):
+        if after.st_size != size or not os.path.samestat(info, after):
             raise OSError(f"{label} rollback source changed while reading")
         try:
             path_after = os.stat(path, follow_symlinks=False)
@@ -6788,17 +6821,19 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
         raise OSError(f"{role} evidence {_setup_runtime_ref(raw)} has an invalid identity")
     normalized = os.path.normcase(os.path.normpath(os.path.abspath(raw)))
     identity = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+    digest = hashlib.sha256()
     try:
-        existed, body, _generation = _capture_protected_setup_file(
+        existed, _body, generation = _capture_protected_setup_file(
             normalized,
             _SETUP_RUNTIME_ARTIFACT_MAX_BYTES,
             role,
+            hasher=digest,
         )
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
-    if not existed:
+    if not existed or generation is None:
         return normalized, identity, "missing"
-    return normalized, identity, f"present:{len(body)}:{hashlib.sha256(body).hexdigest()}"
+    return normalized, identity, f"present:{generation[2]}:{digest.hexdigest()}"
 
 
 def _capture_setup_runtime_file(path: object, role: str) -> tuple[str, str]:
@@ -9975,7 +10010,7 @@ def _prompt_batch_trusted_prefixes(
         if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
             _add_trusted_bin_prefix(parent, getattr(app.cfg, "data_dir", None) or os.path.expanduser("~/.defenseclaw"))
             cache[parent] = True
-            ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env).")
+            ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml).")
         else:
             cache[parent] = False
     return cache
@@ -13162,6 +13197,9 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
     except Exception:  # noqa: BLE001 - diagnostics must not mask the gate result.
         return f"protected lock {invariant} is invalid"
     version = raw_version or "an unreported version"
+    if version.casefold().startswith(f"{connector} ".casefold()):
+        # Devin's banner starts with its own name ("devin 3000.11.3 (...)").
+        version = version[len(connector) + 1 :]
     if (
         compatibility.untested
         and isinstance(entry, dict)
@@ -13175,9 +13213,9 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
     if compatibility.status == STATUS_NOT_GATED or (compatibility.contract and compatibility.supported):
         return f"protected lock {invariant} is invalid"
     return (
-        f"no reviewed hook contract covers {connector} {version}; "
-        f"the protected lock records that correctly. Pin a contract for this version in "
-        f"hook_contracts.json, or remove {connector} from the active roster"
+        f"no reviewed hook contract covers {connector} {version}, so DefenseClaw does not guard it. "
+        f"Install a supported {connector} version, or remove it from the active roster with: "
+        f"defenseclaw guardrail disable --connector {connector}"
     )
 
 def _connector_runtime_snapshot_failure(
@@ -14531,7 +14569,7 @@ def _prompt_env_var_name(default: str) -> str:
         return val
 
 
-def _print_gateway_summary(gw) -> None:
+def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool = False) -> None:
     click.echo()
     ux.ok("Saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -14549,12 +14587,13 @@ def _print_gateway_summary(gw) -> None:
         click.echo(f"    {ux._style(label, fg='bright_black', bold=True)} {val}")
     click.echo()
 
-    if resolved:
-        ux.subhead("Start the sidecar with:")
-        ux.subhead("  defenseclaw-gateway")
+    if api_port_changed:
+        ux.subhead("The new API port takes effect when the gateway starts:")
+        ux.subhead("  defenseclaw-gateway start    (or 'defenseclaw-gateway restart' if it is running)")
     else:
-        ux.subhead("Start the sidecar with:")
-        ux.subhead("  defenseclaw-gateway")
+        ux.subhead("Start the gateway with:")
+        ux.subhead("  defenseclaw-gateway start")
+    if openclaw and not resolved:
         ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()
 

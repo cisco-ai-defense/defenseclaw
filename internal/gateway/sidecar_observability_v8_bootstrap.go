@@ -320,7 +320,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ServiceInstanceID:     gatewaylog.SidecarInstanceID(),
 		DefenseClawInstanceID: gatewaylog.SidecarInstanceID(),
 		TenantID:              cfg.TenantID, WorkspaceID: cfg.WorkspaceID,
-		DeploymentMode: cfg.DeploymentMode, ConnectorMode: string(cfg.Claw.Mode),
+		DeploymentMode: cfg.DeploymentMode, ConnectorMode: observabilityClawMode(cfg),
 		DiscoverySource: cfg.DiscoverySource, DeviceKeyFile: cfg.Gateway.DeviceKeyFile,
 		GenerationPipelines: destinationFactory.GenerationPipelineFactory(prometheus.Options{}),
 	})
@@ -1137,3 +1137,15 @@ var (
 	_ config.ObservabilityV8SecretResolver       = sidecarObservabilityV8SecretResolver{}
 	_ config.ObservabilityV8CredentialResolver   = sidecarObservabilityV8SecretResolver{}
 )
+
+// observabilityClawMode is the gateway-wide defenseclaw.claw.mode resource
+// attribute. With several connectors active, the configured claw mode is only
+// the roster's first connector, and stamping it on every record showed one
+// agent's traffic as another's; each record already names its own agent, so
+// the attribute is left out then.
+func observabilityClawMode(cfg *config.Config) string {
+	if cfg == nil || len(cfg.ActiveConnectors()) > 1 {
+		return ""
+	}
+	return string(cfg.Claw.Mode)
+}

@@ -303,35 +303,36 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         verify=verify,
         json_summary=json_summary,
     ):
-        _run_first_run_cmd(
-            skip_install=skip_install,
-            enable_guardrail=enable_guardrail,
-            sandbox=sandbox,
-            non_interactive=non_interactive,
-            yes=yes,
-            rescan_agents=rescan_agents,
-            connector=connector,
-            profile=profile,
-            observe_all=observe_all,
-            action_connectors=action_connectors,
-            scanner_mode=scanner_mode,
-            with_judge=with_judge,
-            fail_mode=fail_mode,
-            human_approval=human_approval,
-            hilt_min_severity=hilt_min_severity,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
-            llm_api_key=llm_api_key,
-            llm_api_key_env=llm_api_key_env,
-            llm_base_url=llm_base_url,
-            cisco_endpoint=cisco_endpoint,
-            cisco_api_key=cisco_api_key,
-            cisco_api_key_env=cisco_api_key_env,
-            start_gateway=start_gateway,
-            verify=verify,
-            json_summary=json_summary,
-            verbose=verbose,
-        )
+        with agent_discovery.share_fresh_scans():
+            _run_first_run_cmd(
+                skip_install=skip_install,
+                enable_guardrail=enable_guardrail,
+                sandbox=sandbox,
+                non_interactive=non_interactive,
+                yes=yes,
+                rescan_agents=rescan_agents,
+                connector=connector,
+                profile=profile,
+                observe_all=observe_all,
+                action_connectors=action_connectors,
+                scanner_mode=scanner_mode,
+                with_judge=with_judge,
+                fail_mode=fail_mode,
+                human_approval=human_approval,
+                hilt_min_severity=hilt_min_severity,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                llm_api_key=llm_api_key,
+                llm_api_key_env=llm_api_key_env,
+                llm_base_url=llm_base_url,
+                cisco_endpoint=cisco_endpoint,
+                cisco_api_key=cisco_api_key,
+                cisco_api_key_env=cisco_api_key_env,
+                start_gateway=start_gateway,
+                verify=verify,
+                json_summary=json_summary,
+                verbose=verbose,
+            )
         return
 
     from defenseclaw.bootstrap import SANDBOX_FLAG_DEPRECATION
@@ -769,7 +770,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # the now-started gateway. _next_commands only reads cfg.data_dir,
             # which the report already exposes.
             report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
-        elif not start_gateway and len(activated) > 1:
+        if len(activated) > 1:
+            _describe_connector_set(report, activated)
+        if sidecar_step is None and not start_gateway and len(activated) > 1:
             # Extra connectors get their hooks from the gateway's reconcile on
             # the next start; say so instead of leaving Doctor to report
             # "no hooks registered" with no explanation.
@@ -807,7 +810,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             payload["connector_mode_warnings"] = mode_warnings
         click.echo(json.dumps(payload, indent=2))
         return
-    _render_first_run_report(report, CLIRenderer())
+    _render_first_run_report(report, CLIRenderer(), connectors=activated)
     if len(activated) > 1:
         click.echo()
         click.echo("  Configured connectors: " + ", ".join(activated))
@@ -1258,6 +1261,9 @@ def _supported_action_connectors(
     from defenseclaw.commands.cmd_setup import (
         _check_connector_version_supported_for_setup,
     )
+
+    if candidates and allow_trusted_path_prompt and not quiet:
+        click.echo("  Checking installed agent versions...")
 
     out: list[str] = []
     failed: list[str] = []
@@ -1783,6 +1789,7 @@ def _activate_additional_connectors(
     instead of the stale "not started" placeholder written while the start was
     deferred."""
     from defenseclaw import config as cfg_mod
+    from defenseclaw.bootstrap import pin_cursor_posture
     from defenseclaw.commands.cmd_setup import (
         _check_connector_version_supported_for_setup,
     )
@@ -1850,11 +1857,45 @@ def _activate_additional_connectors(
                 "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
             )
 
+    if platform_support.host_os() == "darwin" and primary_name != "openhands" and "openhands" in selected_keys:
+        # The macOS gateway installs OpenHands hooks only from a setup-selected,
+        # digest-pinned executable. Record it the way `setup openhands` does;
+        # when it cannot be verified, setup warns with the reason and the
+        # connector is left out instead of being listed as configured.
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _record_windows_setup_agent_selections,
+        )
+
+        openhands_selection = _record_windows_setup_agent_selections(
+            cfg.data_dir,
+            tuple(selected_keys),
+            _prior_snapshot=_capture_setup_config_snapshot(cfg),
+            required={primary_name},
+        )
+        if openhands_selection is None or openhands_selection.record_for("openhands") is None:
+            selected_keys.remove("openhands")
+            extras = [s for s in extras if connector_paths.normalize(s["connector"]) != "openhands"]
+
     # Rebuild the multi map from the connector selection made in this init
     # run. Reusing the old map would keep unchecked/stale connectors active in
     # `guardrail status`.
     gc.connectors = {primary_name: PerConnectorGuardrailConfig()}
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_trusted_path_prompt else None
+    if (
+        allow_trusted_path_prompt
+        and (primary.get("profile") or "").lower() == "action"
+        and not (primary_name == "opencode" and platform_support.host_os() == "windows")
+    ):
+        # First-run gated the primary without output; print its compatibility
+        # line next to the extras so every action connector has one.
+        _check_connector_version_supported_for_setup(
+            primary_name,
+            mode="observe",
+            emit=True,
+            data_dir=getattr(cfg, "data_dir", None),
+            _allow_prompt=False,
+        )
 
     for s in extras:
         key = connector_paths.normalize(s["connector"])
@@ -1908,6 +1949,7 @@ def _activate_additional_connectors(
                 min_severity=(s["hilt_min_severity"] or "HIGH").upper(),
             )
         gc.connectors[key] = pc
+    pin_cursor_posture(gc, primary_name)
 
     gate = list(gc.judge.hook_connectors or [])
     if gate != ["*"]:
@@ -2065,8 +2107,39 @@ def _internal_antigravity_setup_parent_matches() -> bool:
     )
 
 
-def _render_first_run_report(report, renderer) -> None:
-    subtitle = f"status={report.status} connector={report.connector} profile={report.profile}"
+def _describe_connector_set(report, connectors: list[str]) -> None:
+    """Make the first-run Guardrail and Connector rows cover every connector.
+
+    run_first_run sets up only the primary connector, so with several
+    selected its rows named that one connector alone.
+    """
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.bootstrap import _connector_readiness, _next_commands, _rollup_status
+
+    try:
+        cfg = cfg_mod.load(data_dir=report.data_dir)
+    except Exception:  # noqa: BLE001 - keep the primary-only rows.
+        return
+    modes = ", ".join(f"{name}={cfg.guardrail.effective_mode(name)}" for name in connectors)
+    for step in report.setup:
+        if step.name == "Guardrail" and step.status == "pass":
+            step.detail = f"{len(connectors)} connectors: {modes}"
+    readiness: list = []
+    for step in report.readiness:
+        if step.name != "Connector":
+            readiness.append(step)
+        elif not any(item.name == "Connector" for item in readiness):
+            readiness.extend(_connector_readiness(cfg, name) for name in connectors)
+    report.readiness = readiness
+    report.status = _rollup_status(report.setup, report.readiness)
+    report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
+
+
+def _render_first_run_report(report, renderer, *, connectors: list[str] | None = None) -> None:
+    target = (
+        f"connectors={len(connectors)}" if connectors and len(connectors) > 1 else f"connector={report.connector}"
+    )
+    subtitle = f"status={report.status} {target} profile={report.profile}"
     renderer.title("DefenseClaw First-Run", subtitle)
     renderer.section("Setup")
     for step in report.setup:

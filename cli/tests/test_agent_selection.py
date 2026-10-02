@@ -103,6 +103,24 @@ def test_darwin_openhands_selection_binds_stable_executable_and_full_chain(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
+def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tool_bin = tmp_path / "uv" / "tools" / "openhands" / "bin"
+    tool_bin.mkdir(parents=True, mode=0o700)
+    (tool_bin / "openhands").write_text("#!/bin/sh\n", encoding="utf-8")
+    link = tmp_path / "bin" / "openhands"
+    link.parent.mkdir()
+    link.symlink_to(tool_bin / "openhands")
+    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(link),))
+
+    with pytest.raises(OSError, match=r"trusted-paths add .*uv/tools/openhands/bin"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
 def test_darwin_openhands_selection_rejects_identity_change_during_hash(
     tmp_path: Path,
     monkeypatch,

@@ -3539,6 +3539,23 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertIn("Change saved", result.output)
         self.assertIn("canonical setup audit event was not recorded", result.output)
 
+    def test_new_api_port_saves_without_a_running_gateway(self):
+        # The gateway cannot listen on the new port until it starts, so a
+        # verified run must still succeed and skip the OpenClaw check on a
+        # hook-only install.
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("gateway is not running")
+        self._seed_map("codex")
+
+        with patch("defenseclaw.commands.cmd_doctor._check_openclaw_gateway") as openclaw_check:
+            result = _invoke(["gateway", "--api-port", "19093", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.api_port, 19093)
+        self.assertIn("defenseclaw-gateway start", result.output)
+        self.assertNotIn("OpenClaw", result.output)
+        openclaw_check.assert_not_called()
+
     def test_no_verify_keeps_non_availability_audit_errors_fatal(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = RuntimeError("audit rejected")

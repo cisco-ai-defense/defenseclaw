@@ -29,7 +29,10 @@ import stat
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -81,7 +84,11 @@ UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 CACHE_SCHEMA_VERSION = 6
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
-VERSION_TIMEOUT_SECONDS = 2.0
+# Node and Python CLIs take over a second for --version when idle, and
+# discovery probes four at a time, so a 2 s budget hid installed agents on a
+# busy host.
+VERSION_TIMEOUT_SECONDS = 8.0
+VERSION_PROBE_TIMED_OUT = "version probe timed out"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
@@ -931,6 +938,25 @@ _SPECS: dict[str, _AgentSpec] = {
 }
 
 
+_FRESH_SCANS: ContextVar[dict[tuple, AgentDiscovery] | None] = ContextVar("_FRESH_SCANS", default=None)
+
+
+@contextmanager
+def share_fresh_scans() -> Iterator[None]:
+    """Let the fresh scans of one command reuse its first full scan.
+
+    Setup's version gate asks for a fresh scan per connector, so a guided
+    init with many connectors probed every agent once per connector and sat
+    silent for a minute. The memo is keyed by the config's trust settings,
+    so trusting another binary prefix still scans again.
+    """
+    token = _FRESH_SCANS.set({})
+    try:
+        yield
+    finally:
+        _FRESH_SCANS.reset(token)
+
+
 def discover_agents(
     *,
     use_cache: bool = True,
@@ -953,6 +979,13 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
+    shared = _FRESH_SCANS.get()
+    shared_key = (str(config_path_for_data_dir(data_dir)), require_trusted, tuple(_prefixes))
+    if shared is not None and shared_key in shared:
+        reused = shared[shared_key]
+        if persist_cache:
+            _write_cache(reused, data_dir=data_dir)
+        return reused
     # Prime manager-derived Windows roots before worker threads request the
     # trusted-prefix set. functools.lru_cache does not coalesce concurrent
     # misses, so warming here prevents duplicate npm/pnpm subprocesses.
@@ -972,6 +1005,8 @@ def discover_agents(
         )
     agents = {signal.name: signal for signal in signals}
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
+    if shared is not None:
+        shared[shared_key] = discovery
     # Cache persistence is deliberately best-effort: the freshly computed
     # discovery result is authoritative and must still be returned when the
     # optional acceleration cache cannot be protected or written.
@@ -1131,6 +1166,7 @@ def _scan_agent(
     version_ok = False
 
     probe_errors: list[str] = []
+    timed_out = ""
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
             name,
@@ -1151,10 +1187,16 @@ def _scan_agent(
             break
         if candidate_error:
             probe_errors.append(f"{candidate}: {candidate_error}")
+            if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
+                timed_out = candidate
     if not version_ok and probe_errors:
         error = "; ".join(probe_errors)
+    if not version_ok and timed_out:
+        # A trusted binary that is only slow is installed; its version stays
+        # unknown, so action mode still refuses it until a probe answers.
+        binary_path = timed_out
 
-    installed = bool(binary_path) and version_ok
+    installed = bool(binary_path) and (version_ok or bool(timed_out))
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1734,7 +1776,10 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"claude", "hermes", "omnigent", "openhands"} or (
+    if binary_name == "openhands":
+        # Its --version loads the whole Python agent stack: 15 s idle on Linux.
+        timeout = 30.0
+    elif binary_name in {"claude", "hermes", "omnigent"} or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -1758,7 +1803,7 @@ def _version_for_binary(
             env=env,
         )
     except subprocess.TimeoutExpired:
-        return "", "version probe timed out"
+        return "", VERSION_PROBE_TIMED_OUT
     except Exception as exc:
         return "", f"version probe failed: {exc}"
 
@@ -1830,7 +1875,8 @@ def _version_for_agent_binary(
 def _normalize_devin_cli_version_output(output: str) -> str:
     """Extract the version from Devin's exact canonical ``--version`` banner.
 
-    The native CLI reports ``devin <semver> (<8-char git revision>)``.  Keep
+    The native CLI reports ``devin <semver> (<git revision>)``; the revision
+    is an abbreviated hex hash (8 characters in 3000.4.x, 12 in 3000.11.x).  Keep
     this parser deliberately narrower than general version discovery: any
     extra field, non-canonical numeric component, or malformed revision is
     returned unchanged so the exact connector-contract gate rejects it.
@@ -1851,7 +1897,7 @@ def _normalize_devin_cli_version_output(output: str) -> str:
             return output
 
     revision = fields[2]
-    if len(revision) != 10 or not revision.startswith("(") or not revision.endswith(")"):
+    if len(revision) not in (10, 14) or not revision.startswith("(") or not revision.endswith(")"):
         return output
     if any(character not in "0123456789abcdef" for character in revision[1:-1]):
         return output

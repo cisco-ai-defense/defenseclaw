@@ -602,7 +602,10 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.
 func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
+	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts)
+	defer releaseWatch()
 	resp, err := sendHookRequest(ctx, opts, sp, payload, token)
+	stopWatch()
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, failMode, err.Error())
 	}
@@ -618,6 +621,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	if err != nil {
 		reason := "gateway unreachable"
+		if errors.Is(context.Cause(ctx), errGatewayStartFailing) {
+			reason = errGatewayStartFailing.Error()
+		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure must fail closed on the transport
 			// surface too, mirroring the up-front client-build path. A managed

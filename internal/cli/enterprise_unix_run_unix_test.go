@@ -131,6 +131,7 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 
 	ok := enterprisestatus.New("status", "standalone", "linux", "1.0.0")
 	ok.AddWarning("unit_failed", "defenseclaw-enterprise-apply.service failed")
+	ok.Inspection.Local, ok.Inspection.AIDefense = "active", "unavailable:auth_failed"
 	ok.Finish("linux", 0)
 	out.Reset()
 	if err := printLifecycleResult(&out, ok, false); err != nil {
@@ -138,5 +139,9 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 	}
 	if strings.HasPrefix(out.String(), "✓") {
 		t.Fatalf("a result with warnings got a green check:\n%s", out.String())
+	}
+	// Human status names the AI Defense state, not only the JSON.
+	if !strings.Contains(out.String(), "inspection: local=active ai_defense=unavailable:auth_failed") {
+		t.Fatalf("status hides the inspection state:\n%s", out.String())
 	}
 }

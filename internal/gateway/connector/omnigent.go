@@ -845,6 +845,12 @@ func validateOmnigentInterpreter(opts SetupOpts, path string) error {
 		// can change it, and only while running as this user.
 		return validateOmnigentHomeInterpreter(path, resolved)
 	}
+	if home := omnigentResolvedHome(); !trusted && home != "" && omnigentPathWithin(resolved, home) {
+		// A per-user gateway runs as the user too, so the same owner-only
+		// rule admits the interpreter `uv tool install omnigent` leaves
+		// under ~/.local/share/uv; setup accepted that install already.
+		return validateOmnigentHomeInterpreter(path, resolved)
+	}
 	if !trusted {
 		return fmt.Errorf("omnigent connector: Python interpreter %s is not in a trusted install prefix; add its directory to DEFENSECLAW_TRUSTED_BIN_PREFIXES", resolved)
 	}

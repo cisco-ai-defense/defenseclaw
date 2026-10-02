@@ -64,6 +64,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
 		return fmt.Errorf("kiro migrate hook backup: %w", err)
 	}
+	defer recordKiroCreatedDirs(opts, missingKiroScaffoldDirs())
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("kiro hook script: %w", err)
@@ -170,7 +171,47 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if err := writeDisabledHookTombstone(opts, kiroHookScriptName, c.Name()); err != nil {
 		errs = append(errs, fmt.Errorf("kiro disabled hook tombstone: %w", err))
 	}
+	if strings.TrimSpace(opts.DataDir) != "" {
+		removeCreatedDirs(filepath.Join(opts.DataDir, kiroCreatedDirsFile), filepath.Dir(kiroHomeDir()))
+	}
 	return errors.Join(errs...)
+}
+
+// kiroCreatedDirsFile, in the DefenseClaw data directory, lists the Kiro
+// folders Setup created in a home that never ran Kiro (the guardian enrolls
+// every user with kiro-cli on PATH), so teardown removes them while empty.
+const kiroCreatedDirsFile = "kiro-created-dirs.json"
+
+func kiroScaffoldDirs() []string {
+	home := kiroHomeDir()
+	return []string{home, filepath.Join(home, "agents"), filepath.Join(home, "hooks"), filepath.Join(home, "settings")}
+}
+
+func missingKiroScaffoldDirs() []string {
+	var missing []string
+	for _, dir := range kiroScaffoldDirs() {
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			missing = append(missing, dir)
+		}
+	}
+	return missing
+}
+
+// recordKiroCreatedDirs records the folders of missing that Setup created.
+// It is best effort: an unrecorded folder only stays behind after teardown.
+func recordKiroCreatedDirs(opts SetupOpts, missing []string) {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return
+	}
+	var created []string
+	for _, dir := range missing {
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+			created = append(created, dir)
+		}
+	}
+	if len(created) > 0 {
+		_ = recordCreatedDirs(filepath.Join(opts.DataDir, kiroCreatedDirsFile), created)
+	}
 }
 
 func (c *KiroConnector) VerifyClean(opts SetupOpts) error {

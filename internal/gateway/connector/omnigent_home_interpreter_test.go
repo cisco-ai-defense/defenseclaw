@@ -48,7 +48,7 @@ func omnigentUVToolLayout(t *testing.T, home, purelib string) (interpreterDir st
 // target user. An interpreter `uv tool install` placed under that user's
 // home, which only the user can change, is admitted there; a group- or
 // other-writable directory on the way is refused with the command to fix
-// it. Per-user installs keep the DEFENSECLAW_TRUSTED_BIN_PREFIXES rule.
+// it. A per-user gateway, which runs as the user, admits it the same way.
 func TestOmnigentManagedAdmitsAnOwnerOnlyInterpreterUnderTheUsersHome(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("a home interpreter is never admitted as root")
@@ -75,9 +75,8 @@ func TestOmnigentManagedAdmitsAnOwnerOnlyInterpreterUnderTheUsersHome(t *testing
 		t.Fatalf("site-packages = %q, want %q", got, purelib)
 	}
 
-	if _, err := omnigentSitePackages(context.Background(), SetupOpts{}); err == nil ||
-		!strings.Contains(err.Error(), "DEFENSECLAW_TRUSTED_BIN_PREFIXES") {
-		t.Fatalf("per-user: error = %v, want the unchanged trusted-prefix refusal", err)
+	if got, err := omnigentSitePackages(context.Background(), SetupOpts{}); err != nil || got != purelib {
+		t.Fatalf("per-user: site-packages = %q, %v; want the uv interpreter under the home admitted", got, err)
 	}
 
 	pythonRoot := filepath.Dir(filepath.Dir(interpreterDir))

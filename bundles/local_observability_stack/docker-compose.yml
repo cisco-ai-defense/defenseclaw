@@ -37,6 +37,15 @@
 
 name: defenseclaw-observability
 
+# Docker's default json-file log driver never rotates, and the collector's
+# debug exporter logs every OTLP payload, so its log alone could fill the
+# disk. Cap each container's log at 3 x 10 MB.
+x-logging: &bounded-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 networks:
   defenseclaw-o11y:
     driver: bridge
@@ -73,6 +82,7 @@ services:
       tempo:
         condition: service_started
     restart: unless-stopped
+    logging: *bounded-logs
     healthcheck:
       test: ["CMD", "/otelcol-contrib", "--help"]
       interval: 30s
@@ -104,6 +114,7 @@ services:
     networks:
       - defenseclaw-o11y
     restart: unless-stopped
+    logging: *bounded-logs
 
   loki:
     image: grafana/loki:3.2.0
@@ -117,6 +128,7 @@ services:
     networks:
       - defenseclaw-o11y
     restart: unless-stopped
+    logging: *bounded-logs
 
   tempo:
     image: grafana/tempo:2.6.0
@@ -131,6 +143,7 @@ services:
     networks:
       - defenseclaw-o11y
     restart: unless-stopped
+    logging: *bounded-logs
 
   grafana:
     image: grafana/grafana:11.3.0
@@ -159,3 +172,4 @@ services:
       - loki
       - tempo
     restart: unless-stopped
+    logging: *bounded-logs

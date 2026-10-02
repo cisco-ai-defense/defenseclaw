@@ -280,7 +280,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	}
 	if !rotationTransaction {
 		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix)
+			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 		}
 	}
 
@@ -344,6 +344,8 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	} else {
 		printDaemonStartResult(pid, snap)
 	}
+	// The name records the move to the second; allow for that rounding.
+	printMovedCorruptAuditStores(cfg, startAttemptedAt.Add(-time.Second))
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -632,7 +634,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix)
+		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")
@@ -2183,9 +2185,11 @@ func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
 		switch strings.ToLower(state) {
 		case "running", "healthy":
 			parts = append(parts, sub.name+":ok")
-		case "disabled", "stopped":
+		case "stopped":
 			parts = append(parts, sub.name+":off")
-		case "":
+		case "", "disabled":
+			// A subsystem this install does not use (the OpenClaw gateway
+			// client without OpenClaw) read as a failure right after "OK".
 			continue
 		default:
 			parts = append(parts, sub.name+":"+state)

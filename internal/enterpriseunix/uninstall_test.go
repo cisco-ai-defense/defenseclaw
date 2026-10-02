@@ -93,8 +93,10 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				if h.services.isActive(unit.Name) {
 					t.Fatalf("%s still running after uninstall", unit.Name)
 				}
-				if unit.Activate && h.services.enabled[unit.Name] {
-					t.Fatalf("%s still enabled after uninstall", unit.Name)
+				// A removed launchd label goes back to launchd's default,
+				// enabled, instead of staying listed as disabled (MAC-R1-23).
+				if unit.Activate && h.services.enabled[unit.Name] != (goos == "darwin") {
+					t.Fatalf("%s enabled=%v after uninstall", unit.Name, h.services.enabled[unit.Name])
 				}
 			}
 		})
@@ -202,9 +204,14 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				t.Fatal("the uninstall removed the binaries the registration left still runs")
 			}
 			left = false
-			requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
 			if exists(gateway) || exists(h.env.deploymentPath()) {
 				t.Fatal("the rerun did not finish the removal")
+			}
+			// MAC-R1-22: the purge names the accounts whose data it deleted.
+			if !strings.Contains(strings.Join(done.Changes, "\n"), "per-user data of user alice") {
+				t.Fatalf("the purge does not report the per-user data it removed: %v", done.Changes)
 			}
 		})
 	}

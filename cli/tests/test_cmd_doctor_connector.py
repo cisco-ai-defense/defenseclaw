@@ -1915,12 +1915,35 @@ class TestCheckHookHealth(unittest.TestCase):
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
-            r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertEqual(r.checks[-1]["label"], "Hermes hooks (fail-open)")
-        self.assertIn(hook, r.checks[-1]["detail"])
-        self.assertIn("live=false", r.checks[-1]["detail"])
+            results = {}
+            for running in (True, False):
+                r = _DoctorResult()
+                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                    _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+                results[running] = r.checks[-1]
+        self.assertEqual(results[True]["status"], "fail")
+        self.assertEqual(results[True]["label"], "Hermes hooks (fail-open)")
+        self.assertIn(hook, results[True]["detail"])
+        self.assertIn("live=false", results[True]["detail"])
+        # With no Hermes host running there is nothing to reload.
+        self.assertEqual(results[False]["status"], "pass", results[False])
+
+    def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
+        from defenseclaw.commands import cmd_doctor
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        uid = os.getuid()
+        for args, want in (
+            ("/usr/bin/python3 /home/u/.local/bin/hermes", True),
+            ("uv run hermes", None),
+            ("python3 -m hermes_cli.main", None),
+            ("vim notes.txt", False),
+        ):
+            listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
+            done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done):
+                self.assertIs(cmd_doctor._hermes_host_running(), want, args)
 
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

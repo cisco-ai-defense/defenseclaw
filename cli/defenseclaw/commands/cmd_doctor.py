@@ -1637,7 +1637,51 @@ def _configured_local_retention_days(cfg) -> int:
 
 
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
-    from defenseclaw.doctor_recovery import AuditDBHealthStatus, inspect_audit_db
+    _check_audit_db_store(cfg, r)
+    _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+
+
+def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
+    """Report audit stores the gateway moved aside as corrupt.
+
+    The gateway renames a corrupt store to ``<db>.corrupt-<UTC time>`` and
+    starts a new one; only its log said so, so the reset audit history went
+    unnoticed.
+    """
+    if not db_path:
+        return
+    try:
+        moved = sorted(
+            path
+            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
+            if not path.name.endswith(("-wal", "-shm", "-journal")) and path.is_file()
+        )
+    except OSError:
+        return
+    if not moved:
+        return
+    newest = moved[-1]
+    size_mib = sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()) // (1024 * 1024)
+    count = f"{len(moved)} corrupt audit stores were" if len(moved) > 1 else "the audit store was corrupt and was"
+    _emit(
+        "warn",
+        "Audit store moved aside",
+        f"{count} moved aside by the gateway, which started a new store and kept the block/allow lists; "
+        f"older audit records stay in {newest} ({size_mib} MiB). Recover them with: sqlite3 {newest} .recover; "
+        f"delete {newest} and its -wal/-shm files when they are no longer needed",
+        r=r,
+        check_id="doctor.state.audit-db-moved-aside",
+        reason_code="audit-db-moved-aside",
+        remediation=f"sqlite3 {newest} .recover",
+    )
+
+
+def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
+    from defenseclaw.doctor_recovery import (
+        _AUDIT_FULL_INTEGRITY_MAX_BYTES,
+        AuditDBHealthStatus,
+        inspect_audit_db,
+    )
 
     db_path = str(getattr(cfg, "audit_db", "") or "")
     health = inspect_audit_db(
@@ -1684,14 +1728,17 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
         return
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
         size_mib = max(health.file_bytes, 0) // (1024 * 1024)
+        limit_mib = _AUDIT_FULL_INTEGRITY_MAX_BYTES // (1024 * 1024)
         _emit(
             "warn",
             "Audit database",
-            f"{db_path}; required schema present, but integrity is unverified for {size_mib} MiB file",
+            f"{db_path}; required schema present; integrity not checked because the {size_mib} MiB file "
+            f"is above Doctor's {limit_mib} MiB limit. No action is needed unless the gateway "
+            f"reports audit errors; to check it, stop the gateway and run: sqlite3 {db_path} 'PRAGMA quick_check'",
             r=r,
             check_id="doctor.state.audit-db",
             reason_code=health.reason_code,
-            remediation="stop the gateway and run an offline SQLite integrity check",
+            remediation=f"defenseclaw-gateway stop; sqlite3 {db_path} 'PRAGMA quick_check'",
         )
         return
     detail = f"{db_path}; SQLite quick_check=ok; required schema present"
@@ -1778,14 +1825,17 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
         )
         return
     if health.status is DeviceKeyHealthStatus.LEGACY_UNPROVENANCED:
+        # Keys an earlier release created carry no provenance record and
+        # never will; Doctor keeps them (replacing one breaks pairings), so
+        # a warning would only stay forever on every upgraded install.
         _emit(
-            "warn",
+            "pass",
             "Device identity",
-            "Ed25519 key is valid and private, but cryptographic provenance is unavailable",
+            "Ed25519 key is valid and private; it predates key provenance records "
+            "(created by an earlier release) and is kept as is; no action needed",
             r=r,
             check_id="doctor.identity.device-key",
             reason_code=health.reason_code,
-            remediation="review identity continuity before sandbox pairing; do not replace an in-use key",
         )
         return
     if health.status is DeviceKeyHealthStatus.MISSING:
@@ -1852,6 +1902,7 @@ def _check_component_connector_compatibility(
         HealthStatus,
         build_health_report,
         read_cached_discovery,
+        supported_range_text,
     )
 
     enabled = tuple(connector for connector in connectors if _connector_enabled(cfg, connector))
@@ -1913,18 +1964,7 @@ def _check_component_connector_compatibility(
         if finding.contract_id:
             detail += f"; contract={finding.contract_id}"
         if finding.supported_agent_ranges:
-            ranges = []
-            for supported in finding.supported_agent_ranges:
-                bounds = " ".join(
-                    part
-                    for part in (
-                        f">={supported.min_inclusive}" if supported.min_inclusive else "",
-                        f"<{supported.max_exclusive}" if supported.max_exclusive else "",
-                    )
-                    if part
-                )
-                ranges.append(bounds or supported.contract_id)
-            detail += f"; supported={','.join(ranges)}"
+            detail += f"; supported={supported_range_text(finding.supported_agent_ranges)}"
 
         if finding.status is HealthStatus.SUPPORTED:
             tag = "pass"
@@ -2240,7 +2280,8 @@ def _foreign_gateway_port_holder(cfg) -> str:
 def _foreign_gateway_port_detail(cfg, holder: str) -> str:
     return (
         f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
-        "Stop that process or set gateway.api_port to a free port, then run `defenseclaw-gateway start`"
+        "Stop that process, or move this account's gateway with `defenseclaw setup gateway --api-port <free port>`, "
+        "then run `defenseclaw-gateway start`"
     )
 
 
@@ -2249,6 +2290,25 @@ def _token_probe_failure(code: int, body: str) -> str:
     if code == 0 and body.endswith(_GATEWAY_TOKEN_REFUSED):
         return "the token was not sent: " + body[: -len(_GATEWAY_TOKEN_REFUSED)]
     return "transport failure" if code == 0 else f"HTTP {code}"
+
+
+def _guardrail_health_mode(details: dict) -> str:
+    """Describe the guardrail's policy mode from its /health details.
+
+    Hook connectors report ``policy_mode`` (observe/action); gateways before
+    1.0 also set ``mode`` to the data path ("observability"), which read as
+    observe mode for a connector that blocks through its hooks.
+    """
+    connector_modes = details.get("connector_modes")
+    if isinstance(connector_modes, dict) and connector_modes:
+        return "mode=" + ", ".join(f"{name}:{connector_modes[name]}" for name in sorted(connector_modes))
+    mode = details.get("policy_mode") or details.get("mode") or "?"
+    surface = {"agent_lifecycle_hooks": "hook-enforced", "omnigent_policy_api": "policy-API-enforced"}.get(
+        details.get("enforcement_surface"), ""
+    )
+    if mode == "action" and surface and details.get("enforcement_enabled") is True:
+        return f"mode={mode}, {surface}"
+    return f"mode={mode}"
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
@@ -2290,7 +2350,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 "warn",
                 "Sidecar API",
                 f"{bind}:{cfg.gateway.api_port} answers, but not as this account's verified gateway "
-                f"({trust.detail}){held}. Stop that process or set gateway.api_port to a free port, "
+                f"({trust.detail}){held}. Stop that process, or move this account's gateway with "
+                "`defenseclaw setup gateway --api-port <free port>`, "
                 "then run `defenseclaw-gateway restart`",
                 r=r,
             )
@@ -2337,7 +2398,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         continue
                     detail = state
                     if sub == "guardrail" and isinstance(details, dict):
-                        detail += f" (mode={details.get('mode', '?')})"
+                        detail += f" ({_guardrail_health_mode(details)})"
                     _emit("pass", f"  └─ {sub}", detail, r=r)
                 elif normalized_state in ("disabled", "stopped"):
                     # Cross-check the sidecar's view against on-disk
@@ -5642,6 +5703,51 @@ def _windows_command_line_argv(command_line: str) -> tuple[str, ...] | None:
         return None
 
 
+_HERMES_HOST_EXECUTABLES = frozenset({"hermes", "hermes-agent"})
+
+
+def _hermes_host_running() -> bool | None:
+    """Whether a Hermes host runs as this account; ``None`` when unknown.
+
+    Hermes reads its hook registration only at startup, so doctor can not
+    prove a running host loaded it. With no host running there is nothing to
+    reload: the next host starts with the registration.
+    """
+    if os.name == "nt" or not hasattr(os, "getuid"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-A", "-o", "pid=,uid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    uid = str(os.getuid())
+    own = {str(os.getpid()), str(os.getppid())}
+    wrapped = False
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 3 or fields[1] != uid or fields[0] in own:
+            continue
+        args = fields[2:]
+        # A script launcher puts the interpreter first: python .../bin/hermes.
+        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in args[:2]):
+            return True
+        # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
+        # that is not proof of absence.
+        if any(
+            os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES or arg.lower().startswith("hermes_cli")
+            for arg in args[2:]
+        ):
+            wrapped = True
+    return None if wrapped else False
+
+
 def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:
     """Read bounded argv evidence for a recorded OmniGent server process."""
     if pid <= 0:
@@ -5974,6 +6080,15 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         r=r,
                     )
             elif connector == "hermes":
+                if not r.passive and _hermes_host_running() is False:
+                    _emit(
+                        "pass",
+                        label,
+                        f"registered at {path}; no Hermes host is running, so the next one "
+                        "starts with the DefenseClaw hooks",
+                        r=r,
+                    )
+                    return
                 _emit(
                     "fail",
                     label,
@@ -7619,8 +7734,15 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
         tag = "pass"
         conditions: list[str] = []
         if item.managed_config_state == "drifted":
-            tag = "fail"
-            conditions.append("managed-exporter drift detected")
+            # The file changed after setup: agents such as Codex write their
+            # own settings to it. Teardown then removes only DefenseClaw's
+            # entries, so this is not a failure; setup re-applies and
+            # records the new contents.
+            tag = "warn"
+            conditions.append(
+                "managed-exporter drift detected (the file changed after setup); "
+                f"run 'defenseclaw setup {item.connector}' to re-apply"
+            )
         elif item.managed_config_state == "unverifiable":
             tag = "warn"
             conditions.append("managed-exporter state is unverifiable")
@@ -8673,10 +8795,14 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
             "audit database passed private-custody, integrity, and schema checks",
             effects=effects,
         )
-    if health.status in {
-        AuditDBHealthStatus.INVALID,
-        AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
-    }:
+    if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
+        return RepairDecision(
+            "noop",
+            "audit database schema is present; the file is above Doctor's integrity-check size "
+            "limit, so Doctor leaves it as is",
+            effects=effects,
+        )
+    if health.status is AuditDBHealthStatus.INVALID:
         remediation = (
             "run `defenseclaw-gateway restart` (it applies audit database migrations) after a trusted backup review"
             if health.reason_code == "audit-db-schema-incomplete"
@@ -8727,10 +8853,9 @@ def _fix_audit_db_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
     health = inspect_audit_db(target, data_dir=data_dir)
     if health.status is AuditDBHealthStatus.VALID:
         return ("skip", "audit database already passed integrity and schema checks")
-    if health.status in {
-        AuditDBHealthStatus.INVALID,
-        AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
-    }:
+    if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
+        return ("skip", "audit database schema is present; it is above the integrity-check size limit and is kept")
+    if health.status is AuditDBHealthStatus.INVALID:
         return (
             "fail",
             f"existing audit database is invalid ({health.reason_code}); refusing to replace it",

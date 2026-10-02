@@ -86,6 +86,10 @@ class AlertCommandIntent:
     hint: str = ""
     binary: str = "defenseclaw"
     category: str = "alerts"
+    # "destructive" routes the intent through the danger modal, which needs
+    # an explicit second keypress; ``consequence`` is the line it shows.
+    risk: str = "read-only"
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -853,6 +857,10 @@ class AlertsPanelModel:
                     label="alerts dismiss filtered",
                     args=_alert_id_command_args("dismiss", filtered_ids),
                     hint=f"Clearing {len(filtered_ids)} filtered alert(s).",
+                    # One stray keypress (typing "clear" into the TUI) must
+                    # not empty the alert list behind a Run-focused preview.
+                    risk="destructive",
+                    consequence=_bulk_dismiss_consequence(len(filtered_ids)),
                 ),
             )
         if key == "C":
@@ -865,6 +873,10 @@ class AlertsPanelModel:
                     label="alerts dismiss all",
                     args=_alert_id_command_args("dismiss", all_ids),
                     hint=f"Clearing all {len(all_ids)} loaded active alert(s).",
+                    # One stray keypress (typing "clear" into the TUI) must
+                    # not empty the alert list behind a Run-focused preview.
+                    risk="destructive",
+                    consequence=_bulk_dismiss_consequence(len(all_ids)),
                 ),
             )
         return AlertPanelAction(False)
@@ -1329,6 +1341,10 @@ def _alert_filter_change(old: str, new: str) -> AlertFilterChange | None:
     if old == new:
         return None
     return AlertFilterChange(panel="alerts", filter_type="severity", old=old, new=new)
+
+
+def _bulk_dismiss_consequence(count: int) -> str:
+    return f"Removes {count} alert(s) from the active list. The TUI has no undo for this."
 
 
 def _alert_id_command_args(command: str, alert_ids: list[str] | set[str]) -> tuple[str, ...]:

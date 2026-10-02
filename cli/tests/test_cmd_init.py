@@ -3285,19 +3285,25 @@ class TestMultiConnectorInit(unittest.TestCase):
                 {"connector": "codex", "profile": "observe", "fail_mode": "open",
                  "human_approval": None, "hilt_min_severity": None},
                 [{"connector": "claudecode", "profile": "action", "fail_mode": "closed",
-                  "human_approval": True, "hilt_min_severity": "MEDIUM"}],
+                  "human_approval": True, "hilt_min_severity": "MEDIUM"},
+                 {"connector": "cursor", "profile": "action", "fail_mode": "open",
+                  "human_approval": True, "hilt_min_severity": None}],
                 start_gateway=False,
             )
-            self.assertEqual(active, ["claudecode", "codex"])
+            self.assertEqual(active, ["claudecode", "codex", "cursor"])
             # Gateway start not requested → no sidecar step to fold into report.
             self.assertIsNone(sidecar_step)
 
             reloaded = cfg_mod.load()
             gc = reloaded.guardrail
-            self.assertEqual(sorted(gc.connectors), ["claudecode", "codex"])
+            self.assertEqual(sorted(gc.connectors), ["claudecode", "codex", "cursor"])
             self.assertNotIn("hermes", gc.connectors)
             self.assertEqual(gc.judge.hook_connectors, ["codex"])
-            self.assertEqual(reloaded.active_connectors(), ["claudecode", "codex"])
+            self.assertEqual(reloaded.active_connectors(), ["claudecode", "codex", "cursor"])
+            # Cursor action fails closed and has no native approval prompt,
+            # the same posture `setup cursor` writes and doctor requires.
+            self.assertEqual(gc.effective_hook_fail_mode("cursor"), "closed")
+            self.assertFalse(gc.effective_hilt("cursor").enabled)
             cc = gc.connectors["claudecode"]
             self.assertEqual(cc.mode, "action")
             self.assertEqual(cc.hook_fail_mode, "closed")
@@ -3311,6 +3317,33 @@ class TestMultiConnectorInit(unittest.TestCase):
             # backward-compatible (single-connector) readers.
             self.assertEqual(gc.connector, "claudecode")
             self.assertEqual(reloaded.claw.mode, "claudecode")
+
+    def test_activate_additional_connectors_leaves_out_unverified_macos_openhands(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ), patch("defenseclaw.platform_support.host_os", return_value="darwin"), patch(
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+            return_value=None,
+        ) as record:
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.save()
+            extra = {"profile": "action", "fail_mode": None, "human_approval": None, "hilt_min_severity": None}
+            active, _sidecar = _activate_additional_connectors(
+                {"connector": "codex", "profile": "action", "fail_mode": None,
+                 "human_approval": None, "hilt_min_severity": None},
+                [{"connector": "openhands", **extra}, {"connector": "claudecode", **extra}],
+                start_gateway=False,
+            )
+        # The gateway needs the setup-selected OpenHands executable; without
+        # it OpenHands must not be reported or persisted as configured.
+        self.assertEqual(record.call_args.kwargs["required"], {"codex"})
+        self.assertEqual(active, ["claudecode", "codex"])
+        self.assertNotIn("openhands", cfg_mod.load().guardrail.connectors)
 
     def test_activate_additional_connectors_downgrades_unverified_action(self):
         """An extra connector requested in action mode whose installed version
@@ -4158,6 +4191,9 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
         summary = json.loads(result.output)
         self.assertEqual(sorted(summary.get("connectors", [])), ["claudecode", "codex"])
+        # The summary covers the whole set, not only the primary connector.
+        guardrail = [s for s in summary["setup"] if s["name"] == "Guardrail"]
+        self.assertEqual(guardrail[0]["detail"], "2 connectors: claudecode=observe, codex=observe")
         cfg = self._load_cfg()
         self.assertNotIn("openclaw", cfg["guardrail"].get("connectors", {}) or {})
 

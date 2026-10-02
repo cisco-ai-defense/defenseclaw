@@ -135,7 +135,7 @@ class DoctorHermesPathTests(unittest.TestCase):
             with patch(
                 "defenseclaw.commands.cmd_doctor.hermes_config_path",
                 return_value=config_path,
-            ):
+            ), patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=True):
                 _check_hook_health(cfg, "hermes", result)
 
             self.assertEqual(result.passed, 0, result.checks)
@@ -398,6 +398,49 @@ class DoctorGuardrailTests(unittest.TestCase):
             row["detail"],
             f"summary should be surfaced in detail; got: {row['detail']!r}",
         )
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_sidecar_guardrail_row_shows_the_hook_policy_mode(self, mock_probe):
+        """A hook connector in action mode reported the data path as
+        mode=observability; the row must show the policy mode instead."""
+        import json as _json
+
+        details = {
+            "connector": "claudecode",
+            "mode": "observability",
+            "policy_mode": "action",
+            "enforcement_enabled": True,
+            "enforcement_surface": "agent_lifecycle_hooks",
+            "proxy_port": "closed",
+        }
+        mock_probe.return_value = (
+            200,
+            _json.dumps(
+                {
+                    "gateway": {"state": "running"},
+                    "watcher": {"state": "running"},
+                    "guardrail": {"state": "running", "details": details},
+                    "api": {"state": "running"},
+                }
+            ),
+        )
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, connector="claudecode"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "claudecode"
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        rows = [c for c in result.checks if c.get("label", "").strip().endswith("guardrail")]
+        self.assertEqual([row["detail"] for row in rows], ["running (mode=action, hook-enforced)"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_falls_back_to_generic_message_without_summary(self, mock_probe):

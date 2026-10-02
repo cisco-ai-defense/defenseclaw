@@ -90,6 +90,9 @@ administrator can deploy through their own policy source:
   wsl         reg (default), json, intune (Windows: the Claude Desktop
               disableWslSessions gate and, with platform: disable, AllowWSL=0)
 
+Connectors protected per user (kiro, hermes and the others show lists as
+per_user) have no machine policy entries, so export refuses them.
+
 On Windows, show and verify also report a wsl row: agent sessions inside WSL,
 which Windows machine policy does not reach.`,
 	Args: cobra.NoArgs,
