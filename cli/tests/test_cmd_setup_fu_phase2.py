@@ -3107,6 +3107,38 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         self.assertEqual(gc.judge.hook_connectors, sorted(targets))
         model_prompt.assert_called_once()
 
+    def test_single_connector_resume_defaults_to_its_action_override(self):
+        # GAP-1093: `setup claudecode --mode action` writes a per-connector
+        # override while the global mode stays observe; resuming with
+        # `setup guardrail` must offer action, and keep the override in step.
+        self._seed_map("claudecode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "observe"
+        gc.connectors["claudecode"].mode = "action"
+        defaults: list[str] = []
+
+        def prompt(label, *args, **kwargs):
+            if "Select mode" in label:
+                defaults.append(kwargs.get("default"))
+            return kwargs.get("default")
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=lambda *a, **k: k.get("default")), \
+                patch("defenseclaw.commands.cmd_setup.click.prompt", side_effect=prompt), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_checkbox_selection",
+                    side_effect=lambda _options, *, default_selected=None, **_kw: list(default_selected or []),
+                ), \
+                patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._configure_hilt_interactive", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None):
+            cmd_setup._interactive_guardrail_setup(self.app, gc)
+
+        self.assertEqual(defaults, ["2"])
+        self.assertEqual(gc.effective_mode("claudecode"), "action")
+
     def test_multi_guardrail_setup_action_defaults_ignore_stale_global_mode(self):
         targets = ["antigravity", "claudecode", "devin", "hermes", "opencode", "openhands"]
         self._seed_map(*targets)

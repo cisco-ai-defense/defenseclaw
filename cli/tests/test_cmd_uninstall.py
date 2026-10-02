@@ -190,6 +190,36 @@ class UninstallCommandTests(unittest.TestCase):
             exec_mock.assert_called_once()
 
 
+class KeptAndNextStepsTests(unittest.TestCase):
+    """GAP-1093: a partial uninstall says what it kept and how to go on."""
+
+    def test_default_uninstall_names_kept_data_and_next_steps(self):
+        plan = cmd_uninstall.UninstallPlan(data_dir="/home/u/.defenseclaw", install_root="/home/u/.local/bin")
+        with capture_click_output() as buf:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        text = buf.getvalue()
+        self.assertIn("/home/u/.defenseclaw: config, audit log, policies and secrets", text)
+        self.assertIn("/home/u/.local/bin: the DefenseClaw commands", text)
+        self.assertIn("defenseclaw setup guardrail", text)
+        self.assertIn("defenseclaw uninstall --all --binaries", text)
+
+    def test_all_without_binaries_points_at_quickstart(self):
+        plan = cmd_uninstall.UninstallPlan(
+            data_dir="/home/u/.defenseclaw", install_root="/home/u/.local/bin", remove_data_dir=True
+        )
+        with capture_click_output() as buf:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        text = buf.getvalue()
+        self.assertNotIn("audit log", text)
+        self.assertIn("defenseclaw quickstart", text)
+
+    def test_full_uninstall_prints_nothing(self):
+        plan = cmd_uninstall.UninstallPlan(data_dir="/d", install_root="/b", remove_data_dir=True, remove_binaries=True)
+        with capture_click_output() as buf:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        self.assertEqual(buf.getvalue(), "")
+
+
 class ResetCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

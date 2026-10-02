@@ -12357,7 +12357,21 @@ def _interactive_guardrail_setup(
             + ux.dim("(recommended to start)")
         )
         click.echo("    " + ux.bold("[2] action ") + " — scan and block/confirm when policy requires")
-        current_mode = gc.mode or "observe"
+        # The one active connector may carry its own mode (setup <connector>
+        # --mode action writes a per-connector override): offer that mode as
+        # the default and keep the override in step with the choice, so
+        # pressing Enter never turns an action connector into observe.
+        mode_connector = active_connectors[0] if len(active_connectors) == 1 else gc.connector
+        override = None
+        current_mode = gc.mode
+        if mode_connector:
+            try:
+                override = _existing_connector_override(gc, mode_connector)
+                if hasattr(gc, "effective_mode"):
+                    current_mode = gc.effective_mode(mode_connector)
+            except Exception:  # noqa: BLE001 - an unknown name keeps the global mode.
+                override = None
+        current_mode = current_mode or "observe"
         mode_default = "1" if (default_mode or current_mode) == "observe" else "2"
         mode_choice = click.prompt(
             "  Select mode",
@@ -12367,6 +12381,8 @@ def _interactive_guardrail_setup(
         new_mode = "observe" if mode_choice == "1" else "action"
         mode_changed = new_mode != current_mode
         gc.mode = new_mode
+        if override is not None and str(getattr(override, "mode", "") or "").strip():
+            override.mode = new_mode
 
     # Hook fail-mode prompt. Asked on initial setup OR when the
     # operator just flipped between observe and action — those are
