@@ -2280,7 +2280,10 @@ func isClaudeCodeNativeExecHook(hook map[string]interface{}) bool {
 		return false
 	}
 	command, _ := hook["command"].(string)
-	if !isDefenseClawHookExecutable(command) {
+	// A DefenseClaw handler whose launcher name was edited in place keeps our
+	// exact argv; claim it so repair replaces it instead of adding a second
+	// handler next to it, and remove takes it out (GAP-1364).
+	if !isDefenseClawHookExecutable(command) && !isRenamedDefenseClawHookExecutable(command) {
 		return false
 	}
 	return hasClaudeCodeNativeExecArgs(hook)
