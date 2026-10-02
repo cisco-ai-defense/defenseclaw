@@ -838,6 +838,26 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertFalse(inconsistent.healthy)
         self.assertIn("inconsistent DefenseClaw approval", inconsistent.detail)
 
+    def test_hermes_ignores_a_foreign_powershell_allowlist_approval(self) -> None:
+        # GAP-1304: a user's own `pwsh -NoProfile -File x.ps1` approval made
+        # every Hermes setup fail with "unsupported launcher arguments".
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector hermes'
+        config = self._config("hermes", command)
+        allowlist = config.parent / "shell-hooks-allowlist.json"
+        document = json.loads(allowlist.read_text(encoding="utf-8"))
+        document["approvals"].append(
+            {
+                "event": next(iter(doctor_hooks._HERMES_REQUIRED_HOOKS)),
+                "command": "pwsh -NoProfile -File C:/Users/u/hooks/own-hook.ps1",
+            }
+        )
+        allowlist.write_text(json.dumps(document), encoding="utf-8")
+
+        result = self._validate("hermes", config)
+        self.assertNotIn("launcher arguments", result.detail)
+        self.assertIn("registration is valid", result.detail)
+
     def _validate(
         self,
         connector: str,

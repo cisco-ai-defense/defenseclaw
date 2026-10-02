@@ -274,6 +274,10 @@ def test_amp_setup_candidates_enumerate_only_native_amp_exe(tmp_path: Path, monk
     packaged = trusted.joinpath("node_modules", "@ampcode", "cli", "bin", "amp.exe")
     packaged.parent.mkdir(parents=True)
     packaged.write_bytes(b"native Amp from npm")
+    # `npm i -g @sourcegraph/amp` nests the same image (GAP-1437).
+    nested = trusted.joinpath("node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe")
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"native Amp from the sourcegraph package")
     monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
     monkeypatch.setattr(
         agent_selection.agent_discovery,
@@ -293,7 +297,7 @@ def test_amp_setup_candidates_enumerate_only_native_amp_exe(tmp_path: Path, monk
         str(tmp_path / "state"),
     )
 
-    assert candidates == (str(native), str(packaged))
+    assert candidates == (str(native), str(packaged), str(nested))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native Amp selection authority")
