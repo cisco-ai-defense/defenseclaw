@@ -235,10 +235,13 @@ async def _communicate_captured(
 ) -> tuple[int, bytes, bytes]:
     """Run one captured child and deterministically reap it on cancellation."""
 
+    from defenseclaw import credential_provenance
+
     process = await asyncio.create_subprocess_exec(
         *resolve_subprocess_argv(binary, args),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=credential_provenance.child_environ(),  # GAP-1176
         **captured_subprocess_kwargs(),
     )
     try:
