@@ -20,6 +20,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,6 +53,39 @@ func TestWatchdogDegradedProbesDoNotCountTowardDown(t *testing.T) {
 	runWatchdogLoop(ctx, srv.URL+"/health", 5*time.Millisecond, 2, watchdogHealthRequirements{requireGuardrail: true}, nil, nil)
 
 	state, err := readWatchdogState(config.DefaultDataPath())
+	if err != nil || state != stateDegraded {
+		t.Fatalf("watchdog state = %s (err %v), want degraded", state, err)
+	}
+}
+
+// GAP-1847: a watchdog that starts with an earlier run's "down" state and
+// finds the gateway reachable but degraded records degraded, not down.
+func TestWatchdogDownStateMovesToDegradedWhenGatewayAnswers(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	dataDir := config.DefaultDataPath()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, watchdogStateFile), []byte("down"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		_, _ = w.Write([]byte(`{"guardrail":{"state":"starting"}}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for probes.Load() < 4 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		cancel()
+	}()
+	runWatchdogLoop(ctx, srv.URL+"/health", 5*time.Millisecond, 2, watchdogHealthRequirements{requireGuardrail: true}, nil, nil)
+
+	state, err := readWatchdogState(dataDir)
 	if err != nil || state != stateDegraded {
 		t.Fatalf("watchdog state = %s (err %v), want degraded", state, err)
 	}

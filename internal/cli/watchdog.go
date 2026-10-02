@@ -420,7 +420,9 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 			case stateDegraded:
 				degradedCount++
 				downCount = 0
-				if degradedCount >= debounce && current == stateHealthy {
+				// From down too: a gateway that came back degraded must not
+				// keep showing an earlier run's "down" (GAP-1847).
+				if degradedCount >= debounce && current != stateDegraded {
 					fmt.Fprintf(os.Stderr, "[watchdog] protection degraded: %s\n", assessment.details)
 					_ = notify.Send("DefenseClaw", assessment.notification)
 					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
