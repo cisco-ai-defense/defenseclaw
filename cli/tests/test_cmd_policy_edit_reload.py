@@ -121,3 +121,12 @@ def test_no_change_does_not_reload(app, monkeypatch) -> None:
     monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _boom)
     result = _invoke(app, ["edit", "guardrail"])
     assert result.exit_code == 0 and "No changes specified" in result.output
+
+
+def test_threshold_edit_points_hook_tool_calls_at_block_at(app, reloads) -> None:
+    result = _invoke(app, EDITS[0])
+    assert result.exit_code == 0, result.output
+    assert "guardrail proxy" in result.output
+    assert "defenseclaw guardrail block-at" in result.output
+    patterns = _invoke(app, ["edit", "guardrail", "--add-pattern", "injection", "dc-marker"])
+    assert "guardrail block-at" not in patterns.output
