@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -392,9 +393,16 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	for _, home := range env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)) {
 		homeOf[enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)] = home
 	}
+	// The guardian keeps its record in its data directory (GAP-1761); an
+	// earlier build left it next to the manifest.
 	written := map[string]bool{}
-	for _, home := range env.accountHomes(enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath)) {
-		written[home] = true
+	for _, record := range []string{
+		filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName),
+		enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath),
+	} {
+		for _, home := range env.accountHomes(record) {
+			written[home] = true
+		}
 	}
 	var drift []string
 	for _, state := range result.States {

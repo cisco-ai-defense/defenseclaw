@@ -464,7 +464,9 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 			t.Fatalf("%s must warn that the Local hook file is pending: %+v", action, got.Warnings)
 		}
 	}
-	writeHostFile(t, h, filepath.Join(filepath.Dir(h.env.Layout.ManifestPath), "copilot-vscode-accounts.json"),
+	// The guardian records alice in its data directory, where it writes
+	// the record (GAP-1761).
+	writeHostFile(t, h, filepath.Join(h.env.Layout.GuardianAuthDir, "copilot-vscode-accounts.json"),
 		`{"version": 1, "accounts": [{"user": "alice", "uid": 501, "home": "/home/alice"}]}`)
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		got := h.run(Options{Action: action})
