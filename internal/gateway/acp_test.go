@@ -786,3 +786,9 @@ func TestACPEvaluateBlockRecordsConnectorFinding(t *testing.T) {
 	}
 	t.Fatal("blocked ACP prompt recorded no scan-finding")
 }
+
+// auditStringValue reads a string field of a structured audit row.
+func auditStringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
