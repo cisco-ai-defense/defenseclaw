@@ -656,8 +656,13 @@ def format_claw_aibom_human(
     inv: dict[str, Any],
     *,
     summary_only: bool = False,
+    categories: set[str] | None = None,
 ) -> None:
-    """Render the inventory to the terminal using Rich tables."""
+    """Render the inventory to the terminal using Rich tables.
+
+    *categories* is the ``--only`` selection: sections that were not
+    collected are left out instead of reading "none" (GAP-1358).
+    """
     from rich.console import Console
 
     console = Console(stderr=False)
@@ -667,7 +672,13 @@ def format_claw_aibom_human(
     title = "OpenClaw AIBOM" if connector.lower() == "openclaw" else f"{connector} AIBOM"
     home = inv.get("connector_home") or inv.get("claw_home", "")
     config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
+    if connector.lower() == "opencode" and inv.get("connector_mcp_files"):
+        # DefenseClaw's own bridge plugin is the first lifecycle file; the
+        # inventory reads OpenCode's opencode.json (GAP-1358).
+        mcp_files = [c for c in inv["connector_mcp_files"] if c]
+        config_files = [c for c in mcp_files if os.path.isfile(c)] or mcp_files
     primary_config = next((c for c in config_files if c), "")
+    cats = _resolve_categories(categories)
     console.print()
     console.print(f"[bold]{title}[/bold]  (source: {mode})")
     if primary_config:
@@ -678,18 +689,23 @@ def format_claw_aibom_human(
         console.print(f"  Mode:      {inv.get('claw_mode', '')}")
     console.print()
 
-    _render_summary(console, inv)
+    _render_summary(console, inv, cats)
     console.print()
 
     if not summary_only:
-        _render_skills(console, inv.get("skills", []))
-        _render_plugins(console, inv.get("plugins", []))
-        _render_mcp(console, inv.get("mcp", []))
-        _render_agents(console, inv.get("agents", []))
-        _render_rules(console, inv.get("rules", []))
-        _render_tools(console, inv.get("tools", []))
-        _render_models(console, inv.get("model_providers", []))
-        _render_memory(console, inv.get("memory", []))
+        sections = (
+            ("skills", _render_skills, "skills"),
+            ("plugins", _render_plugins, "plugins"),
+            ("mcp", _render_mcp, "mcp"),
+            ("agents", _render_agents, "agents"),
+            ("rules", _render_rules, "rules"),
+            ("tools", _render_tools, "tools"),
+            ("models", _render_models, "model_providers"),
+            ("memory", _render_memory, "memory"),
+        )
+        for cat, render, key in sections:
+            if cat in cats:
+                render(console, inv.get(key, []))
 
     _render_limitations(console, inv.get("limitations", []))
     _render_errors(console, inv.get("errors", []))
@@ -927,7 +943,9 @@ def _needed_commands(cats: frozenset[str]) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _render_summary(console: Any, inv: dict[str, Any]) -> None:
+def _render_summary(
+    console: Any, inv: dict[str, Any], cats: frozenset[str] = ALL_CATEGORIES,
+) -> None:
     from rich.table import Table
 
     summary = inv.get("summary")
@@ -945,7 +963,7 @@ def _render_summary(console: Any, inv: dict[str, Any]) -> None:
     sk_detail = f"{sk.get('eligible', 0)} eligible"
     sk_detail += _scan_detail_suffix(data.get("scan_skills"))
     sk_detail += _policy_detail_suffix(data.get("policy_skills"))
-    table.add_row("Skills", str(sk.get("count", 0)), sk_detail)
+    rows: list[tuple[str, str, str, str]] = [("skills", "Skills", str(sk.get("count", 0)), sk_detail)]
 
     pl = data.get("plugins", {})
     if pl.get("reports_loaded", True):
@@ -954,19 +972,24 @@ def _render_summary(console: Any, inv: dict[str, Any]) -> None:
         pl_detail = f"{pl.get('enabled', 0)} enabled, {pl.get('disabled', 0)} disabled"
     pl_detail += _scan_detail_suffix(data.get("scan_plugins"))
     pl_detail += _policy_detail_suffix(data.get("policy_plugins"))
-    table.add_row("Plugins", str(pl.get("count", 0)), pl_detail)
+    rows.append(("plugins", "Plugins", str(pl.get("count", 0)), pl_detail))
 
     mcp_detail = ""
     mcp_detail += _scan_detail_suffix(data.get("scan_mcp")).lstrip(" · ")
     mcp_detail += _policy_detail_suffix(data.get("policy_mcp"))
     if mcp_detail.startswith(" · "):
         mcp_detail = mcp_detail.lstrip(" · ")
-    table.add_row("MCP servers", str(data.get("mcp", {}).get("count", 0)), mcp_detail)
-    table.add_row("Agents", str(data.get("agents", {}).get("count", 0)))
-    table.add_row("Rules", str(data.get("rules", {}).get("count", 0)))
-    table.add_row("Tools", str(data.get("tools", {}).get("count", 0)))
-    table.add_row("Model providers", str(data.get("model_providers", {}).get("count", 0)))
-    table.add_row("Memory stores", str(data.get("memory", {}).get("count", 0)))
+    rows.extend([
+        ("mcp", "MCP servers", str(data.get("mcp", {}).get("count", 0)), mcp_detail),
+        ("agents", "Agents", str(data.get("agents", {}).get("count", 0)), ""),
+        ("rules", "Rules", str(data.get("rules", {}).get("count", 0)), ""),
+        ("tools", "Tools", str(data.get("tools", {}).get("count", 0)), ""),
+        ("models", "Model providers", str(data.get("model_providers", {}).get("count", 0)), ""),
+        ("memory", "Memory stores", str(data.get("memory", {}).get("count", 0)), ""),
+    ])
+    for cat, name, count, detail in rows:
+        if cat in cats:
+            table.add_row(name, count, detail)
     console.print(table)
 
 
@@ -996,7 +1019,7 @@ def _scan_detail_suffix(scan: dict[str, int] | None) -> str:
         return ""
     parts = [f"{scanned} scanned"]
     if findings:
-        parts.append(f"[yellow]{findings} findings[/yellow]")
+        parts.append(f"[yellow]{findings} {'finding' if findings == 1 else 'findings'}[/yellow]")
     return " · " + ", ".join(parts)
 
 

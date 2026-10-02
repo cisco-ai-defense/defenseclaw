@@ -52,7 +52,7 @@ def aibom() -> None:
     "--only",
     "categories",
     default=None,
-    help="Comma-separated categories to scan: skills,plugins,mcp,agents,tools,models,memory",
+    help="Comma-separated categories to scan and show: skills,plugins,mcp,agents,rules,tools,models,memory",
 )
 @click.option(
     "--connector", "connector_flag", default="",
@@ -196,7 +196,7 @@ def _scan_one_connector(
         # hand the dict back here.
         return inv, pending_telemetry
 
-    format_claw_aibom_human(inv, summary_only=summary_only)
+    format_claw_aibom_human(inv, summary_only=summary_only, categories=cats)
     return inv, pending_telemetry
 
 

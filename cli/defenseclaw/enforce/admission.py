@@ -234,7 +234,7 @@ def evaluate_admission(
     if finding_count <= 0:
         return AdmissionDecision("clean", "scan clean", action=action, source="scan-clean")
 
-    detail = f"{finding_count} findings, max {severity}"
+    detail = f"{finding_count} {'finding' if finding_count == 1 else 'findings'}, max {severity}"
     if action.install == "block" or action.runtime == "disable":
         return AdmissionDecision("rejected", detail, action=action, source="scan-rejected")
 
