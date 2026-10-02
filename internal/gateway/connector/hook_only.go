@@ -567,6 +567,13 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 			req.ToolArgs = append(json.RawMessage(nil), raw...)
 		}
 	}
+	if CopilotVSCodeLocalTool(req.ToolName) && len(req.ToolArgs) != 0 {
+		// The VS Code Local harness running the CLI hook file (GAP-1903).
+		var input interface{}
+		if json.Unmarshal(req.ToolArgs, &input) == nil {
+			req.ToolArgs = copilotVSCodeLocalToolArgs(req.ToolName, input)
+		}
+	}
 	return req
 }
 

@@ -172,8 +172,9 @@ func dispatchTrustedAction(
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
 		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
-			// pwsh -Command "<body>" without -NoProfile: a profile only runs
-			// more commands before the body, so a match on the body counts.
+			// pwsh -Command "<body>" without -NoProfile, alone or first in a
+			// list: a profile only runs more commands before the body, so a
+			// match on the body counts.
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
 		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true

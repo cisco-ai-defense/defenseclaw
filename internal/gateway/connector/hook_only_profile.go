@@ -111,6 +111,15 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		output = devinHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
 	case "copilot":
 		output = copilotHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
+		if decision, ok := output["permissionDecision"]; ok && CopilotVSCodeLocalTool(in.Req.ToolName) {
+			// The VS Code Local harness running the CLI hook file also gets
+			// its own decision shape (GAP-1903).
+			output["hookSpecificOutput"] = map[string]interface{}{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       decision,
+				"permissionDecisionReason": reason,
+			}
+		}
 	case "openhands":
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "deny", "reason": reason}

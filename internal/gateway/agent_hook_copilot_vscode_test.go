@@ -92,3 +92,42 @@ func TestCopilotVSCodeLocalHookDialect(t *testing.T) {
 		t.Fatalf("allowed call rendered Local output %s; body=%s", out, w.Body.String())
 	}
 }
+
+// GAP-1903: the VS Code Local harness also runs the per-user Copilot CLI
+// hook file and sends a CLI-shaped body with its own tool names. A marker
+// rule on run_in_terminal is denied there too, in both decision shapes.
+func TestCopilotCLIHookFileRunByVSCodeLocalHarness(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	handler := http.HandlerFunc(api.handleAgentHook("copilot"))
+
+	post := func(command string) map[string]interface{} {
+		body := `{"timestamp":1790976011985,"cwd":"/home/alice/w","toolName":"run_in_terminal",` +
+			`"toolArgs":{"command":"` + command + `","explanation":"x","goal":"g","mode":"sync"}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("status=%d err=%v body=%s", w.Code, err, w.Body.String())
+		}
+		hookOutput, _ := out["hook_output"].(map[string]interface{})
+		return hookOutput
+	}
+
+	out := post("echo DCE2E-BLOCK-MARKER > /home/alice/w/x.txt")
+	specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+	if out["permissionDecision"] != "deny" || specific["permissionDecision"] != "deny" ||
+		specific["hookEventName"] != "PreToolUse" || specific["permissionDecisionReason"] == "" {
+		t.Fatalf("marker command not denied: %v", out)
+	}
+	if out := post("echo hello"); out["permissionDecision"] != nil || out["hookSpecificOutput"] != nil {
+		t.Fatalf("allowed call rendered a decision: %v", out)
+	}
+}
