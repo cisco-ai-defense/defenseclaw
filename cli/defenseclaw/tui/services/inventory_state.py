@@ -88,15 +88,6 @@ class InventorySkill:
     # every active connector so the CONNECTOR column can attribute each row.
     connector: str = ""
 
-    @property
-    def effectively_enabled(self) -> bool:
-        """Enabled as "defenseclaw skill list" says it: a blocked skill is kept off.
-
-        The connector may still list a blocked skill as enabled; Inventory
-        showed it "Enabled yes" next to "blocked" (GAP-1402)."""
-
-        return self.enabled and self.verdict.strip().lower() not in {"blocked", "quarantined", "disabled"}
-
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventorySkill:
         return cls(
@@ -1008,7 +999,7 @@ class InventoryPanelModel:
                 fields: list[tuple[str, str]] = [
                     ("Source", skill.source),
                     ("Eligible", str(skill.eligible).lower()),
-                    ("Enabled", str(skill.effectively_enabled).lower()),
+                    ("Enabled", str(skill.enabled).lower()),
                     ("Bundled", str(skill.bundled).lower()),
                     ("Verdict", skill.verdict),
                     ("Detail", skill.verdict_detail),
@@ -1159,7 +1150,7 @@ class InventoryPanelModel:
                         (
                             skill.id,
                             skill.verdict,
-                            "yes" if skill.effectively_enabled else "no",
+                            "yes" if skill.enabled else "no",
                             skill.scan_severity,
                             str(skill.scan_findings),
                             skill.source,

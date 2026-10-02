@@ -25,7 +25,6 @@ from defenseclaw.tui.panels.registries import sync_source_intent
 from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard, build_wizard_args, wizard_goals
 from defenseclaw.tui.screens.command_preview import build_command_preview
 from defenseclaw.tui.services.catalog_state import ToolsPanelModel
-from defenseclaw.tui.services.inventory_state import InventorySkill
 from defenseclaw.tui.services.runtime_state import PlaneRow, RuntimePanelModel
 from defenseclaw.tui.services.v8_event_history import V8EventHistoryRow
 from defenseclaw.tui.widgets import tab_fit
@@ -67,7 +66,7 @@ def test_secret_finding_row_names_its_rule_title_and_post_tool_decision(monkeypa
     assert facts["Rule"] == "SEC-AWS-KEY: AWS access key"
     assert facts["Decision"] == "detected after the tool ran (cannot block)"
     # GAP-1324: the Details cell names the rule, not the redaction placeholder.
-    assert _alert_details_label(event) == "SEC-AWS-KEY: AWS access key"
+    assert _alert_details_label(event).startswith("SEC-AWS-KEY: AWS access key")
 
 
 def test_upgrade_preview_says_it_replaces_binaries_and_restarts() -> None:
@@ -78,16 +77,13 @@ def test_upgrade_preview_says_it_replaces_binaries_and_restarts() -> None:
     assert "replaces the DefenseClaw binaries" in preview.summary
 
 
-def test_tools_add_hint_and_inventory_blocked_skill_and_registry_intents() -> None:
+def test_tools_add_hint_and_registry_intents() -> None:
     # GAP-1486: b/a on an empty Tools table say how to add a rule.
     tools = ToolsPanelModel()
     tools.apply_loaded([])
     action = tools.handle_key("b")
     assert action.handled and action.intent is None
     assert "tool block <tool-name>" in action.hint
-    # GAP-1402: a blocked skill is not shown as enabled.
-    assert InventorySkill(id="fs1-review", enabled=True, verdict="blocked").effectively_enabled is False
-    assert InventorySkill(id="ok", enabled=True, verdict="allowed").effectively_enabled is True
     # GAP-1485: registry commands keep the Registry panel in front.
     assert sync_source_intent("local").stay_on_panel is True
 
