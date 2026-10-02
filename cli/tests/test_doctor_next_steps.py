@@ -200,6 +200,23 @@ def test_unmapped_only_drops_are_healthy_delivery() -> None:
     assert "partial drop-only" not in r.checks[-1]["detail"]
 
 
+def test_all_unmapped_window_is_not_a_bypass_failure() -> None:
+    # GAP-1664: every batch unmapped right after setup (no model call succeeded yet).
+    report = _custody_report(
+        custody="external", normalized_batches=18, drop_only_batches=18, drop_only_reasons=("unsupported_identity",)
+    )
+    (row,) = summarize_native_delivery(report).connectors
+    assert row.state == "unmapped_only"
+    assert "no mapped native records yet (18/18" in row.detail
+    r = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(report, r)
+    check = r.checks[-1]
+    assert check["status"] == "warn"
+    assert "bypasses DefenseClaw" not in check["detail"]
+    assert "reaches this gateway" in check["detail"]
+    assert "setup" not in check["remediation"]
+
+
 def test_real_drop_reasons_still_warn_with_the_reason() -> None:
     report = _custody_report(drop_only_reasons=("invalid_record", "unsupported_identity"))
     (row,) = summarize_native_delivery(report).connectors
@@ -339,6 +356,24 @@ def test_retention_days_is_read_from_config_yaml(tmp_path, monkeypatch) -> None:
     assert cmd_doctor._configured_local_retention_days(cfg) == 30
 
 
+def test_hook_binary_from_another_release_is_named() -> None:
+    # GAP-1415: an older defenseclaw-hook.exe beside a newer gateway read as healthy hooks.
+    import subprocess
+
+    def ran(stdout: str, rc: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(["hook"], rc, stdout=stdout, stderr="")
+
+    hook = r"C:\Users\u\.local\bin\defenseclaw-hook.exe"
+    with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran('{"version":"1.0.0"}')):
+        tag, detail, remediation = cmd_doctor._hook_binary_release_check(hook, "1.0.1")
+    assert (tag, detail) == ("warn", f"{hook} is 1.0.0; this CLI is 1.0.1")
+    assert "install.ps1" in remediation
+    with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran('{"version":"1.0.1"}')):
+        assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[0] == "pass"
+    with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran("", rc=2)):
+        assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[:2] == ("warn", f"{hook} did not report its release")
+
+
 def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     # GAP-1298: with no Hermes process for the account there is nothing to reload.
     from defenseclaw.doctor_hooks import WindowsHookCheck
@@ -432,6 +467,30 @@ def test_omnigent_without_a_server_record_reads_plainly(tmp_path, monkeypatch) -
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     pid, detail = cmd_doctor._omnigent_local_server_pid()
     assert pid == 0 and detail == "OmniGent server has not started yet (no server record)"
+
+
+def test_windows_hermes_check_reads_python_command_lines() -> None:
+    # GAP-1605: DefenseClaw's own TUI is a python.exe; only a Hermes command line is a host.
+    listing = '"pwsh.exe","4100"\n"python.exe","4400"\n"uv.exe","4500"\n'
+    tui = {"4400": r'"C:\u\python.exe" "C:\u\Scripts\defenseclaw.exe" tui', "4500": "uv.exe tool run x"}
+    argv = lambda line: tuple(part.strip('"') for part in line.split()) if line else None  # noqa: E731
+    with (
+        mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=tui),
+        mock.patch.object(cmd_doctor, "_windows_command_line_argv", side_effect=argv),
+    ):
+        assert cmd_doctor._hermes_host_running_windows(listing) is False
+    host = dict(tui, **{"4400": r'"C:\u\python.exe" "C:\u\Scripts\hermes.exe" chat'})
+    with (
+        mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=host),
+        mock.patch.object(cmd_doctor, "_windows_command_line_argv", side_effect=argv),
+    ):
+        assert cmd_doctor._hermes_host_running_windows(listing) is True
+    for lines in ({"4400": "", "4500": "uv.exe x"}, None):  # unreadable command line, no listing
+        with (
+            mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=lines),
+            mock.patch.object(cmd_doctor, "_windows_command_line_argv", side_effect=argv),
+        ):
+            assert cmd_doctor._hermes_host_running_windows(listing) is None
 
 
 def test_windows_hermes_check_falls_back_to_get_process(monkeypatch) -> None:
