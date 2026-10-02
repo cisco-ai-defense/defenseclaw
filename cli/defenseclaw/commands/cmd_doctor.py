@@ -1769,9 +1769,9 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         size_mib = max(health.file_bytes, 0) // (1024 * 1024)
         budget = f"{_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS:g}"
         detail = (
-            f"{db_path}; required schema present; no errors in the first {budget} s of the "
-            f"integrity check on the {size_mib} MiB file (full check: stop the gateway and run "
-            f"sqlite3 {db_path} 'PRAGMA quick_check')"
+            f"{db_path}; required schema present; no errors found, but the integrity check of the "
+            f"{size_mib} MiB file did not finish within its {budget} s budget (full check: stop the "
+            f"gateway and run sqlite3 {db_path} 'PRAGMA quick_check')"
         )
     else:
         detail = f"{db_path}; SQLite quick_check=ok; required schema present"
