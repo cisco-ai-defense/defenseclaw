@@ -417,25 +417,29 @@ def setup(
 ) -> None:
     """Configure DefenseClaw components.
 
-    Legacy behavior:
-    Multi-connector:
-      One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
-      with 'defenseclaw setup <connector>' (choose Add when prompted),
-      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
-      with 'defenseclaw guardrail ... --connector X', and inspect the
-      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
-      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
+    Run 'defenseclaw setup <connector>' to add an agent connector, or one of
+    the subcommands below for guardrails, observability, keys and more.
 
-    Legacy warning:
-    Batch (no subcommand):
-      'defenseclaw setup' with no subcommand launches an interactive
-      active-connector picker (detected connectors pre-checked), then
-      batch mode / optional judge connector pickers. For scripting, select
-      connectors with repeatable '-c/--connector', '--detected', and/or
-      '--all' (e.g. 'defenseclaw setup -c hermes -c codex --mode action').
-      Use '--add-detected --yes' to add newly installed connectors in observe
-      mode without changing the existing active roster or its modes.
+    \b
+    Multi-connector:
+      One gateway enforces several agent-native connectors (codex, claudecode,
+      hermes, antigravity, omnigent and others), listed under
+      guardrail.connectors.
+        Add one:       defenseclaw setup <connector>  (choose Add when asked)
+        Remove one:    defenseclaw setup remove <name>
+        Scope policy:  defenseclaw guardrail ... --connector <name>
+        See them all:  defenseclaw status, defenseclaw guardrail status
+      OpenClaw and ZeptoClaw use the proxy path, so they can't be added this way.
+
+    \b
+    With no subcommand:
+      'defenseclaw setup' opens a connector picker (detected connectors are
+      pre-checked), then asks for the mode and an optional judge connector.
+      For scripts, pick connectors with -c/--connector (repeatable),
+      --detected or --all, for example:
+        defenseclaw setup -c hermes -c codex --mode action
+      Use --add-detected --yes to add newly installed connectors in observe
+      mode without changing the existing connectors or their modes.
     """
     app = ctx.find_object(AppContext)
     if (
@@ -2313,7 +2317,6 @@ def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: st
 def trusted_paths(ctx: click.Context) -> None:
     """Manage directories DefenseClaw trusts for connector-binary discovery.
 
-    Legacy examples:
     Action-mode setup reads a connector's version by executing its binary, but
     only when that binary lives under a trusted prefix — a guard against a
     hostile binary planted on $PATH. Built-in defaults cover system and
