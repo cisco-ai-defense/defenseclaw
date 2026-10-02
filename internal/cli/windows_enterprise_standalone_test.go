@@ -1580,10 +1580,13 @@ func TestWindowsEnterpriseEnsureFailsWhenInstallLeavesNothingInstalled(t *testin
 func TestRollbackWindowsFirstInstallAccountRemovesCopilotVSCodeHooks(t *testing.T) {
 	originalRestorer := windowsFirstInstallRollbackUserConfigRestorer
 	originalCopilot := windowsFirstInstallRollbackCopilotVSCodeRemover
+	originalHomeGone := windowsFirstInstallRollbackHomeGone
 	t.Cleanup(func() {
 		windowsFirstInstallRollbackUserConfigRestorer = originalRestorer
 		windowsFirstInstallRollbackCopilotVSCodeRemover = originalCopilot
+		windowsFirstInstallRollbackHomeGone = originalHomeGone
 	})
+	windowsFirstInstallRollbackHomeGone = func(string) bool { return false }
 	windowsFirstInstallRollbackUserConfigRestorer = func(string, string, string) ([]string, []string, error) {
 		return nil, nil, nil
 	}
@@ -1605,6 +1608,35 @@ func TestRollbackWindowsFirstInstallAccountRemovesCopilotVSCodeHooks(t *testing.
 	got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"copilot"})
 	if len(got) != 1 || !strings.Contains(got[0], "Copilot VS Code hooks") || !strings.Contains(got[0], "access denied") {
 		t.Fatalf("failed Copilot removal leftovers = %v", got)
+	}
+}
+
+// GAP-1618: an account deleted with its profile while a first install ran
+// is not a rollback leftover; there is nothing left to remove and no remedy
+// applies.
+func TestRollbackWindowsFirstInstallAccountSkipsADeletedAccount(t *testing.T) {
+	originalRestorer := windowsFirstInstallRollbackUserConfigRestorer
+	originalCopilot := windowsFirstInstallRollbackCopilotVSCodeRemover
+	t.Cleanup(func() {
+		windowsFirstInstallRollbackUserConfigRestorer = originalRestorer
+		windowsFirstInstallRollbackCopilotVSCodeRemover = originalCopilot
+	})
+	calls := 0
+	windowsFirstInstallRollbackUserConfigRestorer = func(string, string, string) ([]string, []string, error) {
+		calls++
+		return nil, nil, errors.New("enterprise hooks: inspect user home: The system cannot find the file specified.")
+	}
+	windowsFirstInstallRollbackCopilotVSCodeRemover = func(string, string) error {
+		calls++
+		return errors.New("access denied")
+	}
+	present := t.TempDir()
+	deleted := filepath.Join(present, "dcw-vwm")
+	if got := rollbackWindowsFirstInstallAccount("dcw-vwm", deleted, "S-1-5-21-1-2-3-1035", deleted+`\.defenseclaw`, []string{"codex", "copilot"}); len(got) != 0 || calls != 0 {
+		t.Fatalf("deleted account: leftovers=%v calls=%d", got, calls)
+	}
+	if got := rollbackWindowsFirstInstallAccount("dcw-std1", present, "S-1-5-21-1-2-3-1017", present+`\.defenseclaw`, []string{"codex"}); len(got) != 1 || calls != 1 {
+		t.Fatalf("existing account: leftovers=%v calls=%d", got, calls)
 	}
 }
 
