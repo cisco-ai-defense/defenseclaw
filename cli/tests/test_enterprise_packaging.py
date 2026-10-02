@@ -785,7 +785,11 @@ def _macos_pkg_preinstall(host: _Host, version: str) -> str:
     _write_stub(host.bin, "stat", "echo 0")  # the record and marker are root-owned
     return _rooted(
         match.group(1) + "\n",
-        {"state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}", "@DC_PKG_VERSION@": version},
+        {
+            "state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}",
+            "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+            "@DC_PKG_VERSION@": version,
+        },
     )
 
 
@@ -817,6 +821,50 @@ def test_macos_pkg_preinstall_records_a_refused_downgrade(tmp_path: Path, versio
         return
     validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
     assert not sorted(validator.iter_errors(document), key=str)
+
+
+def _validate_lifecycle_result(document: dict) -> None:
+    try:
+        import jsonschema
+    except ImportError:
+        return
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
+    assert not sorted(validator.iter_errors(document), key=str)
+
+
+# GAP-1428: the refusal wrote a fixed document saying every service was down
+# and inspection unknown, while the installed version kept running healthy.
+# The result now carries the running deployment's status, as the installed
+# gateway prints it (indented JSON), plus the refusal.
+@pytest.mark.parametrize("standing_errors", [[], [{"code": "verify_failed", "message": "a target drifted"}]])
+def test_macos_pkg_preinstall_refusal_keeps_the_running_deployment_facts(tmp_path: Path, standing_errors: list) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{"product_version": "1.0.6"}', encoding="utf-8")
+    service = {"name": "com.cisco.defenseclaw.gateway", "kind": "gateway", "state": "running", "pid": 42, "required": True}
+    status = {
+        "schema_version": 2, "ok": not standing_errors, "action": "status", "noop": False, "profile": "standalone",
+        "platform": "darwin", "product_version": "1.0.6", "installed_version": "1.0.6", "installed": True,
+        "transaction_pending": False, "services": [service],
+        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+        "enrollment": {"targets": 2, "pending": 0, "failed": 0, "exempt": 0},
+        "coverage_complete": True, "security_complete": True, "errors": standing_errors,
+        "exit_code": 1 if standing_errors else 0,
+    }
+    (tmp_path / "status.json").write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
+    _write_stub(host.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{host.log}'
+cat '{tmp_path / "status.json"}'""")
+    result = host.run(_macos_pkg_preinstall(host, "1.0.5"))
+    assert result.returncode == 1
+    assert host.calls() == ["gateway enterprise macos status --json"]
+    document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["action"] == "ensure" and document["exit_code"] == 1
+    assert document["product_version"] == "1.0.5" and document["installed_version"] == "1.0.6"
+    assert document["readiness"] == status["readiness"] and document["services"] == [service]
+    assert document["inspection"]["local"] == "active"
+    assert [e["code"] for e in document["errors"]] == ["downgrade_refused"] + [e["code"] for e in standing_errors]
+    _validate_lifecycle_result(document)
 
 
 def _shell_function(text: str, name: str) -> str:
