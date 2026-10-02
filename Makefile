@@ -55,6 +55,8 @@ endif
 INSTALL_DIR := $(USER_HOME)/.local/bin
 DC_EXT_DIR  := $(USER_HOME)/.defenseclaw/extensions/defenseclaw
 OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
+# Set when make all stopped a running Windows gateway to replace it (GAP-1784).
+SOURCE_GATEWAY_STOPPED := $(or $(DEFENSECLAW_HOME),$(USER_HOME)/.defenseclaw)/.make-all-stopped-gateway
 
 # _bundle-data is a prerequisite of the target that creates $(VENV), so a
 # fresh checkout cannot use the project interpreter while staging its first
@@ -199,7 +201,14 @@ source-migrate: _source-install-preflight
 # it, so the CLI and the gateway differed and doctor called the old process a
 # stranger on the port (GAP-1575). Restart it to load this build.
 source-restart-gateway: _source-install-preflight
-	@if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
+	@if [ -f "$(SOURCE_GATEWAY_STOPPED)" ]; then \
+		rm -f "$(SOURCE_GATEWAY_STOPPED)"; \
+		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" start >/dev/null 2>&1; then \
+			echo "  ✓ Started the gateway again on this build"; \
+		else \
+			echo "  ! Could not start the gateway on this build. Run: defenseclaw-gateway start"; \
+		fi; \
+	elif "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
 		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" restart >/dev/null 2>&1; then \
 			echo "  ✓ Restarted the running gateway so it runs this build"; \
 		else \
@@ -630,6 +639,19 @@ _source-dev-install: _source-install-dev-preflight
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway $(GATEWAY)$(EXE) || exit 1; \
 	fi
+ifeq ($(OS),Windows_NT)
+	@# Windows lets a running gateway's file be renamed but keeps the process
+	@# on the old copy, which this account then could not stop or restart
+	@# (GAP-1784). Stop it before the swap; source-restart-gateway starts it.
+	@if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
+		echo "  Stopping the running gateway so this build can replace it (make all starts it again)"; \
+		if ! "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" stop >/dev/null 2>&1; then \
+			echo "  Could not stop the running gateway; stop it with 'defenseclaw-gateway stop', then build again"; \
+			exit 1; \
+		fi; \
+		touch "$(SOURCE_GATEWAY_STOPPED)"; \
+	fi
+endif
 	@./scripts/source-install-preflight.sh dev-publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"

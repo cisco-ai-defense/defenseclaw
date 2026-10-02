@@ -134,6 +134,19 @@ def test_make_all_restarts_a_running_gateway_it_replaced() -> None:
     assert 'pgrep -x "$(GATEWAY)"' not in hint
 
 
+def test_windows_make_all_stops_the_running_gateway_before_replacing_it() -> None:
+    # GAP-1784: Windows renamed the running gateway's file aside and the
+    # account could no longer stop or restart the process left on it.
+    text = MAKEFILE.read_text(encoding="utf-8")
+    install = text[text.index("\n_source-dev-install:") : text.index("\ncli-install:")]
+    windows = install[install.index("ifeq ($(OS),Windows_NT)") : install.index("dev-publish-gateway")]
+    assert windows.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" stop') < windows.index('touch "$(SOURCE_GATEWAY_STOPPED)"')
+    assert "then build again" in windows and "exit 1;" in windows
+    restart = text[text.index("\nsource-restart-gateway:") : text.index("\npath:")]
+    marker = restart.index('[ -f "$(SOURCE_GATEWAY_STOPPED)" ]')
+    assert marker < restart.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" start') < restart.index('$(EXE)" restart')
+
+
 def test_make_all_keeps_an_existing_config_instead_of_rerunning_first_run() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
