@@ -54,9 +54,25 @@ listener.
 
 ## Auth
 
-Every request except `GET /health` must authenticate. The shared authentication
-middleware accepts these header forms; all three are constant-time compared
-with the resolved gateway token:
+Every request except `GET /health` must authenticate. Two routes use their own
+scheme instead of the gateway token:
+
+- `POST /api/v1/acp/challenge` and `POST /api/v1/acp/evaluate` accept only a
+  loopback request signed with the ACP key (`X-DefenseClaw-ACP-Key-ID`, a
+  nonce and a request MAC; see [ACP guard](/docs/acp-guard)). The gateway
+  token alone gets 401 there.
+- In a managed install on the standalone profile,
+  `GET /api/v1/hook-listener-proof` answers before authentication. A loopback
+  request that names a current per-user key ID
+  (`X-DefenseClaw-Listener-Key-Id`) and a nonce
+  (`X-DefenseClaw-Listener-Nonce`) gets 204 with an HMAC over that nonce in
+  `X-DefenseClaw-Listener-Proof`; any other request gets 401. The answer is a
+  digest, never a credential. The Amp and OpenCode plugins use it to check
+  that the listener is the gateway before they send the user's credential.
+
+For every other route the shared authentication middleware accepts these
+header forms; all three are constant-time compared with the resolved gateway
+token:
 
 ```
 Authorization:         Bearer <token>
@@ -145,9 +161,16 @@ the API port can read it, including another account on a multi-user host.
 The document carries the gateway's config path (which names the owner's
 home directory), the active connectors with per-agent request and block
 counts, and the guardrail, routing and telemetry state, including
-telemetry destinations. It carries no tokens, keys or request content.
-This is accepted so that every health consumer works without a
-credential; see residual R33 in the enterprise threat model.
+telemetry destinations. In a managed install on the standalone profile it
+also carries `inspection` (whether local and AI Defense inspection are
+active) and `user_scoped_credentials.key_ids`, the non-secret fingerprints
+of the per-user credential keys that authenticate right now (the key IDs the
+listener proof names). It carries no tokens, key material or request
+content. On Linux and macOS managed installs the hook socket also answers
+`GET /health` with the same document without peer authorization; every
+other path there keeps peer authorization. This is accepted so that every
+health consumer works without a credential; see residual R33 in the
+enterprise threat model.
 
 When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem
 for the OpenShell sandbox runtime:
