@@ -294,28 +294,25 @@ func ensureInventoryACE(path string, sid *windows.SID, mask windows.ACCESS_MASK,
 	return inventoryDACLGranted, nil
 }
 
-// daclContainsInventoryReadACE reports whether `acl` already contains an
-// allow-access ACE granting `sid` at least Read+Execute with the same
-// inheritance semantics we would install. Used as an idempotency short-circuit
-// so repeat ticks skip the (get, merge, set) round-trip when the ACE is
-// already present in the exact shape we need.
+// daclContainsInventoryReadACE reports whether `acl` already grants `sid`
+// at least Read+Execute on the folder itself and, inherited, on everything
+// below it. Used as an idempotency short-circuit so repeat ticks skip the
+// (get, merge, set) round-trip, which rewrites the inherited ACEs of every
+// object under the folder.
 //
-// Inheritance requirements match the `SUB_CONTAINERS_AND_OBJECTS_INHERIT` flag
-// set we pass to `ACLFromEntries`: both OBJECT_INHERIT_ACE (files) and
-// CONTAINER_INHERIT_ACE (subdirs) must be present, and neither
-// NO_PROPAGATE_INHERIT_ACE nor INHERIT_ONLY_ACE may be set — an ACE that
-// grants the parent but does not propagate to children is NOT equivalent for
-// our purposes (the scanner reads files INSIDE the dotdirs, not the dotdir
-// itself), and an INHERIT_ONLY_ACE that doesn't apply to the parent leaves
-// the traversal grant absent. Rebuilding the ACL is preferable to leaving a
-// half-configured ACE in place.
+// Windows stores the grant ensureInventoryReadACE writes as two ACEs: one
+// with the generic rights mapped to file rights for the folder, and an
+// INHERIT_ONLY_ACE with the generic rights for its children. Both shapes,
+// and a single ACE that covers both, count (GAP-1863: matching only the
+// unsplit generic shape re-granted every folder on every pass). An ACE
+// with NO_PROPAGATE_INHERIT_ACE does not cover the children.
 func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 	if acl == nil || sid == nil {
 		return false
 	}
-	const wantMask = uint32(windows.GENERIC_READ | windows.GENERIC_EXECUTE)
-	const requiredInherit = uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
-	const forbiddenInherit = uint8(windows.NO_PROPAGATE_INHERIT_ACE | windows.INHERIT_ONLY_ACE)
+	want := mapWindowsUserPathGenericMask(windows.GENERIC_READ | windows.GENERIC_EXECUTE)
+	const inherit = uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
+	self, children := false, false
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
@@ -328,19 +325,18 @@ func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 		if aceSID == nil || !windows.EqualSid(aceSID, sid) {
 			continue
 		}
-		if uint32(ace.Mask)&wantMask != wantMask {
+		if mapWindowsUserPathGenericMask(ace.Mask)&want != want {
 			continue
 		}
 		flags := ace.Header.AceFlags
-		if flags&requiredInherit != requiredInherit {
-			continue
+		if flags&windows.INHERIT_ONLY_ACE == 0 {
+			self = true
 		}
-		if flags&forbiddenInherit != 0 {
-			continue
+		if flags&inherit == inherit && flags&windows.NO_PROPAGATE_INHERIT_ACE == 0 {
+			children = true
 		}
-		return true
 	}
-	return false
+	return self && children
 }
 
 // daclContainsInventoryListACE reports whether `acl` already grants `sid`
