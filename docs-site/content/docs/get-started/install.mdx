@@ -138,6 +138,22 @@ raw `pip`, `uv`, or editable install at a release-managed virtual environment.
 The lower-level install targets are for fresh or isolated development homes,
 not the normal repeated-development path.
 
+### Build from source on Windows
+
+Run the same workflow in Git Bash (Git for Windows) with GNU Make, Go, `uv`,
+and Python 3.10-3.13 from python.org.
+
+- Clone with `git -c core.autocrlf=false clone ...` so the shell scripts keep
+  LF line endings.
+- `make all` uses the first of `python3`, `python`, and `py -3` that runs, so
+  the Microsoft Store `python3` alias is skipped. When none runs, the build
+  stops with "no working Python 3 interpreter".
+- Files go to `%USERPROFILE%\.defenseclaw` and `%USERPROFILE%\.local\bin`,
+  the same places as a release install. `make all` refuses an account that
+  already has a release install and prints how to remove its binaries first
+  (`defenseclaw.cmd uninstall --binaries --yes`, which keeps your config and
+  audit log). You can also build in a separate Windows account.
+
 <Callout type="warning" title="Local dist output is not a release">
 `make dist` builds release-shaped files for testing the installer with
 `--local dist`. They are unsigned; do not present them as published binaries.
