@@ -985,11 +985,31 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
         self.assertIn("stays closed", result.output)
+        self.assertIn("1 active connector overrides = open; Cursor stays closed)", result.output)
 
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("guardrail mode observe --connector cursor", result.output)
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
+
+    def test_confirm_refuses_when_output_is_piped(self):
+        # GAP-1432: `fail-mode open 2>&1 | tail` hid the prompt in the pipe
+        # and the command looked hung; it now refuses and names --yes.
+        import sys
+
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None})
+        app.cfg.guardrail.hook_fail_mode = "closed"
+        app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
+        state = SimpleNamespace(current=True, drift=(), desired="closed")
+        with (
+            patch.object(cmd_guardrail, "_isatty", side_effect=lambda stream: stream is sys.stdin),
+            patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state),
+        ):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open"], obj=app)
+        self.assertEqual(result.exit_code, 2, msg=result.output)
+        self.assertIn("Re-run it with --yes", result.output)
+        app.cfg.save.assert_not_called()
 
     def test_bare_set_reload_failure_restores_config_and_runtime(self):
         runner = CliRunner()

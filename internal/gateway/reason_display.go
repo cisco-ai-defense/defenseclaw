@@ -137,14 +137,14 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
-	if subject := agentBlockListSubject(sourceReason); action == "block" && subject != "" {
-		if standaloneEnterpriseActive.Load() {
-			return "DefenseClaw blocked this action under your organization's policy (" + subject + "). " +
-				agentBlockNoRetry + " Contact your administrator if you need it allowed."
-		}
-		return "DefenseClaw policy blocked this action (" + subject + "). " + agentBlockNoRetry
+	subject := agentBlockListSubject(sourceReason)
+	if subject == "" {
+		subject = agentJudgeSubject(sourceReason)
 	}
-	if subject := agentJudgeSubject(sourceReason); action == "block" && subject != "" {
+	if subject == "" {
+		subject = agentRuleAndJudgeSubject(sourceReason)
+	}
+	if action == "block" && subject != "" {
 		if standaloneEnterpriseActive.Load() {
 			return "DefenseClaw blocked this action under your organization's policy (" + subject + "). " +
 				agentBlockNoRetry + " Contact your administrator if you need it allowed."
@@ -235,6 +235,24 @@ func agentJudgeSubject(reason string) string {
 		return ""
 	}
 	return "LLM judge: " + strings.Join(kinds, ", ")
+}
+
+// agentRuleAndJudgeSubject words a local rule match that the LLM judge also
+// flagged ("matched: R:Title; judge-pii: ...") as "rule R: Title; LLM judge:
+// personal data or credentials", or returns "" when either half is not one
+// agentMatchedRules or agentJudgeSubject words. The mixed reason fell back to
+// the redacted text with its raw labels (GAP-1824).
+func agentRuleAndJudgeSubject(reason string) string {
+	local, judge, found := strings.Cut(reason, "; judge-")
+	if !found {
+		return ""
+	}
+	rules := agentMatchedRules(local)
+	judgeSubject := agentJudgeSubject("judge-" + judge)
+	if rules == "" || judgeSubject == "" {
+		return ""
+	}
+	return rules + "; " + judgeSubject
 }
 
 // agentBlockListSubject words a block-list reason for the agent ("tool Write

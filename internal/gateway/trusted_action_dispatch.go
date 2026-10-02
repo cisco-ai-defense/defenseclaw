@@ -418,6 +418,7 @@ func dispatchTrustedAction(
 	}
 	findings = append(semanticFindings, legacyFindings...)
 	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized = appendTrustedHomeResolvedSSHKeyWriteFinding(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -1998,12 +1999,8 @@ func dispatchTrustedFallback(
 		facts,
 		request.EnforcementCapable,
 	)
-	return finalizeTrustedActionFindings(
-		generation,
-		request,
-		facts,
-		findings,
-	), fallbackTelemetry
+	findings = finalizeTrustedActionFindings(generation, request, facts, findings)
+	return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on

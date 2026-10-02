@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 
 import click
 
@@ -98,6 +99,32 @@ _CONNECTOR_LABELS = {
 }
 
 _RUNTIME_FAIL_MODE_CONNECTORS = frozenset({"amp", "claudecode", "codex", "opencode"})
+
+
+
+def _isatty(stream) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _confirm_proceed() -> bool:
+    """Ask the shared "  Proceed?" confirm (on stderr, so ``| tail`` shows it).
+
+    When stdin is a terminal but stdout and stderr both go into a pipe
+    (``guardrail fail-mode open 2>&1 | tail``), the prompt would sit in the
+    pipe and the command looked hung (GAP-1432). Refuse instead and name
+    --yes; scripts that answer on a piped stdin keep the prompt.
+    """
+    if _isatty(sys.stdin) and not _isatty(sys.stdout) and not _isatty(sys.stderr):
+        click.echo(
+            "  ✗ This change needs your confirmation, but the output is piped, so the prompt "
+            "would be hidden. Re-run it with --yes to apply it, or without the pipe.",
+            err=True,
+        )
+        raise SystemExit(2)
+    return click.confirm("  Proceed?", default=True, err=True)
 
 
 def _preflight_config_write(app: AppContext) -> None:
@@ -275,7 +302,7 @@ def _toggle_connector_guardrail(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
@@ -830,7 +857,7 @@ def disable_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
@@ -951,7 +978,7 @@ def enable_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
@@ -1190,7 +1217,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -1263,8 +1290,17 @@ def _apply_global_fail_mode_transaction(
         try:
             app.cfg.save()
             if fail_mode_targets:
+                # A pinned connector (Cursor) keeps its own value; say so
+                # instead of counting it in the overrides (GAP-1432).
+                pinned = {name: (target_modes or {}).get(name, mode) for name in fail_mode_targets}
+                kept = "".join(
+                    f"; {_connector_label(name)} stays {value}"
+                    for name, value in sorted(pinned.items())
+                    if value != mode
+                )
+                changed = sum(1 for value in pinned.values() if value == mode)
                 ux.ok(
-                    f"Config saved (global default + {len(fail_mode_targets)} active connector overrides = {mode})",
+                    f"Config saved (global default + {changed} active connector overrides = {mode}{kept})",
                     indent="  ",
                 )
             else:
@@ -1609,7 +1645,7 @@ def fail_mode_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         # click.Abort routes through Click's exception handler and
         # cooperates with the result callbacks the setup group
@@ -1802,7 +1838,7 @@ def _set_connector_hilt(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -2019,7 +2055,7 @@ def hilt_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -2167,7 +2203,7 @@ def _set_connector_block_message(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -2369,7 +2405,7 @@ def block_message_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True, err=True):
+    if not yes and not _confirm_proceed():
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 

@@ -138,7 +138,9 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
     help=(
         "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
         "'open' = allow + log (recommended); 'closed' = block where the hook supports "
-        "a blocking response. DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
+        "a blocking response. Omitted, the wizard asks (default open), and "
+        "--non-interactive keeps the current setting (closed on a new install). "
+        "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."
     ),
 )
@@ -2446,6 +2448,13 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if _closed_fail_mode_connectors(report, connectors):
+        # --non-interactive keeps the closed default the wizard asks about
+        # (GAP-1424): say what it means and how to change it.
+        renderer.echo(
+            "  Fail mode is closed: hooks block the agent while the gateway is unreachable;"
+            " to allow and log instead: defenseclaw guardrail fail-mode open"
+        )
     if platform_support.host_os() in {"linux", "darwin"}:
         # No service unit restarts a per-user gateway on Linux or macOS; the
         # agent shell hooks start it on their next call (RHEL-U3-06).
@@ -2457,6 +2466,28 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():
         renderer.echo(f"  Unguarded ACP agents found ({summary}): defenseclaw setup acp")
+
+
+def _closed_fail_mode_connectors(report, connectors: list[str] | None) -> list[str]:
+    """The action connectors whose hook fail mode is closed and can be opened.
+
+    Cursor's action mode pins it closed and Hermes stays open upstream, so
+    neither is named.
+    """
+    from defenseclaw import config as cfg_mod
+
+    try:
+        cfg = cfg_mod.load(data_dir=report.data_dir)
+        names = connectors or ([report.connector] if report.connector else [])
+        return [
+            name
+            for name in names
+            if name not in ("cursor", "hermes")
+            and str(cfg.guardrail.effective_mode(name)).lower() == "action"
+            and cfg.guardrail.effective_hook_fail_mode(name) == "closed"
+        ]
+    except Exception:  # noqa: BLE001 - the hint is advisory.
+        return []
 
 
 def _sandboxes_possible() -> bool:

@@ -4326,6 +4326,27 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_noninteractive_closed_fail_mode_says_how_to_open_it(self, mock_discover, _gate):
+        # GAP-1424: --non-interactive keeps the closed default the wizard asks
+        # about; the summary says what it does and how to change it.
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        args = [
+            "--non-interactive", "--yes",
+            "--observe-all", "--action-connectors", "claudecode",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify",
+        ]
+        result = self._invoke(args)
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertIn("claudecode=action (fail closed)", result.output)
+        self.assertIn("to allow and log instead: defenseclaw guardrail fail-mode open", result.output)
+
+        result = self._invoke([*args, "--fail-mode", "open"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertNotIn("defenseclaw guardrail fail-mode open", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_action_connectors_only_configures_named_connector(self, mock_discover, _gate):
         mock_discover.return_value = self._disc({"codex", "claudecode"})
 
