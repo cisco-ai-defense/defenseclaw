@@ -3139,6 +3139,35 @@ def _rotate_token_hook_path(data_dir: str, connector: str) -> str:
     return os.path.join(data_dir, "hooks", f".hook-{scope}.token")
 
 
+def _rotate_token_preflight_writable(paths: list[str]) -> None:
+    """Prove every credential folder takes a new file before the gateway stops.
+
+    Rotation writes each credential through a temporary file in its folder.
+    An unwritable folder used to fail only after the gateway and watchdog
+    were stopped, leaving every hook failing closed (GAP-1636). A folder that
+    does not exist yet is left to the writer, which creates it.
+    """
+
+    import tempfile
+
+    for directory in sorted({os.path.dirname(os.path.abspath(path)) for path in paths}):
+        if not os.path.isdir(directory):
+            continue
+        try:
+            fd, probe = tempfile.mkstemp(prefix=".rotate-probe.", suffix=".tmp", dir=directory)
+        except OSError as exc:
+            raise click.ClickException(
+                f"Token rotation cannot write to {directory} ({exc.strerror or exc}). Nothing was "
+                "changed and the gateway was not stopped. Make the folder writable for your "
+                "account, then run the command again."
+            ) from exc
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
 def _rotate_token_trusted_posix_owner(info: os.stat_result) -> bool:
     if os.name == "nt" or not hasattr(info, "st_uid"):
         return True
@@ -3865,6 +3894,9 @@ def _rotate_token_transaction(
     hook_publish_lock_base = os.path.join(
         data_dir,
         _TOKEN_ROTATION_HOOK_PUBLISH_LOCK_BASE_NAME,
+    )
+    _rotate_token_preflight_writable(
+        [dotenv_path, *(_rotate_token_hook_path(data_dir, connector) for connector in requested_scopes)]
     )
     with (
         locked_file_update(hook_publish_lock_base),
