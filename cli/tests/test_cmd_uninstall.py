@@ -356,9 +356,16 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 patch.object(cmd_uninstall, "_legacy_custody_parents", return_value=[str(legacy_tmp)]),
                 patch.dict(os.environ, {"HOME": str(home)}),
                 patch.object(cmd_uninstall.ux, "subhead") as subhead,
+                patch.object(cmd_uninstall, "_remove_user_path_entry") as path_entry,
             ):
                 cmd_uninstall._remove_binaries(plan)
-            self.assertEqual(sorted(os.listdir(root)), [])
+            if sys.platform == "win32":
+                # Windows also removes the emptied install folder and its user Path entry.
+                self.assertFalse(root.exists())
+                path_entry.assert_called_once_with(plan)
+            else:
+                self.assertEqual(sorted(os.listdir(root)), [])
+                path_entry.assert_not_called()
             self.assertEqual(os.listdir(legacy_tmp), ["unrelated"])
             if sys.platform != "win32":
                 self.assertEqual(os.listdir(home), [])
