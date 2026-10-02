@@ -140,8 +140,17 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 		}
+		// The default uninstall keeps an allow-only Cursor hook tombstone for
+		// Cursor processes still running; the purge removes it (GAP-1567).
+		if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
+			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+				"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		}
 	}
 }
+
+// windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
+var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWindowsCursorManagedTombstone
 
 // windowsManagedHooksNotLocalSystemReason ends a user_state_remaining entry
 // whose folder a purge left because it did not run as LocalSystem; the
