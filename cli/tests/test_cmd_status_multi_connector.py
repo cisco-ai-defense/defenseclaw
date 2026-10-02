@@ -423,9 +423,14 @@ class TestOpenCodeRuntimeTruth(unittest.TestCase):
                 self.assertEqual(state, "degraded")
                 self.assertIn("manual or automatic OpenCode registration", detail)
 
-    def test_missing_malformed_and_stale_are_unverified(self):
+    def test_missing_heartbeat_is_idle_not_degraded(self):
+        state, detail = self._state("")
+        self.assertEqual(state, "idle")
+        self.assertIn("no authenticated load heartbeat", detail)
+        self.assertIn("normal while OpenCode is closed", detail)
+
+    def test_malformed_and_stale_are_unverified(self):
         for heartbeat, reason in (
-            ("", "no authenticated load heartbeat"),
             ("not-a-timestamp", "malformed"),
             ((self.now - timedelta(minutes=16)).isoformat(), "stale"),
         ):

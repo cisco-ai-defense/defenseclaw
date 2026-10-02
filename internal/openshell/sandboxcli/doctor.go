@@ -486,7 +486,7 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 			if c.Fix.Command != "" {
 				fix += ": " + c.Fix.Command
 			}
-			if c.Fix.Automatic {
+			if c.Fix.Automatic && c.Fix.Command != CommandName+" doctor --fix" {
 				fix += "  (" + CommandName + " doctor --fix)"
 			}
 			a.line("  " + a.dim("→ "+fix))

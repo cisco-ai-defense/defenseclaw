@@ -1286,7 +1286,7 @@ class OverviewPanelModel:
             gateway_started_at=health.started_at if health is not None else "",
             gateway_available=availability == "running",
         )
-        if state == "degraded" and "no authenticated load heartbeat" in detail:
+        if state in {"degraded", "idle"} and "no authenticated load heartbeat" in detail:
             # OpenCode reports the load when it starts, so a closed OpenCode
             # is normal, as doctor says (GAP-1565, GAP-1608).
             return "idle", "idle: OpenCode is not open; it loads the plugin when it starts"

@@ -1526,6 +1526,9 @@ func (r *doctorRun) dockerDriverFix() *Fix {
 	fix := r.gatewayChangeFix(`run sandboxes on the docker compute driver: set compute_driver = "docker" in `+where,
 		"(sandboxes made on the other driver cannot start after the switch)", r.applyGateway(GatewayChanges{ComputeDriver: DriverDocker}))
 	if fix != nil && fix.Automatic {
+		// One short line that names the command once (GAP-1654); the
+		// detail row already names the driver the gateway runs.
+		fix.Summary = "switch the gateway to the docker compute driver (sandboxes made on the current driver cannot start after it)"
 		fix.Command = "defenseclaw sandbox doctor --fix"
 	}
 	return fix

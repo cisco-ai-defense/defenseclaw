@@ -220,9 +220,12 @@ residue automatically.
   <Accordion title="An install, upgrade, or rollback fails">
     Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed
     upgrade restores the previous install automatically and keeps the failed
-    attempt in `%USERPROFILE%\.defenseclaw\.failed-<time>`. Close the TUI and
-    other DefenseClaw commands if the installer reports files in use, then run
-    the install command again.
+    attempt in `%USERPROFILE%\.defenseclaw\.failed-<time>` (a later failed upgrade
+    replaces it). To remove it, run
+    `cmd /c rd /s /q "%USERPROFILE%\.defenseclaw\.failed-<time>"`
+    (`Remove-Item -Force` stops at the copy's read-only key file). Close the TUI
+    and other DefenseClaw commands if the installer reports files in use, then
+    run the install command again.
   </Accordion>
   <Accordion title="The gateway is stopped, stale, or owned by another process">
     Run `defenseclaw-gateway status`, then `defenseclaw-gateway start` or
