@@ -12422,7 +12422,7 @@ def _fix_gateway_token_drift(
             if not hook_drift:
                 return ("skip", "gateway already accepts the configured token")
         auth_rejected = code in {401, 403, 503}
-        if not auth_rejected:
+        if not auth_rejected and not hook_drift:
             detail = _token_probe_failure(code, body)
             return (
                 "fail",

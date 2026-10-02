@@ -485,6 +485,39 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         repair.assert_called_once_with(self.cfg, start_if_stopped=False)
         self.assertEqual(listener.call_count, 2)
 
+    def test_hook_credential_drift_restarts_the_gateway(self):
+        """GAP-1244: the gateway accepts its token but refuses a hook credential."""
+        _seed_dotenv(self.tmp, "new-tok")
+        _seed_pidfile(self.tmp, self.pid)
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                side_effect=[self.process_trust, self.replacement_trust],
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                side_effect=[
+                    (200, _status_body(self.cfg, self.process_trust.pid)),
+                    (200, _status_body(self.cfg, self.replacement_trust.pid)),
+                ],
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._connector_hook_credential_problems",
+                side_effect=[["claudecode"], []],
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+                return_value=(True, ""),
+            ) as repair,
+        ):
+            result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
+        self.assertEqual(result, ("pass", "sidecar restarted and the claudecode hook credential is accepted again"))
+        repair.assert_called_once_with(self.cfg, start_if_stopped=False)
+
     def test_fail_when_managed_restart_returns_false(self):
         _seed_dotenv(self.tmp, "new-tok")
         _seed_pidfile(self.tmp, self.pid)
