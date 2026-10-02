@@ -997,10 +997,8 @@ class TestSetupHelpers(unittest.TestCase):
 
     def test_mask_long_key(self):
         from defenseclaw.commands.cmd_setup import _mask
-        result = _mask("abcdefghijklmnop")
-        self.assertTrue(result.startswith("abcd"))
-        self.assertTrue(result.endswith("mnop"))
-        self.assertIn("...", result)
+        # GAP-1366: the last four only, as keys set/list show.
+        self.assertEqual(_mask("abcdefghijklmnop"), "...mnop")
 
 
 class TestSetupSkillScannerCommonConfig(unittest.TestCase):

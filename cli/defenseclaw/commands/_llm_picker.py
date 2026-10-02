@@ -901,7 +901,8 @@ def _mask(value: str) -> str:
         return "(unset)"
     if len(value) <= 8:
         return "****"
-    return f"{value[:4]}…{value[-4:]}"
+    # Last four only, like keys set/list (GAP-1366).
+    return f"…{value[-4:]}"
 
 
 def summary_panel(

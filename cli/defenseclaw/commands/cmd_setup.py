@@ -2005,9 +2005,10 @@ def _prompt_and_save_secret(
 
 
 def _mask(key: str) -> str:
+    # Last four only, like keys set/list (GAP-1133, GAP-1366).
     if len(key) <= 8:
         return "****"
-    return key[:4] + "..." + key[-4:]
+    return "..." + key[-4:]
 
 
 def _llm_key_state(resolved, key_val: str) -> str:
