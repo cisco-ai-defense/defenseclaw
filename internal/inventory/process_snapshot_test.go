@@ -346,3 +346,20 @@ func TestClassifyWindowsProcessesFoldsCursorWorkerServer(t *testing.T) {
 		t.Fatalf("connectors = %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector)
 	}
 }
+
+// GAP-1965: Amp's plugin runtimes are amp.exe children of the amp.exe run;
+// they are folded into it, so one Amp session is one Amp process.
+func TestClassifyWindowsProcessesFoldsAmpPluginRuntimes(t *testing.T) {
+	catalog := append(windowsAgentCatalog(), AISignature{ID: "amp", Name: "Amp", ProcessNames: []string{"amp"}})
+	image := `C:\Users\kevin\AppData\Roaming\npm\node_modules\@ampcode\cli\bin\amp.exe`
+	procs := []processInfo{
+		{PID: 12196, PPID: 900, Comm: "amp.exe", Image: image, Windows: true},
+		{PID: 3032, PPID: 12196, Comm: "amp.exe", Image: image, Windows: true},
+		{PID: 13156, PPID: 12196, Comm: "amp.exe", Image: image, Windows: true},
+		{PID: 4000, PPID: 901, Comm: "amp.exe", Image: image, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "amp" || procs[1].Connector != "" || procs[2].Connector != "" || procs[3].Connector != "amp" {
+		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
+	}
+}
