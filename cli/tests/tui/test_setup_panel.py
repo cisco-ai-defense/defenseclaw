@@ -1009,6 +1009,12 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     assert render_wizard_value(set_fields[2]) == "****live"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
 
+    # GAP-1176: a stored credential can be removed from the wizard.
+    remove_fields = _with_field(fields, "Action", "remove")
+    assert missing_required_fields(SetupWizard.CREDENTIALS, remove_fields) == ("Env Name",)
+    remove_fields = _with_field(remove_fields, "Env Name", "VIRUSTOTAL_API_KEY")
+    assert build_wizard_args(SetupWizard.CREDENTIALS, remove_fields) == ("keys", "remove", "VIRUSTOTAL_API_KEY", "--yes")
+
 
 def test_guardrail_wizard_inherits_unified_llm_without_forcing_override() -> None:
     cfg = {

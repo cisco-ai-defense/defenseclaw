@@ -56,3 +56,46 @@ class KeysRemoveTests(unittest.TestCase):
             result = CliRunner().invoke(keys_cmd, ["set", "SPLUNK_ACCESS_TOKEN", "--value", ""], obj=app)
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("defenseclaw keys remove SPLUNK_ACCESS_TOKEN", result.output)
+
+    def test_remove_of_dotenv_loaded_key_does_not_claim_shell_export(self):
+        from defenseclaw import credential_provenance
+        from defenseclaw.config import _load_dotenv_into_os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as fh:
+                fh.write("NOT_A_KNOWN_KEY=x1\nSHELL_KEY=from-file\n")
+            env = {k: v for k, v in os.environ.items() if k not in ("NOT_A_KNOWN_KEY", "SHELL_KEY")}
+            env["SHELL_KEY"] = "from-shell"
+            credential_provenance._reset_for_tests()
+            with patch.dict(os.environ, env, clear=True):
+                _load_dotenv_into_os(tmp)
+                runner = CliRunner()
+                removed = runner.invoke(keys_cmd, ["remove", "NOT_A_KNOWN_KEY", "--yes"], obj=app)
+                self.assertEqual(removed.exit_code, 0, removed.output)
+                self.assertNotIn("still exported", removed.output)
+                self.assertNotIn("NOT_A_KNOWN_KEY", os.environ)
+                removed = runner.invoke(keys_cmd, ["remove", "SHELL_KEY", "--yes"], obj=app)
+                self.assertEqual(removed.exit_code, 0, removed.output)
+                self.assertIn("SHELL_KEY is still exported", removed.output)
+
+    def test_gateway_token_is_marked_managed_and_not_removable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            dotenv = os.path.join(tmp, ".env")
+            with open(dotenv, "w", encoding="utf-8") as fh:
+                fh.write("DEFENSECLAW_GATEWAY_TOKEN=t1\nNOT_A_KNOWN_KEY=x1\n")
+            env = {k: v for k, v in os.environ.items() if k not in ("DEFENSECLAW_GATEWAY_TOKEN", "NOT_A_KNOWN_KEY")}
+            runner = CliRunner()
+            with patch.dict(os.environ, env, clear=True):
+                listed = runner.invoke(keys_cmd, ["list"], obj=app)
+                self.assertEqual(listed.exit_code, 0, listed.output)
+                other = [line for line in listed.output.splitlines() if "Other entries" in line]
+                self.assertEqual(len(other), 1, listed.output)
+                self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", other[0])
+                self.assertIn("Managed by DefenseClaw", listed.output)
+                refused = runner.invoke(keys_cmd, ["remove", "DEFENSECLAW_GATEWAY_TOKEN", "--yes"], obj=app)
+                self.assertNotEqual(refused.exit_code, 0)
+                self.assertIn("gateway auth token", refused.output)
+                with open(dotenv, encoding="utf-8") as fh:
+                    self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=t1", fh.read())

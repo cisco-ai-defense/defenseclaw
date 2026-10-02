@@ -704,3 +704,54 @@ def test_verify_reports_profile_drift_after_a_hand_edit(tmp_path, monkeypatch):
         assert binding["profile_source"] == "binding"
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_remove_without_entry_is_a_noop_and_last_remove_restores_no_file(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings = _zed_settings(tmp_path)
+    try:
+        runner = CliRunner()
+        result = runner.invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Nothing to remove" in result.output
+        assert not settings.exists()
+
+        result = runner.invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Removed the DefenseClaw kiro entry" in result.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_without_options_checks_every_binding(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    kiro = _binary(tmp_path / "kiro-cli")
+    try:
+        runner = CliRunner()
+        result = runner.invoke(acp_cmd, ["verify"], obj=app)
+        assert result.exit_code != 0
+        assert "No DefenseClaw ACP bindings are configured" in result.output
+        for client in ("zed", "jetbrains"):
+            result = runner.invoke(
+                acp_cmd,
+                ["setup", "--client", client, "--agent", "kiro", "--guard-binary", guard, "--agent-binary", kiro],
+                obj=app,
+            )
+            assert result.exit_code == 0, result.output
+        result = runner.invoke(acp_cmd, ["verify"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Verified jetbrains/kiro" in result.output and "Verified zed/kiro" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)

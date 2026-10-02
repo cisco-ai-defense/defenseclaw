@@ -374,9 +374,52 @@ func (s *proxyState) reject(msg Message, direction Direction) {
 	defer s.mu.Unlock()
 	if direction == AgentToClient {
 		delete(s.pendingAgent, msg.IDKey())
-	} else {
-		delete(s.pendingClient, msg.IDKey())
+		return
 	}
+	delete(s.pendingClient, msg.IDKey())
+	// A blocked session/prompt never reaches the agent, so its turn is over.
+	// Leaving it active refused every later prompt as "concurrent".
+	if msg.Method == "session/prompt" && s.activePrompt == msg.IDKey() {
+		s.activePrompt = ""
+		s.turnBuffer = s.turnBuffer[:0]
+		s.turnFrames = s.turnFrames[:0]
+	}
+}
+
+// maxBlockReasonBytes bounds the policy reason echoed to the editor.
+const maxBlockReasonBytes = 512
+
+// blockResponse is the JSON-RPC error an editor sees for a blocked frame. The
+// policy reason goes in both the message (Zed) and data.details (Toad), so
+// the user learns why the prompt was refused instead of a bare failure.
+func blockResponse(id json.RawMessage, reason string) []byte {
+	message := "blocked by DefenseClaw ACP policy"
+	reason = strings.TrimSpace(reason)
+	if len(reason) > maxBlockReasonBytes {
+		reason = strings.ToValidUTF8(reason[:maxBlockReasonBytes], "") + "..."
+	}
+	if reason == "" {
+		return ErrorResponse(id, -32001, message)
+	}
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	payload := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				Details string `json:"details"`
+			} `json:"data"`
+		} `json:"error"`
+	}{JSONRPC: "2.0", ID: id}
+	payload.Error.Code = -32001
+	payload.Error.Message = message + ": " + reason
+	payload.Error.Data.Details = "DefenseClaw blocked this request: " + reason
+	out, _ := json.Marshal(payload)
+	return out
 }
 
 func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direction Direction, src io.Reader, dst, rejectDst io.Writer) error {
@@ -412,7 +455,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		} else if verdict.Action == "block" || verdict.Action == "confirm" {
 			if opts.Mode == ModeAction {
 				if msg.IsRequest() {
-					response := ErrorResponse(msg.ID, -32001, "blocked by DefenseClaw ACP policy")
+					response := blockResponse(msg.ID, verdict.Reason)
 					state.reject(msg, direction)
 					_, err = fmt.Fprintln(rejectDst, string(response))
 					if err != nil {
@@ -422,7 +465,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					// A response belongs to the peer in the direction it was
 					// already travelling. Never drop it silently: return a
 					// terminal JSON-RPC error for the same pending ID.
-					response := ErrorResponse(msg.ID, -32001, "blocked by DefenseClaw ACP policy")
+					response := blockResponse(msg.ID, verdict.Reason)
 					if _, err = fmt.Fprintln(dst, string(response)); err != nil {
 						return err
 					}
@@ -430,7 +473,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				if direction == AgentToClient {
 					if promptID := state.abortPrompt(); len(promptID) > 0 {
 						if msg.Method != "" || !bytes.Equal(bytes.TrimSpace(promptID), bytes.TrimSpace(msg.ID)) {
-							response := ErrorResponse(promptID, -32001, "blocked by DefenseClaw ACP policy")
+							response := blockResponse(promptID, verdict.Reason)
 							if _, err = fmt.Fprintln(dst, string(response)); err != nil {
 								return err
 							}
@@ -456,7 +499,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
 				}
 				if turnVerdict.Action == "block" || turnVerdict.Action == "confirm" {
-					response := ErrorResponse(msg.ID, -32001, "blocked by DefenseClaw ACP policy")
+					response := blockResponse(msg.ID, turnVerdict.Reason)
 					if _, err := fmt.Fprintln(dst, string(response)); err != nil {
 						return err
 					}

@@ -95,13 +95,29 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
         _render_unregistered(app, statuses)
 
 
+def _gateway_token_names(cfg) -> set[str]:
+    """Env names that hold DefenseClaw's own gateway auth token."""
+    names = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+    token_env = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
+    if token_env:
+        names.add(token_env)
+    return names
+
+
 def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> None:
     """Name .env entries that are not in the registry so they can be removed."""
     import os
 
     known = {s.resolution.env_name for s in statuses} | {s.spec.env_name for s in statuses}
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
-    extra = sorted(name for name in _dotenv_names(dotenv_path) if name not in known)
+    stored = [name for name in _dotenv_names(dotenv_path) if name not in known]
+    gateway_tokens = _gateway_token_names(app.cfg)
+    managed = sorted(name for name in stored if name in gateway_tokens)
+    extra = sorted(name for name in stored if name not in gateway_tokens)
+    if managed:
+        click.echo(
+            f"  {ux.bold('Managed by DefenseClaw')} {ux.dim('(gateway auth token, do not remove):')} {', '.join(managed)}"
+        )
     if not extra:
         return
     click.echo(f"  {ux.bold('Other entries in .env')} {ux.dim('(not in the registry):')} {', '.join(extra)}")
@@ -229,18 +245,27 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     if env_name not in _dotenv_names(dotenv_path):
         ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
         return
+    if env_name in _gateway_token_names(app.cfg):
+        raise click.ClickException(
+            f"{env_name} is DefenseClaw's own gateway auth token; removing it would cut the hooks, "
+            "the CLI and the TUI off from the gateway. It is not removed. "
+            "To reset it, run 'defenseclaw setup' or 'defenseclaw init'."
+        )
     if not yes and not click.confirm(f"  Remove {env_name} from {dotenv_path}?", default=False):
         raise click.Abort()
 
-    if not _remove_dotenv_key(dotenv_path, env_name):
-        ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
-        return
     from defenseclaw import credential_provenance
 
+    # Decide where the process value came from before the file changes: the
+    # provenance marker is tied to the .env digest, so asking afterwards
+    # always answered "the shell exported it".
     shell_value = os.environ.get(env_name, "")
     from_dotenv = bool(shell_value) and credential_provenance.was_injected_from_dotenv(
         app.cfg.data_dir, env_name, shell_value
     )
+    if not _remove_dotenv_key(dotenv_path, env_name):
+        ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
+        return
     if from_dotenv:
         os.environ.pop(env_name, None)
     if app.logger:

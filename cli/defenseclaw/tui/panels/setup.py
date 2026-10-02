@@ -279,7 +279,8 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
 
 WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup <connector> --yes. Need connector, restart preference, guardrail mode, and scanner mode.",
-    "Runs: defenseclaw keys list / check / set / fill-missing. Need env var name and secret only for set.",
+    "Runs: defenseclaw keys list / check / set / remove / fill-missing. "
+    "Need env var name for set and remove, and the secret only for set.",
     "Runs: defenseclaw setup llm --non-interactive. Need provider, model, optional base URL, and API key env or value.",
     "Runs: defenseclaw setup local-observability <action>. "
     "Need Docker for up/reset; status/url require no credentials.",
@@ -1941,8 +1942,8 @@ def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
             "choice",
             value="list",
             default="list",
-            options=("list", "check", "fill-missing", "set"),
-            hint="list shows the keys list table; set writes to env-backed storage.",
+            options=("list", "check", "fill-missing", "set", "remove"),
+            hint="list shows the keys list table; set writes to env-backed storage; remove deletes one entry.",
         ),
         WizardFormField("Env Name", "string", hint="Credential environment variable name."),
         WizardFormField("Secret Value", "password", hint="Only used by Action=set."),
@@ -3221,6 +3222,13 @@ def _credentials_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGo
             summary="Write a single env-backed credential.",
             presets={"@Action": "set"},
             fields=("Action", "Env Name", "Secret Value"),
+        ),
+        WizardGoal(
+            "remove",
+            "Remove a stored credential",
+            summary="Delete one entry from ~/.defenseclaw/.env (a rotated or mistyped key).",
+            presets={"@Action": "remove"},
+            fields=("Action", "Env Name"),
         ),
     )
 
@@ -5378,6 +5386,9 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             missing.append("Env Name")
         if not wizard_field_value(fields, "Secret Value", raw=True):
             missing.append("Secret Value")
+    if wizard == SetupWizard.CREDENTIALS and wizard_field_value(fields, "Action") == "remove":
+        if not wizard_field_value(fields, "Env Name"):
+            missing.append("Env Name")
     if wizard == SetupWizard.CUSTOM_PROVIDERS:
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Name"):
@@ -6922,6 +6933,10 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         # carried on the intent's ``secret_stdin`` and written (then stdin
         # closed) by the executor. See F-0801.
         return tuple(args)
+    if action == "remove":
+        # The command preview is the confirmation; the CLI prompt can't be
+        # answered from the TUI subprocess.
+        return ("keys", "remove", wizard_field_value(fields, "Env Name"), "--yes")
     # The readable table, not --json: this output is read by a person in
     # Activity (GAP-1162). The Setup panel loads its own JSON copy.
     return ("keys", "list")
