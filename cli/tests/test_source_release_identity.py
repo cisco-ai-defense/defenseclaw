@@ -16,6 +16,8 @@ from scripts import source_release_identity
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash") or "/bin/bash"
+# The checked-in source version: source builds (make all) report the 1.0 line.
+CHECKED_IN_RELEASE = "1.0.0"
 VERSION_PATHS = (
     "Makefile",
     "pyproject.toml",
@@ -114,16 +116,16 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,
-        expected_release="0.8.10",
+        expected_release=CHECKED_IN_RELEASE,
     )
 
     assert identity == {
         "schema_version": 1,
-        "source_release": "0.8.10",
+        "source_release": CHECKED_IN_RELEASE,
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.10"}
+    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {CHECKED_IN_RELEASE}
     assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
@@ -169,7 +171,7 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     before = {relative: reviewed_bytes(relative) for relative in VERSION_PATHS}
 
     completed = subprocess.run(
-        [BASH, str(stamp), "0.8.10"],
+        [BASH, str(stamp), CHECKED_IN_RELEASE],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -255,7 +257,7 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
     path.write_text(source.replace(old, new), encoding="utf-8")
 
     with pytest.raises(source_release_identity.SourceIdentityError, match=message):
-        source_release_identity.validate_source_tree(repo, expected_release="0.8.10")
+        source_release_identity.validate_source_tree(repo, expected_release=CHECKED_IN_RELEASE)
 
 
 def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:
