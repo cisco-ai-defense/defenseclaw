@@ -1266,11 +1266,13 @@ class InventoryPanelModel:
                 True,
                 hint=f"Inventory filter: {label} (1 shows all). Digits filter on this sub-tab; Ctrl+P switches panel.",
             )
-        if key in {"h", "left", "shift+tab"}:
+        # Tab / Shift+Tab stay global (next / previous panel), as the help
+        # says; h/l walk the sub-tabs (GAP-1641).
+        if key in {"h", "left"}:
             before = self.active_sub
             self.move_subtab(-1)
             return InventoryPanelAction(True, hint="" if self.active_sub != before else "(first inventory sub-tab)")
-        if key in {"l", "right", "tab"}:
+        if key in {"l", "right"}:
             before = self.active_sub
             self.move_subtab(1)
             return InventoryPanelAction(True, hint="" if self.active_sub != before else "(last inventory sub-tab)")

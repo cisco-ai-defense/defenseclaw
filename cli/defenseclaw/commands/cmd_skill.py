@@ -1452,8 +1452,17 @@ def _print_skill_list_table(
     ready_count = sum(
         1 for s in skills if s.get("eligible") and not s.get("disabled")
     )
+    # Skills gone from disk (listed from scan history) are not part of the
+    # installed count (GAP-1598).
+    removed_count = sum(
+        1
+        for s in skills
+        if _skill_status_display(s, actions_map.get(s.get("name", "")), scan_map.get(s.get("name", "")))
+        == "✗ removed"
+    )
 
-    detail = f"({ready_count}/{len(skills)} ready)"
+    detail = f"({ready_count}/{len(skills) - removed_count} ready"
+    detail += f", {removed_count} removed)" if removed_count else ")"
     title = (
         list_scope_title("Skills", connector, detail)
         if connector
@@ -1520,6 +1529,11 @@ def _print_skill_list_table(
         )
 
     console.print(table)
+    if removed_count:
+        console.print(
+            f"[dim]{removed_count} removed skill(s) are no longer on disk; they are listed "
+            "from scan history so their last verdict stays visible.[/dim]"
+        )
     bundled_count = sum(1 for s in skills if s.get("bundled"))
     if bundled_count:
         console.print(

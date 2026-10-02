@@ -887,7 +887,9 @@ class AlertsPanelModel:
         if key == "a":
             self.select_all()
             return AlertPanelAction(True, hint=f"Selected {len(self.selected_ids)} alert(s).")
-        if key in {"A", "X"}:
+        # A is the Activity panel key everywhere (the result strip says
+        # "press A for full output"), so only X deselects here (GAP-1630).
+        if key == "X":
             self.deselect_all()
             return AlertPanelAction(True, hint="Selection cleared.")
         if key == "r":

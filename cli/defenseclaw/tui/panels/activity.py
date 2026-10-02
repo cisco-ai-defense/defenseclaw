@@ -304,10 +304,12 @@ class ActivityPanelModel:
         self.select_entry(self.cursor + delta)
 
     def handle_key(self, key: str) -> None:
-        if key == "1":
+        # h/l switch the sub-tabs (as on Inventory and Logs); the digits stay
+        # panel keys, so 1 opens Overview from here too (GAP-1607).
+        if key in {"h", "left"}:
             self.set_tab("commands")
             return
-        if key == "2":
+        if key in {"l", "right"}:
             self.set_tab("mutations")
             return
         if self.tab == "mutations":
@@ -364,7 +366,8 @@ class ActivityPanelModel:
             self.mutation_cursor = max(len(self.mutations) - 1, 0)
 
     def render_text(self, *, height: int = 24) -> str:
-        tab_bar = "  [1] Commands   [2] Mutations (gateway activity)\n"
+        marks = {name: "▸" if self.tab == name else " " for name in ("commands", "mutations")}
+        tab_bar = f"  {marks['commands']} Commands   {marks['mutations']} Mutations (gateway activity)   h/l switch\n"
         if self.tab == "mutations":
             return tab_bar + self._render_mutations(height=height)
         if not self.entries:

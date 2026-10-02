@@ -55,7 +55,7 @@ terminal width, so the labels don't change as you switch panels.
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
 | `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
-| `A` | Activity | Live output from commands you run; `2` (Mutations) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
+| `A` | Activity | Live output from commands you run; `l` (Mutations; `h` goes back to Commands) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |
