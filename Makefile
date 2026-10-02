@@ -76,7 +76,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
-        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
@@ -149,6 +149,7 @@ check-version-sync:
 # CI jobs that only want the binaries.
 all: _source-install-dev-preflight
 	@$(MAKE) --no-print-directory _source-dev-install
+	@$(MAKE) --no-print-directory source-migrate
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
@@ -173,6 +174,18 @@ all: _source-install-dev-preflight
 	@echo "  defenseclaw doctor     # health check"
 	@echo "  defenseclaw version    # CLI / gateway / plugin versions"
 	@echo ""
+
+# Bring existing data (for example from a release install this checkout
+# replaced) to this checkout's config schema and seeded rule packs, as the
+# release upgrade does. migrate is idempotent and keeps edited rule packs.
+source-migrate: _source-install-preflight
+	@data_dir="$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}"; \
+	if [ -f "$$data_dir/config.yaml" ]; then \
+		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" migrate; then \
+			echo "  Could not migrate the existing config — fix the error above, then re-run: defenseclaw migrate"; \
+			exit 1; \
+		fi; \
+	fi
 
 path: _source-install-preflight
 	@if [ "$${NO_PATH:-0}" = "1" ]; then \
