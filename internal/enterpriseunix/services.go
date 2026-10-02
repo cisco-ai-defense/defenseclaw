@@ -419,9 +419,25 @@ func (m *launchdManager) waitUnloaded(ctx context.Context, unit Unit) bool {
 	}
 }
 
+// Enable clears a disabled override only. launchctl enable writes a
+// "=> enabled" override for a label launchd already starts by default, and
+// no command deletes an override, so every install left six DefenseClaw
+// entries in launchd's disabled-services database after uninstall
+// (GAP-1443). If the overrides cannot be read, it enables as before.
 func (m *launchdManager) Enable(ctx context.Context, unit Unit) error {
+	if result, err := m.env.Runner.Run(ctx, "launchctl", "print-disabled", "system"); err == nil &&
+		!launchdDisabledPattern(unit.Name).Match(result.Stdout) {
+		return nil
+	}
 	_, err := m.env.Runner.Run(ctx, "launchctl", "enable", "system/"+unit.Name)
 	return err
+}
+
+// launchdDisabledPattern matches label's disabled override in
+// `launchctl print-disabled` output: "label" => disabled (macOS 11 and
+// later) or "label" => true (older releases).
+func launchdDisabledPattern(label string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*"` + regexp.QuoteMeta(label) + `"\s*=>\s*(disabled|true)\s*$`)
 }
 
 func (m *launchdManager) Disable(ctx context.Context, unit Unit) error {

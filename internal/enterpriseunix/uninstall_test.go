@@ -82,7 +82,15 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				policyRemoved = true
 				check("machine policy removal")
 			}}
+			before := len(h.services.calls)
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			// GAP-1443: a macOS disable writes a launchd override that no
+			// command deletes; the definitions are removed instead.
+			for _, call := range h.services.calls[before:] {
+				if goos == "darwin" && strings.HasPrefix(call, "disable ") {
+					t.Fatalf("uninstall ran %q, which leaves a launchd override", call)
+				}
+			}
 			if !removeAll || !policyRemoved {
 				t.Fatalf("uninstall skipped a registration removal: per-user=%v machine-policy=%v", removeAll, policyRemoved)
 			}
