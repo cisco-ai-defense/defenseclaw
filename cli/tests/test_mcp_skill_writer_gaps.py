@@ -113,6 +113,11 @@ def test_disk_full_write_names_the_file_and_main_prints_one_line(home, monkeypat
         unset_mcp_server("hermes", "deepwiki")
     assert raised.value.errno == errno.ENOSPC and raised.value.filename == config
 
+    # main() snapshots console state into module globals and the environment;
+    # keep that out of later tests.
+    for name in ("_keep_console_width_when_piped", "_force_utf8_io"):
+        monkeypatch.setattr(main, name, lambda: None)
+    monkeypatch.setattr(main.ux, "configure_console_output", lambda *_a: None)
     monkeypatch.setattr(main, "_try_launch_tui", lambda: False)
     monkeypatch.setattr(main, "cli", MagicMock(side_effect=raised.value))
     with pytest.raises(SystemExit) as exited:
