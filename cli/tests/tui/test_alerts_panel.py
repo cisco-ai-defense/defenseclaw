@@ -822,3 +822,28 @@ def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
     # truth.
     assert "Summary:" not in copied
     assert "Details: connector=" not in copied
+
+
+def test_hook_finding_detail_shows_the_decision_from_its_evaluation() -> None:
+    """GAP-0999: the finding row has no action; the hook decision for the same
+    evaluation says the call was blocked."""
+
+    finding = _v8_alert_row(
+        "finding",
+        bucket="security.finding",
+        event_name="finding.observed",
+        severity="CRITICAL",
+        action="scan-finding",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.scan.scanner": "hook-rules"},
+    )
+    decision = _v8_alert_row(
+        "decision",
+        bucket="guardrail.evaluation",
+        event_name="hook_decision",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.guardrail.effective_action": "block"},
+    )
+
+    (alert,) = alerts_from_v8_history((finding,), (decision,))
+
+    assert ("Decision", "block") in alert.facts
+    assert ("Decision", "block") not in alerts_from_v8_history((finding,))[0].facts

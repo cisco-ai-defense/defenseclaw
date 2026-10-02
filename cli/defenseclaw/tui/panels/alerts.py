@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -250,7 +251,32 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
     return False
 
 
-def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
+_DECISION_KEYS = (
+    "defenseclaw.enforcement.effective_action",
+    "defenseclaw.guardrail.effective_action",
+    "defenseclaw.guardrail.decision",
+    "defenseclaw.network.decision",
+)
+
+
+def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
+    """Map a guardrail evaluation id to the action taken for that call.
+
+    A hook-rules finding and the hook decision that blocked the call are two
+    records of one evaluation; only the decision carries the action, so the
+    finding's detail looks it up here (GAP-0999).
+    """
+
+    decisions: dict[str, str] = {}
+    for row in rows:
+        evaluation = payload_text(row.payload, "defenseclaw.evaluation.id")
+        decision = payload_text(row.payload, *_DECISION_KEYS)
+        if evaluation and decision:
+            decisions.setdefault(evaluation, decision)
+    return decisions
+
+
+def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
     payload = row.payload
     action = (
         payload_text(
@@ -313,12 +339,10 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         facts.append(("Rule", rule))
     if scanner := payload_text(payload, "defenseclaw.scan.scanner"):
         facts.append(("Scanner", scanner))
-    if decision := payload_text(
-        payload,
-        "defenseclaw.enforcement.effective_action",
-        "defenseclaw.guardrail.decision",
-        "defenseclaw.network.decision",
-    ):
+    decision = payload_text(payload, *_DECISION_KEYS)
+    if not decision and decisions:
+        decision = decisions.get(payload_text(payload, "defenseclaw.evaluation.id"), "")
+    if decision:
         facts.append(("Decision", decision))
     severity = (row.severity or "INFO").upper()
     if row.bucket == "network.egress" and severity == "INFO":
@@ -346,10 +370,16 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
 
 def alerts_from_v8_history(
     rows: tuple[V8EventHistoryRow, ...],
+    context: tuple[V8EventHistoryRow, ...] = (),
 ) -> tuple[AlertEvent, ...]:
-    """Project canonical history rows without performing another DB read."""
+    """Project canonical history rows without performing another DB read.
 
-    return tuple(_v8_alert_event(row) for row in rows if _is_v8_alert_row(row))
+    ``context`` is other recent history (hook decisions) that may hold the
+    action taken for a finding's evaluation.
+    """
+
+    decisions = _evaluation_decisions((*rows, *context))
+    return tuple(_v8_alert_event(row, decisions) for row in rows if _is_v8_alert_row(row))
 
 
 def humanize_alert_details(raw: str) -> str:
@@ -1107,7 +1137,7 @@ class AlertsPanelModel:
                 f"History: {item.timestamp.strftime('%b %d %H:%M')} "
                 f"{rich_escape(item.action)} {rich_escape(item.severity)}"
             )
-        lines.append("[Enter] close detail  [Esc] close")
+        lines.append("[Enter] close detail  [Esc] close  PgUp/PgDn scroll")
         return "\n".join(lines)
 
     def get_detail_info(self) -> AlertDetailInfo | None:
