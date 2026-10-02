@@ -656,6 +656,12 @@ def _alerts_default(
     if not app.store:
         ux.warn("No audit store available. Run 'defenseclaw init' first.")
         return
+    from defenseclaw.audit_capacity import audit_disk_full_notice
+
+    # A full disk drops new alerts silently while enforcement goes on (GAP-1528).
+    notice = audit_disk_full_notice(str(getattr(app.cfg, "audit_db", "") or ""))
+    if notice:
+        ux.warn(notice[0].upper() + notice[1:])
 
     needle = (connector or "").strip()
     if needle:

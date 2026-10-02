@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -796,10 +797,15 @@ func (writer *EventHistoryWriter) stageAppendOutcome(
 	defer writer.healthMu.Unlock()
 	if outcome.signed {
 		writer.unsignedReported = false
-		if outcome.mandatory {
-			writer.enqueueHealthTransitionLocked(writer.healthTransition(
-				sequence, EventHistoryHealthRecovered, EventHistoryHealthWriteFailed, "", 0,
-			))
+		// Any signed commit after a write failure proves the SQLite write
+		// path works again. Waiting for a mandatory record left the gateway
+		// reporting "audit events cannot be written" long after writes
+		// resumed (GAP-1537, GAP-1660).
+		failed := writer.writeHealthKnown && writer.writeHealthState == EventHistoryHealthFailed
+		if (outcome.mandatory || failed) && writer.enqueueHealthTransitionLocked(writer.healthTransition(
+			sequence, EventHistoryHealthRecovered, EventHistoryHealthWriteFailed, "", 0,
+		)) && failed {
+			fmt.Fprintf(os.Stderr, "[audit] event-history writes recovered\n")
 		}
 		return
 	}
@@ -881,19 +887,27 @@ func (writer *EventHistoryWriter) enqueueHealthFailure(
 		sequence, EventHistoryHealthFailed, code, sqliteClass, primary,
 	)
 	writer.healthMu.Lock()
-	defer writer.healthMu.Unlock()
-	writer.enqueueHealthTransitionLocked(transition)
+	accepted := writer.enqueueHealthTransitionLocked(transition)
+	writer.healthMu.Unlock()
+	if accepted && code == EventHistoryHealthWriteFailed {
+		// One line per state change (not per failed write), so gateway.log
+		// says which write failed and why (GAP-1660).
+		fmt.Fprintf(os.Stderr, "[audit] event-history write failed (sqlite class=%s code=%d): %v\n",
+			sqliteClass, primary, err)
+	}
 }
 
+// enqueueHealthTransitionLocked reports whether the transition changed the
+// tracked health state (a duplicate of the current state returns false).
 func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 	transition EventHistoryHealthTransition,
-) {
+) bool {
 	if writer.healthReporter == nil || !validEventHistoryHealthTransition(transition) {
-		return
+		return false
 	}
 	if transition.Code == EventHistoryHealthWriteFailed {
 		if transition.Sequence <= writer.writeHealthSeq {
-			return
+			return false
 		}
 		previousState := writer.writeHealthState
 		previousClass := writer.writeHealthClass
@@ -905,7 +919,7 @@ func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 		if writer.writeHealthKnown && previousState == transition.State &&
 			(transition.State == EventHistoryHealthRecovered ||
 				previousClass == transition.SQLiteClass && previousPrimary == transition.SQLitePrimaryCode) {
-			return
+			return false
 		}
 		writer.writeHealthKnown = true
 	}
@@ -930,10 +944,10 @@ func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 		}
 		writer.healthQueue = queue
 		if len(writer.healthQueue) >= 5 {
-			return
+			return true // the state changed even though the full queue drops this delivery
 		}
 		writer.healthQueue = append(writer.healthQueue, transition)
-		return
+		return true
 	}
 
 	// The active callback is separate. Behind it, retain only the latest
@@ -946,14 +960,15 @@ func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 		}
 		if pending.Generation > transition.Generation ||
 			pending.Generation == transition.Generation && pending.Sequence >= transition.Sequence {
-			return
+			return false
 		}
 		writer.healthQueue = append(writer.healthQueue[:index], writer.healthQueue[index+1:]...)
 	}
 	if len(writer.healthQueue) >= 5 {
-		return
+		return false
 	}
 	writer.healthQueue = append(writer.healthQueue, transition)
+	return true
 }
 
 func (writer *EventHistoryWriter) flushHealth() {
@@ -1011,12 +1026,6 @@ func validEventHistoryHealthTransition(transition EventHistoryHealthTransition) 
 // reconstructing class/primary-code pairings that could drift.
 func ValidEventHistoryHealthTransition(transition EventHistoryHealthTransition) bool {
 	return validEventHistoryHealthTransition(transition)
-}
-
-// ValidEventHistorySQLiteDiagnostic reports whether class and primary are a
-// bounded SQLite diagnostic pair, for consumers of gateway health details.
-func ValidEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary uint8) bool {
-	return validEventHistorySQLiteDiagnostic(class, primary)
 }
 
 func validEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary uint8) bool {

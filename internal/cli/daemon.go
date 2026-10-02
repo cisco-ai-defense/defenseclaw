@@ -1941,8 +1941,7 @@ func waitForGatewayReadiness(
 			if lastSnap.Telemetry.State == gateway.StateError &&
 				strings.TrimSpace(lastSnap.Telemetry.LastError) == "" &&
 				telemetryReadinessRetryableSQLiteContention(lastSnap.Telemetry.Details) {
-				detail := "error (" + telemetryReadinessFailureDetail(lastSnap.Telemetry.Details) +
-					eventHistorySQLiteClassNote(lastSnap.Telemetry.Details) + ")"
+				detail := "error (" + telemetryReadinessFailureDetail(lastSnap.Telemetry.Details) + ")"
 				if problem := eventHistoryProblem(lastSnap.Telemetry.Details); problem != "" {
 					detail += ": " + problem
 				}
@@ -2044,11 +2043,10 @@ func gatewaySnapshotReady(
 		if detail == "" {
 			detail = string(subsystem.health.State)
 			if subsystem.name == "telemetry" {
-				// GAP-1603: name the SQLite class and say why in plain words,
-				// instead of the bare sqlite_write_failed token.
 				if diagnosis := telemetryReadinessFailureDetail(subsystem.health.Details); diagnosis != "" {
-					detail += " (" + diagnosis + eventHistorySQLiteClassNote(subsystem.health.Details) + ")"
+					detail += " (" + diagnosis + ")"
 				}
+				// GAP-1603: say why in plain words, not only the token.
 				if problem := eventHistoryProblem(subsystem.health.Details); problem != "" {
 					detail += ": " + problem
 				}
@@ -2175,7 +2173,11 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	}
 	busyLocked := class == "busy_locked" && (primary == 5 || primary == 6)
 	transientIO := startupRetriesSQLiteIO && class == "io" && primary == 10
-	if !busyLocked && !transientIO {
+	// A write that ran out of time behind a long hold on a large audit.db
+	// (class deadline, primary 0 or SQLITE_INTERRUPT) also clears after the
+	// writer's next commit (GAP-1519, GAP-1646).
+	transientDeadline := startupRetriesSQLiteIO && class == "deadline" && (primary == 0 || primary == 9)
+	if !busyLocked && !transientIO && !transientDeadline {
 		return false
 	}
 	generation, generationOK := details["generation"].(float64)
@@ -2186,7 +2188,7 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	}
 	// Reuse the closed diagnostic projection so a concurrent destination or
 	// retention failure cannot be hidden behind otherwise-retryable contention.
-	want := fmt.Sprintf("generation=%d; event_history=sqlite_write_failed", uint64(generation))
+	want := fmt.Sprintf("generation=%d; event_history=sqlite_write_failed/%s", uint64(generation), class)
 	return telemetryReadinessFailureDetail(details) == want
 }
 
@@ -2219,6 +2221,8 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 	retentionStates := allowed("", "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped")
 	retentionFailures := allowed("", "run_failed", "scheduler_failed")
 	historyFailures := allowed("", "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed")
+	historyClasses := allowed("busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt",
+		"unavailable", "other")
 	closed := func(values map[string]interface{}, key string, vocabulary map[string]bool) (string, bool) {
 		raw, exists := values[key]
 		if !exists {
@@ -2296,6 +2300,12 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		parts = append(parts, "retention="+strings.TrimSuffix(retentionState+"/"+retentionFailure, "/"))
 	}
 	if historyFailure != "" {
+		// The SQLite class tells a slow or locked write from a full or damaged
+		// store; gateway.log does not record it (GAP-1519).
+		if class, _ := details["event_history_last_sqlite_class"].(string); historyFailure == "sqlite_write_failed" &&
+			historyClasses[class] {
+			historyFailure += "/" + class
+		}
 		parts = append(parts, "event_history="+historyFailure)
 	}
 	detail := strings.Join(parts, "; ")

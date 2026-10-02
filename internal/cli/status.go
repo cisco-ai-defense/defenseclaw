@@ -906,24 +906,12 @@ func eventHistoryProblem(details map[string]interface{}) string {
 		return "audit events cannot be written because the audit database is read-only or cannot be opened"
 	case "constraint_corrupt":
 		return "audit events cannot be written because the audit database is damaged; run 'defenseclaw doctor'"
-	case "io":
-		return "audit events cannot be written because reading or writing the audit database failed " +
+	case "io", "deadline":
+		return "audit events cannot be written because reading or writing the audit database failed or timed out " +
 			"(another program, such as an antivirus scan, may hold the file); try again in a minute"
 	default:
 		return "audit events cannot be written to the audit database; run 'defenseclaw doctor'"
 	}
-}
-
-// eventHistorySQLiteClassNote is "; SQLite class <class>, code <n>" for the
-// last event-history SQLite failure, or "" when the gateway reported none.
-func eventHistorySQLiteClassNote(details map[string]interface{}) string {
-	class, _ := details["event_history_last_sqlite_class"].(string)
-	primary, ok := details["event_history_last_sqlite_primary_code"].(float64)
-	if !ok || primary != float64(uint8(primary)) ||
-		!audit.ValidEventHistorySQLiteDiagnostic(audit.EventHistorySQLiteClass(class), uint8(primary)) {
-		return ""
-	}
-	return fmt.Sprintf("; SQLite class %s, code %d", class, uint8(primary))
 }
 
 // judgeProblem says in plain words that recent LLM judge calls failed
