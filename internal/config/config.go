@@ -2775,6 +2775,19 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	return loadConfigSource(configFile, migrateRuntime, nil, false, true, false, true)
 }
 
+// LoadManagedFileForLifecycleRecovery loads a managed config like
+// LoadFromFile, without publishing provenance and without requiring the
+// standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
+// the gateway service. The Windows managed-hook lifecycle snapshot and
+// teardown read only listener settings from it, and they run during the
+// rollback of an install whose new config the services could not load:
+// refusing that config there failed the rollback too, and left every
+// service stopped (GAP-1291). The gateway and every activation keep the
+// strict loaders.
+func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
+	return loadConfigSourceChecked(configFile, false, nil, false, false, false, true, false)
+}
+
 func loadConfigSource(
 	configFile string,
 	migrateRuntime bool,
@@ -2783,6 +2796,22 @@ func loadConfigSource(
 	publishProvenance bool,
 	runtimeV8 bool,
 	enforceManagedTrust bool,
+) (*Config, error) {
+	return loadConfigSourceChecked(
+		configFile, migrateRuntime, sourceBytes, sourceProvided,
+		publishProvenance, runtimeV8, enforceManagedTrust, true,
+	)
+}
+
+func loadConfigSourceChecked(
+	configFile string,
+	migrateRuntime bool,
+	sourceBytes []byte,
+	sourceProvided bool,
+	publishProvenance bool,
+	runtimeV8 bool,
+	enforceManagedTrust bool,
+	checkPolicyInputs bool,
 ) (*Config, error) {
 	// viper holds a process-global keystore. Without resetting it, a
 	// previous Load() (e.g. from another binary path or test case)
@@ -2982,11 +3011,13 @@ func loadConfigSource(
 			}
 			return nil, err
 		}
-		if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
+		if checkPolicyInputs {
+			if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
+				}
+				return nil, err
 			}
-			return nil, err
 		}
 		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
 			if ReportConfigLoadError != nil {
