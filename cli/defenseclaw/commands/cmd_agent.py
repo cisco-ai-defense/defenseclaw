@@ -1489,7 +1489,11 @@ def discovery_status(
         else:
             ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
         summary = live["summary"] or {}
-        ux.kv("Last scan", str(summary.get("scanned_at") or "-"), indent="  ")
+        last = str(summary.get("scanned_at") or "-")
+        if _is_process_refresh(summary):
+            # GAP-1482: the 60 s process tick is not the full scan.
+            last += f" (process refresh; full scan every {on_disk['scan_interval_min']} min)"
+        ux.kv("Last scan", last, indent="  ")
         ux.kv("Active signals", str(summary.get("active_signals", 0)), indent="  ")
         ux.kv("New signals", str(summary.get("new_signals", 0)), indent="  ")
         if live["lookup_model_provenance_online"] is None:
@@ -4097,6 +4101,23 @@ def _humanize_seconds(seconds: int) -> str:
     return "".join(f"{v}{u}" for v, u in chosen)
 
 
+def _is_process_refresh(summary: dict[str, Any]) -> bool:
+    """True when the report came from the process-only tick, not a full scan."""
+    return str(summary.get("source") or "").strip().lower() == "process"
+
+
+def _discovery_scan_clause(summary: dict[str, Any]) -> str:
+    """'scanned <time>, files=N', or say it was a process refresh (GAP-1482).
+
+    The process-only tick reads no files, so its files=0 is not the count of
+    the last full scan.
+    """
+    when = summary.get("scanned_at", "-") or "-"
+    if _is_process_refresh(summary):
+        return f"process refresh {when}; files are read on full scans"
+    return f"scanned {when}, files={summary.get('files_scanned', 0)}"
+
+
 def _format_relative_time(value: Any) -> str:
     """Render an ISO-8601 timestamp as ``Nm ago`` / ``Nh ago``.
 
@@ -4404,11 +4425,7 @@ def _render_ai_usage_table(
             shown_clause = f"{len(displayed)} of {len(rows)} {signal_word} shown"
         else:
             shown_clause = f"{len(rows)} {signal_word} shown"
-        footer = (
-            f"{shown_clause} "
-            f"(scanned {summary.get('scanned_at', '-')}, "
-            f"files={summary.get('files_scanned', 0)})."
-        )
+        footer = f"{shown_clause} ({_discovery_scan_clause(summary)})."
         if hidden > 0:
             footer += f" {hidden} more hidden by --limit; raise it or use --json for the full list."
         footer += _format_ai_usage_scan_diagnostics(summary)
@@ -4509,8 +4526,7 @@ def _render_ai_usage_table(
     signal_word = _pluralize(total_signals, "signal", "signals")
     footer = (
         f"{len(full_groups)} {group_word}, {total_signals} {signal_word} "
-        f"(scanned {summary.get('scanned_at', '-')}, "
-        f"files={summary.get('files_scanned', 0)})."
+        f"({_discovery_scan_clause(summary)})."
     )
     hidden = len(full_groups) - len(displayed_full)
     if hidden > 0:

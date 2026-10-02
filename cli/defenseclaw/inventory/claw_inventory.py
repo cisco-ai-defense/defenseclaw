@@ -211,6 +211,7 @@ def build_claw_aibom(
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
+    _mark_collected_categories(out, cats)
     return out
 
 
@@ -264,6 +265,8 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
     ]
     findings: list[Finding] = []
     for key, label in category_labels:
+        if not _category_collected(inv, key):
+            continue
         payload = inv.get(key, [])
         count = len(payload) if isinstance(payload, list) else 0
         findings.append(
@@ -387,6 +390,11 @@ def enrich_with_policy(
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
+            # GAP-1383: a skill DefenseClaw disabled or quarantined is not
+            # enabled, whatever the connector's own config says; the Skills
+            # panel and 'skill info' already say so.
+            if target_type == "skill" and _action_holds_off(action_entry):
+                item["enabled"] = False
             if scan_entry:
                 item["scan_findings"] = scan_entry["finding_count"]
                 item["scan_severity"] = scan_entry["max_severity"]
@@ -408,6 +416,13 @@ def enrich_with_policy(
 
 # keep the old name as an alias for backward compatibility
 enrich_skills_with_policy = enrich_with_policy
+
+
+def _action_holds_off(action_entry: Any) -> bool:
+    actions = getattr(action_entry, "actions", None)
+    if actions is None:
+        return False
+    return getattr(actions, "runtime", "") == "disable" or getattr(actions, "file", "") == "quarantine"
 
 
 def _fallback_actions_for(
@@ -876,6 +891,33 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
 # ---------------------------------------------------------------------------
 # Summary builder (shared by JSON and human output)
 # ---------------------------------------------------------------------------
+
+
+_SUMMARY_KEY_CATEGORY = {"model_providers": "models"}
+
+
+def _mark_collected_categories(inv: dict[str, Any], cats: frozenset[str]) -> None:
+    """Flag the categories an ``--only`` run did not collect (GAP-1483).
+
+    Their empty lists mean "not collected", not "none": the JSON summary
+    carries ``"collected": false`` for them and the audit record skips them,
+    so a partial BOM does not read (or store) as an empty inventory.
+    """
+    if cats == ALL_CATEGORIES:
+        return
+    inv["categories_collected"] = sorted(cats)
+    summary = inv.get("summary")
+    if not isinstance(summary, dict):
+        return
+    for key, value in summary.items():
+        if isinstance(value, dict) and "count" in value:
+            if _SUMMARY_KEY_CATEGORY.get(key, key) not in cats:
+                value["collected"] = False
+
+
+def _category_collected(inv: dict[str, Any], key: str) -> bool:
+    entry = (inv.get("summary") or {}).get(key)
+    return not (isinstance(entry, dict) and entry.get("collected") is False)
 
 
 def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
@@ -4390,6 +4432,7 @@ def _build_aibom_from_filesystem(
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
+    _mark_collected_categories(out, cats)
     return out
 
 

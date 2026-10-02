@@ -944,9 +944,10 @@ def _print_skill_info_card(
     if info_map.get("filePath"):
         click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
     eligible = info_map.get("eligible", False)
-    held = info_map.get("disabled") or info_map.get("verdict") in ("blocked", "quarantined", "disabled")
+    held = _skill_held_off(info_map) or info_map.get("verdict") in ("quarantined", "disabled")
     # GAP-1320: "Eligible: True" is the connector's own check; say that
-    # DefenseClaw keeps a blocked or disabled skill off.
+    # DefenseClaw keeps a disabled or quarantined skill off. A block-list
+    # entry alone does not stop the copy on disk, so it gets no note.
     note = " (the connector would load it; DefenseClaw keeps it off)" if eligible is True and held else ""
     click.echo(f"{ux.bold('Eligible:')}    {eligible}{note}")
     click.echo(f"{ux.bold('Disabled:')}    {info_map.get('disabled', False)}")
@@ -981,7 +982,9 @@ def _print_skill_info_card(
         style = _POLICY_VERDICT_STYLES.get(verdict, "white")
         click.echo()
         click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
-        note = _skill_policy_note(info_map.get("name", skill_name), verdict)
+        note = _skill_policy_note(
+            info_map.get("name", skill_name), verdict, held=held,
+        )
         if note:
             click.echo(f"  {note}")
 
@@ -1065,7 +1068,25 @@ def _skill_policy_verdict(
     return label, _POLICY_VERDICT_STYLES.get(label, ""), decision.reason or ""
 
 
-def _skill_policy_note(name: str, label: str) -> str:
+def _skill_held_off(info_map: dict[str, Any] | None, action_entry: Any = None) -> bool:
+    """True only when DefenseClaw actually keeps the skill from loading.
+
+    The install block list alone does not stop a copy already on disk; only a
+    disable (runtime) or a quarantine (file) does (GAP-1320).
+    """
+    if info_map and info_map.get("disabled"):
+        return True
+    actions = getattr(action_entry, "actions", None)
+    if actions is None and info_map and isinstance(info_map.get("actions"), dict):
+        actions = info_map["actions"]
+    if isinstance(actions, dict):
+        return actions.get("runtime") == "disable" or actions.get("file") == "quarantine"
+    if actions is not None:
+        return getattr(actions, "runtime", "") == "disable" or getattr(actions, "file", "") == "quarantine"
+    return False
+
+
+def _skill_policy_note(name: str, label: str, *, held: bool = True) -> str:
     """One line on what a policy verdict means for an installed copy."""
     if label == "rejected":
         return (
@@ -1076,7 +1097,13 @@ def _skill_policy_note(name: str, label: str) -> str:
     if label == "warning":
         return f"allowed with findings. Block it: defenseclaw skill block {name}"
     if label == "blocked":
-        return f"on the block list, so DefenseClaw keeps it disabled. Unblock it: defenseclaw skill unblock {name}"
+        if held:
+            return f"on the block list, so DefenseClaw keeps it disabled. Unblock it: defenseclaw skill unblock {name}"
+        return (
+            "on the install block list; the copy already on disk still loads. "
+            f"Turn it off: defenseclaw skill disable {name}  "
+            f"Unblock it: defenseclaw skill unblock {name}"
+        )
     return ""
 
 
@@ -1566,7 +1593,13 @@ def _print_skill_scan_policy(
     )
     if label in ("-", "clean"):
         return
-    note = _skill_policy_note(name, label) or reason
+    held = True
+    if label == "blocked" and pe is not None:
+        try:
+            held = _skill_held_off(None, pe.get_action("skill", name, connector or ""))
+        except Exception:
+            held = True
+    note = _skill_policy_note(name, label, held=held) or reason
     click.echo(f"        policy: {label}" + (f" — {note}" if note else ""))
 
 

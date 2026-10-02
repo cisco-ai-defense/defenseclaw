@@ -409,10 +409,13 @@ def _scan_one_plugin_dir(
         return
 
     sev = result.max_severity()
+    verdict = _plugin_scan_findings_verdict(
+        app, result, name=target_name, path=scan_dir, connector=connector,
+    )
     _scan_ui.render_per_target_status(
         ctx,
         target=target_name,
-        verdict=_scan_ui.VERDICT_BLOCKED,
+        verdict=verdict,
         detail=f"max severity: {sev}",
         findings=len(result.findings),
     )
@@ -428,11 +431,47 @@ def _scan_one_plugin_dir(
     _scan_ui.render_summary(
         ctx,
         clean=0,
-        blocked=1,
+        blocked=1 if verdict == _scan_ui.VERDICT_BLOCKED else 0,
         errored=0,
         total=1,
+        findings=len(result.findings),
         duration_ms=int(result.duration.total_seconds() * 1000),
     )
+
+
+def _plugin_scan_findings_verdict(
+    app: AppContext, result: Any, *, name: str, path: str, connector: str,
+) -> str:
+    """BLOCKED only when the plugin policy would block it (GAP-1413).
+
+    A plugin whose worst finding is LOW ("declares no permissions") is not
+    blocked by the default policy, so it reads WARN (or INFO) and does not
+    count in the Summary's blocked=.
+    """
+    from defenseclaw.commands import _scan_ui
+
+    sev = str(result.max_severity()).upper()
+    try:
+        from defenseclaw.enforce import PolicyEngine
+        from defenseclaw.enforce.admission import evaluate_admission
+
+        decision = evaluate_admission(
+            PolicyEngine(app.store),
+            policy_dir=app.cfg.policy_dir,
+            target_type="plugin",
+            name=name,
+            source_path=path,
+            scan_result=result,
+            fallback_actions=app.cfg.plugin_actions,
+            connector=connector,
+            asset_policy=app.cfg.asset_policy,
+        )
+        blocks = decision.verdict != "allowed" and decision.action.install == "block"
+    except Exception:
+        blocks = app.cfg.plugin_actions.should_install_block(sev)
+    if blocks:
+        return _scan_ui.VERDICT_BLOCKED
+    return _scan_ui.VERDICT_INFO if sev == "INFO" else _scan_ui.VERDICT_WARN
 
 
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
@@ -1000,11 +1039,15 @@ def _scan_all_plugins(
                     findings=0,
                 )
             else:
-                blocked += 1
+                verdict = _plugin_scan_findings_verdict(
+                    app, result, name=pid, path=scan_dir, connector=connector,
+                )
+                if verdict == _scan_ui.VERDICT_BLOCKED:
+                    blocked += 1
                 _scan_ui.render_per_target_status(
                     ctx,
                     target=target_label,
-                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    verdict=verdict,
                     detail=f"max severity: {result.max_severity()}",
                     findings=len(result.findings),
                 )

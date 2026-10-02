@@ -330,12 +330,10 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     facts: list[tuple[str, str]] = []
     if row.connector:
         facts.append(("Connector", row.connector))
+    rule_id = payload_text(payload, "defenseclaw.finding.rule_id")
     rule = ": ".join(
         value
-        for value in (
-            payload_text(payload, "defenseclaw.finding.rule_id"),
-            payload_text(payload, "defenseclaw.finding.title"),
-        )
+        for value in (rule_id, _finding_display_title(rule_id, payload_text(payload, "defenseclaw.finding.title")))
         if value
     )
     if rule:
@@ -534,7 +532,7 @@ class AlertsPanelModel:
     ) -> None:
         """Apply an already-loaded shared canonical-history snapshot."""
 
-        audit_events = list(alerts_from_v8_history(rows, context))
+        audit_events = _with_hook_decisions(self.store, list(alerts_from_v8_history(rows, context)))
         if self.audit_events == audit_events:
             return
         self.audit_events = audit_events
@@ -1590,6 +1588,46 @@ def _hook_decision_label(store: object | None, event_id: str, hook_target: str =
         rows = lookup([event_id]).get(event_id, [])
     except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the decision.
         return ""
+    return _hook_decision_from_rows(rows, hook_target)
+
+
+def _finding_display_title(rule_id: str, title: str) -> str:
+    """The rule pack's title for a redacted secret finding, as the CLI shows it (GAP-1456)."""
+    if not rule_id or not title:
+        return title
+    try:
+        from defenseclaw.commands.cmd_alerts import _finding_title  # noqa: PLC0415
+
+        return _finding_title(rule_id, title)
+    except Exception:  # noqa: BLE001 - the title is a display nicety.
+        return title
+
+
+def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list[AlertEvent]:
+    """Give each hook-rule finding the decision of its hook call (GAP-1456).
+
+    The list and the detail then say "detected after the tool ran (cannot
+    block)" like ``defenseclaw alerts``, not the evaluation's raw "allow".
+    """
+    lookup = getattr(store, "hook_details_for_alerts", None)
+    ids = [e.id for e in events if e.action == "scan-finding" and e.id and not e.id.startswith("gw:")]
+    if lookup is None or not ids:
+        return events
+    try:
+        details = lookup(ids)
+    except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the decision.
+        return events
+    out: list[AlertEvent] = []
+    for event in events:
+        decision = _hook_decision_from_rows(details.get(event.id, []), event.target) if event.id in details else ""
+        if decision:
+            facts = tuple(fact for fact in event.facts if fact[0] != "Decision")
+            event = replace(event, facts=(*facts, ("Decision", decision)))
+        out.append(event)
+    return out
+
+
+def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
     decision = ""
     for raw in rows:
         tokens = parse_detail_tokens((raw or "").split(" details_json=", 1)[0])
@@ -1729,6 +1767,12 @@ def _alert_details_label(event: AlertEvent) -> str:
     if event.details.startswith("bucket="):
         summary = event.details.partition(" summary=")[2].strip()
         event_name = event.details.partition("event_name=")[2].split(" ", 1)[0]
+        rule = next((value for label, value in event.facts if label == "Rule"), "")
+        if rule and (not summary or summary.startswith("<redacted")):
+            # GAP-1456: a redacted evidence summary says nothing; show what the
+            # CLI shows instead (decision and rule).
+            decision = next((value for label, value in event.facts if label == "Decision"), "")
+            return _truncate(" · ".join(part for part in (rule, decision) if part), 58)
         if summary and summary != event_name:
             return _truncate(summary, 58)
         # A finding with no summary of its own (prompt-lane rows) showed only

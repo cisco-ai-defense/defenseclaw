@@ -887,6 +887,19 @@ class DiscoveryHelperTests(unittest.TestCase):
     silently-clobbered fields or no-op detection regressions.
     """
 
+    def test_scan_clause_labels_the_process_refresh(self):
+        # GAP-1482: the 60 s process tick reads no files; "files=0" there is
+        # not the last full scan's count.
+        full = cmd_agent._discovery_scan_clause(
+            {"source": "api", "scanned_at": "T1", "files_scanned": 968},
+        )
+        self.assertEqual(full, "scanned T1, files=968")
+        tick = cmd_agent._discovery_scan_clause(
+            {"source": "process", "scanned_at": "T2", "files_scanned": 0},
+        )
+        self.assertIn("process refresh T2", tick)
+        self.assertNotIn("files=0", tick)
+
     def test_build_skips_none_fields(self):
         out = cmd_agent._build_discovery_overrides(
             mode="passive",
