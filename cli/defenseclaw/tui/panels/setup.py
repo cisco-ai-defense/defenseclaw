@@ -264,7 +264,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Choose how skills are scanned and which analyzers run.",
     "Choose how MCP servers are scanned and what gets checked.",
     "Set the gateway host, ports, TLS and token.",
-    "Turn on the LLM guardrail and choose observe or block.",
+    "Turn on the LLM guardrail and choose observe or action (block).",
     "Send events to Splunk HEC or a local Splunk.",
     "Send logs, traces and metrics to an observability vendor.",
     "Post alerts to Slack, PagerDuty, Webex or any URL.",
@@ -3203,8 +3203,8 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         ),
         WizardGoal(
             "bulk",
-            "Set active connectors",
-            summary="Run bare setup to choose the active hook connector set.",
+            "Choose which agents DefenseClaw protects",
+            summary="Pick every agent to protect in one step; the others are turned off.",
             presets={"@Action": "batch"},
             fields=(
                 "Connectors (CSV)",
