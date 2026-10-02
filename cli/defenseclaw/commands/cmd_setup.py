@@ -13270,6 +13270,12 @@ def _restart_services(
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.
     hook_multi = [c for c in (connectors or []) if c in _HOOK_ENFORCED_CONNECTORS]
+    if failed and connector != "openclaw":
+        # GAP-1508: a failed restart must not end with a line that reads as
+        # "protection is current"; the error below says what to run. The
+        # OpenClaw path below still restarts its own gateway first.
+        click.echo()
+        _fail_if_restart_failed(failed)
     if connector != "openclaw" and len(hook_multi) > 1:
         names = ", ".join(sorted(hook_multi))
         if "omnigent" in hook_multi:
@@ -13364,8 +13370,8 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
     raise click.ClickException(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)
-        + ". The requested configuration was not verified as applied. Fix the error above "
-        "before relying on enforcement."
+        + ". The requested configuration was not verified as applied, so the agents may not be "
+        "protected. Run `defenseclaw-gateway start`, then `defenseclaw doctor`, before relying on enforcement."
     )
 
 
