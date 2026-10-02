@@ -198,6 +198,11 @@ func TestWindowsStandaloneEnrollmentCountsOnlyPendingTargets(t *testing.T) {
 	if err != nil || enrollment.Targets != 2 || enrollment.Pending != 1 {
 		t.Fatalf("enrollment = %+v, %v; want 2 targets, 1 pending", enrollment, err)
 	}
+	// Each account and its connectors' states (GAP-1073).
+	if len(enrollment.Accounts) != 2 || enrollment.Accounts[0].Connectors["codex"] != "enrolled" ||
+		enrollment.Accounts[1].Connectors["codex"] != "pending" {
+		t.Fatalf("enrollment accounts = %+v", enrollment.Accounts)
+	}
 }
 
 // Status and verify of a computer with a pending transaction name it and the

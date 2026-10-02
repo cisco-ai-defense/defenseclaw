@@ -1431,3 +1431,26 @@ func TestWindowsFirstInstallRollbackLeftoverNamesTheElevatedPrompt(t *testing.T)
 		t.Fatalf("warnings = %+v", warnings)
 	}
 }
+
+// GAP-1073: status and verify help list only the flags they read; the
+// install-only flags stay accepted.
+func TestWindowsEnterpriseInspectionHelpHidesInstallFlags(t *testing.T) {
+	for _, action := range []string{"status", "verify", "install"} {
+		cmd := newWindowsEnterpriseLifecycleCommand(action)
+		usage := cmd.UsageString()
+		hidden := action != "install"
+		for _, name := range []string{"gateway-binary", "purge", "certification-codex-home", "mode", "install-root"} {
+			if cmd.Flags().Lookup(name) == nil {
+				t.Fatalf("%s: --%s is no longer accepted", action, name)
+			}
+			if strings.Contains(usage, "--"+name+" ") == hidden {
+				t.Fatalf("%s help: --%s shown=%v\n%s", action, name, !hidden, usage)
+			}
+		}
+		for _, name := range []string{"--json", "--profile", "--config"} {
+			if !strings.Contains(usage, name+" ") {
+				t.Fatalf("%s help lacks %s\n%s", action, name, usage)
+			}
+		}
+	}
+}

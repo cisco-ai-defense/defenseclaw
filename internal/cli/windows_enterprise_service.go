@@ -270,7 +270,25 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		"standalone: SHA-256 thumbprint of an accepted Authenticode signer certificate (repeatable)")
 	flags.StringVar(&opts.productVersion, "product-version", "",
 		"standalone: version recorded for this deployment (default: this CLI's version)")
+	if action == "status" || action == "verify" {
+		// Status and verify only read the deployment. The install,
+		// upgrade, uninstall and certification inputs stay accepted but
+		// out of their help (GAP-1073).
+		for _, name := range windowsEnterpriseInspectionHiddenFlags {
+			_ = flags.MarkHidden(name)
+		}
+	}
 	return cmd
+}
+
+// windowsEnterpriseInspectionHiddenFlags are the lifecycle flags status and
+// verify leave out of their help.
+var windowsEnterpriseInspectionHiddenFlags = []string{
+	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "cli-binary",
+	"install-root", "state-root", "gateway-service-name", "guardian-service-name",
+	"certification-codex-home", "core-hardening-certification",
+	"attest-agent-application-control", "attest-claude-effective-policy",
+	"no-start", "purge", "deferred-config", "mode", "connector", "product-version",
 }
 
 func windowsEnterpriseLifecycleSummary(action string) string {
