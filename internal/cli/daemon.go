@@ -207,6 +207,8 @@ func init() {
 	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
 	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
+	startCmd.Flags().Bool(hookColdStartFlag, false, "start requested by a connector hook after a refused connection")
+	_ = startCmd.Flags().MarkHidden(hookColdStartFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
@@ -231,11 +233,50 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 	return err == nil && enabled
 }
 
-func runStart(cmd *cobra.Command, _ []string) error {
+func runStart(cmd *cobra.Command, args []string) error {
+	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
+	if coldStart && !hookColdStartSupported {
+		return errHookColdStartUnsupported
+	}
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		return err
 	}
+	dataDir := config.DefaultDataPath()
+	if coldStart {
+		if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
+			return fmt.Errorf("hook cold start skipped: %w", err)
+		}
+		liftHookResourceLimits()
+	}
+	lockWait := gatewayStartLockWait
+	if coldStart {
+		lockWait = hookColdStartLockWait
+	}
+	release, err := acquireGatewayStartLock(dataDir, lockWait)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if coldStart {
+		// A stop or install may have begun while this start waited.
+		if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
+			return fmt.Errorf("hook cold start skipped: %w", err)
+		}
+	}
+	err = runStartLocked(cmd, args, coldStart)
+	if err != nil && coldStart {
+		if running, _ := daemon.New(dataDir).IsRunning(); !running {
+			recordHookColdStartFailure(dataDir)
+		}
+	}
+	return err
+}
+
+func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	rotationTransaction := rotationTransactionRequested(cmd)
+	if coldStart && rotationTransaction {
+		return errors.New("a hook cold start cannot be a rotation start")
+	}
 	var expectedConnectorState rotationConnectorState
 	if rotationTransaction {
 		rawState, flagErr := cmd.Flags().GetString(rotationConnectorStateFlag)
@@ -274,6 +315,10 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	if alreadyRunning {
 		if rotationTransaction {
 			return fmt.Errorf("rotation start requires a stopped gateway; managed PID %d is already running", pid)
+		}
+		if !coldStart {
+			// An explicit start of a running gateway still ends a stop.
+			clearGatewayColdStartState(config.DefaultDataPath())
 		}
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
@@ -327,12 +372,16 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		// previous release would avoid: leave the gateway running and report it.
 		requirements.allowHookContractAdmissionRefusal = true
 	}
+	readinessTimeout := defaultStartReadinessTimeout
+	if coldStart {
+		readinessTimeout = hookColdStartReadinessTimeout
+	}
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
 		client,
 		sidecarStatusURL(cfg),
-		defaultStartReadinessTimeout,
+		readinessTimeout,
 		defaultReadinessPollInterval,
 		requirements,
 	)
@@ -340,6 +389,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
+	clearGatewayColdStartState(config.DefaultDataPath())
 
 	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
 	if admissionRefused {
@@ -478,6 +528,10 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		_ = runWatchdogStop(nil, nil)
 	}
 
+	// Written before the stop so a hook refused mid-shutdown does not start
+	// the gateway again. Start and restart remove it.
+	markGatewayStopped(config.DefaultDataPath())
+
 	if !running {
 		fmt.Println(Dim("Gateway sidecar is not running"))
 		return nil
@@ -608,6 +662,11 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		return err
 	}
+	release, err := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)
+	if err != nil {
+		return err
+	}
+	defer release()
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or
@@ -668,6 +727,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
+	clearGatewayColdStartState(config.DefaultDataPath())
 
 	printDaemonStartResult(pid, snap)
 	fmt.Println()

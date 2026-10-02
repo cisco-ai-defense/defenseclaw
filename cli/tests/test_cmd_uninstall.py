@@ -217,7 +217,7 @@ class ResetCommandTests(unittest.TestCase):
             self.assertTrue(plan.remove_data_dir)
             self.assertFalse(plan.remove_plugin)
             self.assertFalse(plan.remove_binaries)
-            self.assertEqual(plan.preserve_data_entries, (".venv",))
+            self.assertEqual(plan.preserve_data_entries, (".venv", ".uv"))
             self.assertIn("preserve runtime:", result.output)
 
     def test_reset_failure_is_nonzero_and_never_reports_complete(self):
@@ -356,9 +356,15 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 patch.object(cmd_uninstall, "_legacy_custody_parents", return_value=[str(legacy_tmp)]),
                 patch.dict(os.environ, {"HOME": str(home)}),
                 patch.object(cmd_uninstall.ux, "subhead") as subhead,
+                patch.object(cmd_uninstall, "_remove_user_path_entry") as path_entry,
             ):
                 cmd_uninstall._remove_binaries(plan)
-            self.assertEqual(sorted(os.listdir(root)), [])
+            # The emptied install folder goes as well; Windows also drops its user Path entry.
+            self.assertFalse(root.exists())
+            if sys.platform == "win32":
+                path_entry.assert_called_once_with(plan)
+            else:
+                path_entry.assert_not_called()
             self.assertEqual(os.listdir(legacy_tmp), ["unrelated"])
             if sys.platform != "win32":
                 self.assertEqual(os.listdir(home), [])

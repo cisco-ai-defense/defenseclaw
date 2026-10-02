@@ -328,23 +328,35 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
-Config, credentials, state, and logs stay unless you purge.
+Config, credentials, state, and logs stay unless you purge, and so does
+each user's DefenseClaw folder (`~/.defenseclaw`). A purge removes
+everything, each enrolled user's folder and per-user binaries included.
 
-| Install channel | Remove, keep config and state | Remove everything |
+On Linux and macOS, the default uninstall removes the deployment and its
+machine state: the config, credentials, gateway and guardian state, logs,
+lifecycle state and the service account. Each user keeps `~/.defenseclaw`
+and the per-user binaries; `--purge` removes those too. Add `--keep-state`
+to keep the machine state for a reinstall instead.
+
+| Install channel | Remove the deployment and machine state, keep each user's data | Remove everything |
 | --- | --- | --- |
-| Linux payload | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` | Add `--purge`. Add `--remove-service-account` to also delete the `defenseclaw` account |
-| Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | `sudo apt purge defenseclaw-enterprise` |
-| RHEL package | `sudo dnf remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo dnf remove defenseclaw-enterprise`. rpm has no purge |
-| macOS | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` | Add `--purge`, and `--remove-service-account` to delete `_defenseclaw` |
+| Linux payload | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` | Add `--purge` |
+| Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo apt purge defenseclaw-enterprise` |
+| RHEL package | `sudo dnf remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo dnf remove defenseclaw-enterprise` |
+| macOS | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` | Add `--purge` |
 | Windows | Setup `/uninstall JSON=1`, or `defenseclaw.exe enterprise windows uninstall --profile standalone --json` | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
 
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
-  first. `apt purge` then deletes `/etc/defenseclaw`, `/var/lib/defenseclaw`,
-  `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`, and
-  `/var/log/defenseclaw`. It keeps the `defenseclaw` account. To delete the
-  account, run
-  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json`
-  before you remove the package.
+  first, without purge, which removes the machine state and the
+  `defenseclaw` account. `apt purge` also deletes what a failed uninstall
+  left of `/etc/defenseclaw`, `/var/lib/defenseclaw`,
+  `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`,
+  and `/var/log/defenseclaw`. Each user keeps `~/.defenseclaw` and the
+  per-user binaries: by then the gateway that removes them as each user is
+  gone. To remove those too, run
+  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
+  before you remove the package. The MDM `uninstall.sh --purge` does this
+  for you.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left (Linux and macOS).** Each user's registrations are
@@ -354,15 +366,23 @@ Config, credentials, state, and logs stay unless you purge.
   the deployment record and state stay. Fix the cause, or remove
   DefenseClaw's entries from that user's agent config, and run the same
   uninstall again. `ensure` restores the deployment instead.
-- **Per-user state (Linux and macOS).** `--purge` also removes each enrolled
-  user's DefenseClaw folder (`~/.defenseclaw`, with its hook credentials), as
-  that user. It first restores the files of any agent that DefenseClaw
-  changed and still has backups for there, for example one set up by an
-  earlier release. Two things stay: `~/.defenseclaw/foreign-hooks-backup`
-  (the user's own hooks that the foreign-hook policy moved aside) and the
-  hook scripts in `~/.defenseclaw/hooks`, each replaced by a stub that exits
-  0, because an agent that is still running may call it. Delete the folder
-  once the user's agents have restarted.
+- **Per-user state (Linux and macOS).** `--purge` also removes everything
+  DefenseClaw put in each enrolled user's home, as that user. It first stops
+  the user's per-user gateway and watchdog, if one runs, and restores the
+  files of any agent that DefenseClaw changed and still has backups for
+  there, for example one set up by an earlier release. It then removes all of
+  `~/.defenseclaw` (the hook scripts, hook credentials and
+  `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`,
+  `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links into
+  `~/.defenseclaw`, the `uv` the per-user installer added (when unchanged)
+  and its bookkeeping. No dangling link stays; the user's own tools in
+  `~/.local/bin` stay. The per-user install edits no shell profile, so no
+  PATH entry is left. The result names each user whose data it removed. It
+  also names each enrolled user it left alone, with the reason: a home that
+  is not trusted or not available, a hook removal that failed, or a gateway
+  that could not be stopped. Fix the cause and run the same uninstall again.
+  Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their
+  own moved-aside hooks back.
 - **MDM.** Use `uninstall.sh [--purge]` on Linux and macOS, or `uninstall.ps1`
   on Windows. See [Install with an MDM](/docs/enterprise/mdm).
 - **Windows per-user registrations.** Acting as a user needs that user's
@@ -375,13 +395,18 @@ Config, credentials, state, and logs stay unless you purge.
   `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
 - **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem,
-  also removes each enrolled account's `%USERPROFILE%\.defenseclaw`, whether
-  or not the account is signed in. The same two things stay as on Linux and
-  macOS. The `per_user_state_remaining` warning names each folder it could
-  not remove, with the reason.
+  also removes all of each enrolled account's `%USERPROFILE%\.defenseclaw`
+  (hook scripts and `foreign-hooks-backup` included), whether or not the
+  account is signed in. It also removes the DefenseClaw files of a per-user
+  install from `%USERPROFILE%\.local\bin` and, once that folder is empty,
+  the folder and its entry in the account's user `Path`. The result names
+  each account it purged. A signed-out account's `Path` cannot be changed,
+  so it keeps that entry, and the result says so. The
+  `per_user_state_remaining` warning names each folder it could not remove,
+  with the reason.
 
 ```bash title="Linux: remove everything"
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json
 ```
 
 ```powershell title="Windows: remove everything"

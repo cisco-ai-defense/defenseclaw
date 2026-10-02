@@ -179,6 +179,15 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
         color: {DEFAULT_TOKENS.accent_amber};
     }}
 
+    /* Docked, so it never scrolls away: with four or more rows the dialog
+       scrolls at 80x24, and keeping a lower row in view used to push the
+       "press Enter again" danger hint off the top. */
+    #consequence-hint {{
+        dock: bottom;
+        margin-bottom: 0;
+        margin-top: 1;
+    }}
+
     .consequence-action-row {{
         width: 100%;
         height: auto;
@@ -230,8 +239,8 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
                 yield Static(details, id="consequence-details")
             if self.model.consequence:
                 yield Static(self.model.consequence, id="consequence-warning")
-            # The hint sits above the actions so the danger step's
-            # "press Enter again" is on screen, not below the fold.
+            # The hint is docked to the dialog's bottom edge (see CSS), so
+            # the danger step's "press Enter again" is always on screen.
             yield Static(_HINT_DEFAULT, id="consequence-hint")
             for index, action in enumerate(self.model.actions):
                 label = action.display_label

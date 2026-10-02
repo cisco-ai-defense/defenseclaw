@@ -67,6 +67,27 @@ $failures = & $module {
         }
     }
 
+    # A purge names each account whose per-user data went and each one whose
+    # data stayed; both lists carry through.
+    $purgeFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":0,' +
+        '"user_state_purged":["alice (' + $sid + '): C:\\Users\\alice\\.defenseclaw"],' +
+        '"user_state_remaining":["bob (' + $sid + '): C:\\Users\\bob\\.defenseclaw: access denied"]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $purgeResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $purgeFinalize
+    if (@($purgeResult.user_state_purged).Count -ne 1 -or
+        -not ([string]@($purgeResult.user_state_purged)[0]).StartsWith('alice (')) {
+        $failures.Add("purged accounts were not carried: $(ConvertTo-HarnessJson $purgeResult)")
+    }
+    if (@($purgeResult.user_state_remaining).Count -ne 1 -or
+        -not ([string]@($purgeResult.user_state_remaining)[0]).EndsWith('access denied')) {
+        $failures.Add("remaining accounts were not carried: $(ConvertTo-HarnessJson $purgeResult)")
+    }
+
     # Helper output ahead of the report, and a finalize without the fields
     # (an older helper), are tolerated.
     $json = ConvertTo-HarnessJson (Add-DefenseClawUserRegistrationCleanupResult `

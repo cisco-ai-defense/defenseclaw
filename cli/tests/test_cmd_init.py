@@ -418,8 +418,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertIn("hooks for claudecode, devin are installed when the gateway starts", result.output)
 
     def test_next_says_to_start_the_gateway_after_a_reboot_on_linux_and_macos(self):
-        # RHEL-U3-06: nothing restarts a per-user gateway on Linux or macOS,
-        # while a Windows hook starts a stopped one.
+        # RHEL-U3-06: no service unit restarts a per-user gateway on Linux or
+        # macOS; the shell hooks start it, and Windows has its own guidance.
         from types import SimpleNamespace
 
         from defenseclaw.commands import cmd_init
@@ -427,7 +427,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         report = SimpleNamespace(
             status="ok", connector="codex", profile="observe", setup=[], readiness=[], next_commands=[]
         )
-        hint = "After a reboot or sign-out, start the gateway again: defenseclaw-gateway start"
+        hint = (
+            "After a reboot, agent hooks start the gateway on their next call;"
+            " after defenseclaw-gateway stop, run: defenseclaw-gateway start"
+        )
         for host, shown in (("linux", True), ("darwin", True), ("windows", False)):
             lines: list[str] = []
             renderer = SimpleNamespace(

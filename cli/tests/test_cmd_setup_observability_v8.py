@@ -186,6 +186,33 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
 
 
+def test_setup_v8_add_environment_tags_gateway_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # BENIGN-WIN2-01: a cloned host shares host.name with its source, and the
+    # only way to tag it apart was a hand edit of config.yaml.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nobservability:\n  resource:\n    attributes:\n"
+        "      deployment.environment: old\n"
+    )
+    args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
+    args += ["--protocol", "grpc", "--allow-private-networks", "--environment", " lab-win2 "]
+
+    result = CliRunner().invoke(observability, args, obj=app, catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert source["observability"]["resource"]["attributes"] == {
+        "deployment.environment": "lab-win2",
+        "deployment.environment.name": "lab-win2",
+    }
+    blank = CliRunner().invoke(observability, [*args[:-1], "  "], obj=app)
+    assert blank.exit_code != 0 and "nonblank" in blank.output
+
+
 def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

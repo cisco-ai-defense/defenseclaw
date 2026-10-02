@@ -178,6 +178,10 @@ type UnixEligibleAccount struct {
 	GID       int    `json:"gid"`
 	Home      string `json:"home"`
 	HomeInode uint64 `json:"home_inode,omitempty"`
+	// CreatedDirs, only in the guardian's VS Code Local accounts record,
+	// are the folders below Home the guardian created for DefenseClaw's
+	// Local files there; their removal takes the empty ones out again.
+	CreatedDirs []string `json:"created_dirs,omitempty"`
 }
 
 type unixCandidate struct {

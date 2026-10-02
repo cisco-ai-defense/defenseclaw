@@ -60,5 +60,14 @@ def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:
     assert uninstall_command_for_option(UninstallOption.DRY_RUN).args == ("uninstall", "--dry-run")
     assert uninstall_command_for_option(UninstallOption.KEEP_DATA).args == ("uninstall", "--yes")
     assert uninstall_command_for_option(UninstallOption.WIPE_DATA).args == ("uninstall", "--all", "--yes")
+    # The one row that removes everything, binaries included.
+    assert uninstall_command_for_option(UninstallOption.WIPE_ALL).args == (
+        "uninstall",
+        "--all",
+        "--binaries",
+        "--yes",
+    )
+    wipe_all = model.action_for_hotkey("e")
+    assert wipe_all is not None and wipe_all.danger and wipe_all.action_id == UninstallOption.WIPE_ALL.value
     assert "--yes" in "\n".join((*model.details, model.consequence))
     assert "dry-run" in model.actions[0].description

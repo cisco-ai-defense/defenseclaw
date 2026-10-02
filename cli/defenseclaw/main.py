@@ -187,6 +187,22 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
 
 
+def _is_audit_export(ctx: click.Context) -> bool:
+    """Return whether this is the ``audit export`` alias for the gateway command.
+
+    The gateway binary loads the configuration and opens the audit database
+    read-only itself, so the CLI must not open the store for writing first.
+    """
+    if ctx.invoked_subcommand != "audit":
+        return False
+    argv = sys.argv[1:]
+    try:
+        index = argv.index("audit")
+    except ValueError:
+        return False
+    return index + 1 < len(argv) and argv[index + 1] == "export"
+
+
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
@@ -229,6 +245,8 @@ def cli(ctx: click.Context) -> None:
     if _is_help_invocation(ctx):
         return
     if _is_offline_rulepack_validation(ctx):
+        return
+    if _is_audit_export(ctx):
         return
 
     from defenseclaw import config as cfg_mod

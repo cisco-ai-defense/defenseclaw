@@ -8,12 +8,11 @@ package connector
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// A read-only hook script or credential stayed after a Windows purge: the
-// script could not be opened for the stub write, so neither step ran.
+// A read-only hook script or credential stayed after a Windows purge. Both
+// go now, with the rest of the folder.
 func TestPurgeUserStateInRootHandlesReadOnlyFiles(t *testing.T) {
 	dataDir := t.TempDir()
 	hooks := filepath.Join(dataDir, "hooks")
@@ -40,7 +39,10 @@ func TestPurgeUserStateInRootHandlesReadOnlyFiles(t *testing.T) {
 	if _, err := os.Lstat(token); !os.IsNotExist(err) {
 		t.Fatalf("read-only credential stayed: %v", err)
 	}
-	if stub, _ := os.ReadFile(script); !strings.Contains(string(stub), "disabled tombstone") {
-		t.Fatalf("read-only hook script is not the stub: %q", stub)
+	if _, err := os.Lstat(script); !os.IsNotExist(err) {
+		t.Fatalf("read-only hook script stayed: %v", err)
+	}
+	if _, err := os.Lstat(hooks); !os.IsNotExist(err) {
+		t.Fatalf("the hooks folder stayed: %v", err)
 	}
 }

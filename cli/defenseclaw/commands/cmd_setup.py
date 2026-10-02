@@ -4168,7 +4168,7 @@ def setup_gateway(
     # succeed until then, and the gateway may be down precisely because the
     # old port was taken.
     api_port_changed = gw.api_port != previous_api_port
-    _print_gateway_summary(gw, openclaw=uses_openclaw, api_port_changed=api_port_changed)
+    _print_gateway_summary(gw, openclaw=uses_openclaw)
 
     if verify and not api_port_changed:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
@@ -14637,7 +14637,7 @@ def _prompt_env_var_name(default: str) -> str:
         return val
 
 
-def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool = False) -> None:
+def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
     click.echo()
     ux.ok("Saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -14657,9 +14657,8 @@ def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool 
     click.echo()
 
     # The setup restart step that runs after every saved change restarts a
-    # running gateway or prints the start command, so no start hint here.
-    if api_port_changed:
-        ux.subhead("The new API port takes effect when the gateway starts.")
+    # running gateway or says the change applies on the next start, so this
+    # summary carries no start or "takes effect" line of its own.
     if openclaw and not resolved:
         ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()

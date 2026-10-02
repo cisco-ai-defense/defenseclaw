@@ -5,10 +5,13 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,8 +19,10 @@ import (
 )
 
 // watcherCreatedDirsFile, in the DefenseClaw data directory, lists the
-// folders the gateway's install watcher created because they were missing
-// when it started watching them.
+// folders DefenseClaw created because they were missing: those the gateway's
+// install watcher started watching, and the parents of the agent config files
+// a connector setup wrote. Uninstall removes the ones still empty
+// (cli/defenseclaw/commands/cmd_uninstall.py _remove_created_dirs).
 const (
 	watcherCreatedDirsFile     = "watcher-created-dirs.json"
 	watcherCreatedDirsMaxBytes = 1 << 20
@@ -35,6 +40,133 @@ func RecordWatcherCreatedDirs(dataDir string, dirs []string) error {
 		return nil
 	}
 	return recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), dirs)
+}
+
+// SetupRecordingCreatedDirs runs conn.Setup and adds to the data directory's
+// list the folders below the home directory that it created for the agent
+// config files the connector owns (~/.copilot/hooks, say), so uninstall can
+// remove them again while they are empty. The list is best effort: Setup's
+// own result is what it returns.
+func SetupRecordingCreatedDirs(ctx context.Context, conn Connector, opts SetupOpts) error {
+	missing := missingConfigDirs(conn, opts)
+	err := conn.Setup(ctx, opts)
+	recordDirsNowPresent(opts.DataDir, missing)
+	return err
+}
+
+// recordDirsNowPresent adds to the data directory's list each of missing,
+// folders that did not exist before a DefenseClaw write, that is a folder
+// now. Best effort.
+func recordDirsNowPresent(dataDir string, missing []string) {
+	if strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	var created []string
+	for _, dir := range missing {
+		if info, statErr := os.Lstat(dir); statErr == nil && info.Mode().Type() == fs.ModeDir {
+			created = append(created, dir)
+		}
+	}
+	if len(created) > 0 {
+		_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
+	}
+}
+
+// prepareOpenCodePluginArtifactDestination creates the plugin folder of
+// path (~/.config/opencode/plugins) and records the folders below the home
+// it had to create, so uninstall removes them again once they are empty:
+// the folder is made before any connector Setup runs (the gateway's
+// registration snapshot), so SetupRecordingCreatedDirs never sees it
+// missing, and the plugin file is not one of the hook config paths.
+func prepareOpenCodePluginArtifactDestination(path, dataDir string) error {
+	var missing []string
+	if home := strings.TrimSpace(userHomeDir()); home != "" && filepath.IsAbs(path) {
+		missing = missingParentDirs(filepath.Clean(home), path)
+	}
+	err := createOpenCodePluginArtifactDestination(path)
+	recordDirsNowPresent(dataDir, missing)
+	return err
+}
+
+// RemovalLeavingNoNewDirs runs fn, a removal of conn's registration for a
+// target. The agent config folders below the home that fn itself created
+// and left empty go again (removing Codex's hooks made an empty ~/.codex in
+// an account where Codex never ran, and the purge then left it). When the
+// data directory did not exist, what fn put there (the disabled hook
+// scripts and locks a teardown writes so an agent's cached registration
+// stays harmless; none can be cached, as no hook script was ever there)
+// goes too.
+func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) error {
+	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
+	_, statErr := os.Lstat(dataDir)
+	dataDirMissing := strings.TrimSpace(opts.DataDir) != "" && errors.Is(statErr, fs.ErrNotExist)
+	missing := missingConfigDirs(conn, opts)
+	err := fn()
+	if dataDirMissing {
+		if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
+			if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
+				err = removeErr
+			}
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return len(missing[i]) > len(missing[j]) })
+	for _, dir := range missing {
+		_ = os.Remove(dir) // only empty folders go
+	}
+	return err
+}
+
+// missingConfigDirs returns the missing folders between the home directory
+// and each agent file conn writes, deepest first: its hook config files and
+// the agent files its Setup patches (AgentPaths: OpenCode's plugin and
+// opencode.json, say, which make ~/.config/opencode in a home where OpenCode
+// never ran). Files in the data directory are DefenseClaw's own and go with it.
+func missingConfigDirs(conn Connector, opts SetupOpts) []string {
+	home := strings.TrimSpace(userHomeDir())
+	if home == "" || conn == nil {
+		return nil
+	}
+	home = filepath.Clean(home)
+	paths := HookConfigPathsForConnector(conn, opts)
+	if provider, ok := conn.(AgentPathProvider); ok {
+		paths = append(paths, provider.AgentPaths(opts).PatchedFiles...)
+	}
+	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
+	var missing []string
+	for _, path := range uniqueNonEmptyStrings(paths) {
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		if strings.TrimSpace(opts.DataDir) != "" && (filepath.Clean(path) == dataDir || belowDir(dataDir, path)) {
+			continue
+		}
+		for _, dir := range missingParentDirs(home, path) {
+			if !slices.Contains(missing, dir) {
+				missing = append(missing, dir)
+			}
+		}
+	}
+	return missing
+}
+
+// missingParentDirs returns the missing folders between home and path,
+// deepest first.
+func missingParentDirs(home, path string) []string {
+	var missing []string
+	for dir := filepath.Dir(filepath.Clean(path)); belowDir(home, dir); dir = filepath.Dir(dir) {
+		if _, statErr := os.Lstat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+			break
+		}
+		missing = append(missing, dir)
+	}
+	return missing
+}
+
+// belowDir reports whether path is strictly inside root.
+func belowDir(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
 // recordCreatedDirs adds dirs to the created-folder list at path.

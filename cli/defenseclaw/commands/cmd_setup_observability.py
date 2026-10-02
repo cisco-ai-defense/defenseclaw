@@ -164,6 +164,14 @@ def observability() -> None:
     is_flag=True,
     help="Send OTLP without TLS (for a collector you run yourself that has no TLS)",
 )
+@click.option(
+    "--environment",
+    default=None,
+    help=(
+        "Tag all telemetry from this gateway with deployment.environment.name "
+        "(for example, to tell apart computers that share a host name)"
+    ),
+)
 @pass_ctx
 def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset prompts
     app: AppContext,
@@ -180,6 +188,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     url, method, url_path, verify_tls,
     allow_private_networks,
     plaintext,
+    environment,
 ) -> None:
     """Configure a telemetry destination.
 
@@ -192,6 +201,11 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     \b
       # Interactive (default)
       defenseclaw setup observability add splunk-enterprise
+    \b
+      # Tag this computer's telemetry (host.name comes from the OS)
+      defenseclaw setup observability add otlp --non-interactive \\
+          --endpoint 127.0.0.1:4317 --protocol grpc \\
+          --allow-private-networks --plaintext --environment lab-win2
     """
     preset = resolve_preset(preset_id.lower())
     token_source = click.get_current_context().get_parameter_source("token_value")
@@ -254,6 +268,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             token_value=token_value,
             target=None,
             dry_run=dry_run,
+            extra_mutations=_v8_environment_mutations(app.cfg.data_dir, environment),
             allow_private_networks=allow_private_networks,
             plaintext=plaintext,
         )
@@ -483,6 +498,33 @@ def _v8_authored_destinations(data_dir: str) -> list[dict[str, Any]]:
     if not isinstance(destinations, list):
         return []
     return [dict(value) for value in destinations if isinstance(value, dict)]
+
+
+def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[Any]:
+    """Mutations that set the gateway-wide deployment.environment.name tag.
+
+    host.name is reserved and always comes from the operating system, so two
+    computers with the same name (a cloned VM, for example) are told apart by
+    this tag. A legacy ``deployment.environment`` alias, when present, is kept
+    equal so the validator does not reject the pair as conflicting.
+    """
+
+    if environment is None:
+        return []
+    from defenseclaw.observability.v8_config import load_validate_v8
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation
+
+    value = environment.strip()
+    if not value:
+        raise ValueError("--environment needs a nonblank value")
+    prefix = ("observability", "resource", "attributes")
+    mutations = [V8YAMLMutation.set((*prefix, "deployment.environment.name"), value)]
+    path = config_path_for_data_dir(data_dir)
+    source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
+    attributes = ((source.get("observability") or {}).get("resource") or {}).get("attributes") or {}
+    if isinstance(attributes, dict) and "deployment.environment" in attributes:
+        mutations.append(V8YAMLMutation.set((*prefix, "deployment.environment"), value))
+    return mutations
 
 
 def _build_v8_preset_destination(

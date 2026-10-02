@@ -35,5 +35,7 @@ func sanitizedTestEnv() []string {
 		}
 		out = append(out, entry)
 	}
-	return out
+	// Rendered hooks pointed at a refused port would otherwise try to start
+	// the developer's own gateway. Tests of the cold start set it back to 1.
+	return append(out, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 }

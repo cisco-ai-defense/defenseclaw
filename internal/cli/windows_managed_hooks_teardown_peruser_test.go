@@ -207,21 +207,50 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	// is signed in, and names each one that stays with the reason.
 	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
 	originalIdentity, originalPurger := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger
+	originalBinaries := windowsManagedHooksStandaloneUserBinariesPurger
 	t.Cleanup(func() {
 		enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger = originalIdentity, originalPurger
+		windowsManagedHooksStandaloneUserBinariesPurger = originalBinaries
 	})
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
-	purged := 0
+	purged, binaries := 0, 0
 	windowsManagedHooksStandaloneUserStatePurger = func(home, sid, _ string) error {
 		if purged++; home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
 			t.Fatalf("purged %s %s", home, sid)
 		}
 		return nil
 	}
-	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
-	if purged != 1 || len(report.UserStateRemaining) != 0 {
-		t.Fatalf("purge ran %d time(s), remaining %v", purged, report.UserStateRemaining)
+	// The account's per-user binaries in %USERPROFILE%\.local\bin go after
+	// its folder.
+	windowsManagedHooksStandaloneUserBinariesPurger = func(home, sid string) ([]string, error) {
+		if binaries++; binaries != purged || home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("binaries purge %d for %s %s after %d state purge(s)", binaries, home, sid, purged)
+		}
+		return []string{filepath.Join(home, ".local", "bin", "defenseclaw.cmd")}, nil
 	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if purged != 1 || binaries != 1 || len(report.UserStateRemaining) != 0 {
+		t.Fatalf("purge ran %d/%d time(s), remaining %v", purged, binaries, report.UserStateRemaining)
+	}
+	// The report names each account whose data went.
+	if len(report.UserStatePurged) != 1 || !strings.HasSuffix(report.UserStatePurged[0], `\.defenseclaw`) {
+		t.Fatalf("purged accounts = %v", report.UserStatePurged)
+	}
+	if body, _ := json.Marshal(report); !strings.Contains(string(body), `"user_state_purged":[`) {
+		t.Fatalf("report JSON %s lacks user_state_purged", body)
+	}
+	// A binaries purge that fails names the account as not purged.
+	windowsManagedHooksStandaloneUserBinariesPurger = func(string, string) ([]string, error) {
+		return nil, errors.New("the user Path entry stays: its registry hive is not loaded while it is signed out")
+	}
+	purged = 0
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.UserStatePurged) != 0 || len(report.UserStateRemaining) != 1 ||
+		!strings.Contains(report.UserStateRemaining[0], "registry hive is not loaded") {
+		t.Fatalf("failed binaries purge: purged %v remaining %v", report.UserStatePurged, report.UserStateRemaining)
+	}
+	windowsManagedHooksStandaloneUserBinariesPurger = func(string, string) ([]string, error) { return nil, nil }
+	purged = 1
 	// An account whose registrations stayed keeps the folder with its
 	// connector_backups.
 	pendingSID = userCleanupSIDA

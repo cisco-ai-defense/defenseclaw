@@ -144,6 +144,37 @@ def test_doctor_config_load_failure_replaces_stale_green_cache(
     assert saved["failed"] >= 2
 
 
+def test_doctor_on_an_uninitialized_install_points_to_init_only(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # BENIGN-MAC-05: with no config.yaml Doctor ran every check against the
+    # built-in defaults and reported an OpenClaw connector, a stopped gateway
+    # and --fix hints instead of saying that init never ran.
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+
+    result = CliRunner().invoke(cli, ["doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "DefenseClaw is not initialized" in result.output
+    assert "defenseclaw init" in result.output
+    for leftover in ("openclaw", "OpenClaw", "doctor --fix", "Connectors", "Services"):
+        assert leftover not in result.output
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert [(c["label"], c["status"]) for c in payload["checks"]] == [("Config file", "fail")]
+    assert payload["checks"][0]["remediation"] == "defenseclaw init"
+    assert json.loads((data_dir / "doctor_cache.json").read_text())["failed"] == 1
+
+
 def test_non_doctor_command_keeps_store_initialization() -> None:
     """The Doctor exemption must not weaken ordinary command startup."""
 

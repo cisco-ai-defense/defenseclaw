@@ -851,6 +851,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         cli_settings: str | None = None,
         remote_settings_path: str | None = None,
         managed_enterprise: bool = False,
+        codex_per_user: bool = False,
     ):
         return validate_windows_hook_registration(
             connector=connector,
@@ -865,6 +866,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             claude_cli_settings=cli_settings,
             claude_remote_settings_path=remote_settings_path,
             managed_enterprise=managed_enterprise,
+            codex_per_user=codex_per_user,
         )
 
     def _contract_check(self, connector: str, config: Path) -> tuple[_DoctorResult, str]:
@@ -2401,6 +2403,28 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("source-trusted from managed_config.toml", check.detail)
         self.assertIn(str(requirements), check.detail)
+
+    def test_codex_per_user_managed_layer_registration_is_stale(self) -> None:
+        # WIN2-U2-09: current Codex ignores CODEX_HOME\managed_config.toml on
+        # Windows, so a per-user install whose hooks still live there (an
+        # earlier release) is unprotected and must not be reported healthy.
+        runtime = self._runtime()
+        config = self._config(
+            "codex",
+            f'"{runtime}" hook --connector codex',
+            codex_managed=True,
+            codex_contract="codex-hooks-v3",
+        )
+        self._lock("codex", config, contract="codex-hooks-v3")
+        requirements = self.root / "ProgramData" / "OpenAI" / "Codex" / "requirements.toml"
+        self.policy_inspector_mock.return_value = (True, str(requirements))
+
+        check = self._validate("codex", config, codex_per_user=True)
+
+        self.assertFalse(check.healthy)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("managed_config.toml", check.detail)
+        self.assertIn("defenseclaw setup codex", check.detail)
 
     def test_codex_cloud_effective_policy_uses_protected_setup_binary(self) -> None:
         runtime = self._runtime()

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 )
 
-func prepareOpenCodePluginArtifactDestination(path string) error {
+// createOpenCodePluginArtifactDestination makes the plugin folder of path
+// and checks the plugin target (see prepareOpenCodePluginArtifactDestination).
+func createOpenCodePluginArtifactDestination(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

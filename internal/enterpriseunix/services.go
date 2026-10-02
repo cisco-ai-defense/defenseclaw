@@ -174,6 +174,12 @@ func (m *systemdManager) DefinitionPath(unit Unit, channel string) string {
 	return filepath.Join("/etc/systemd/system", unit.Name)
 }
 
+// systemdTimerStampPath is where systemd keeps a Persistent= timer's last
+// trigger time; it stays after the timer unit is removed.
+func systemdTimerStampPath(timer string) string {
+	return filepath.Join("/var/lib/systemd/timers", "stamp-"+timer)
+}
+
 var systemdVersionPattern = regexp.MustCompile(`(?m)^systemd\s+(\d+)`)
 
 func (m *systemdManager) Version(ctx context.Context) int {

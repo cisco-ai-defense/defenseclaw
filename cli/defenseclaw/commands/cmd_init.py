@@ -1478,8 +1478,7 @@ def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:
         StepResult(
             "Agent Selection",
             "warn",
-            f"left out {', '.join(sorted(problems))}: no usable agent executable was found ({details}); "
-            "fix that, then add each one with defenseclaw setup <agent>",
+            f"left out {', '.join(sorted(problems))}, which setup cannot select ({details})",
             f"defenseclaw setup {first}",
         )
     )
@@ -2208,8 +2207,12 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
     if platform_support.host_os() in {"linux", "darwin"}:
-        # Nothing restarts a per-user gateway on Linux or macOS (RHEL-U3-06).
-        renderer.echo("  After a reboot or sign-out, start the gateway again: defenseclaw-gateway start")
+        # No service unit restarts a per-user gateway on Linux or macOS; the
+        # agent shell hooks start it on their next call (RHEL-U3-06).
+        renderer.echo(
+            "  After a reboot, agent hooks start the gateway on their next call;"
+            " after defenseclaw-gateway stop, run: defenseclaw-gateway start"
+        )
     if _sandboxes_possible():
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():

@@ -208,7 +208,7 @@ func capturePluginArtifactRegistrationSnapshot(
 		return nil, errors.New("connector does not own a managed plugin artifact")
 	}
 	pluginPath := conn.configPath(opts)
-	if err := prepareOpenCodePluginArtifactDestination(pluginPath); err != nil {
+	if err := prepareOpenCodePluginArtifactDestination(pluginPath, opts.DataDir); err != nil {
 		return nil, fmt.Errorf("prepare %s plugin destination: %w", conn.name, err)
 	}
 	backupPath := managedFileBackupPath(opts.DataDir, conn.name, "config")
@@ -1597,7 +1597,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		return err
 	}
 	path := c.configPath(opts)
-	if err := prepareOpenCodePluginArtifactDestination(path); err != nil {
+	if err := prepareOpenCodePluginArtifactDestination(path, opts.DataDir); err != nil {
 		return fmt.Errorf("%s prepare plugin destination: %w", c.name, err)
 	}
 	backupPath := managedFileBackupPath(opts.DataDir, c.name, "config")
@@ -1781,6 +1781,9 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	}
 	if c.name == "openhands" && runtime.GOOS == "darwin" {
 		return c.teardownOpenHandsWithToken(ctx, opts)
+	}
+	if c.name == "copilot" {
+		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 	}
 	return c.teardown(ctx, opts, "")
 }
@@ -2450,6 +2453,7 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		if err := validateCopilotHookPolicy(opts, path); err != nil {
 			return err
 		}
+		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 	}
 	logicalName := c.managedBackupLogicalName()
 	if err := captureManagedFileBackup(opts.DataDir, c.name, logicalName, path); err != nil {

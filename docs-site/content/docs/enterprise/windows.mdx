@@ -229,7 +229,7 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer certificates (SHA-256 thumbprints). Applies to a signed Setup. |
 | `JSON=1` | Print the result document on standard output |
 | `NOSTART=1` | Install or update with the services stopped and disabled. A later `/repair` starts them. |
-| `PURGE=1` | With `/uninstall`, also remove the state under `C:\ProgramData\Cisco\DefenseClaw` and each enrolled account's `%USERPROFILE%\.defenseclaw` |
+| `PURGE=1` | With `/uninstall`, also remove the state under `C:\ProgramData\Cisco\DefenseClaw`, each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
@@ -660,11 +660,16 @@ in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 folder, including that account's per-user hook tokens, whether or not the
 account is signed in. Some of its subfolders grant only the account and
 SYSTEM, not Administrators, so this also needs the uninstall to run as
-LocalSystem. As on Linux and macOS, two things stay: each DefenseClaw hook
-script, replaced by a stub that exits without doing anything, because an
-agent that is still running may call the hook path it loaded; and the
-account's own hooks that the foreign-hook policy moved aside
-(`foreign-hooks-backup`). The `per_user_state_remaining` warning names each
+LocalSystem. As on Linux and macOS, the whole folder goes: the hook
+scripts, and the account's own hooks that the foreign-hook policy moved
+aside (`foreign-hooks-backup`; copy it first if the account wants them
+back). The purge also removes the DefenseClaw launchers, binaries, the `uv`
+the per-user installer added (when unchanged) and its bookkeeping from
+`%USERPROFILE%\.local\bin`. When that leaves the folder empty, the folder
+goes, and so does its entry in the account's user `Path`; a folder other
+tools still use keeps its entry. A signed-out account's registry hive is not
+loaded, so its `Path` entry stays and the result says so. The result names
+each account whose data the purge removed. The `per_user_state_remaining` warning names each
 folder the purge could not remove and why: the uninstall did not run as
 LocalSystem, a file in it could not be removed, or the account's roaming or
 container profile is not on the computer while it is signed out. Remove

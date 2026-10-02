@@ -1269,6 +1269,18 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		!strings.Contains(purge.Warnings[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
 		t.Fatalf("purge warnings = %+v", purge.Warnings)
 	}
+	// A purge names each account whose data and binaries went.
+	gone, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["bob (` + sid + `): C:\\Users\\bob\\.defenseclaw"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(done, &windowsEnterpriseLifecycleOptions{purge: true}, gone, windowsEnterpriseStandaloneRun{})
+	if len(done.Warnings) != 0 || len(done.Changes) != 1 ||
+		!strings.Contains(done.Changes[0], `removed all DefenseClaw per-user data of bob (`+sid+`): C:\Users\bob\.defenseclaw`) ||
+		!strings.Contains(done.Changes[0], `.local\bin`) {
+		t.Fatalf("purged accounts: changes %+v warnings %+v", done.Changes, done.Warnings)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}

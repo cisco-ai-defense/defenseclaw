@@ -1166,6 +1166,9 @@ def test_modal_toggle_and_uninstall_state_match_go_args_and_copy() -> None:
     assert uninstall_args_for_option("dry-run") == (("uninstall", "--dry-run"), "uninstall dry-run")
     assert uninstall_intent("wipe-data").args == ("uninstall", "--all", "--yes")
     assert uninstall_intent("wipe-data").category == "destructive"
+    assert modal.select_by_hotkey("e") is True
+    assert modal.selected() == "wipe-all"
+    assert uninstall_intent("wipe-all").args == ("uninstall", "--all", "--binaries", "--yes")
 
 
 def test_setup_panel_credentials_restart_and_config_save_state() -> None:

@@ -38,8 +38,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 46801,
-      "sha256": "39f8e70d82b8b04eab33c5b4b95e346801f1498248258c2a06d70181ae306af2"
+      "size": 50073,
+      "sha256": "146288590163e338408a834ee44572603674016d25e14570539b04d143b11be9"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",

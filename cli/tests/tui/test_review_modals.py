@@ -46,6 +46,26 @@ async def test_uninstall_wipe_shows_its_second_confirmation_at_80x24() -> None:
     assert results == []
 
 
+async def test_uninstall_everything_row_fits_and_confirms_at_80x24() -> None:
+    results: list[object] = []
+
+    class Harness(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(UninstallScreen(), results.append)
+
+    app = Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press("e", "enter")
+        await pilot.pause()
+        text = screen_text(app)
+        assert "press enter / click again to confirm" in text
+        assert "Uninstall everything" in text and "binaries" in text
+        assert all(len(line.rstrip()) <= 80 for line in text.splitlines())
+        assert any(line.rstrip().endswith("╮") for line in text.splitlines()[:3])
+    assert results == []
+
+
 async def test_all_three_toasts_are_visible() -> None:
     from defenseclaw.tui.widgets.toasts import ToastManager, ToastStack
 

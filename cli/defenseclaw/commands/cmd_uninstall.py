@@ -67,7 +67,8 @@ from defenseclaw.commands import windows_native_uninstall
 # is the conservative fallback path used when the gateway binary is too
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
-_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
+# .uv holds the Python the installer's venv runs on (scripts/install.sh).
+_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv", ".uv")
 # The installers (scripts/install.sh, scripts/install.ps1) write this record
 # beside the launchers when they install uv because it was missing: one
 # "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
@@ -76,6 +77,11 @@ _UV_RECORD = "defenseclaw-uv.sha256"
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
+# The folders DefenseClaw created because they were missing (the gateway's
+# install watcher, connector setup); see the Go connector package's
+# watcher_created_dirs.go. Uninstall removes the ones still empty.
+_CREATED_DIRS_RECORD = "watcher-created-dirs.json"
+_CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
@@ -170,6 +176,20 @@ class UninstallPlan:
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
     setup_leftovers: tuple[str, ...] = ()
+    # observability_teardown removes the local observability stack
+    # (`defenseclaw setup local-observability`) and its data volumes before
+    # its Compose files in data_dir go (uninstall --all only).
+    observability_teardown: bool = False
+    # uv_leftovers are uv's download cache and the Python it fetched, which
+    # installers before 1.0.2 left outside data_dir (~/.cache/uv,
+    # ~/.local/share/uv/python; %LOCALAPPDATA%\uv\cache, %APPDATA%\uv\python)
+    # when they installed uv (--all --binaries only, and only when that uv
+    # goes too and no other uv is on PATH).
+    uv_leftovers: tuple[str, ...] = ()
+    # mac_app is DefenseClawMac.app when it is installed (macOS). Uninstall
+    # does not remove the app, its login item or its background service; the
+    # plan says how to.
+    mac_app: str = ""
 
 
 @dataclass(frozen=True)
@@ -237,6 +257,7 @@ def uninstall_cmd(
     """Uninstall DefenseClaw (reversibly by default)."""
     if _dispatch_native_windows_uninstall(
         wipe_data=wipe_data,
+        binaries=binaries,
         dry_run=dry_run,
         yes=yes,
     ):
@@ -268,9 +289,16 @@ def _dispatch_native_windows_uninstall(
     wipe_data: bool,
     dry_run: bool,
     yes: bool,
+    binaries: bool = False,
     platform_name: str | None = None,
 ) -> bool:
-    """Prefer authenticated native Setup before consulting generic markers."""
+    """Prefer authenticated native Setup before consulting generic markers.
+
+    Setup removes its own program files either way. With binaries, what an
+    earlier script install left in %USERPROFILE%\\.local\\bin (and its user
+    Path entry) and the folders a replaced Setup left go too, once Setup is
+    done.
+    """
 
     try:
         request = windows_native_uninstall.prepare_native_windows_uninstall(
@@ -289,6 +317,11 @@ def _dispatch_native_windows_uninstall(
         click.echo(f"  {ux.dim('→')} user data will be deleted")
     else:
         click.echo(f"  {ux.dim('→')} user data will be preserved")
+    if binaries:
+        click.echo(
+            f"  {ux.dim('→')} after Setup: DefenseClaw files left in %USERPROFILE%\\.local\\bin "
+            "and its user Path entry are removed too"
+        )
     click.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
 
     if dry_run:
@@ -304,6 +337,8 @@ def _dispatch_native_windows_uninstall(
         raise click.ClickException(str(exc)) from exc
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
+        if binaries:
+            _remove_script_install_after_native_setup(request.platform_name)
         return True
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
@@ -313,6 +348,41 @@ def _dispatch_native_windows_uninstall(
         raise SystemExit(outcome.returncode)
     ux.err(f"Authenticated native Setup exited with Windows code {outcome.returncode}.")
     raise SystemExit(outcome.returncode)
+
+
+def _remove_script_install_after_native_setup(platform_name: str) -> None:
+    """Remove what install.ps1 left beside a native Setup install (--binaries).
+
+    The launchers go only when the plan validation proves them DefenseClaw's
+    (the installer's defenseclaw.cmd shim); a refusal is reported with what
+    stays, and the uninstall exits non-zero.
+    """
+    data_dir = str(config_module.default_data_path())
+    install_root, binary_targets = _owned_binary_targets(platform_name)
+    binary_targets += _installer_uv_targets(install_root, platform_name)
+    plan = UninstallPlan(
+        platform_name=platform_name,
+        install_root=install_root,
+        data_dir=data_dir,
+        managed_venv=os.path.join(data_dir, ".venv"),
+        gateway_path="",
+        binary_targets=binary_targets,
+        remove_binaries=True,
+    )
+    try:
+        if any(os.path.lexists(path) for path in binary_targets):
+            _remove_binaries(plan)
+        else:
+            _remove_install_bookkeeping(install_root, data_dir)
+            if _install_root_empties(plan):
+                with contextlib.suppress(OSError):
+                    os.rmdir(install_root)
+                _remove_user_path_entry(plan)
+        _remove_setup_leftovers(_windows_setup_leftovers(platform_name))
+    except (OSError, click.ClickException) as exc:
+        detail = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
+        ux.err(f"DefenseClaw files in {install_root} were not all removed: {detail}")
+        raise SystemExit(1) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +572,36 @@ def _build_plan(
         binary_targets=binary_targets,
         data_bound_launchers=data_bound_launchers,
         setup_leftovers=_windows_setup_leftovers(platform_name) if binaries else (),
+        observability_teardown=(
+            wipe_data and not preserve_data_entries and _local_observability_stack_file(data_dir) != ""
+        ),
+        mac_app=_installed_mac_app(platform_name) if wipe_data and binaries else "",
+        uv_leftovers=(
+            _installer_uv_leftovers(install_root, binary_targets, data_dir, platform_name)
+            if wipe_data and binaries
+            else ()
+        ),
     )
+
+
+def _local_observability_stack_file(data_dir: str) -> str:
+    """Return the Compose file of the local observability stack in data_dir."""
+    path = os.path.join(data_dir, "observability-stack", "docker-compose.yml")
+    return path if os.path.isfile(path) and not os.path.islink(path) else ""
+
+
+# Where DefenseClawMac.app is installed (packaging/macos/app).
+_MAC_APP_NAME = "DefenseClawMac.app"
+
+
+def _installed_mac_app(platform_name: str) -> str:
+    if platform_name != "darwin":
+        return ""
+    for parent in ("/Applications", os.path.expanduser("~/Applications")):
+        path = os.path.join(parent, _MAC_APP_NAME)
+        if os.path.isdir(path):
+            return path
+    return ""
 
 
 # DefenseClaw Setup keeps its hook launcher and transaction log under
@@ -640,6 +739,252 @@ def _installer_uv_targets(install_root: str, platform_name: str) -> tuple[str, .
         targets.append(path)
     targets.append(record)
     return tuple(targets)
+
+
+def _uv_default_dirs(platform_name: str) -> tuple[str, str]:
+    """Return uv's default cache folder and managed-Python folder."""
+    if platform_name == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        roaming = os.environ.get("APPDATA", "")
+        return (
+            os.path.join(local, "uv", "cache") if os.path.isabs(local) else "",
+            os.path.join(roaming, "uv", "python") if os.path.isabs(roaming) else "",
+        )
+    home = os.path.expanduser("~")
+    cache = os.environ.get("XDG_CACHE_HOME", "")
+    data = os.environ.get("XDG_DATA_HOME", "")
+    cache = cache if os.path.isabs(cache) else os.path.join(home, ".cache")
+    data = data if os.path.isabs(data) else os.path.join(home, ".local", "share")
+    return os.path.join(cache, "uv"), os.path.join(data, "uv", "python")
+
+
+def _venv_base_python_dir(data_dir: str, python_root: str) -> str:
+    """Return the folder in python_root that the data dir's venv runs on, or ""."""
+    try:
+        with open(os.path.join(data_dir, ".venv", "pyvenv.cfg"), encoding="utf-8") as stream:
+            lines = stream.read(16_384).splitlines()
+    except (OSError, UnicodeError):
+        return ""
+    home = next(
+        (value.strip() for key, _, value in (line.partition("=") for line in lines) if key.strip() == "home"),
+        "",
+    )
+    if not home or not os.path.isabs(home):
+        return ""
+    root = _normalized(os.path.realpath(python_root))
+    base = _normalized(os.path.realpath(home))
+    try:
+        if os.path.commonpath((root, base)) != root or base == root:
+            return ""
+    except ValueError:
+        return ""
+    first = os.path.relpath(base, root).split(os.sep)[0]
+    return os.path.join(python_root, first)
+
+
+def _installer_uv_leftovers(
+    install_root: str, binary_targets: tuple[str, ...], data_dir: str, platform_name: str
+) -> tuple[str, ...]:
+    """Name the uv cache and Python an older installer left for DefenseClaw.
+
+    Only when uninstall removes the uv the installer installed (its digest
+    still matches), no other uv is on PATH, and uv's folders are the
+    defaults. The Python folder goes only when it holds nothing but the
+    Python the data dir's venv runs on (and uv's links and bookkeeping).
+    """
+    uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
+    if not any(os.path.basename(target) == uv_name for target in binary_targets):
+        return ()
+    root = _normalized(install_root)
+    for directory in os.get_exec_path():
+        if directory and _normalized(directory) != root and os.path.isfile(os.path.join(directory, uv_name)):
+            return ()
+    cache, python_root = _uv_default_dirs(platform_name)
+    leftovers: list[str] = []
+    if cache and not os.environ.get("UV_CACHE_DIR") and _plain_owned_dir(cache):
+        leftovers.append(cache)
+    if python_root and not os.environ.get("UV_PYTHON_INSTALL_DIR") and _plain_owned_dir(python_root):
+        base = _venv_base_python_dir(data_dir, python_root)
+        if base and _only_python(python_root, base):
+            leftovers.append(python_root)
+    return tuple(leftovers)
+
+
+def _plain_owned_dir(path: str) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(path):
+        return False
+    return not hasattr(os, "getuid") or info.st_uid == os.getuid()
+
+
+def _only_python(python_root: str, base: str) -> bool:
+    """Report whether python_root holds only base, links to it and uv's dot files."""
+    wanted = _normalized(os.path.realpath(base))
+    try:
+        entries = list(os.scandir(python_root))
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if _normalized(entry.path) == _normalized(base) and not _is_reparse_path(entry.path):
+            continue
+        if _is_reparse_path(entry.path) and _normalized(os.path.realpath(entry.path)) == wanted:
+            continue
+        return False
+    return True
+
+
+def _running_base_python() -> str:
+    return os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
+
+
+def _holds_running_python(path: str) -> bool:
+    """Report whether path holds the Python this CLI runs on (Windows only matters)."""
+    if sys.platform != "win32":
+        return False
+    return _below(os.path.realpath(path), _running_base_python())
+
+
+def _deferred_interpreter_dirs(plan: UninstallPlan, base_python: str) -> list[str]:
+    """Name the folders holding base_python that the deferred helper removes after it exits.
+
+    The helper runs on base_python, so it cannot remove them while it runs:
+    the installer's <data_dir>/.uv (scripts/install.ps1), or a uv Python
+    folder the plan removes (uv_leftovers).
+    """
+    candidates = []
+    if plan.remove_data_dir and not plan.preserve_data_entries:
+        candidates.append(os.path.join(plan.data_dir, ".uv"))
+    candidates.extend(plan.uv_leftovers)
+    return [path for path in candidates if os.path.isdir(path) and _below(os.path.realpath(path), base_python)]
+
+
+def _remove_uv_leftovers(paths: tuple[str, ...]) -> None:
+    """Remove the uv folders the plan names, then their parents left empty."""
+    for path in paths:
+        try:
+            _remove_tree_no_follow(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
+        _remove_empty_parents(path)
+
+
+def _remove_tree_no_follow(path: str) -> None:
+    """Remove a folder tree; links and junctions inside go without being followed."""
+    if _is_reparse_path(path):
+        raise OSError(f"refusing link or reparse point {path}")
+    with os.scandir(path) as entries:
+        children = list(entries)
+    for entry in children:
+        if _is_reparse_path(entry.path):
+            if entry.is_dir(follow_symlinks=False) or (sys.platform == "win32" and os.path.isdir(entry.path)):
+                os.rmdir(entry.path)
+            else:
+                os.unlink(entry.path)
+        elif entry.is_dir(follow_symlinks=False):
+            _remove_tree_no_follow(entry.path)
+        else:
+            os.unlink(entry.path)
+    os.rmdir(path)
+
+
+def _remove_empty_parents(path: str) -> None:
+    """Remove the parents of path that are empty now, up to the home folder."""
+    home = _normalized(os.path.expanduser("~"))
+    parent = os.path.dirname(os.path.abspath(path))
+    while parent and _normalized(parent) != home and os.path.dirname(parent) != parent:
+        try:
+            if os.path.commonpath((home, _normalized(parent))) != home:
+                return
+            os.rmdir(parent)
+        except (OSError, ValueError):
+            return
+        parent = os.path.dirname(parent)
+
+
+def _remove_created_dirs(data_dir: str) -> None:
+    """Remove the folders DefenseClaw created in the home folder that are still empty.
+
+    The gateway records them (_CREATED_DIRS_RECORD): the folders its install
+    watcher created to watch, and the parents of the agent config files a
+    connector setup wrote. Deepest first, each goes only while it is an empty
+    real folder reached through real folders from the home folder; one with
+    content stays, and so does its record.
+    """
+    record = os.path.join(data_dir, _CREATED_DIRS_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CREATED_DIRS_RECORD_MAX_BYTES:
+            return
+        with open(record, encoding="utf-8") as stream:
+            dirs = json.load(stream).get("dirs")
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(dirs, list):
+        return
+    home = os.path.abspath(os.path.expanduser("~"))
+    kept: list[str] = []
+    removed: list[str] = []
+    for path in sorted({d for d in dirs if isinstance(d, str)}, key=len, reverse=True):
+        if not os.path.isabs(path) or not _below(home, path):
+            kept.append(path)
+            continue
+        if not _real_dir_chain(home, path):
+            continue
+        try:
+            os.rmdir(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            kept.append(path)
+            continue
+        removed.append(path)
+    try:
+        if kept:
+            with open(record, "w", encoding="utf-8") as stream:
+                json.dump({"dirs": sorted(kept)}, stream)
+                stream.write("\n")
+        else:
+            os.unlink(record)
+    except OSError:
+        pass
+    if removed:
+        ux.ok(f"removed the empty folders DefenseClaw created: {', '.join(sorted(removed))}")
+
+
+def _below(root: str, path: str) -> bool:
+    root = _normalized(root)
+    candidate = _normalized(path)
+    try:
+        return candidate != root and os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        return False
+
+
+def _real_dir_chain(root: str, path: str) -> bool:
+    """Report whether path and each folder up to root is a real folder."""
+    root = _normalized(root)
+    current = os.path.abspath(path)
+    while _normalized(current) != root:
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(current):
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return True
 
 
 def _sha256_file(path: str) -> str:
@@ -880,6 +1225,13 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
                 click.echo(f"      {ux.dim('·')} {target}")
         for path in plan.setup_leftovers:
             click.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
+        for path in plan.uv_leftovers:
+            click.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
+        if plan.platform_name == "win32":
+            click.echo(
+                f"      {ux.dim('·')} the {plan.install_root} entry in your user Path, "
+                "once nothing else is left in that folder"
+            )
     elif plan.remove_data_dir:
         # The launchers into the data dir stop working with it, so they go
         # too; the rest keep working and stay until --binaries.
@@ -900,8 +1252,19 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
                 f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
                 f"in {plan.install_root} (add --binaries to remove them too)"
             )
+    if plan.observability_teardown:
+        click.echo(
+            f"  • {ux.bold('local observability:')} its containers and data volumes go (docker compose down --volumes)"
+        )
     if _requires_deferred_cleanup(plan):
         click.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
+    if plan.mac_app:
+        # Not removed here: the app owns its login item and background
+        # service, which it unregisters itself.
+        click.echo(
+            f"  • {ux.bold('kept:')}                {plan.mac_app}: quit it, turn off its login item "
+            "(System Settings > General > Login Items), then move it to the Trash"
+        )
     click.echo()
 
 
@@ -936,6 +1299,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+    if plan.stop_gateway and plan.data_dir:
+        # The gateway is stopped, so its watcher no longer uses them.
+        _remove_created_dirs(plan.data_dir)
     if "copilot" in plan.connectors or plan.remove_data_dir:
         _remove_orphan_copilot_plugin()
     if plan.remove_plugin and "openclaw" in plan.connectors:
@@ -947,6 +1313,10 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.setup_leftovers:
         # After connector teardown, so no agent hook still runs the launcher.
         run_phase("Setup leftovers removal", lambda: _remove_setup_leftovers(plan.setup_leftovers))
+    if plan.observability_teardown:
+        # Before data removal: Compose needs the stack's files in data_dir.
+        # A stack Docker cannot reach stays, with the command that removes it.
+        _local_observability_teardown(plan.data_dir)
     deferred = _requires_deferred_cleanup(plan)
     if deferred:
         status: list[str] = []
@@ -976,6 +1346,18 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         _remove_empty_plugin_cache()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
+    elif plan.remove_binaries:
+        # The helper removes the launchers once this CLI exits; the
+        # installer's bookkeeping is not in use, so it goes now, and so does
+        # the Path entry of a folder the helper leaves empty.
+        _remove_install_bookkeeping(plan.install_root, plan.data_dir)
+        if _install_root_empties(plan):
+            _remove_user_path_entry(plan)
+    if plan.uv_leftovers:
+        # Last: on Linux and macOS this CLI may run on the Python that goes.
+        # On Windows that one is in use until the deferred helper exits,
+        # which removes it then (_deferred_interpreter_dirs).
+        _remove_uv_leftovers(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
@@ -1309,11 +1691,21 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
     """Start the validated standalone helper and wait for its ready signal."""
     _validate_plan(plan)
     base_python = os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or ""))
+    interpreter_dirs = _deferred_interpreter_dirs(plan, base_python) if base_python else []
+    # The installer's Python is in <data_dir>\.uv (install.ps1); any other
+    # base Python inside the data dir is not trusted to run the helper.
+    uv_dir = os.path.join(plan.data_dir, ".uv")
     if (
         not base_python
         or not os.path.isfile(base_python)
         or _is_reparse_path(base_python)
-        or _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+        or (
+            _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+            and not (
+                _normalized(base_python).startswith(_normalized(uv_dir) + os.sep)
+                and not _is_reparse_path(uv_dir)
+            )
+        )
     ):
         raise click.ClickException("no trusted base Python is available for deferred cleanup")
 
@@ -1340,6 +1732,9 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
             ],
             "binary_targets": list(plan.binary_targets if plan.remove_binaries else plan.data_bound_launchers),
             "remove_data_dir": plan.remove_data_dir,
+            "remove_empty_install_root": plan.remove_binaries,
+            # The folders holding the helper's own Python: they go once it exits.
+            "interpreter_dirs": interpreter_dirs,
             "ready_path": ready_path,
             "status_path": status_path,
         }
@@ -2064,6 +2459,19 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
         ux.ok(f"{deferred_shim} is removed right after this command exits")
 
     _remove_install_bookkeeping(plan.install_root, plan.data_dir)
+    if plan.platform_name == "win32" and _install_root_empties(plan):
+        with contextlib.suppress(OSError):
+            os.rmdir(plan.install_root)
+        _remove_user_path_entry(plan)
+    elif plan.platform_name != "win32":
+        # An empty ~/.local/bin goes too, and so does ~/.local when that
+        # leaves it empty.
+        try:
+            if not os.listdir(plan.install_root):
+                os.rmdir(plan.install_root)
+                _remove_empty_parents(plan.install_root)
+        except OSError:
+            pass
 
     # A pip-installed CLI is outside this plan; we don't shell out to pip
     # because we can't be sure which environment was used. Mention it only
@@ -2130,6 +2538,120 @@ def _remove_install_bookkeeping(install_root: str, data_dir: str = "") -> None:
             ux.warn(f"could not remove {path}: {exc}")
             continue
         ux.ok(f"removed {path}")
+
+
+def _install_root_empties(plan: UninstallPlan) -> bool:
+    """Report whether the install root holds nothing but what this plan removes.
+
+    install.ps1 added the folder to the user Path for DefenseClaw; once
+    nothing else is in it, the entry goes. A folder other tools still use
+    keeps its entry.
+    """
+    try:
+        names = os.listdir(plan.install_root)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    owned = {os.path.basename(path).lower() for path in plan.binary_targets}
+    owned.update(name.lower() for name in _INSTALL_BOOKKEEPING)
+    return all(name.lower() in owned for name in names)
+
+
+def _path_without_entry(raw: str, directory: str, expand: Callable[[str], str]) -> str:
+    """Return the Path value raw without its entries naming directory.
+
+    The other entries, their order and their unexpanded %VAR% text stay. An
+    entry names directory when it does after expand (and without quotes or a
+    trailing backslash), compared without case as Windows does.
+    """
+    wanted = directory.rstrip("\\/").lower()
+    kept = []
+    for entry in raw.split(";"):
+        candidate = expand(entry.strip().strip('"')).rstrip("\\/").lower() if entry.strip() else ""
+        if candidate and candidate == wanted:
+            continue
+        kept.append(entry)
+    return ";".join(kept)
+
+
+def _remove_user_path_entry(plan: UninstallPlan) -> None:
+    """Remove the install root from the user Path install.ps1 added it to (Windows)."""
+    if plan.platform_name != "win32" or sys.platform != "win32":
+        return
+    try:
+        changed = _edit_windows_user_path(plan.install_root)
+    except OSError as exc:
+        ux.warn(f"could not remove {plan.install_root} from your user Path: {exc}; remove it in Environment Variables")
+        return
+    if changed:
+        ux.ok(f"removed {plan.install_root} from your user Path (new terminals get the change)")
+
+
+def _edit_windows_user_path(directory: str) -> bool:
+    import ctypes
+    import winreg
+
+    access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, access) as key:
+        try:
+            raw, kind = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return False
+        if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) or not isinstance(raw, str):
+            return False
+        # winreg returns REG_EXPAND_SZ unexpanded; writing it back with its
+        # own kind keeps the %VAR% entries.
+        value = _path_without_entry(raw, directory, winreg.ExpandEnvironmentStrings)
+        if value == raw:
+            return False
+        winreg.SetValueEx(key, "Path", 0, kind, value)
+    # Tell Explorer, so terminals opened from now on get the new Path.
+    result = ctypes.c_size_t()
+    ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 2, 5000, ctypes.byref(result))
+    return True
+
+
+def _local_observability_teardown(data_dir: str) -> None:
+    """Remove the local observability stack's containers and data volumes.
+
+    Only when Docker is installed and holds the stack: a host that never ran
+    `defenseclaw setup local-observability` is not touched. A stack Docker
+    cannot reach stays, with the command that removes it.
+    """
+    compose_file = _local_observability_stack_file(data_dir)
+    if not compose_file or not shutil.which("docker"):
+        return
+    try:
+        from defenseclaw.observability import local_stack
+    except Exception:  # noqa: BLE001 - a broken bundle leaves nothing to drive.
+        return
+    manual = f"docker compose -p {local_stack.COMPOSE_PROJECT} down --volumes"
+    try:
+        controller = local_stack.LocalStackController(os.path.dirname(compose_file))
+        if not _local_observability_present(controller, local_stack.COMPOSE_PROJECT):
+            return
+        controller.reset(confirmed=True)
+    except Exception as exc:  # noqa: BLE001 - reported, the uninstall goes on.
+        ux.warn(f"the local observability stack and its data volumes stay: {exc}; remove them with: {manual}")
+        return
+    ux.ok("removed the local observability stack and its data volumes")
+
+
+def _local_observability_present(controller, project: str) -> bool:
+    """Report whether Docker holds a container or volume of the stack."""
+    label = f"label=com.docker.compose.project={project}"
+    for argv in (
+        [controller.docker_path, "ps", "--all", "--quiet", "--filter", label],
+        [controller.docker_path, "volume", "ls", "--quiet", "--filter", label],
+    ):
+        result = controller.runner.run(argv, timeout=15, env=controller.environment)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            raise RuntimeError(f"Docker did not answer ({detail[0] if detail else f'exit {result.returncode}'})")
+        if result.stdout.strip():
+            return True
+    return False
 
 
 def _expand(p: str) -> str:

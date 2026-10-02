@@ -1166,6 +1166,42 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _doctor_config_present(cfg) -> bool:
+    from defenseclaw.config import config_path_for_data_dir
+
+    return os.path.isfile(str(config_path_for_data_dir(getattr(cfg, "data_dir", None))))
+
+
+def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool) -> None:
+    """Render the whole Doctor result for an install that was never initialized."""
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    cfg_path = str(config_path_for_data_dir(getattr(cfg, "data_dir", None)))
+    r.set_section("configuration")
+    if not json_out:
+        _doctor_subsection("Configuration")
+    _emit(
+        "fail",
+        "Config file",
+        f"{cfg_path} not found; DefenseClaw is not initialized, so no other check can run",
+        r=r,
+        check_id="doctor.config.canonical-v8",
+        reason_code="not-initialized",
+        remediation="defenseclaw init",
+    )
+    if write_cache and os.path.isdir(str(getattr(cfg, "data_dir", "") or "")):
+        _write_doctor_cache(cfg, r)
+    if json_out:
+        click.echo(json.dumps(r.to_dict(), indent=2))
+        return
+    _doctor_subsection("Summary")
+    ux.echo("  Health: " + ux._style(f"{r.failed} failed", fg="red", bold=True))
+    ux.echo()
+    ux.warn("DefenseClaw is not initialized. Run: defenseclaw init, then re-run: defenseclaw doctor", indent="  ")
+    ux.echo()
+
+
 def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     """Name root-owned ~/.defenseclaw leftovers from a sudo-started gateway."""
 
@@ -1678,7 +1714,7 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
 
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
-        _AUDIT_FULL_INTEGRITY_MAX_BYTES,
+        _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
         AuditDBHealthStatus,
         inspect_audit_db,
     )
@@ -1727,21 +1763,18 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         )
         return
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
+        # Nothing was found wrong: the walk only ran out of time on a very
+        # large file. That is not a health problem, so it must not raise a
+        # WARN on every Doctor run of a long-lived install.
         size_mib = max(health.file_bytes, 0) // (1024 * 1024)
-        limit_mib = _AUDIT_FULL_INTEGRITY_MAX_BYTES // (1024 * 1024)
-        _emit(
-            "warn",
-            "Audit database",
-            f"{db_path}; required schema present; integrity not checked because the {size_mib} MiB file "
-            f"is above Doctor's {limit_mib} MiB limit. No action is needed unless the gateway "
-            f"reports audit errors; to check it, stop the gateway and run: sqlite3 {db_path} 'PRAGMA quick_check'",
-            r=r,
-            check_id="doctor.state.audit-db",
-            reason_code=health.reason_code,
-            remediation=f"defenseclaw-gateway stop; sqlite3 {db_path} 'PRAGMA quick_check'",
+        budget = f"{_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS:g}"
+        detail = (
+            f"{db_path}; required schema present; no errors found, but the integrity check of the "
+            f"{size_mib} MiB file did not finish within its {budget} s budget (full check: stop the "
+            f"gateway and run sqlite3 {db_path} 'PRAGMA quick_check')"
         )
-        return
-    detail = f"{db_path}; SQLite quick_check=ok; required schema present"
+    else:
+        detail = f"{db_path}; SQLite quick_check=ok; required schema present"
     _emit(
         "pass",
         "Audit database",
@@ -8434,6 +8467,15 @@ def doctor(
             ux.echo()
         raise SystemExit(1)
 
+    # BENIGN-MAC-05: without config.yaml every later check ran against the
+    # built-in defaults (OpenClaw connector, stopped gateway, missing hooks),
+    # so an install where `defenseclaw init` never ran read as a broken one
+    # with a page of failures and --fix / gateway start hints. Say once that
+    # DefenseClaw is not initialized and stop, as `defenseclaw status` does.
+    if not _doctor_config_present(cfg):
+        _report_uninitialized_install(cfg, r, json_out=json_out, write_cache=not (do_fix and dry_run))
+        raise SystemExit(1)
+
     # Repair first, then diagnose the resulting state.  The former ordering
     # ran fixers after every check, leaving already-repaired failures in the
     # result and forcing a misleading exit 1 until the operator ran Doctor a
@@ -8859,8 +8901,8 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
         return RepairDecision(
             "noop",
-            "audit database schema is present; the file is above Doctor's integrity-check size "
-            "limit, so Doctor leaves it as is",
+            "audit database schema is present and the integrity check found no errors "
+            "before its time budget ran out, so Doctor leaves it as is",
             effects=effects,
         )
     if health.status is AuditDBHealthStatus.INVALID:
@@ -8915,7 +8957,7 @@ def _fix_audit_db_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if health.status is AuditDBHealthStatus.VALID:
         return ("skip", "audit database already passed integrity and schema checks")
     if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
-        return ("skip", "audit database schema is present; it is above the integrity-check size limit and is kept")
+        return ("skip", "audit database schema is present and no integrity errors were found; it is kept")
     if health.status is AuditDBHealthStatus.INVALID:
         return (
             "fail",

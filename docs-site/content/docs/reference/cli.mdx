@@ -375,7 +375,7 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--include-activity` also dumps `activity_events`, within the same window. |
+| `defenseclaw-gateway audit export` (or `defenseclaw audit export`, which runs it with the same options) | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--include-activity` also dumps `activity_events`, within the same window. |
 | `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
@@ -473,8 +473,9 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw setup guardrail --disable` | Roll back guardrail. Connector files restored from backup. |
-| `defenseclaw uninstall` | Reversible by default — runs connector teardown, stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) intact. |
-| `defenseclaw uninstall --all` | Same as above, plus deletes `~/.defenseclaw/`. Add `--binaries` to also remove the `defenseclaw` and `defenseclaw-gateway` binaries from `~/.local/bin`. |
+| `defenseclaw uninstall` | Reversible by default — runs connector teardown (removes the hooks and registrations), stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) and the binaries intact. |
+| `defenseclaw uninstall --all` | Same as above, plus deletes all of `~/.defenseclaw/` (hook scripts and `foreign-hooks-backup` included) and the local observability stack's containers and data volumes. The launcher links into `~/.defenseclaw/` go with it; the binaries stay. |
+| `defenseclaw uninstall --all --binaries` | Removes everything: all of the above, plus `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links, the `uv` the installer added (when unchanged) and its bookkeeping from `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows, where the emptied folder and its user `Path` entry go too). On a native Windows Setup install, Setup runs first and the script-install leftovers go after it. On macOS, `DefenseClawMac.app` stays; the plan says how to remove it. Run `--dry-run` first to see the plan. |
 | `defenseclaw uninstall --skip-sandbox-teardown` | Uninstall without the OpenShell sandbox teardown it runs first (when Docker or OpenShell are gone or broken); `defenseclaw sandbox teardown` removes the sandboxes later. `reset` takes it too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
 
@@ -532,7 +533,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `rotate-credentials` | Replace the key every user's per-user credentials derive from. Every user moves to the new key before it takes effect. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
 | `status` | Report the deployment state. Read-only |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
-| `uninstall` | Stop and remove the deployment. `--purge` also removes config and state |
+| `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw`. `--purge` removes everything, every enrolled account's data and binaries included |
 
 | Flag | Actions | Meaning |
 | --- | --- | --- |
@@ -545,8 +546,10 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
 | `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove config, credentials, state, and logs |
-| `--remove-service-account` | uninstall | With `--purge`, also delete the gateway service account |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, and its per-user binaries and launcher links in `~/.local/bin`, after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
+| `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
+| `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
+| `--remove-service-account` | uninstall | Delete the gateway service account. This is the default now; the flag is kept for older scripts |
 | `--json` | all | Print the lifecycle result as JSON |
 
 Exit codes: `0` success or no-op, `1` failure (already rolled back), `2`
@@ -570,7 +573,7 @@ its transaction on PowerShell 7, which must be installed.
 | `ensure` | Standalone only | Install, upgrade, or repair as needed. Refuses to downgrade (`downgrade_refused`) |
 | `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
 | `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
-| `uninstall` | Secure Client, standalone | Remove the services. Keeps state unless `--purge` |
+| `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Keeps state and each account's `%USERPROFILE%\.defenseclaw` unless `--purge` |
 
 | Flag | Meaning |
 | --- | --- |
@@ -584,7 +587,7 @@ its transaction on PowerShell 7, which must be installed.
 | `--broker-binary` | Secure Client only: the source credential broker |
 | `--installer <file>` | An explicit `install-enterprise.ps1` |
 | `--no-start` | Install, upgrade, repair, ensure: stage the services disabled and stopped |
-| `--purge` | Uninstall: also remove managed state |
+| `--purge` | Uninstall: also remove managed state and (standalone) each enrolled account's `%USERPROFILE%\.defenseclaw` and DefenseClaw files in `%USERPROFILE%\.local\bin`, with that folder's user `Path` entry once it is empty. The result names each account. A signed-out account keeps its `Path` entry, and the result says so |
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
 

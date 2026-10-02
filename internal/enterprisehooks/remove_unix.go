@@ -76,21 +76,29 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	}
 	return connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
-			if err := conn.Teardown(ctx, setupOpts); err != nil {
-				return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
-			}
-			// The connector's hook credential goes with its registration.
-			if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
-				if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
-				}
-			}
-			if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
-			}
-			return nil
+			return connector.RemovalLeavingNoNewDirs(conn, setupOpts, func() error {
+				return removeUserHooksAs(ctx, conn, setupOpts, dataDir)
+			})
 		})
 	})
+}
+
+// removeUserHooksAs is RemoveUserHooks' removal, run with the user's
+// credentials and home.
+func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts connector.SetupOpts, dataDir string) error {
+	if err := conn.Teardown(ctx, setupOpts); err != nil {
+		return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
+	}
+	// The connector's hook credential goes with its registration.
+	if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
+		if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
+		}
+	}
+	if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
+	}
+	return nil
 }
 
 // PurgeUserState removes one account's DefenseClaw per-user state for the
@@ -99,10 +107,12 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 // targets. A connector that still keeps DefenseClaw's backups (one set up by
 // an earlier route, or disabled before the uninstall) is torn down first, so
 // the files DefenseClaw changed get their content back before the backups
-// go; if any teardown fails, the state stays for a rerun. Then the state
-// goes except the account's own hooks the foreign-hook policy moved aside
-// and the hook scripts, which become disabled stubs (see
-// connector.PurgeUserState). A home that no longer exists is not an error.
+// go; if any teardown fails, the state stays for a rerun. Then all of
+// ~/.defenseclaw goes, including the hook scripts and the account's own
+// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
+// and so do the binaries and launcher links the per-user install put in
+// ~/.local/bin (see RemoveUserBinaries). The caller stops the account's
+// per-user gateway first. A home that no longer exists is not an error.
 func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
 		return err
@@ -138,7 +148,11 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not a .defenseclaw folder", dataDir)
 	}
 	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
-		return nil
+		// A rerun after the state went still removes the binaries.
+		return withOwnerCredentials(uid, gid, func() error {
+			_, err := RemoveUserBinaries(home, dataDir, uid)
+			return err
+		})
 	}
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
 		return err
@@ -171,7 +185,8 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 				return fmt.Errorf("enterprise hooks: remove the per-user state: %w", err)
 			}
 			removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
-			return nil
+			_, err = RemoveUserBinaries(home, dataDir, uid)
+			return err
 		})
 	})
 }

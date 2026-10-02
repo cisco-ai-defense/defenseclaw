@@ -2909,6 +2909,12 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				workspaceDir = cfg.ConnectorWorkspaceDir()
 			}
 			compTargets = scanner.ComponentTargets(workspaceDir)
+			// Without a workspace the project targets are relative
+			// (filepath.Join("", ".claude", "commands")): watching them would
+			// create them in the gateway's working folder.
+			for kind, dirs := range compTargets {
+				compTargets[kind] = absoluteDirs(dirs)
+			}
 			if cfg != nil && strings.EqualFold(strings.TrimSpace(conn.Name()), "amp") {
 				// Amp's effective skill roots depend on settings
 				// (amp.skills.path and amp.skills.disableClaudeCodeSkills).
@@ -2965,6 +2971,17 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	return skillDirs, pluginDirs, src
+}
+
+// absoluteDirs returns dirs without its relative entries.
+func absoluteDirs(dirs []string) []string {
+	kept := dirs[:0:0]
+	for _, dir := range dirs {
+		if filepath.IsAbs(dir) {
+			kept = append(kept, dir)
+		}
+	}
+	return kept
 }
 
 // ampWatcherSkillDirs keeps Amp's Claude-compatible skill roots available for
@@ -3666,7 +3683,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// inverted operator expectations, so both paths now exit the
 		// guardrail goroutine with the wrapped error via the shared
 		// failGuardrailWithRollback helper.
-		if err := conn.Setup(ctx, setupOpts); err != nil {
+		if err := connector.SetupRecordingCreatedDirs(ctx, conn, setupOpts); err != nil {
 			return failSetup("setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
 		}
 		// Post-Setup verification: every owned hook script the
@@ -5492,7 +5509,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		}
 	}
 
-	if err := conn.Setup(ctx, opts); err != nil {
+	if err := connector.SetupRecordingCreatedDirs(ctx, conn, opts); err != nil {
 		return fmt.Errorf("connector %s setup failed: %w", conn.Name(), err)
 	}
 	if err := verifyHookScriptsOrRetry(ctx, opts, conn); err != nil {
