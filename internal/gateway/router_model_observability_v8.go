@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -75,8 +77,20 @@ func (r *EventRouter) emitEventRouterModelV8(
 	}
 	input := hookModelV8ModelInput(observation)
 	input.Envelope.Provenance.Producer = eventRouterModelV8Producer
-	startedContext, span, err := lifecycle.StartModelTrace(ctx, input)
 	metricRuntime, _ := emitter.(hookLifecycleMetricV8Runtime)
+	// Every connector turn is rooted in a connector-named agent span
+	// ("invoke_agent openclaw"), as the hook and proxy paths are, so OpenClaw
+	// sessions can be found by agent in Galileo and Tempo (GAP-1452).
+	agentInput := eventRouterAgentInputV8(observation)
+	agentContext, agent, agentErr := lifecycle.StartAgentTrace(ctx, agentInput)
+	if agentErr == nil && agent != nil {
+		return emitEventRouterModelUnderAgentV8(ctx, agentContext, agent, agentInput, input, observation)
+	}
+	if agentErr == nil && hookModelV8AgentSamplingDeclined(ctx, agentContext) {
+		recordGeneratedModelMetricsV8ForProducer(agentContext, metricRuntime, observation, eventRouterModelV8Producer)
+		return agentContext
+	}
+	startedContext, span, err := lifecycle.StartModelTrace(ctx, input)
 	if err != nil {
 		recordGeneratedModelMetricsV8ForProducer(ctx, metricRuntime, observation, eventRouterModelV8Producer)
 		return ctx
@@ -92,6 +106,93 @@ func (r *EventRouter) emitEventRouterModelV8(
 		return ctx
 	}
 	return modelContext
+}
+
+// emitEventRouterModelUnderAgentV8 records the zero-duration model operation
+// as the child of its agent root and returns the ended model context, the
+// parent for a later tool or approval child.
+func emitEventRouterModelUnderAgentV8(
+	ctx context.Context,
+	agentContext context.Context,
+	agent *observabilityruntime.AgentTrace,
+	agentInput observability.SpanAgentInvokeInput,
+	input observability.SpanModelChatInput,
+	observation hookModelV8Observation,
+) context.Context {
+	defer agent.Abort()
+	if agentContext == nil {
+		agentContext = agent.Context()
+	}
+	inheritProxyV8AgentIdentity(&input, agentInput)
+	model, err := agent.StartModel(input)
+	if err != nil || model == nil {
+		recordGeneratedModelMetricsV8ForProducer(agentContext, agent, observation, eventRouterModelV8Producer)
+		if agent.End(agentInput) != nil {
+			return ctx
+		}
+		return agentContext
+	}
+	defer model.Abort()
+	modelContext := model.Context()
+	recordGeneratedModelMetricsV8ForProducer(modelContext, model, observation, eventRouterModelV8Producer)
+	if model.End(input) != nil || agent.End(agentInput) != nil {
+		return ctx
+	}
+	return modelContext
+}
+
+// eventRouterAgentInputV8 is the agent root of one OpenClaw assistant message.
+// The stream reports no lifecycle or execution identity, so the root carries
+// only what the message reports, like the proxy's agent root.
+func eventRouterAgentInputV8(observation hookModelV8Observation) observability.SpanAgentInvokeInput {
+	meta := observation.meta
+	envelope := hookModelV8Envelope(observation, "invoke_agent")
+	envelope.Provenance.Producer = eventRouterModelV8Producer
+	outcome, technicalFailure, errorType := hookModelV8ObservationResult(observation)
+	input := observability.SpanAgentInvokeInput{
+		Envelope: envelope, Outcome: outcome, Kind: "INTERNAL",
+		StartTimeUnixNano:                  uint64(observation.startedAt.UnixNano()),
+		EndTimeUnixNano:                    uint64(observation.finishedAt.UnixNano()),
+		Status:                             observability.NewTraceStatusOK(),
+		DefenseClawAgentType:               observation.agentType,
+		DefenseClawTelemetryInputReported:  false,
+		DefenseClawContentInputState:       "not_reported",
+		DefenseClawTelemetryOutputReported: false,
+		DefenseClawContentOutputState:      "not_reported",
+		GenAIOperationName:                 observability.Present("invoke_agent"),
+		ConditionConnectorKnown:            hookModelV8StableToken(meta.Source) != "",
+		ConditionOperationTerminal:         true,
+		ConditionTechnicalFailure:          technicalFailure,
+	}
+	if errorType != "" {
+		input.ErrorType = observability.Present(errorType)
+	}
+	if technicalFailure {
+		input.Status = observability.NewTraceStatusError(input.ErrorType)
+	}
+	input.DefenseClawConnectorSource = hookModelV8OptionalID(meta.Source)
+	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
+	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
+	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
+	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)
+	input.GenAIAgentID = hookModelV8OptionalID(observation.agentID)
+	input.GenAIAgentName = hookModelV8OptionalID(observation.agentName)
+	input.DefenseClawAgentRootID = hookModelV8OptionalID(observation.agentID)
+	input.DefenseClawSessionRootID = hookModelV8OptionalID(observation.sessionID)
+	if observation.agentID != "" {
+		input.DefenseClawAgentLineageProvenance = observability.Present("reported")
+		input.DefenseClawAgentDepth = observability.Present[int64](0)
+	}
+	input.DefenseClawAgentPhase = observability.Present("model")
+	input.DefenseClawAgentPhaseCode = observability.Present[int64](3)
+	if provider := strings.TrimSpace(observation.provider); provider != "" {
+		input.GenAIProviderName = observability.Present(provider)
+	}
+	if observation.model != "" {
+		input.GenAIRequestModel = observability.Present(observation.model)
+		input.GenAIResponseModel = observability.Present(observation.model)
+	}
+	return input
 }
 
 func eventRouterModelMeta(

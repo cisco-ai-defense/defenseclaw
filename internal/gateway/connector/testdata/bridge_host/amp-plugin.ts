@@ -361,9 +361,11 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			const definition = agent.definition
 			let facts: AgentFacts
 			// agent_type names the agent's traces (invoke_agent <type>), so it
-			// stays "amp"; the mode or custom agent is its name and the
-			// definition kind its own field. Naming traces after the mode
-			// ("invoke_agent medium") hid Amp from a search by agent.
+			// stays "amp". A custom agent definition is its own agent and keeps
+			// its name; a built-in mode (smart, rush, medium) is only a setting
+			// of Amp, so the agent stays "amp" and the mode goes in agent_mode.
+			// Naming the agent after the mode (gen_ai.agent.name=medium) hid
+			// Amp from every view grouped by agent name.
 			if (definition.kind === "agent-definition") {
 				const display = definition.display?.label || ""
 				facts = {
@@ -377,7 +379,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			} else {
 				const mode = stringID(definition.mode)
 				facts = {
-					agent_name: mode || "amp",
+					agent_name: "amp",
 					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(mode ? { agent_mode: mode } : {}),

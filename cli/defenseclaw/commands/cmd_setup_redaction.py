@@ -140,6 +140,12 @@ def status_cmd(app: AppContext, emit_json: bool) -> None:
                     "warnings": [
                         {"code": code, "path": path, "summary": summary} for code, path, summary in status.warnings
                     ],
+                    "judge_bodies": {
+                        "capture": status.judge_bodies_enabled,
+                        "path": status.judge_bodies_path,
+                        "redacted": False,
+                        "retention_days": status.retention_days,
+                    },
                 },
                 indent=2,
                 sort_keys=True,
@@ -1464,6 +1470,7 @@ def _render_status(status, *, compact: bool = False) -> None:
         return
     click.echo("\nBuckets")
     _render_buckets(status.buckets)
+    _render_judge_body_store(status)
     if status.buckets and all(bucket.redaction_profile == "none" for bucket in status.buckets):
         click.echo(
             "\nEvery bucket uses profile 'none', so collected telemetry is sent unredacted.\n"
@@ -1483,6 +1490,26 @@ def _render_status(status, *, compact: bool = False) -> None:
         click.echo(
             f"note: {name}: {' and '.join(flags)} set on purpose for a collector on this machine; no action needed"
         )
+
+
+def judge_body_store_disclosure(status) -> tuple[str, ...]:
+    """Say plainly that the local judge-body store is outside every redaction profile (GAP-1693)."""
+
+    if not status.judge_bodies_enabled:
+        return ("guardrail.retain_judge_bodies=false: raw LLM-judge text is not kept.",)
+    retention = "with no retention limit" if status.unbounded_retention else f"for {status.retention_days} days"
+    path = status.judge_bodies_path or "judge_bodies.db"
+    return (
+        f"guardrail.retain_judge_bodies=true: {path} keeps the raw LLM-judge request and response text, "
+        f"unredacted (it can quote secrets from prompts), {retention}.",
+        "Turn it off: set guardrail.retain_judge_bodies: false in config.yaml, then run 'defenseclaw-gateway restart'.",
+    )
+
+
+def _render_judge_body_store(status) -> None:
+    click.echo("\nLocal judge-body store (not covered by redaction profiles)")
+    for line in judge_body_store_disclosure(status):
+        click.echo(f"  {line}")
 
 
 _LOCAL_COLLECTOR_FLAGS = {
@@ -1509,6 +1536,10 @@ def _render_preview(preview, destinations: Sequence = ()) -> None:
     click.echo("\nRedaction policy preview")
     click.echo("  Scope: configurable observability log/trace projections only")
     click.echo("  OS notifications and agent hook responses retain separate safety redaction")
+    click.echo(
+        "  Not covered: the local judge-body store (judge_bodies.db) keeps raw LLM-judge text "
+        "while guardrail.retain_judge_bodies is true"
+    )
     click.echo(f"  Effective legs changed: {len(preview.changes)}")
     click.echo(f"  Newly unredacted: {preview.newly_unredacted}")
     click.echo(f"  No longer unredacted: {preview.no_longer_unredacted}")
