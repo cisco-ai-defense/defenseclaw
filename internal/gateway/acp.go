@@ -21,7 +21,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 )
 
@@ -147,16 +151,19 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID)
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile"}
 		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
-		a.recordACPEvaluationV8(r.Context(), req, verdict, nil, agent.ConnectorID, profileName, time.Since(started))
-		a.emitGuardrailApplyTraceV8(r.Context(), agent.ConnectorID, "", acpTraceTargetType(req), &ToolInspectVerdict{
+		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{
 			Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 			Reason: verdict.Reason, Mode: mode, WouldBlock: verdict.WouldBlock,
-		}, time.Since(started), hookEvaluationContext{})
+		}, started, func(traceCtx context.Context) hookEvaluationContext {
+			a.recordACPEvaluationV8(traceCtx, req, verdict, nil, nil, agent.ConnectorID, profileName, time.Since(started))
+			return hookEvaluationContext{}
+		})
 		a.writeJSON(w, http.StatusOK, verdict)
 		return
 	}
@@ -168,7 +175,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if req.Surface == acp.SurfacePrompt {
 		direction = "prompt"
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), inspectScanTimeout)
+	scanCtx, cancel := context.WithTimeout(ctx, inspectScanTimeout)
 	defer cancel()
 	// Scan the frame's strings, not the marshalled envelope. Content rules
 	// anchor on prose boundaries, and inside raw JSON every value is preceded
@@ -178,7 +185,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if content == "" {
 		content = string(req.Payload)
 	}
-	verdict := a.inspectMessageContent(ctx, &ToolInspectRequest{
+	verdict := a.inspectMessageContent(scanCtx, &ToolInspectRequest{
 		Tool: "message", Content: content, Direction: direction,
 		Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
 	})
@@ -191,32 +198,219 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock,
 	}
-	if len(verdict.DetailedFindings) > 0 {
-		// A rule match is a finding of the agent's connector, as it is on the
-		// hook path: a blocked ACP prompt raised no alert (GAP-1302).
-		findingCtx := r.Context()
-		if env := audit.EnvelopeFromContext(findingCtx); env.Connector != agent.ConnectorID {
-			env.Connector = agent.ConnectorID
-			findingCtx = audit.ContextWithEnvelope(findingCtx, env)
+	record := func(recordCtx context.Context) hookEvaluationContext {
+		var evaluation hookEvaluationContext
+		if len(verdict.DetailedFindings) > 0 {
+			// A rule match is a finding of the agent's connector, as it is
+			// on the hook path: a blocked ACP prompt raised no alert
+			// (GAP-1302).
+			evaluation = a.emitInspectVerdictFindings(recordCtx, "inspect-http",
+				hookEvaluationTarget(agent.ConnectorID, "acp"), acpTraceTargetType(req), verdict,
+				time.Since(started), "emit_acp_findings")
 		}
-		targetType := acpTraceTargetType(req)
-		evaluation := a.emitInspectVerdictFindings(findingCtx, "inspect-http",
-			hookEvaluationTarget(agent.ConnectorID, "acp"), targetType, verdict,
-			time.Since(started), "emit_acp_findings")
-		// The hook path records a decision as an apply_guardrail span; ACP
-		// wrote only the log row, so Tempo and a Galileo-only deployment
-		// never saw an ACP block (GAP-1836).
-		a.emitGuardrailApplyTraceV8(findingCtx, agent.ConnectorID, "", targetType, verdict,
-			time.Since(started), evaluation)
+		ruleIDs := scanner.TopRuleIDs(ruleFindingsToInspect(verdict.DetailedFindings, ""), 8)
+		a.recordACPEvaluationV8(recordCtx, req, result, verdict.Findings, ruleIDs,
+			agent.ConnectorID, profileName, time.Since(started))
+		return evaluation
 	}
-	a.recordACPEvaluationV8(r.Context(), req, result, verdict.Findings, agent.ConnectorID, profileName, time.Since(started))
+	if len(verdict.DetailedFindings) > 0 {
+		// The hook path records a decision as a span; ACP wrote only the log
+		// row, so Tempo and a Galileo-only deployment never saw an ACP block
+		// (GAP-1836).
+		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, verdict, started, record)
+	} else {
+		record(ctx)
+	}
 	// The audit row keeps the source reason; the editor gets the wording the
 	// hook connectors show ("DefenseClaw policy blocked this action (rule
 	// SEC-AWS-KEY: AWS access key). Do not retry it in another form."), not
 	// the raw "matched: ID:title" text (GAP-1793), through the same sink
 	// barrier as the inspect response.
 	result.Reason = verdict.sanitizeForResponse(false).Reason
+	if req.Direction == acp.AgentToClient && req.Surface == acp.SurfaceOutput {
+		result.Reason = acpWithheldOutputReason(result.Reason)
+	}
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// acpWithheldOutputReason words a block of the agent's own output
+// (session/update). The guard can only withhold what the agent sent: a tool
+// the agent runs itself has already run when its tool_call update arrives,
+// so "blocked this action ... Do not retry it" told the user nothing had
+// happened while the file was already written (GAP-1956). Other reasons
+// (evaluation unavailable, a configured message) are kept.
+func acpWithheldOutputReason(reason string) string {
+	for _, prefix := range []string{
+		"DefenseClaw policy blocked this action (",
+		"DefenseClaw blocked this action under your organization's policy (",
+	} {
+		rest, ok := strings.CutPrefix(reason, prefix)
+		if !ok {
+			continue
+		}
+		subject, _, ok := strings.Cut(rest, "). "+agentBlockNoRetry)
+		if !ok || subject == "" {
+			break
+		}
+		policy := "DefenseClaw policy withheld agent output ("
+		if strings.Contains(prefix, "organization") {
+			policy = "DefenseClaw withheld agent output under your organization's policy ("
+		}
+		return policy + subject + "). The agent may already have run the step; check its effects."
+	}
+	return reason
+}
+
+// acpEvaluationContext attributes an ACP evaluation the way the hook path
+// attributes a hook call: to the ACP session the frame belongs to and, on a
+// per-user gateway (which runs as its user and is the only holder of the
+// user's ACP token), to that user. The guard sends no identity headers, so
+// ACP finding, scan and span rows named no user or session and could not be
+// joined to the hook rows of the same session (GAP-1946).
+func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string) context.Context {
+	env := audit.EnvelopeFromContext(ctx)
+	changed := false
+	if env.Connector != connector {
+		env.Connector, changed = connector, true
+	}
+	if session := acpFrameSessionID(req); session != "" {
+		if SessionIDFromContext(ctx) == "" {
+			ctx = ContextWithSessionID(ctx, session)
+		}
+		if env.SessionID == "" {
+			env.SessionID, changed = session, true
+		}
+	}
+	if changed {
+		ctx = audit.ContextWithEnvelope(ctx, env)
+	}
+	identity := AgentIdentityFromContext(ctx)
+	if identity.UserID == "" && identity.UserName == "" && !gatewayRunsAsServiceAccount() {
+		if user := useridentity.Current(); !user.Empty() {
+			identity.UserID, identity.UserIDKind, identity.UserName = user.ID, user.IDKind, user.Name
+			ctx = ContextWithAgentIdentity(ctx, identity)
+		}
+	}
+	return ctx
+}
+
+// acpFrameSessionID is the ACP sessionId a single frame names, or "".
+func acpFrameSessionID(req acp.Evaluation) string {
+	if req.Aggregate {
+		return ""
+	}
+	msg, err := acp.ParseMessage(req.Payload)
+	if err != nil || len(msg.Params) == 0 {
+		return ""
+	}
+	var params struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(msg.Params, &params) != nil || !hookModelV8Identifier(params.SessionID) {
+		return ""
+	}
+	return params.SessionID
+}
+
+// acpDecisionTraceRuntime starts the spans of one ACP decision.
+type acpDecisionTraceRuntime interface {
+	StartAgentTrace(context.Context, observability.SpanAgentInvokeInput) (context.Context, *observabilityruntime.AgentTrace, error)
+	inspectTraceV8Runtime
+}
+
+const acpTraceV8Producer = "gateway.acp.trace"
+
+// traceACPDecisionV8 records one ACP decision as an "invoke_agent <agent>"
+// span with its apply_guardrail child, and runs record (the finding and
+// verdict rows) inside the child so those rows carry its trace and span IDs.
+// The agent span is what Galileo ingests: it has no guardrail span shape, so
+// an ACP block that was only an apply_guardrail span reached Tempo but never
+// Galileo (GAP-1836).
+func (a *APIServer) traceACPDecisionV8(
+	ctx context.Context, connector string, req acp.Evaluation, verdict *ToolInspectVerdict,
+	started time.Time, record func(context.Context) hookEvaluationContext,
+) {
+	runtime, ok := a.observabilityV8RuntimeEmitter().(acpDecisionTraceRuntime)
+	if !ok || runtime == nil || verdict == nil {
+		record(ctx)
+		return
+	}
+	targetType := acpTraceTargetType(req)
+	agentInput := acpAgentInvokeInputV8(ctx, connector, verdict, started)
+	agentCtx, agentSpan, err := runtime.StartAgentTrace(ctx, agentInput)
+	if err != nil || agentCtx == nil {
+		agentCtx, agentSpan = ctx, nil
+	}
+	if agentSpan != nil {
+		defer agentSpan.Abort()
+	}
+	guardCtx, guardSpan, err := runtime.StartGuardrailApplyTrace(agentCtx, observability.SpanGuardrailApplyInput{
+		Kind: "INTERNAL", StartTimeUnixNano: uint64(started.UnixNano()),
+		DefenseClawGuardrailName: "inspect", DefenseClawGuardrailTargetType: targetType,
+	})
+	if err != nil || guardCtx == nil {
+		guardCtx, guardSpan = agentCtx, nil
+	}
+	if guardSpan != nil {
+		defer guardSpan.Abort()
+	}
+	evaluation := record(guardCtx)
+	if guardSpan != nil {
+		if input, ok := a.guardrailApplyTraceV8Input(guardCtx, connector, "", targetType, verdict,
+			time.Since(started), evaluation); ok {
+			input.StartTimeUnixNano = uint64(started.UnixNano())
+			_ = guardSpan.End(input)
+		}
+	}
+	if agentSpan != nil {
+		agentInput.EndTimeUnixNano = uint64(time.Now().UTC().UnixNano())
+		_ = agentSpan.End(agentInput)
+	}
+}
+
+// acpAgentInvokeInputV8 is the agent root of one ACP decision: the agent the
+// editor drives, its ACP session and the user.
+func acpAgentInvokeInputV8(
+	ctx context.Context, connector string, verdict *ToolInspectVerdict, started time.Time,
+) observability.SpanAgentInvokeInput {
+	connector = hookDecisionMetricConnector(connector)
+	connectorKnown := connector != "unknown"
+	if !connectorKnown {
+		connector = ""
+	}
+	session := audit.EnvelopeFromContext(ctx).SessionID
+	outcome := observability.OutcomeCompleted
+	if strings.EqualFold(strings.TrimSpace(verdict.Action), "block") {
+		outcome = observability.OutcomeBlocked
+	}
+	input := observability.SpanAgentInvokeInput{
+		Envelope: observability.FamilyEnvelopeInput{
+			Source: observability.SourceGateway, Connector: connector, Action: "invoke_agent", Phase: "finalize",
+			Correlation: gatewayGeneratedCorrelation(ctx, connector),
+			Provenance:  observability.FamilyProvenanceInput{Producer: acpTraceV8Producer},
+		},
+		Outcome: outcome, Kind: "INTERNAL",
+		StartTimeUnixNano:                  uint64(started.UnixNano()),
+		EndTimeUnixNano:                    uint64(time.Now().UTC().UnixNano()),
+		Status:                             observability.NewTraceStatusOK(),
+		DefenseClawAgentType:               firstNonEmpty(connector, "acp"),
+		DefenseClawTelemetryInputReported:  false,
+		DefenseClawContentInputState:       "not_reported",
+		DefenseClawTelemetryOutputReported: false,
+		DefenseClawContentOutputState:      "not_reported",
+		GenAIOperationName:                 observability.Present("invoke_agent"),
+		DefenseClawConnectorSource:         hookV8OptionalIdentifier(connector),
+		GenAIAgentName:                     hookV8OptionalIdentifier(connector),
+		GenAIConversationID:                hookV8OptionalIdentifier(session),
+		DefenseClawSessionRootID:           hookV8OptionalIdentifier(session),
+		ConditionConnectorKnown:            connectorKnown,
+		ConditionOperationTerminal:         true,
+	}
+	caller := auditCallerIdentity(ctx)
+	input.UserID = hookV8OptionalIdentifier(caller.ID)
+	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	return input
 }
 
 // acpTraceTargetType is the guardrail target of an ACP frame: what the
@@ -236,8 +430,13 @@ func acpTraceTargetType(req acp.Evaluation) string {
 // evaluation as rule_ids absent / finding_count 0 while the reason named the
 // rule that matched -- a SIEM rolling up either attribute saw no ACP findings
 // at all, and the hook lane reported them for identical content.
+//
+// ruleIDs are the matched rules' own IDs, as the hook rows and the
+// apply_guardrail span name them. Without them the IDs were re-derived from
+// the finding strings, which turns a rule-pack rule into
+// "UNKNOWN-<rule id>" (GAP-1946).
 func (a *APIServer) recordACPEvaluationV8(
-	ctx context.Context, req acp.Evaluation, verdict acp.Verdict, findings []string,
+	ctx context.Context, req acp.Evaluation, verdict acp.Verdict, findings, ruleIDs []string,
 	connector, profile string, elapsed time.Duration,
 ) {
 	action := strings.ToLower(strings.TrimSpace(verdict.Action))
@@ -263,6 +462,9 @@ func (a *APIServer) recordACPEvaluationV8(
 	})
 	if err != nil {
 		return
+	}
+	if len(ruleIDs) > 0 {
+		facts.ruleIDs = inspectTraceV8RuleIDs(ruleIDs)
 	}
 	facts.acp = &acpEvaluationV8Context{
 		client: req.ClientID, agent: req.AgentID, method: req.Method,
