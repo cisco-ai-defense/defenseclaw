@@ -71,6 +71,7 @@ def _preflight(
     mode: str,
     *,
     dev_reclaim: bool = False,
+    gateway_name: str = "defenseclaw-gateway",
 ) -> subprocess.CompletedProcess[str]:
     environment = {
         **os.environ,
@@ -88,7 +89,7 @@ def _preflight(
             str(install_dir),
             ".venv/bin",
             "defenseclaw",
-            "defenseclaw-gateway",
+            gateway_name,
         ],
         env=environment,
         text=True,
@@ -666,6 +667,60 @@ def test_make_all_dev_reclaim_replaces_existing_acp(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_publishes_windows_hook_launcher_beside_gateway(tmp_path: Path) -> None:
+    # GAP-1479: init registers hooks at <install dir>/defenseclaw-hook.exe, so a
+    # Windows make all must publish the launcher it builds, and rebuild it later.
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    cli = repo / ".venv/bin/defenseclaw"
+    _write_executable(cli, b"source cli\n")
+    install_dir.mkdir(parents=True)
+    (install_dir / "defenseclaw").symlink_to(cli)
+    _write_executable(repo / "defenseclaw-gateway.exe", b"gateway\n")
+    _write_executable(install_dir / "defenseclaw-gateway.exe", b"gateway\n")
+    source_hook = repo / "defenseclaw-hook.exe"
+    installed_hook = install_dir / "defenseclaw-hook.exe"
+    _write_executable(source_hook, b"hook-v1\n")
+
+    for payload in (b"hook-v1\n", b"hook-v2\n"):
+        source_hook.write_bytes(payload)
+        published = _preflight(
+            tmp_path,
+            repo,
+            install_dir,
+            "publish-hook",
+            dev_reclaim=True,
+            gateway_name="defenseclaw-gateway.exe",
+        )
+        assert published.returncode == 0, published.stdout + published.stderr
+        assert installed_hook.read_bytes() == payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_unowned_hook_launcher_refuses_before_mutation(tmp_path: Path) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    install_dir.mkdir(parents=True)
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-hook.exe", b"source hook\n")
+    installed_hook = install_dir / "defenseclaw-hook.exe"
+    _write_executable(installed_hook, b"release hook\n")
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-hook",
+        dev_reclaim=True,
+        gateway_name="defenseclaw-gateway.exe",
+    )
+
+    assert completed.returncode != 0
+    assert "unowned hook launcher already exists" in completed.stderr
+    assert installed_hook.read_bytes() == b"release hook\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_source_checkout_alias_claims_the_canonical_root(tmp_path: Path) -> None:
     repo, install_dir, _source_gateway, installed_gateway = _source_install_fixture(tmp_path)
     alias = tmp_path / "checkout-alias"
@@ -873,6 +928,7 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert "source-install-preflight.sh dev-check" in makefile
     assert "source-install-preflight.sh dev-publish-gateway" in makefile
     assert "source-install-preflight.sh dev-publish-acp" in makefile
+    assert "source-install-preflight.sh dev-publish-hook" in makefile
     assert "source-install-preflight.sh dev-claim" in makefile
     assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1
