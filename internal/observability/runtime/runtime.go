@@ -467,6 +467,16 @@ func (runtime *Runtime) emitWithLeaseControls(
 		outcome, processErr = local.Process(ctx, metadata, processBuilder)
 	}
 	if processErr != nil {
+		// A failed SQLite write (disk full) still hands back the remote
+		// projections: export this gateway's own records so the decision and
+		// the outage stay visible remotely while the local store is down
+		// (GAP-1536). Imported records stay SQLite-first.
+		if len(outcome.OptionalWork()) > 0 {
+			if inbound {
+				return pipeline.LocalLogOutcome{}, processErr
+			}
+			runtime.dispatchOptional(lease, graph, outcome)
+		}
 		return outcome, processErr
 	}
 	// The managed-enterprise event sink is release-owned and must remain
@@ -488,6 +498,17 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if localOnly || suppressAll {
 		return outcome, nil
 	}
+	runtime.dispatchOptional(lease, graph, outcome)
+	return outcome, nil
+}
+
+// dispatchOptional enqueues a log outcome's optional-destination work and
+// records its projection failures.
+func (runtime *Runtime) dispatchOptional(
+	lease *runtimegraph.Lease,
+	graph *runtimegraph.Graph,
+	outcome pipeline.LocalLogOutcome,
+) {
 	dispatchValue, dispatchOK := lease.Component(DestinationDispatchComponentName)
 	dispatch, typedDispatch := dispatchValue.(*destinationDispatchComponent)
 	if !dispatchOK || !typedDispatch || dispatch == nil || dispatch.digest != graph.Digest() {
@@ -501,7 +522,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 		for _, failure := range outcome.OptionalFailures() {
 			observeBoundedDestinationFailure(runtime.destinationObserver, failure.DestinationName())
 		}
-		return outcome, nil
+		return
 	}
 	for _, failure := range outcome.OptionalFailures() {
 		dispatch.ObserveProjectionFailure(failure)
@@ -509,7 +530,6 @@ func (runtime *Runtime) emitWithLeaseControls(
 	for _, work := range outcome.OptionalWork() {
 		dispatch.Enqueue(work)
 	}
-	return outcome, nil
 }
 
 // Reload exposes runtimegraph's exact rejected/applied/applied-degraded result.

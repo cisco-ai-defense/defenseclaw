@@ -443,3 +443,28 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		t.Fatal("runtime inspection omitted the dashboard by-rule metric")
 	}
 }
+
+// GAP-1381: a path-targeted scan names the asset by its last path element,
+// and a scan with findings but no admission verdict is not "clean".
+func TestScanV8NamesPathTargetsAndKeepsFindingsOutOfClean(t *testing.T) {
+	for target, want := range map[string]string{
+		"/home/u/.claude/skills/ws1-notes/":   "ws1-notes",
+		`C:\Users\u\.claude\skills\ws1-notes`: "ws1-notes",
+		"skill://demo":                        "skill://demo",
+		"http://127.0.0.1:8000/mcp":           "http://127.0.0.1:8000/mcp",
+	} {
+		if got, ok := scanV8TargetRef(target).Get(); !ok || got != want {
+			t.Errorf("scanV8TargetRef(%q) = %q, %v; want %q", target, got, ok, want)
+		}
+	}
+	withFinding := &scanner.ScanResult{Findings: []scanner.Finding{{Severity: scanner.SeverityInfo}}}
+	if got := scanV8Verdict(withFinding, ""); got != "warn" {
+		t.Errorf("verdict with findings = %q, want warn", got)
+	}
+	if got := scanV8Verdict(&scanner.ScanResult{}, ""); got != "clean" {
+		t.Errorf("verdict without findings = %q, want clean", got)
+	}
+	if got := scanV8Verdict(withFinding, "block"); got != "block" {
+		t.Errorf("explicit verdict = %q, want block", got)
+	}
+}

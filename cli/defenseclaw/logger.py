@@ -232,7 +232,7 @@ class Logger:
 
         return cls(_NoRuntimeRecorder())
 
-    def log_scan(self, result: ScanResult, *, error: str = "") -> None:
+    def log_scan(self, result: ScanResult, *, error: str = "", connector: str | None = None) -> None:
         scan: dict[str, Any] = {
             "scanner": result.scanner,
             "target": result.target,
@@ -244,6 +244,10 @@ class Logger:
             # A scan that could not finish is recorded as scan.failed, so
             # audit export, OTLP and alerts show it (GAP-1504).
             scan["error"] = error.replace("\x00", "").encode("utf-8")[:4000].decode("utf-8", "ignore")
+        # Name the agent whose skill/plugin/MCP server was scanned, so the
+        # scan telemetry says which connector the asset belongs to (GAP-1381).
+        if connector:
+            scan["connector"] = connector
         self._emit({"kind": "scan", "run_id": _current_run_id(), "scan": scan})
 
     def log_scan_failed(self, scanner: str, target: str, error: str, *, duration_ms: int = 0) -> None:

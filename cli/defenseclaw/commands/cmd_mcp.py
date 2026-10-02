@@ -749,7 +749,10 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         return None
 
     if app.logger:
-        app.logger.log_scan(replace(result, target=audit_target) if audit_target else result)
+        app.logger.log_scan(
+            replace(result, target=audit_target) if audit_target else result,
+            connector=connector or None,
+        )
     return result
 
 

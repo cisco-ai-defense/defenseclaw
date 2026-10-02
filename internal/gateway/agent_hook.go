@@ -112,7 +112,7 @@ type agentHookRequest struct {
 	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
 	CorrelationIdentifiers      []connector.CorrelationValue
 	SuppressCorrelationEmit     bool
-	CorrelationUnavailable      bool // correlation failed, not a replay: not exported, still audited
+	CorrelationUnavailable      bool // correlation failed, not a replay: decision exported without join IDs, still audited
 	CorrelationReceipt          *audit.CorrelationReceiptLocator
 	CWD                         string
 	ToolName                    string
@@ -386,11 +386,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer cancelCompletion()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
-			// Correlation persistence is fail-closed for export, not for policy
-			// enforcement. The hook must still be evaluated if the local ledger is
-			// temporarily unavailable; runtime export receives no incomplete
-			// occurrence envelope and therefore cannot publish a partial join.
-			// The verdict still gets its local audit row (finalizeAgentHook).
+			// Correlation persistence is fail-closed for the LLM event export,
+			// not for policy enforcement. The hook must still be evaluated if the
+			// local ledger is temporarily unavailable; the verdict keeps its local
+			// audit row and its decision export (finalizeAgentHook).
 			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, correlationErr)
 			req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
@@ -730,7 +729,11 @@ func (a *APIServer) finalizeAgentHook(
 		a.observeSandboxHookDecision(ctx, req, resp)
 	})
 
-	if !req.SuppressCorrelationEmit {
+	// A hook whose correlation ledger write failed (disk full) still exports
+	// its decision, without the cross-call join IDs: otherwise every allow
+	// and block disappears from Grafana and Galileo exactly while the local
+	// audit is down (GAP-1536). Only an exact replay stays unexported.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 			if !panicked {
@@ -740,7 +743,7 @@ func (a *APIServer) finalizeAgentHook(
 	}
 	// Every verdict has its audit row, save the exact replay of a delivery
 	// whose row is already persisted: a hook whose correlation failed is
-	// not exported (no partial join), but it is audited.
+	// audited too.
 	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("audit", func() {
 			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
@@ -1032,7 +1035,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	if !req.SuppressCorrelationEmit {
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
 	// As in finalizeAgentHook: only an exact replay goes without its row.

@@ -98,6 +98,10 @@ type cliObservabilityV8Scan struct {
 	// Error is set when the scan could not finish; it is recorded as
 	// scan.failed so failed scans are visible in audit and OTLP (GAP-1504).
 	Error string `json:"error,omitempty"`
+	// Connector is the connector whose skill, plugin or MCP server the CLI
+	// scanned (skill scan --connector claudecode), so scan.completed and
+	// finding.observed say which agent the asset belongs to (GAP-1381).
+	Connector string `json:"connector,omitempty"`
 }
 
 // cliObservabilityV8Finding deliberately mirrors Finding.to_dict in the
@@ -279,6 +283,7 @@ func (observation cliObservabilityV8WebhookDelivery) validate() error {
 
 func (scan cliObservabilityV8Scan) validate() error {
 	if !cliObservabilityV8Identifier(scan.Scanner, true) ||
+		!cliObservabilityV8Identifier(scan.Connector, false) ||
 		!cliObservabilityV8Text(scan.Target, cliObservabilityV8MaxTargetBytes, true) ||
 		scan.Timestamp.IsZero() || scan.Timestamp.Year() < 1 || scan.Timestamp.Year() > 9999 ||
 		scan.DurationMS < 0 || scan.DurationMS > math.MaxInt64/int64(time.Millisecond) ||
@@ -462,11 +467,15 @@ func (a *APIServer) emitCLIObservabilityV8(
 			result.ScanError = scan.Error
 			result.ExitCode = 1
 		}
+		connector := envelope.Connector
+		if connector == "" {
+			connector = scan.Connector
+		}
 		return a.logger.LogScanWithCorrelation(ctx, result, "", audit.ScanCorrelation{
 			RunID: envelope.RunID, RequestID: envelope.RequestID,
 			SessionID: envelope.SessionID, TraceID: envelope.TraceID,
 			AgentID: envelope.AgentID, AgentName: envelope.AgentName,
-			AgentInstanceID: envelope.AgentInstanceID, Connector: envelope.Connector,
+			AgentInstanceID: envelope.AgentInstanceID, Connector: connector,
 		})
 	case "llm_bridge":
 		return a.emitCLILLMBridgeV8(ctx, *request.LLMBridge)
