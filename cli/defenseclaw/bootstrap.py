@@ -1181,9 +1181,9 @@ def _apply_first_run_choices(
     _apply_first_run_connector_override(cfg, connector, profile_mode)
 
     # Honor an explicit operator choice supplied via flag/prompt.
-    # Empty string means "leave whatever was loaded alone" — usually
-    # the canonical default ("open") seeded by _migrate_0_4_0 or by
-    # default_config(). Anything other than the literal "closed"
+    # Empty string means "leave whatever was loaded alone": "closed"
+    # from default_config() on a new install, or "open" seeded by
+    # _migrate_0_4_0 on an old one. Anything other than the literal "closed"
     # sentinel is silently downgraded to "open" because failing-open
     # on a typo is strictly safer than failing-closed and bricking
     # the agent. Mirrors normalizeHookFailMode in
@@ -1400,7 +1400,12 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             if hasattr(app.cfg.guardrail, "effective_mode")
             else app.cfg.guardrail.mode
         )
-        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}")
+        fail_mode = (
+            app.cfg.guardrail.effective_hook_fail_mode(connector)
+            if hasattr(app.cfg.guardrail, "effective_hook_fail_mode")
+            else app.cfg.guardrail.hook_fail_mode
+        )
+        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}")
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")

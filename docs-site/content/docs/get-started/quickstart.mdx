@@ -196,7 +196,7 @@ and redaction profile that file is allowed to receive.
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail-mode for delivery, authentication, and invalid gateway responses. Defaults to preserving whatever the connector already had.",
+      description: "Hook fail-mode for delivery, authentication, and invalid gateway responses. Omitted, it keeps the current setting, which is `closed` on a new install: hooks block the agent's tools while the gateway is down. The summary's Guardrail line shows the result.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",

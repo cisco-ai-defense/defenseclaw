@@ -503,7 +503,8 @@ organization examples are in
 Each sample is an observe-mode starter: it inspects Codex, Claude Code,
 Cursor and Copilot (and OpenCode on Linux and macOS), logs every verdict and
 does not block on policy verdicts. Change `guardrail.mode` to
-`action` when you are ready to block.
+`action` when you are ready to block. Each sample also turns on AI Discovery
+(`ai_discovery.enabled: true`), which is off when the key is not set.
 
 <Tabs items={['Linux', 'macOS', 'Windows']}>
   <Tab value="Linux">
@@ -526,6 +527,8 @@ guardrail:
     cursor: {}
     copilot: {}
     opencode: {}
+ai_discovery:
+  enabled: true                         # AI Discovery is off without it
 enterprise:
   profile: standalone
   inspection:
@@ -571,6 +574,8 @@ guardrail:
     cursor: {}
     copilot: {}
     opencode: {}
+ai_discovery:
+  enabled: true                         # AI Discovery is off without it
 enterprise:
   profile: standalone                       # macOS otherwise means Secure Client
   inspection:
@@ -613,6 +618,8 @@ guardrail:
     claudecode: {}
     cursor: {}
     copilot: {}
+ai_discovery:
+  enabled: true                         # AI Discovery is off without it
 enterprise:
   profile: standalone                   # Windows otherwise means Secure Client
   inspection:

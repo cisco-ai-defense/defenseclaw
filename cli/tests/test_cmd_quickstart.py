@@ -304,6 +304,11 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         result = self.runner.invoke(quickstart_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--fail-mode", result.output)
+        # GAP-1251: a new install resolves to closed, so the help must not
+        # call open the default.
+        text = " ".join(result.output.split())
+        self.assertNotIn("'open' (default)", text)
+        self.assertIn("'closed' (the default on a new install)", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([

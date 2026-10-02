@@ -1165,6 +1165,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(summary["profile"], "action")
         setup = {step["name"]: step for step in summary["setup"]}
         self.assertIn("hermes, mode=action", setup["Guardrail"]["detail"])
+        # GAP-1251: the summary names the resulting hook fail mode.
+        self.assertIn("fail mode=closed", setup["Guardrail"]["detail"])
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:

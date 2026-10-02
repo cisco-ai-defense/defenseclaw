@@ -180,6 +180,17 @@ Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
+skill, MCP and AI component records it feeds) is off unless the config sets
+it. A config you write is read as written, so add this block to turn it on:
+
+```yaml
+ai_discovery:
+  enabled: true
+```
+
+See [Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise).
+
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:
 

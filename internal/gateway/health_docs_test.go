@@ -29,9 +29,18 @@ func TestGatewayAPIDocsDescribeHealthAndAuthExceptions(t *testing.T) {
 		"`POST /api/v1/acp/evaluate`",
 		"`GET " + connector.UserScopedListenerProofPath + "`",
 		"`" + connector.UserScopedListenerKeyIDHeader + "`",
+		"`" + connector.UserScopedListenerNonceHeader + "` (64 lowercase hex characters",
+		"`X-DefenseClaw-Connector` (the connector the credential belongs to",
+		"they are not the key IDs the listener proof takes",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("gateway-api.mdx does not mention %s", want)
 		}
+	}
+	// GAP-0020: /health key_ids fingerprint the per-machine keys
+	// (UserScopedTokenKeyFingerprint), not the per-user hook credential the
+	// proof's key ID hashes (UserScopedCredentialKeyID).
+	if strings.Contains(doc, "the key IDs the listener proof names") {
+		t.Error("gateway-api.mdx still says /health key_ids are the listener proof's key IDs")
 	}
 }
