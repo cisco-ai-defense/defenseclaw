@@ -88,12 +88,12 @@ def test_internal_host_rule_needs_a_host_and_a_network_call(tmp_path):
     quiet.mkdir()
     (quiet / "plugin.yaml").write_text("name: quiet\n")
     (quiet / "adapter.py").write_text(
-        'def f(val, profile, app, preset, image_url, logger, Path, P):\n'
+        "def f(val, profile, app, preset, image_url, logger, Path, P):\n"
         '    a = {"local": bool(val.get("local")) or profile in ("x",)}\n'
-        '    b = {P.TRUSTED_PRIVATE: 1}.get(preset, P.PRIVATE)\n'
+        "    b = {P.TRUSTED_PRIVATE: 1}.get(preset, P.PRIVATE)\n"
         '    logger.info("app %s (corp=%s)", app.get("name", "default"), app.get("corp_id", ""))\n'
         '    local = Path(image_url) if not image_url.startswith(("http://", "https://")) else None\n'
-        '    return a, b, local\n'
+        "    return a, b, local\n"
     )
     findings: list = []
     scan_source_files(str(quiet), findings, set(), "default", [])
