@@ -2137,6 +2137,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
 	}
 	defer fsw.Close()
+	events := newEnterpriseHookWatchPump(fsw.Events, fsw.Errors, enterpriseHookWatchEventBuffer)
 
 	watched := map[string]struct{}{}
 	// Owned-file allowlists, split by expected writer. fsnotify on
@@ -2282,7 +2283,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
 		}
-		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
+		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw, events); waitErr != nil {
 			return waitErr
 		}
 		// Manifest is present now — re-run the startup reconcile so
@@ -2360,7 +2361,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		select {
 		case <-cmd.Context().Done():
 			return cmd.Context().Err()
-		case event, ok := <-fsw.Events:
+		case event, ok := <-events.Events:
 			if !ok {
 				if err := cmd.Context().Err(); err != nil {
 					return err
@@ -2427,7 +2428,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
 			debounceReason = "fsnotify"
-		case err, ok := <-fsw.Errors:
+		case err, ok := <-events.Errors:
 			if !ok {
 				if contextErr := cmd.Context().Err(); contextErr != nil {
 					return contextErr
@@ -2435,6 +2436,14 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				return errors.New("enterprise hooks watch: fsnotify error channel closed unexpectedly")
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] fsnotify error: %s\n", err)
+		case <-events.Overflow:
+			// Events were dropped while a reconcile ran; reconcile once more
+			// so a dropped change is not left to the interval pass.
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			debouncePending = true
+			if debounceReason == "" {
+				debounceReason = "fsnotify"
+			}
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
@@ -2550,7 +2559,7 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 // symlink) is treated as fatal: we did our one bounded wait, an
 // operator now dropped a bad file, further recovery belongs to a
 // human triage rather than an unbounded wait loop.
-func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw *fsnotify.Watcher) error {
+func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw *fsnotify.Watcher, events *enterpriseHookWatchPump) error {
 	manifestPath := filepath.Clean(enterpriseHookManifest)
 	parentDir := filepath.Dir(manifestPath)
 
@@ -2615,7 +2624,7 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 				return fmt.Errorf("enterprise hooks watch: targets.yaml wait timeout after %s at %s — exiting for SCM restart", enterpriseHookTargetsWaitTimeout, manifestPath)
 			}
 			return deadline.Err()
-		case event := <-fsw.Events:
+		case event := <-events.Events:
 			// Only react to writes/creates for the target file; ignore
 			// noise for siblings (a stray temp file, chmod on the
 			// dir itself).
@@ -2628,7 +2637,11 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), fmt.Sprintf("appeared (%s)", event.Op)); done {
 				return err
 			}
-		case fswErr := <-fsw.Errors:
+		case <-events.Overflow:
+			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), "present after dropped events"); done {
+				return err
+			}
+		case fswErr := <-events.Errors:
 			// fsnotify.Errors is documented to deliver only
 			// recoverable errors (queue overflow, watcher-internal
 			// signals). Log and keep waiting; the ticker will retry.
