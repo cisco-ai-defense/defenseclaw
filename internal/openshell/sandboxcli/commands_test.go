@@ -1405,6 +1405,40 @@ func TestEnableDisableWrappers(t *testing.T) {
 	}
 }
 
+// enable refuses, and leaves the rc file alone, while sandboxes cannot run:
+// the wrapper would make the plain command fail in every new shell (GAP-1219).
+func TestEnableRefusesWhileSandboxesCannotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*testApp)
+		want  string
+	}{
+		{"config off", func(ta *testApp) { ta.Cfg.OpenShell.Enabled = false }, "sandboxes are off"},
+		{"daemon off", func(ta *testApp) { ta.daemon.status.Enabled = false }, "sandboxes are off"},
+		{"unavailable", func(ta *testApp) { ta.daemon.status.Available = false }, "sandboxes are unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			writeConfig(t, ta, "")
+			ta.env["SHELL"] = "/bin/zsh"
+			tc.setup(ta)
+			err := ta.Enable(WrapperOptions{Harness: "claude"})
+			if err == nil {
+				t.Fatal("enable succeeded while sandboxes cannot run")
+			}
+			has(t, err.Error(), "not wrapping `claude`", tc.want)
+			if _, statErr := os.Stat(filepath.Join(ta.home, ".zshrc")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf(".zshrc was written: %v", statErr)
+			}
+			if c := loadConfig(t, ta); len(c.OpenShell.Wrappers) != 0 {
+				t.Fatalf("openshell.wrappers = %v", c.OpenShell.Wrappers)
+			}
+			// disable still works, to undo a wrapper an older build wrote.
+			ta.ok(t, ta.Disable(WrapperOptions{Harness: "claude"}))
+		})
+	}
+}
+
 // A wrapper enable wrote to an --rc file is found again: by the wrapped
 // list, doctor, a disable without --rc, and teardown.
 func TestWrappersInACustomRCFile(t *testing.T) {
