@@ -2214,6 +2214,11 @@ def _connector_teardown(plan: UninstallPlan) -> None:
         )
 
 
+# A connector teardown or verify runs the gateway's full config load, which
+# on a busy Windows host with remote observability destinations took 108 s;
+# the old fixed 60 s aborted every uninstall run there (GAP-1663).
+_CONNECTOR_COMMAND_TIMEOUT_S = 300
+
 # ``defenseclaw-gateway connector verify`` exits 2 for a connector name its
 # registry cannot resolve (a config error), distinct from 1 for residue.
 _GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2
@@ -2242,7 +2247,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -2278,6 +2283,7 @@ def _run_gateway_connector_teardown(
     gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
+    ux.subhead(f"tearing down {connector} (on a busy host this can take a few minutes)...")
     try:
         proc = subprocess.run(
             [
@@ -2291,7 +2297,7 @@ def _run_gateway_connector_teardown(
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")
@@ -2321,7 +2327,7 @@ def _run_gateway_connector_teardown(
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             ux.warn(f"gateway connector verification failed to launch: {exc}")

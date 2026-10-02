@@ -1319,6 +1319,22 @@ class GatewayTeardownOutputTests(unittest.TestCase):
         self.assertEqual(kwargs["errors"], "replace")
         self.assertNotIn("text", kwargs)
 
+    def test_gateway_teardown_waits_for_a_slow_gateway(self):
+        # GAP-1663: a no-op teardown took 108 s on a busy Windows home; the
+        # fixed 60 s aborted every uninstall run there.
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway.exe"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output() as buf,
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("codex"))
+
+        self.assertIn("tearing down codex", buf.getvalue())
+        timeouts = [call.kwargs["timeout"] for call in run_mock.call_args_list]
+        self.assertEqual(len(timeouts), 2)  # teardown, then verify
+        self.assertTrue(all(timeout >= 300 for timeout in timeouts), timeouts)
+
     def test_gateway_stop_uses_utf8(self):
         completed = type("Completed", (), {"returncode": 0, "stdout": "✓ stopped\n", "stderr": ""})()
         with (
