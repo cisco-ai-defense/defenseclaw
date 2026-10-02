@@ -74,7 +74,9 @@ and other fields that activation loaded.
 ## 4. Validate and test the active Rego
 
 `policy validate` checks the generated `data.json` shape and compiles the Rego.
-`policy test` runs any Rego unit tests in the same directory.
+`policy test` runs any Rego unit tests (`*_test.rego`) in the same directory.
+The installed policy directories ship without unit tests, so there it reports
+that there is nothing to run and exits 0.
 
 ```bash
 defenseclaw policy validate \
