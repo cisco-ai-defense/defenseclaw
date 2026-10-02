@@ -92,11 +92,28 @@ func TestEventRouterModelV8SessionMessagePreservesContentMetricsAndW3CHierarchy(
 		Payload: eventRouterAssistantMessagePayload(t, "session-model-1", "run-model-1"),
 	})
 
-	spans := waitForEventRouterModelSpans(t, capture, 1)
-	if len(spans) != 1 {
-		t.Fatalf("model spans=%d want=1", len(spans))
+	// GAP-1452: the model operation is the child of an "invoke_agent openclaw"
+	// root, so Galileo and Tempo can attribute the turn to OpenClaw.
+	spans := waitForEventRouterModelSpans(t, capture, 2)
+	if len(spans) != 2 {
+		t.Fatalf("agent+model spans=%d want=2", len(spans))
 	}
-	model := spans[0]
+	var agent, model *tracepb.Span
+	for _, span := range spans {
+		switch gatewayProtoAttribute(span.Attributes, "defenseclaw.span.family") {
+		case observability.TelemetryFamilyModelChat:
+			model = span
+		case observability.TelemetryFamilyAgentInvoke:
+			agent = span
+		}
+	}
+	if agent == nil || model == nil || agent.Name != "invoke_agent openclaw" ||
+		!bytes.Equal(model.TraceId, agent.TraceId) || !bytes.Equal(model.ParentSpanId, agent.SpanId) {
+		t.Fatalf("model is not the child of an invoke_agent openclaw root: agent=%+v model=%+v", agent, model)
+	}
+	if got := gatewayProtoAttribute(agent.Attributes, "gen_ai.conversation.id"); got != "session-model-1" {
+		t.Fatalf("agent root conversation=%q", got)
+	}
 	attributes := hookModelV8ProtoAttributes(model)
 	for key, want := range map[string]string{
 		"defenseclaw.span.family":       observability.TelemetryFamilyModelChat,
@@ -139,9 +156,9 @@ func TestEventRouterModelV8SessionMessagePreservesContentMetricsAndW3CHierarchy(
 		Tool: "shell", ID: "tool-call-1", SessionID: "session-model-1", RunID: "run-model-1",
 		Output: "workspace", ExitCode: &zero,
 	})
-	spans = waitForEventRouterModelSpans(t, capture, 2)
-	if len(spans) != 2 {
-		t.Fatalf("model+tool spans=%d want=2", len(spans))
+	spans = waitForEventRouterModelSpans(t, capture, 3)
+	if len(spans) != 3 {
+		t.Fatalf("agent+model+tool spans=%d want=3", len(spans))
 	}
 	var tool *tracepb.Span
 	for _, span := range spans {
