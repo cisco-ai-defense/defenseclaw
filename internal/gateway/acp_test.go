@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestACPEvaluateDeniedMethodHonorsProfileMode(t *testing.T) {
@@ -780,6 +781,14 @@ func TestACPEvaluateBlockRecordsConnectorFinding(t *testing.T) {
 			if event.Connector != "kiro" || target != "kiro:acp" || event.Severity != "CRITICAL" {
 				t.Fatalf("scan-finding connector=%q target=%q severity=%q, want kiro, kiro:acp, CRITICAL",
 					event.Connector, target, event.Severity)
+			}
+			// The finding names the ACP session and the gateway's user, as a
+			// hook finding does (GAP-1946).
+			if event.SessionID != "s" {
+				t.Fatalf("scan-finding session_id=%q, want the ACP session s", event.SessionID)
+			}
+			if user := useridentity.Current(); user.ID != "" && auditStringValue(event.Structured["user.id"]) != user.ID {
+				t.Fatalf("scan-finding user.id=%q, want %q", auditStringValue(event.Structured["user.id"]), user.ID)
 			}
 			return
 		}
