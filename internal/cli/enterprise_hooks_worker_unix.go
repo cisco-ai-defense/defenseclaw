@@ -224,6 +224,7 @@ type enterpriseHookPurgeDetail struct {
 	Data     bool `json:"data,omitempty"`
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
+	UVCache  bool `json:"uv_cache,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -511,7 +512,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Binaries: summary.Binaries, Gateway: stopped}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)

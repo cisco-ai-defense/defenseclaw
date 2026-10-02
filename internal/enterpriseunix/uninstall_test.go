@@ -262,4 +262,12 @@ func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
 	if got := purgedUserChange("carol", &purgedUserDetail{}); got != "found no DefenseClaw per-user data or binaries of user carol to remove" {
 		t.Fatalf("an account with nothing to remove: %q", got)
 	}
+	// GAP-1947: the uv cache entries the purge removed are named too.
+	if got := purgedUserChange("dave", &purgedUserDetail{Data: true, UVCache: true}); !strings.Contains(got, "~/.defenseclaw") ||
+		!strings.HasSuffix(got, "and DefenseClaw's entries in its uv cache (~/.cache/uv)") {
+		t.Fatalf("an account with uv cache entries: %q", got)
+	}
+	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
+		t.Fatalf("an account with only uv cache entries: %q", got)
+	}
 }
