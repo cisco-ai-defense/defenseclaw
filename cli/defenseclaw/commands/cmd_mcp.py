@@ -724,6 +724,13 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
     except Exception as exc:
         if quiet and captured_stdout is not None:
             _emit_captured_stdout(captured_stdout.getvalue())
+        if app.logger:
+            try:
+                app.logger.log_scan_failed(
+                    "mcp-scanner", audit_target or target, f"scan failed: {exc}",
+                )
+            except Exception as log_exc:  # noqa: BLE001 - keep the scan error primary
+                click.echo(f"warning: could not record the failed scan: {log_exc}", err=True)
         if quiet:
             payload = _mcp_scan_error_json_payload(
                 target, exc, connector=connector,

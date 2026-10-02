@@ -40,3 +40,43 @@ def test_default_resolver_keeps_getaddrinfo_order():
         infos.append((family, socket.SOCK_STREAM, 6, "", (ip, 0)))
     with patch.object(ssrf.socket, "getaddrinfo", return_value=infos):
         assert ssrf._default_resolver("mcp.example.com") == answers
+
+
+def test_failed_mcp_scan_is_recorded_as_failed_scan():
+    """GAP-1504: an errored scan reaches the gateway as a scan with an error."""
+    from defenseclaw.commands import cmd_mcp
+    from defenseclaw.scanner.mcp import MCPScannerWrapper
+
+    recorder = _Recorder()
+    cfg = SimpleNamespace(
+        scanners=SimpleNamespace(mcp_scanner=SimpleNamespace()),
+        resolve_llm=lambda _scope: None,
+        effective_inspect_llm=lambda: None,
+        cisco_ai_defense=None,
+    )
+    app = SimpleNamespace(cfg=cfg, logger=Logger(recorder))
+    with patch.object(MCPScannerWrapper, "__init__", return_value=None), patch.object(
+        MCPScannerWrapper, "scan", side_effect=RuntimeError("Connection to MCP server was cancelled"),
+    ), patch("defenseclaw.scanner.rulepack.maybe_wrap", side_effect=lambda scanner, *a, **k: scanner):
+        result = cmd_mcp._run_scan(
+            app, "https://mcp.example.com/mcp", "", False, False, False,
+            audit_target="deepwiki",
+        )
+
+    assert result is None
+    [payload] = recorder.payloads
+    assert payload["kind"] == "scan"
+    assert payload["scan"]["scanner"] == "mcp-scanner"
+    assert payload["scan"]["target"] == "deepwiki"
+    assert payload["scan"]["findings"] == []
+    assert "was cancelled" in payload["scan"]["error"]
+
+
+def test_successful_scan_payload_has_no_error_field():
+    from datetime import datetime, timezone
+
+    from defenseclaw.models import ScanResult
+
+    recorder = _Recorder()
+    Logger(recorder).log_scan(ScanResult("mcp-scanner", "x", datetime.now(timezone.utc)))
+    assert "error" not in recorder.payloads[0]["scan"]
