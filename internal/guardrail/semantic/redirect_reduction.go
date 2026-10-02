@@ -65,6 +65,30 @@ func (p *Program) ListReductionSafe() bool {
 	return p != nil && p.listReductionSafe
 }
 
+// StaticCommandSubsetSafe reports whether a match of this expression on the
+// view returned by actionfacts.StaticCommandSubsetReduction also holds for
+// the whole action.
+//
+// The view keeps only the commands the action is certain to run with a
+// static argv, so the action has more commands, redirects, paths, network
+// facts and data flows (and so artifacts and archive lineages) than the view,
+// never fewer. A kept command's own fields are those of the action, and its
+// argv_complete is true because its argv is static. An expression is safe
+// when it reads neither parse nor authoritative, reads argv_complete only on
+// a command, and reads each of those collections only as the range of an
+// exists() reached from the root through &&, || and exists() or all()
+// predicates alone.
+func (p *Program) StaticCommandSubsetSafe() bool {
+	return p != nil && p.subsetReductionSafe
+}
+
+func subsetReductionSafe(ast *cel.Ast) bool {
+	return reductionSafe(ast, map[string]bool{
+		"commands": true, "redirects": true, "paths": true, "network": true,
+		"data_flows": true, "artifacts": true, "archive_lineages": true,
+	})
+}
+
 func redirectReductionSafe(ast *cel.Ast) bool {
 	return reductionSafe(ast, map[string]bool{
 		"redirects": true, "paths": true, "artifacts": true, "archive_lineages": true,
