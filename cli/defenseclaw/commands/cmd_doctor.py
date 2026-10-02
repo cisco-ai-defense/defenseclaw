@@ -8705,6 +8705,7 @@ def doctor(
                 rule_pack_validation_cache=rule_pack_validation_cache,
             )
             _check_hook_contract_lock(cfg, _c, r)
+            _check_hook_runtime_integrity(cfg, _c, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
     # operators who switch connectors via 'defenseclaw setup guardrail
@@ -10982,6 +10983,20 @@ def _check_hook_contract_lock(
         _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
+
+
+def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None:
+    """FAIL when a generated hook script or its token sidecar drifted.
+
+    An edited script (an early ``exit 0``) silently disables enforcement and a
+    missing token blocks every call, while the other hook rows stay green
+    (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
+    """
+    from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
+
+    problems = hook_runtime_problems(cfg, connector)
+    if problems:
+        _emit("fail", "Hook runtime files", f"{'; '.join(problems)}; run `{setup_command(connector)}`", r=r)
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:

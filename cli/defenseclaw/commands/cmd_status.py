@@ -617,6 +617,7 @@ def _print_agents(
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
+            suffix += _hook_runtime_degraded_suffix(cfg, conn)
             ux.echo(
                 f"                {friendly} ({conn}) — mode={mode or '?'}"
                 f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}"
@@ -770,6 +771,23 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
             "drift": ["report-unavailable"],
             "sources": [],
         }
+
+
+def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
+    """`` — DEGRADED (...)`` when a hook script or token drifted (GAP-1141, GAP-1138)."""
+    try:
+        from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
+
+        problems = hook_runtime_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
+        return ""
+    if not problems:
+        return ""
+    return (
+        " — "
+        + ux._style("DEGRADED", fg="red", bold=True)
+        + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
+    )
 
 
 def _connector_state_verb(state: str) -> str:

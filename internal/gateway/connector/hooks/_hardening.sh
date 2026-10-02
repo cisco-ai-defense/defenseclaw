@@ -953,10 +953,23 @@ defenseclaw_handle_missing_token() {
   local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)" >&2
+    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2
     exit 2
   fi
   exit 0
+}
+
+# defenseclaw_missing_token_next_step names the per-user repair for a missing
+# hook token (GAP-1138). Managed hooks print nothing: the service restores
+# their token.
+defenseclaw_missing_token_next_step() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  local setup_name="${1:-}"
+  [ "$setup_name" = "claudecode" ] && setup_name="claude-code"
+  [ -n "$setup_name" ] || return 0
+  printf '%s' "; run \`defenseclaw setup ${setup_name}\` to restore the hook token"
 }
 
 # defenseclaw_read_stdin_capped reads stdin into a shell variable but

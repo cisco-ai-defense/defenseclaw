@@ -382,6 +382,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
 func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+	if action == "block" {
+		a.dispatchHookBlockWebhook("codex", req.ToolName, req.HookEventName, severity, reason)
+	}
 	if a == nil || a.notifier == nil {
 		return
 	}
