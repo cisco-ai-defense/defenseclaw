@@ -328,3 +328,31 @@ def test_the_rollback_copy_states_its_size_and_the_free_space() -> None:
     body = _text()[_text().index("function Save-Snapshot") :][:1400]
     assert "Saving a rollback copy of the data folder ({0:N0} MB needed{1})" in body
     assert body.index("Saving a rollback copy") < body.index("Not enough free disk space")
+
+
+def test_a_pending_uninstall_cleanup_is_waited_for_before_the_data_dir_is_touched() -> None:
+    # GAP-1647: an install started right after `uninstall --all` lost its
+    # .staging to the deferred cleanup, which runs after the CLI exits.
+    start = _text().index("function Wait-UninstallCleanup(")
+    body = _text()[start : _text().index("\n}\n", start)]
+    assert '-Filter "defenseclaw-uninstall-*"' in body and '"plan.json"' in body
+    assert '"interpreter_dirs"' in body
+    assert "AddMinutes(-10)" in body
+    assert "wait a minute, then run the installer again. Nothing was changed." in body
+    install = _ps1_function("Invoke-Install")
+    assert install.index("Wait-UninstallCleanup") < install.index('Join-Path $DataDir "logs"')
+    # The helper's folder names match what uninstall writes.
+    uninstall = (ROOT / "cli" / "defenseclaw" / "commands" / "cmd_uninstall.py").read_text(encoding="utf-8")
+    assert 'tempfile.mkdtemp(prefix=f"defenseclaw-uninstall-{token}-")' in uninstall
+    assert 'os.path.join(helper_dir, "plan.json")' in uninstall
+    assert '"interpreter_dirs"' in uninstall
+
+
+def test_uv_gets_load_tolerant_timeouts_and_they_are_restored() -> None:
+    # GAP-1776: uv's 60 s bytecode and 30 s HTTP limits failed installs on a
+    # busy Windows host.
+    install = _ps1_function("Invoke-Install")
+    assert 'if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }' in install
+    assert 'if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }' in install
+    restore = _text()[_text().index("$savedEnv = @{}") :][:400]
+    assert '"UV_COMPILE_BYTECODE_TIMEOUT", "UV_HTTP_TIMEOUT"' in restore
