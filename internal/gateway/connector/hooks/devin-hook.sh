@@ -184,7 +184,7 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/devin/hook" "$PAYLOAD" \
 # a reboot, for example): start it once and retry. See
 # defenseclaw_gateway_cold_start in _hardening.sh.
 defenseclaw_hook_post() {
-  curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/devin/hook" \
+  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/devin/hook" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: devin-hook/1.0" \
     "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \

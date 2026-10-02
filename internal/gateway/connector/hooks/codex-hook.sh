@@ -323,7 +323,7 @@ codex_gateway_post() {
     exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${_DC_CURL_CONFIG_TOKEN}\"")
   fi
   exec 9< <(printf '%s' "${_DC_HOOK_PAYLOAD}")
-  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
+  RESPONSE=$(curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: codex-hook/1.0" \
     -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
