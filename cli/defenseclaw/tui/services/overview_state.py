@@ -530,7 +530,7 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("m", "Mode", ("setup", "connector")),
     # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
-    ("N", "Notify", ("setup", "notifications")),
+    ("b", "Notify", ("setup", "notifications")),
     ("u", "Upgrade", ("upgrade",)),
     ("X", "Uninstall", ("uninstall",)),
     # NOTE: ``?`` is intentionally NOT mapped here. Routing ``?``

@@ -4448,7 +4448,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("Ctrl+\\", "Pick a colour theme"),
             ("Y / Ctrl+S", "Copy / save the last command's output"),
             ("D", "Run doctor in the background"),
-            ("Ctrl+C", "Cancel running command (or quit when idle)"),
+            ("Ctrl+C", "Quit DefenseClaw (cancels the running command first)"),
+            ("q", "Close the drawer or overlay (does not quit)"),
         ]
 
         # Per-active-panel cheat sheets. Anything we don't have a
@@ -4460,9 +4461,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
-                ("m", "Switch connector mode"),
+                ("m", "Filter by connector (Overview, Alerts, Audit, Logs)"),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
-                ("N", "Turn notifications on or off"),
+                ("b", "Turn desktop notifications on or off"),
                 ("u / X", "Upgrade / uninstall (both preview first)"),
             ],
             "alerts": [
@@ -4525,7 +4526,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("G / g", "Jump to end / start"),
                 ("a / t / s", "Verdicts: filter action / event type / severity"),
                 ("J", "Verdicts: judge response history"),
-                ("N", "Turn notifications on or off"),
+                ("b", "Turn desktop notifications on or off"),
             ],
             "audit": [
                 ("j/k or Up/Down", "Navigate entries"),
@@ -5631,7 +5632,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         key_by_button = {
             "logs-toggle-pause": "space",
-            "logs-notifications": "N",
+            "logs-notifications": "b",
             "logs-judge-history": "J",
         }
         if button_id in key_by_button:
@@ -8889,10 +8890,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("d", "Doctor"),
             ("i", "Inventory"),
             ("g", "Guardrail"),
-            ("m", "Mode"),
+            ("m", "Connector"),
             ("p", "Policies"),
             ("l", "Logs"),
-            ("N", "Notify"),
+            ("b", "Notify"),
             ("u", "Upgrade"),
             ("X", "Uninstall"),
             ("?", "Help"),
@@ -10682,8 +10683,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if key in {"i", "l", "p"}:
                 self.action_switch_panel({"i": "inventory", "l": "logs", "p": "policies"}[key])
                 return True
-            if key in {"N", "X"}:
-                if key == "N":
+            # ``b`` (bell), not ``N``: N is the Runtime tab key (GAP-1159).
+            if key in {"b", "X"}:
+                if key == "b":
                     self.run_worker(self._open_notifications_toggle(), exclusive=False, thread=False)
                 else:
                     self.run_worker(self._open_uninstall_modal(), exclusive=False, thread=False)
