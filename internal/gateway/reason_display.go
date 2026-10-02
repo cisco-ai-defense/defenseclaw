@@ -76,10 +76,21 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 
 // notificationDisplayReason applies the same narrow catalog carve-out to OS
 // notifications only under the default compatibility policy. An explicit
-// managed-enterprise redact directive remains authoritative.
+// managed-enterprise redact directive remains authoritative. An LLM judge
+// verdict (alone or after a rule match) is worded the way the agent reads it
+// ("LLM judge: personal data or credentials"), not as raw judge labels with
+// redaction tokens (GAP-1981).
 func notificationDisplayReason(reason string, policy redaction.SinkPolicy) string {
 	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
 		return reason
+	}
+	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
+		if subject := agentJudgeSubject(reason); subject != "" {
+			return subject
+		}
+		if subject := agentRuleAndJudgeSubject(reason); subject != "" {
+			return subject
+		}
 	}
 	return redaction.ReasonForSink(reason, policy)
 }

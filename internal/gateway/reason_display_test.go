@@ -94,6 +94,25 @@ func TestNotificationDisplayReasonPreservesOnlyTrustedCatalogMetadata(t *testing
 	}
 }
 
+// TestNotificationDisplayReasonWordsJudgeVerdicts: the desktop notice and its
+// terminal fallback word an LLM judge block like the agent text, without raw
+// judge labels or redaction tokens (GAP-1981).
+func TestNotificationDisplayReasonWordsJudgeVerdicts(t *testing.T) {
+	judge := "judge-pii: Password: hunter2-test; Username: jroe; judge-exfil: sends login data"
+	want := "LLM judge: personal data or credentials, possible data exfiltration"
+	if got := notificationDisplayReason(judge, redaction.SinkPolicyDefault); got != want {
+		t.Fatalf("judge notification reason = %q, want %q", got, want)
+	}
+	mixed := "matched: TRUST-SAFETY-OVERRIDE:Safety override attempt; " + judge
+	got := notificationDisplayReason(mixed, redaction.SinkPolicyDefault)
+	if !strings.HasPrefix(got, "rule TRUST-SAFETY-OVERRIDE") || !strings.HasSuffix(got, "; "+want) {
+		t.Fatalf("rule+judge notification reason = %q, want rule then %q", got, want)
+	}
+	if forced := notificationDisplayReason(judge, redaction.SinkPolicyRedact); forced == want {
+		t.Fatalf("forced-redact notification reason = %q, want the redact directive honoured", forced)
+	}
+}
+
 func TestAgentAndDefaultSinkDisplayReasonUseTrustedMetadataCarveOut(t *testing.T) {
 	redaction.SetAgentReasonRedactionDisabled(false)
 	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })

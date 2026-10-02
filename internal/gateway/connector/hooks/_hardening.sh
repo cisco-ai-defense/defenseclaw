@@ -730,9 +730,12 @@ defenseclaw_log_hook_failure() {
   safe_reason="$(defenseclaw_json_escape "$reason")"
   safe_category="$(defenseclaw_json_escape "$category")"
   safe_fail_mode="$(defenseclaw_json_escape "$fail_mode")"
+  # stderr is redirected before the append so a failed open of the log
+  # (full disk, read-only home) cannot print a shell diagnostic naming this
+  # script into the agent-visible block reason (GAP-1974).
   printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s"}\n' \
     "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" \
-    >> "$log_file" 2>/dev/null || true
+    2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
 }
