@@ -882,5 +882,37 @@ class UsageDetailEvidenceTests(unittest.TestCase):
         self.assertIn("Identity", result.output)
 
 
+
+class DiscoveryOffAndWordingTests(unittest.TestCase):
+    """GAP-1195: say discovery is off, and name the runtime planes plainly."""
+
+    class _DisabledUsageClient(_FakeClient):
+        def ai_usage(self):
+            return {"enabled": False, "summary": {}, "signals": []}
+
+    def _invoke(self, command):
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", self._DisabledUsageClient):
+            return CliRunner().invoke(command, [], obj=_make_ctx())
+
+    def test_processes_and_usage_say_discovery_is_disabled(self):
+        for command, empty_table in ((cmd_agent.processes, "AI processes (0 live)"),
+                                     (cmd_agent.usage, "AI visibility")):
+            result = self._invoke(command)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("AI discovery is disabled", result.output)
+            self.assertIn("defenseclaw agent discovery enable", result.output)
+            self.assertNotIn(empty_table, result.output)
+
+    def test_runtime_plane_changes_read_as_plain_words(self):
+        self.assertEqual(
+            cmd_agent._runtime_change_line("planes", [], ["a", "b"]),
+            "Runtime planes: none → A inference heartbeat, B per-process egress",
+        )
+        self.assertEqual(cmd_agent._runtime_change_line("enabled", False, True),
+                         "Runtime monitoring: off → on")
+        self.assertNotIn("['a', 'b']", cmd_agent._runtime_planes_saved_phrase(False))
+
 if __name__ == "__main__":
     unittest.main()

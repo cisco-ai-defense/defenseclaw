@@ -206,26 +206,26 @@ func (adapter *ProjectedTraceAdapter) deliverHTTP(
 			errors.Is(err, netguard.ErrV8AddressProhibited),
 			errors.Is(err, netguard.ErrV8EndpointInvalid),
 			errors.Is(err, netguard.ErrV8RedirectBlocked):
-			return deliveryResult(delivery.OutcomeUnsafeEndpoint)
+			return failedResult(delivery.OutcomeUnsafeEndpoint, delivery.FailureCodeEndpointProhibited)
 		case wroteRequest.Load():
-			return deliveryResult(delivery.OutcomeAmbiguous)
+			return failedResult(delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost)
 		default:
-			return deliveryResult(delivery.OutcomeTransient)
+			return failedResult(delivery.OutcomeTransient, transportFailureCode(err))
 		}
 	}
 	if response == nil {
-		return deliveryResult(delivery.OutcomeAmbiguous)
+		return failedResult(delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		return deliveryResult(delivery.OutcomeAuthentication)
+		return failedResult(delivery.OutcomeAuthentication, httpStatusFailureCode(response.StatusCode))
 	}
 	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly ||
 		response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
-		return deliveryResult(delivery.OutcomeTransient)
+		return failedResult(delivery.OutcomeTransient, httpStatusFailureCode(response.StatusCode))
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return deliveryResult(delivery.OutcomePermanentPayload)
+		return failedResult(delivery.OutcomePermanentPayload, httpStatusFailureCode(response.StatusCode))
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxTraceResponseBodyBytes+1))
 	if readErr != nil || len(body) > maxTraceResponseBodyBytes {
@@ -295,19 +295,18 @@ func (adapter *ProjectedTraceAdapter) deliverGRPC(
 	if err != nil {
 		if adapter.config.tracker.unsafeSince(dialSequence) ||
 			errors.Is(err, netguard.ErrV8AddressProhibited) || errors.Is(err, netguard.ErrV8EndpointInvalid) {
-			return deliveryResult(delivery.OutcomeUnsafeEndpoint)
+			return failedResult(delivery.OutcomeUnsafeEndpoint, delivery.FailureCodeEndpointProhibited)
 		}
+		code := grpcFailureCode(err)
 		switch grpcstatus.Code(err) {
 		case codes.Unauthenticated, codes.PermissionDenied:
-			return deliveryResult(delivery.OutcomeAuthentication)
+			return failedResult(delivery.OutcomeAuthentication, code)
 		case codes.InvalidArgument, codes.NotFound, codes.AlreadyExists, codes.FailedPrecondition,
 			codes.OutOfRange, codes.Unimplemented:
 			adapter.recordTraceFailure(spanCount)
-			return deliveryResult(delivery.OutcomePermanentPayload)
-		case codes.Canceled, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Aborted, codes.Unavailable:
-			return deliveryResult(delivery.OutcomeAmbiguous)
+			return failedResult(delivery.OutcomePermanentPayload, code)
 		default:
-			return deliveryResult(delivery.OutcomeAmbiguous)
+			return failedResult(delivery.OutcomeAmbiguous, code)
 		}
 	}
 	if response == nil {

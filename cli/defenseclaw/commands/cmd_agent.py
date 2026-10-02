@@ -310,6 +310,13 @@ def usage(
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
 
+    if payload.get("enabled") is False and not (payload.get("signals") or []):
+        click.echo(
+            "AI discovery is disabled, so there is no AI usage to show. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+        return
+
     click.echo(
         _render_ai_usage_table(
             payload,
@@ -422,7 +429,19 @@ def processes(
     if process_error:
         raise click.ClickException(f"process snapshot failed: {process_error}")
 
+    if payload.get("enabled") is False and not process_signals:
+        # The sidecar answers with an empty list while discovery is off (the
+        # default after init); say so instead of "AI processes (0 live)".
+        click.echo(_AI_DISCOVERY_OFF_PROCESSES_HINT)
+        return
+
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
+
+
+_AI_DISCOVERY_OFF_PROCESSES_HINT = (
+    "AI discovery is disabled, so no AI processes are observed. "
+    "Enable it with: defenseclaw agent discovery enable"
+)
 
 
 _AI_DISCOVERY_DISABLED_HINT = (
@@ -1161,7 +1180,7 @@ def discovery_enable(
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
     for field, before, after in runtime_diff:
-        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
+        ux.subhead(_runtime_change_line(field, before, after), indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar starts the discovery service.",
@@ -1205,7 +1224,7 @@ def discovery_enable(
         ux.ok(
             "Config saved (ai_discovery.enabled = true, "
             f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min}, "
-            f"runtime planes {'a/b/c' if _discovery_runtime(ad).enable_host_plane else 'a/b'} on)",
+            f"{_runtime_planes_saved_phrase(_discovery_runtime(ad).enable_host_plane)})",
             indent="  ",
         )
     except OSError as exc:
@@ -1693,7 +1712,7 @@ def discovery_setup(
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
     for field, before, after in runtime_diff:
-        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
+        ux.subhead(_runtime_change_line(field, before, after), indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar applies these settings.",
@@ -1735,9 +1754,7 @@ def discovery_setup(
             f"{str(ad.enabled).lower()}, mode={ad.mode}, "
             f"scan_interval_min={ad.scan_interval_min}"
             + (
-                ", runtime planes a/b/c on"
-                if enable_pref and host_plane_requested
-                else ", runtime planes a/b on"
+                f", {_runtime_planes_saved_phrase(host_plane_requested)}"
                 if enable_pref
                 else ""
             )
@@ -2925,7 +2942,7 @@ def _apply_runtime_settings(
         ux.ok("no configuration changes needed", indent="  ")
     else:
         for field, before, after in changes:
-            ux.subhead(f"{field}: {before!r} -> {after!r}", indent="  ")
+            ux.subhead(_runtime_change_line(field, before, after), indent="  ")
         if runtime.enable_host_plane:
             ux.warn(
                 "the host plane reads kernel process, file, and identity events. Every "
@@ -3081,6 +3098,44 @@ def _discovery_runtime(ad: Any) -> AIRuntimeConfig:
     except Exception:  # noqa: BLE001 - fixtures may be read-only namespaces
         pass
     return created
+
+
+# Plain names for the runtime planes (docs: ai-discovery "The three planes").
+_RUNTIME_PLANE_NAMES = {
+    "a": "A inference heartbeat",
+    "b": "B per-process egress",
+    "c": "C agent actions",
+}
+
+
+def _on_off(value: object) -> str:
+    return "on" if value else "off"
+
+
+def _runtime_planes_phrase(planes: object) -> str:
+    names = [
+        _RUNTIME_PLANE_NAMES.get(str(plane).strip().lower(), str(plane))
+        for plane in (planes or [])  # type: ignore[union-attr]
+    ]
+    return ", ".join(names) if names else "none"
+
+
+def _runtime_change_line(field: str, before: object, after: object) -> str:
+    """One preview line for a runtime-plane config change, in plain words."""
+    if field == "enabled":
+        return f"Runtime monitoring: {_on_off(before)} → {_on_off(after)}"
+    if field == "planes":
+        return f"Runtime planes: {_runtime_planes_phrase(before)} → {_runtime_planes_phrase(after)}"
+    if field == "enable_host_plane":
+        return f"Plane C (agent actions, kernel events): {_on_off(before)} → {_on_off(after)}"
+    if field == "dns_capture":
+        return f"DNS capture: {_on_off(before)} → {_on_off(after)}"
+    return f"{field}: {before!r} → {after!r}"
+
+
+def _runtime_planes_saved_phrase(host_plane: bool) -> str:
+    planes = FULL_RUNTIME_PLANES if host_plane else USER_RUNTIME_PLANES
+    return f"runtime planes on: {_runtime_planes_phrase(planes)}"
 
 
 def _preview_runtime_planes(

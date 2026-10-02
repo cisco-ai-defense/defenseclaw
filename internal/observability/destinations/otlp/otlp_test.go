@@ -1071,10 +1071,11 @@ func TestLogFailureClassificationAndMalformedProjection(t *testing.T) {
 		statusCode int
 		partial    bool
 		retried    uint64
+		code       delivery.FailureCode
 	}{
-		{name: "authentication", statusCode: http.StatusUnauthorized},
-		{name: "too-early", statusCode: http.StatusTooEarly, retried: 2},
-		{name: "transient", statusCode: http.StatusTooManyRequests, retried: 2},
+		{name: "authentication", statusCode: http.StatusUnauthorized, code: delivery.FailureCodeHTTPAuthentication},
+		{name: "too-early", statusCode: http.StatusTooEarly, retried: 2, code: delivery.FailureCodeHTTPRetryable},
+		{name: "transient", statusCode: http.StatusTooManyRequests, retried: 2, code: delivery.FailureCodeHTTPRetryable},
 		{name: "partial-rejection", statusCode: http.StatusOK, partial: true},
 	}
 	for _, test := range tests {
@@ -1105,6 +1106,13 @@ func TestLogFailureClassificationAndMalformedProjection(t *testing.T) {
 			drainOTLP(t, dispatcher)
 			if got := dispatcher.Counters(); got.Rejected != 1 || got.Retried != test.retried || got.Delivered != 0 {
 				t.Fatalf("counters = %+v", got)
+			}
+			// The failure code names the cause in alerts and destination
+			// health instead of "unspecified".
+			if test.code != "" {
+				if got := dispatcher.DeliveryHealthSnapshot().LastFailureCode; got != test.code {
+					t.Fatalf("last failure code = %q, want %q", got, test.code)
+				}
 			}
 			_ = adapter.Close(context.Background())
 		})
