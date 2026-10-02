@@ -66,7 +66,9 @@ class AuditDiskFullNoticeTests(unittest.TestCase):
         self.assertIn("new alerts and audit events are not being recorded", result.output)
         with (
             mock.patch("shutil.disk_usage", return_value=_ROOMY),
-            mock.patch.object(cmd_status, "_fetch_runtime_bound_health", return_value={"telemetry": {"state": "running"}}),
+            mock.patch.object(
+                cmd_status, "_fetch_runtime_bound_health", return_value={"telemetry": {"state": "running"}}
+            ),
         ):
             result = CliRunner().invoke(alerts, [], obj=self.app)
         self.assertNotIn("not being recorded", result.output)
