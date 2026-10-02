@@ -320,6 +320,21 @@ def test_uv_python_with_other_pythons_stays(per_user_install) -> None:
 
 
 @posix_only
+def test_uv_cache_stays_when_the_installer_kept_uv_in_the_data_dir(per_user_install) -> None:
+    # GAP-1125: the current installer keeps uv's cache in data_dir/.uv, so
+    # ~/.cache/uv is the account's own.
+    cache = per_user_install.home / ".cache" / "uv"
+    cache.mkdir(parents=True)
+    (per_user_install.data_dir / ".uv" / "cache").mkdir(parents=True)
+    with patch.dict(os.environ, {"PATH": str(per_user_install.bin_dir), "XDG_CACHE_HOME": ""}):
+        os.environ.pop("UV_CACHE_DIR", None)
+        leftovers = cmd_uninstall._installer_uv_leftovers(
+            str(per_user_install.bin_dir), (str(per_user_install.bin_dir / "uv"),), str(per_user_install.data_dir), "linux"
+        )
+    assert leftovers == ()
+
+
+@posix_only
 def test_all_binaries_removes_an_emptied_local_bin(per_user_install) -> None:
     (per_user_install.bin_dir / "rg").unlink()
 

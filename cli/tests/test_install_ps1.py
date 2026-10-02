@@ -220,3 +220,23 @@ def test_remove_tree_retries_without_logging_a_terminating_error() -> None:
     retry = body[: body.index("if ($attempt -ge 30)")] + body[body.index("Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue") :]
     assert "-ErrorAction Stop" not in retry
     assert "if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }" in body
+
+
+def test_architecture_check_avoids_the_psreadline_polyfill() -> None:
+    # GAP-1054: in an interactive Windows PowerShell 5.1 console (`irm | iex`)
+    # [Runtime.InteropServices.RuntimeInformation] is PSReadLine's polyfill.
+    text = _text()
+    assert "[Runtime.InteropServices.RuntimeInformation]::OSArchitecture" not in text
+    assert "switch (Get-OSArchitectureName) {" in text
+    body = text[text.index("function Get-OSArchitectureName {") :][:900]
+    assert '[object].Assembly.GetType("System.Runtime.InteropServices.RuntimeInformation")' in body
+    assert "$env:PROCESSOR_ARCHITEW6432" in body and "$env:PROCESSOR_ARCHITECTURE" in body
+
+
+def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
+    # GAP-1125: a uv.exe in %USERPROFILE%\\.local\\bin that is not on PATH yet is
+    # the user's; the installer must not overwrite and record it.
+    text = _text()
+    lookup = text[text.index("$Uv = [string](Get-Command uv.exe") :][:600]
+    assert '(Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }' in lookup
+    assert lookup.index("Join-Path $BinDir") < lookup.index("$Uv = Install-Uv")

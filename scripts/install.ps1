@@ -121,6 +121,18 @@ function Test-Version([string]$Value) {
     return $Value -match '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 }
 
+function Get-OSArchitectureName {
+    # In an interactive Windows PowerShell 5.1 console (the `irm | iex` path)
+    # [Runtime.InteropServices.RuntimeInformation] resolves to PSReadLine's
+    # polyfill, which has no OSArchitecture. Ask the core library instead.
+    $type = [object].Assembly.GetType("System.Runtime.InteropServices.RuntimeInformation")
+    $property = if ($type) { $type.GetProperty("OSArchitecture") } else { $null }
+    if ($property) { return $property.GetValue($null).ToString().ToUpperInvariant() }
+    $name = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { [string]$env:PROCESSOR_ARCHITECTURE }
+    if ($name -eq "AMD64") { return "X64" }
+    return $name.ToUpperInvariant()
+}
+
 function Confirm-Step([string]$Prompt) {
     if ($Yes) { return $true }
     try { $answer = Read-Host "  $Prompt [Y/n]" } catch { $answer = "" }
@@ -1301,7 +1313,7 @@ function Invoke-Install {
 
     if ($env:OS -ne "Windows_NT") { Die "This installer is for Windows; use install.sh on macOS and Linux" }
     # The OS, not this process: x64 PowerShell also runs, emulated, on Windows ARM64.
-    switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToUpperInvariant()) {
+    switch (Get-OSArchitectureName) {
         "X64" { }
         "ARM64" { Die "Windows ARM64 is not certified, including x64 emulation; use Windows x64. Nothing was changed." }
         default { Die "Unsupported architecture: $_ (DefenseClaw for Windows needs x64). Nothing was changed." }
@@ -1422,6 +1434,9 @@ function Invoke-Install {
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    # A uv already in the bin folder belongs to the user (or an earlier run)
+    # even when that folder is not on PATH yet: use it, never overwrite it.
+    if (-not $Uv -and (Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }
     if (-not $Uv) {
         Write-Info "Installing uv $UvVersion (Python package manager)"
         $Uv = Install-Uv
