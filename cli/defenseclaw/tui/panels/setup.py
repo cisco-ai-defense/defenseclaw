@@ -8351,6 +8351,11 @@ def _value(cfg: object | Mapping[str, Any] | None, key: str) -> str:
 def _fmt_config_version(cfg: object | Mapping[str, Any] | None) -> str:
     version = get_config_value(cfg, "config_version", "")
     if not version:
+        # ``Config`` keeps the on-disk version in ``_source_config_version``
+        # (there is no ``config_version`` attribute), so a v8 file showed
+        # "(unset)" (GAP-1161).
+        version = getattr(cfg, "_source_config_version", 0) or ""
+    if not version:
         return "(unset)"
     return str(version)
 

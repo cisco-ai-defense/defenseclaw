@@ -388,3 +388,20 @@ def test_rules_only_install_and_gateway_api_port(config) -> None:
 
     entry = ActivityEntry("defenseclaw setup claude-code --yes", exit_code=0, done=True, duration=timedelta(seconds=13.01))
     assert entry.status_label == "exit 0 (13.0s)"
+
+
+async def test_config_version_and_restart_banner_after_restart() -> None:
+    """GAP-1161: a v8 config shows its version; a successful gateway restart
+    clears the queued-restart banner."""
+
+    from defenseclaw.tui.app import DefenseClawTUI
+    from defenseclaw.tui.panels.setup import _fmt_config_version
+
+    assert _fmt_config_version(SimpleNamespace(_source_config_version=8)) == "8"
+    assert _fmt_config_version(None) == "(unset)"
+
+    app = DefenseClawTUI()
+    app.setup_model.queue_restart("config saved from Textual TUI")
+    assert app.setup_model.restart_queue.pending
+    await app._handle_successful_command("defenseclaw-gateway", ("restart",))  # noqa: SLF001
+    assert not app.setup_model.restart_queue.pending

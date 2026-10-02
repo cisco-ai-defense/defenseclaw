@@ -11750,7 +11750,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if storage_changed:
                 self._schedule_signal_data_refresh()
             self._schedule_active_panel_refresh("config-save")
-            self.setup_model.queue_restart(restart_reason)
+            # Record the gateway's current start time so the next health poll
+            # can clear the banner once the gateway really restarted.
+            self.setup_model.queue_restart(
+                restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
+            )
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
@@ -11989,6 +11993,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._refresh_hint()
 
     async def _handle_successful_command(self, binary: str, args: tuple[str, ...]) -> None:
+        if binary == "defenseclaw-gateway" and args[:1] in {("restart",), ("start",)}:
+            # A successful restart (G on the queued-restart banner) applies the
+            # queued config; the banner used to stay up afterwards (GAP-1161).
+            self.setup_model.clear_restart_queue()
+            return
         if binary != "defenseclaw" or not args:
             return
         command = args[0]
