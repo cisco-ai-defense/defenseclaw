@@ -446,3 +446,43 @@ func TestInspectToolBlocksOpenClawExecWithControls(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1451: an OpenClaw block is a finding attributed to connector openclaw
+// with target openclaw:exec, and its inspect-tool-block row carries the
+// verdict's severity.
+func TestInspectToolBlockAttributesOpenClawFinding(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	installRedirectReductionRules(t, "openclaw", redirectReductionRule(
+		"TEST-MARKER-BLOCK", redirectReductionMarker,
+		`f.commands.exists(c, c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+	))
+	_, verdict := postInspectForConnector(t, api, "openclaw",
+		`{"tool":"exec","args":{"command":"echo dc-block-marker > /tmp/dc-x.txt"}}`)
+	if verdict.Action != guardrailActionBlock {
+		t.Fatalf("verdict = %s, want block", verdict.Action)
+	}
+	events, err := api.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finding, block bool
+	for _, event := range events {
+		switch event.Action {
+		case "scan-finding":
+			finding = true
+			target := auditStringValue(event.Structured["defenseclaw.finding.target_ref"])
+			if event.Connector != "openclaw" || target != "openclaw:exec" || event.Severity != "CRITICAL" {
+				t.Errorf("scan-finding connector=%q target=%q severity=%q, want openclaw, openclaw:exec, CRITICAL",
+					event.Connector, target, event.Severity)
+			}
+		case "inspect-tool-block":
+			block = true
+			if event.Connector != "openclaw" || event.Severity != "CRITICAL" {
+				t.Errorf("inspect-tool-block connector=%q severity=%q, want openclaw, CRITICAL", event.Connector, event.Severity)
+			}
+		}
+	}
+	if !finding || !block {
+		t.Fatalf("finding=%t block=%t, want both rows", finding, block)
+	}
+}
