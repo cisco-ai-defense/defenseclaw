@@ -296,7 +296,8 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
     # first rd sees a non-empty folder (GAP-1728). rd without /s still keeps a
     # folder that has real content.
     steps.extend(
-        f'(for /l %i in (1,1,{_EMPTY_DIR_RD_TRIES}) do if exist "{path}" (rd "{path}" 2>nul || ping -n 3 127.0.0.1 >nul))'
+        f'(for /l %i in (1,1,{_EMPTY_DIR_RD_TRIES}) do if exist "{path}" '
+        f'(rd "{path}" 2>nul || ping -n 3 127.0.0.1 >nul))'
         for path in empty_dirs
         if not _CMD_METACHARACTERS & set(path)
     )
