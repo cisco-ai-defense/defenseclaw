@@ -1568,7 +1568,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// (GAP-1930).
 		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evalCtx.RuleIDs); ok {
 			meta := hookDecisionMetricMeta(r.Context(), connectorName)
-			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, outcome,
+			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, req.Args, outcome,
 				AgentIdentityFromContext(r.Context()))
 		}
 	}

@@ -31,15 +31,18 @@ func TestOpenClawBlockLandsOnTheToolSpan(t *testing.T) {
 		t.Fatal("no outcome for a block")
 	}
 	user := AgentIdentity{UserID: "501", UserIDKind: "posix_uid", UserName: "dcm-std1"}
-	rememberOpenClawToolOutcome("sess-uuid", "run-2", "exec", outcome, user)
-	rememberOpenClawToolOutcome("sess-uuid", "run-1", "exec", outcome, user)
+	marker := []byte(`{"command":"echo dcmr1-block-marker > /tmp/dcmc4-openclaw.txt"}`)
+	rememberOpenClawToolOutcome("sess-uuid", "run-2", "exec", []byte(`{"command":"echo two"}`), outcome, user)
+	rememberOpenClawToolOutcome("sess-uuid", "run-1", "exec", marker, outcome, user)
 
-	// Another run's decision is never taken; the stream may name the
-	// session by its key, not the plugin's id.
-	other := generatedToolV8Observation{tool: "exec", meta: llmEventMeta{Source: "openclaw", SessionID: "agent:main:main", RunID: "run-9"}}
+	// A call with another command never takes the decision.
+	other := generatedToolV8Observation{
+		tool: "exec", arguments: `{"command":"ls"}`,
+		meta: llmEventMeta{Source: "openclaw", SessionID: "agent:main:main", RunID: "run-9"},
+	}
 	applyOpenClawToolOutcome(&other)
 	if other.meta.Guardrail.Action != "" {
-		t.Fatalf("another run took the decision: %+v", other.meta.Guardrail)
+		t.Fatalf("another command took the decision: %+v", other.meta.Guardrail)
 	}
 	write := generatedToolV8Observation{tool: "write", meta: llmEventMeta{Source: "openclaw", RunID: "run-1"}}
 	applyOpenClawToolOutcome(&write)
@@ -47,9 +50,13 @@ func TestOpenClawBlockLandsOnTheToolSpan(t *testing.T) {
 		t.Fatalf("another tool took the decision: %+v", write.meta.Guardrail)
 	}
 
+	// GAP-1930 r4: live, the stream names its own run id and the session
+	// key, so neither id matches the plugin's; the arguments do (formatted
+	// differently, with a field the plugin did not send).
 	observation := generatedToolV8Observation{
 		tool: "exec", startedAt: now, finishedAt: now.Add(time.Second),
-		meta: llmEventMeta{Source: "openclaw", SessionID: "agent:main:main", RunID: "run-1", ToolID: "call_1"},
+		arguments: `{"command": "echo dcmr1-block-marker \u003e /tmp/dcmc4-openclaw.txt", "timeout": 30}`,
+		meta:      llmEventMeta{Source: "openclaw", SessionID: "agent:main:tui-9b76", RunID: "run-stream", ToolID: "call_1"},
 	}
 	applyOpenClawToolOutcome(&observation)
 	input := generatedToolV8Input(observation)
@@ -68,9 +75,8 @@ func TestOpenClawBlockLandsOnTheToolSpan(t *testing.T) {
 	if input.Outcome != observability.OutcomeBlocked {
 		t.Fatalf("outcome = %v", input.Outcome)
 	}
-	// Taken once: the next call of the run gets the other remembered
-	// decision only through its own run.
-	again := generatedToolV8Observation{tool: "exec", meta: llmEventMeta{Source: "openclaw", RunID: "run-1"}}
+	// Taken once: the same command again does not find it.
+	again := generatedToolV8Observation{tool: "exec", arguments: string(marker), meta: llmEventMeta{Source: "openclaw", RunID: "run-1"}}
 	applyOpenClawToolOutcome(&again)
 	if again.meta.Guardrail.Action != "" {
 		t.Fatalf("decision taken twice: %+v", again.meta.Guardrail)
