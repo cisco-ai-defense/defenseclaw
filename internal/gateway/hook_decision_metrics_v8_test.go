@@ -495,3 +495,22 @@ func TestHookDecisionV8IsExportedWhenCorrelationIsUnavailable(t *testing.T) {
 			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) >= 1
 	})
 }
+
+// GAP-1536: the prompt/tool/response event (Galileo's invoke_agent and
+// execute_tool spans) of a hook whose correlation ledger write failed is
+// still exported; only an exact replay stays unexported.
+func TestHookLLMEventIsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  agentHookRequest
+		want bool
+	}{
+		{"correlated", agentHookRequest{}, true},
+		{"correlation unavailable", agentHookRequest{SuppressCorrelationEmit: true, CorrelationUnavailable: true}, true},
+		{"exact replay", agentHookRequest{SuppressCorrelationEmit: true}, false},
+	} {
+		if got := hookLLMEventExportable(tc.req); got != tc.want {
+			t.Errorf("%s: hookLLMEventExportable = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}

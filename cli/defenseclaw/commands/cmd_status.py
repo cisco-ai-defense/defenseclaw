@@ -408,6 +408,7 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         else:
             _status_row("Sidecar", ux._style("running", fg="green"))
+        _print_audit_log_health(cfg, health)
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
@@ -435,6 +436,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 "Sidecar",
                 ux._style("not running; start it: defenseclaw-gateway start", fg="yellow"),
             )
+        _print_audit_log_health(cfg, None)
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
         _print_agents(cfg, sidecar_down=True)
@@ -1026,6 +1028,31 @@ def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     color = "green" if runtime == "running" else "yellow"
     value = f"{state['mode']} — {runtime}; {state['model_count']} model(s)"
     _status_row("Model routing", ux._style(value, fg=color))
+
+
+def _print_audit_log_health(cfg, health: dict | None) -> None:
+    """Warn when audit events are not being recorded (GAP-1528).
+
+    Enforcement keeps working when the audit database cannot be written (a
+    full disk), so without this row status looked healthy while blocks were
+    missing from alerts and audit.
+    """
+    from defenseclaw.audit_capacity import audit_disk_full_notice
+
+    value = audit_disk_full_notice(str(getattr(cfg, "audit_db", "") or ""))
+    telemetry = health.get("telemetry") if isinstance(health, dict) else None
+    if not value and isinstance(telemetry, dict):
+        state = str(telemetry.get("state") or "").strip().lower()
+        if state and state not in _RUNTIME_HEALTHY_STATES:
+            from defenseclaw.commands.cmd_doctor import _telemetry_error_reason
+
+            reason = _telemetry_error_reason(telemetry.get("details"))
+            since = str(telemetry.get("since") or "").strip()
+            if reason:
+                value = reason + (f" (since {since})" if since and not since.startswith("0001") else "")
+                value += "; run 'defenseclaw doctor'"
+    if value:
+        _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
 
 
 def _print_llm_judge(health: dict | None) -> None:
