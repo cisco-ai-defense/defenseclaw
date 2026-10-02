@@ -634,6 +634,11 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("connector reconcile %s lock: %w", name, err)
 		}
 	}
+	if name != "opencode" && !opts.ManagedEnterprise {
+		if err := publishReconciledConnectorActive(dataDir, name); err != nil {
+			return fmt.Errorf("connector reconcile %s: publish active runtime state: %w", name, err)
+		}
+	}
 	if connectorFlagJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 			"connector": name,
@@ -644,6 +649,25 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style("✓", "fg=green", "bold"), name)
 	return nil
+}
+
+// publishReconciledConnectorActive records name in the active roster, as the
+// OpenCode path does. A reconcile with the gateway stopped (fail mode with no
+// gateway running) writes hooks and a lock entry; when the roster does not
+// name that connector, the gateway later finds a lock-only registration it
+// has no authority to reconcile and can never start (GAP-1650). An unreadable
+// roster is left for the gateway to report.
+func publishReconciledConnectorActive(dataDir, name string) error {
+	active, _, err := connector.ReadActiveConnectorState(dataDir)
+	if err != nil {
+		return nil
+	}
+	for _, existing := range active {
+		if strings.EqualFold(existing, name) {
+			return nil
+		}
+	}
+	return connector.SaveActiveConnectors(dataDir, append(active, name))
 }
 
 func reconcileAmpRegistration(

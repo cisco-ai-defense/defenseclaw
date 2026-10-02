@@ -2055,6 +2055,26 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertEqual(persistence.call_count, 2)
         runtime.assert_called_once()
 
+    def test_gateway_that_cannot_start_is_not_reported_as_incomplete_rollback(self):
+        # GAP-1139: the config was restored; the gateway fails to start again
+        # for the same reason, which is not an incomplete rollback.
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        self.assertIsNone(snapshot.applied_runtime)
+        cause = click.ClickException("gateway restart/readiness failed for: defenseclaw-gateway.")
+        with (
+            patch("defenseclaw.commands.cmd_setup._restore_setup_config_snapshot"),
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_restored_connector_runtime",
+                side_effect=click.ClickException(str(cause.message)),
+            ),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = str(raised.exception)
+        self.assertNotIn("rollback was incomplete", message)
+        self.assertIn("gateway still cannot start for the same reason", message)
+
     def test_persistence_exception_does_not_skip_remaining_verification(self):
         snapshot = replace(
             cmd_setup._capture_setup_config_snapshot(self.app.cfg),

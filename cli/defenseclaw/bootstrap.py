@@ -376,6 +376,31 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
+def _reserve_api_port(port: int) -> bool:
+    """Claim ``port`` for this account now, as its gateway start would.
+
+    Two accounts running init at the same time could otherwise both pick a
+    port neither gateway listens on yet (GAP-1462). O_EXCL makes the claim
+    atomic; False only when another account claimed the port first. Windows
+    claims carry the account SID and are left to the gateway start.
+    """
+    if os.name == "nt" or _windows_port_claims():
+        return True
+    try:
+        os.close(
+            os.open(
+                os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        )
+    except FileExistsError:
+        return not _api_port_claimed_by_other_account(port)
+    except OSError:
+        return True  # a claim is only a hint
+    return True
+
+
 def suggest_free_api_port(host: str, port: int) -> int:
     """A port after ``port``, in the first-run steps, this account can use now; 0 if none."""
     host = (host or "127.0.0.1").strip("[]")
@@ -413,11 +438,11 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT):
+    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port):
+        if _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
@@ -426,6 +451,38 @@ def choose_first_run_api_port(cfg: Config) -> str:
     return (
         f"{host}:{_DEFAULT_API_PORT} is in use; choose a free port with "
         "`defenseclaw setup gateway --api-port <free port> --non-interactive`"
+    )
+
+
+_DEFAULT_GUARDRAIL_PORT = 4000
+
+
+def choose_first_run_guardrail_port(cfg: Config) -> str:
+    """Move a new config's guardrail proxy port off 4000 when something holds it.
+
+    Like the API port: a second account's proxy (OpenClaw) on the same host
+    could not listen on the first account's 4000, so its gateway never
+    started (GAP-1701). Returns a line for the first-run output, or "".
+    """
+    gc = cfg.guardrail
+    if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
+        return ""
+    host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+    if host.lower() in {"", "localhost", "::1"}:
+        host = "127.0.0.1"
+    if _api_port_free(host, _DEFAULT_GUARDRAIL_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _api_port_free(host, port):
+            gc.port = port
+            return (
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
+                f"proxy), so this account's guardrail proxy uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use; choose a free guardrail proxy port with "
+        "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
 
 
@@ -652,6 +709,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
+        proxy_note = choose_first_run_guardrail_port(cfg)
+        if proxy_note:
+            status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
+            setup.append(StepResult("Guardrail proxy port", status, proxy_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
