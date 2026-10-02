@@ -16,7 +16,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -332,6 +334,17 @@ func (l *lifecycle) describeGuardianCleanups() {
 		account := strings.TrimSpace(entry.User)
 		if account == "" {
 			account = strings.TrimSpace(entry.UserHome)
+		}
+		if home := strings.TrimSpace(entry.UserHome); home != "" {
+			if _, err := os.Lstat(env.P(home)); errors.Is(err, os.ErrNotExist) {
+				// A deleted account took its home and the registration with
+				// it; the guardian drops the entry once the directory no
+				// longer knows the account (GAP-1205).
+				r.AddWarning(codeGuardianCleanupPending, fmt.Sprintf(
+					"%s for user %s: the home %s no longer exists (the account was deleted), so no hook registration is left there; the hook guardian drops this entry on its next pass once the account lookup reports it gone",
+					entry.Connector, account, home))
+				continue
+			}
 		}
 		message := fmt.Sprintf("%s for user %s is no longer enrolled, but DefenseClaw's hook registration is still in %s and the gateway refuses its hooks; ",
 			entry.Connector, account, entry.UserHome)
