@@ -1908,6 +1908,7 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: read schema version: %w", err)
 	}
 
+	purgedHistory := false
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
@@ -1915,6 +1916,10 @@ func (s *Store) Init() error {
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
+		purgedHistory = purgedHistory || (current > 0 && m.description == historicalEvidencePurgeMigrationDescription)
+	}
+	if purgedHistory {
+		s.reclaimPurgedHistory()
 	}
 	if err := ensureJudgeBodyTimestampUnixNano(s.db, legacyJudgeTimestampUnixNanoIndex); err != nil {
 		return fmt.Errorf("audit: verify judge timestamp retention index: %w", err)
