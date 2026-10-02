@@ -1244,6 +1244,19 @@ class FirstRunApiPortTests(unittest.TestCase):
 
         self.assertEqual((first.gateway.api_port, second.gateway.api_port), (18980, 18990))
 
+    def test_new_config_moves_the_guardrail_proxy_port_off_a_held_4000(self):
+        # GAP-1701: a second account's OpenClaw proxy cannot listen on 4000.
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000):
+            note = bootstrap.choose_first_run_guardrail_port(cfg)
+        self.assertEqual(cfg.guardrail.port, 4010)
+        self.assertIn("uses port 4010", note)
+        with patch.object(bootstrap, "_api_port_free", return_value=True):
+            self.assertEqual(bootstrap.choose_first_run_guardrail_port(default_config()), "")
+
     @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
     def test_uninstall_all_removes_only_this_accounts_claims(self):
         import tempfile

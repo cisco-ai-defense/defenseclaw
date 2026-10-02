@@ -374,6 +374,38 @@ def choose_first_run_api_port(cfg: Config) -> str:
     )
 
 
+_DEFAULT_GUARDRAIL_PORT = 4000
+
+
+def choose_first_run_guardrail_port(cfg: Config) -> str:
+    """Move a new config's guardrail proxy port off 4000 when something holds it.
+
+    Like the API port: a second account's proxy (OpenClaw) on the same host
+    could not listen on the first account's 4000, so its gateway never
+    started (GAP-1701). Returns a line for the first-run output, or "".
+    """
+    gc = cfg.guardrail
+    if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
+        return ""
+    host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+    if host.lower() in {"", "localhost", "::1"}:
+        host = "127.0.0.1"
+    if _api_port_free(host, _DEFAULT_GUARDRAIL_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _api_port_free(host, port):
+            gc.port = port
+            return (
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
+                f"proxy), so this account's guardrail proxy uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use; choose a free guardrail proxy port with "
+        "`defenseclaw setup guardrail --port <free port> --non-interactive`"
+    )
+
+
 def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
     """Publish the finalized first-run config.
 
@@ -597,6 +629,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
+        proxy_note = choose_first_run_guardrail_port(cfg)
+        if proxy_note:
+            status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
+            setup.append(StepResult("Guardrail proxy port", status, proxy_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
