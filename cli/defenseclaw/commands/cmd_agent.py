@@ -3258,7 +3258,10 @@ def _log_discovery_action(app: AppContext, *, action: str, details: str) -> None
     if logger is None:
         return
     try:
-        logger.log_action(action, "config", details)
+        # The gateway admits only registered audit actions, so the
+        # toggle is recorded as config-update with the operation named
+        # in the details (for example "ai_discovery-enable mode=...").
+        logger.log_action("config-update", "config", f"{action} {details}")
     except Exception:
         # Audit failures must never block a config flip.
         pass

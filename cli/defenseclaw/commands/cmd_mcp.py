@@ -2203,7 +2203,7 @@ def set_server(
     if write_failed:
         if app.logger:
             app.logger.log_action(
-                "mcp-set-failed", name, f"connectors={','.join(c for c, _ in write_failed)}"
+                "mcp-set", name, f"result=failed connectors={','.join(c for c, _ in write_failed)}"
             )
         raise SystemExit(1)
 
@@ -2268,7 +2268,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             fg="yellow",
         )
         if app.logger:
-            app.logger.log_action("mcp-unset-noop", name, f"connectors={','.join(connectors)}")
+            app.logger.log_action("mcp-unset", name, f"result=noop connectors={','.join(connectors)}")
         return
 
     if len(removed) > 1:
@@ -2291,6 +2291,6 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     if write_failed:
         if app.logger:
             app.logger.log_action(
-                "mcp-unset-failed", name, f"connectors={','.join(c for c, _ in write_failed)}"
+                "mcp-unset", name, f"result=failed connectors={','.join(c for c, _ in write_failed)}"
             )
         raise SystemExit(1)

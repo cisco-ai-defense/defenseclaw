@@ -1023,7 +1023,8 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
         # Update path uses the dedicated audit action so SIEMs can
         # tell "discovery toggled" from "discovery tuned".
         details = app.logger.log_action.call_args.args
-        self.assertEqual(details[0], "ai_discovery-update")
+        self.assertEqual(details[0], "config-update")
+        self.assertTrue(details[2].startswith("ai_discovery-update "))
 
     def test_already_enabled_without_diff_short_circuits(self):
         runner = CliRunner()
@@ -1059,7 +1060,8 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         scan_mock.assert_not_called()
-        self.assertEqual(app.logger.log_action.call_args.args[0], "ai_discovery-update")
+        self.assertEqual(app.logger.log_action.call_args.args[0], "config-update")
+        self.assertTrue(app.logger.log_action.call_args.args[2].startswith("ai_discovery-update "))
 
     def test_host_plane_requires_explicit_opt_in(self):
         runner = CliRunner()

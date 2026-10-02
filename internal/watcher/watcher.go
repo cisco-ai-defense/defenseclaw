@@ -507,8 +507,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// evt.Path we drop the allow and force a fresh scan/decision.
 	if existing, _ := pe.GetAction(targetType, evt.Name); existing != nil {
 		if existing.Actions.Install == "allow" && existing.SourcePath != "" && existing.SourcePath != evt.Path {
-			_ = w.logger.LogAction("install-allow-path-mismatch", evt.Path,
-				fmt.Sprintf("type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
+			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+				fmt.Sprintf("reason=allow-path-mismatch type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
 					targetType, evt.Name, existing.SourcePath, evt.Path))
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)

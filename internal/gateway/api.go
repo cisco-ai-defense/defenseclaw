@@ -2697,8 +2697,8 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if !rootOK {
 		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch-rejected", req.Target,
-				"reason=outside-skill-roots (F-3287)")
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillFetch), req.Target,
+				"result=rejected reason=outside-skill-roots (F-3287)")
 		}
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "target is not under a configured skill or plugin root (F-3287)",
