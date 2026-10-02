@@ -19,8 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from rich.markup import escape as rich_escape
-
 from defenseclaw.alert_semantics import (
     ALERT_ACTIONABLE_SEVERITIES,
     ALERT_ALL_SEVERITIES,
@@ -33,6 +31,7 @@ from defenseclaw.hook_metrics import (
     detection_only_hook_label,
     parse_detail_tokens,
 )
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -721,6 +720,18 @@ class AlertsPanelModel:
             parts.append(f"search '{self.filter_text}'")
         return ", ".join(parts)
 
+    def step_severity_scope(self, step: int) -> None:
+        """Move to the previous or next severity chip (Actionable .. Low)."""
+
+        order = ("actionable", "all", "critical", "high", "medium", "low")
+        current = self.active_scope_key()
+        index = order.index(current) if current in order else 0
+        target = order[max(0, min(index + step, len(order) - 1))]
+        if target == "actionable":
+            self.set_actionable_scope()
+        else:
+            self.set_severity_filter_exact("" if target == "all" else target.upper())  # type: ignore[arg-type]
+
     def active_scope_key(self) -> str:
         if self.severity_filter:
             return self.severity_filter.lower()
@@ -903,26 +914,18 @@ class AlertsPanelModel:
                 self.refresh()
             self.apply_filter()
             return AlertPanelAction(True, hint="Type to search alerts. Enter applies; Esc clears.")
-        if key == "1":
+        # h/l step through the severity chips; the digits stay panel keys,
+        # so 1 opens Overview from Alerts too (GAP-1708).
+        if key in {"h", "left", "l", "right"}:
             old = self.severity_filter
-            self.set_severity_filter("")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "2":
-            old = self.severity_filter
-            self.set_severity_filter("CRITICAL")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "3":
-            old = self.severity_filter
-            self.set_severity_filter("HIGH")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "4":
-            old = self.severity_filter
-            self.set_severity_filter("MEDIUM")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "5":
-            old = self.severity_filter
-            self.set_severity_filter("LOW")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
+            self.step_severity_scope(-1 if key in {"h", "left"} else 1)
+            return AlertPanelAction(
+                True,
+                hint="Showing alerts of all severities."
+                if self.active_scope_key() == "all"
+                else f"Showing {self.active_scope_label().lower()} alerts.",
+                filter_change=_alert_filter_change(old, self.severity_filter),
+            )
         if key == "y":
             copied = self.copy_detail_text()
             if not copied:

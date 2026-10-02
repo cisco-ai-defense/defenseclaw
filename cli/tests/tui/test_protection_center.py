@@ -325,7 +325,7 @@ def test_global_changes_name_the_connectors_that_keep_their_own_setting() -> Non
 
 def test_optin_rows_follow_the_scope_and_staged_packs_never_turn_on() -> None:
     model = protection_model()
-    assert model.handle_key("2").kind == "render"
+    assert model.select_view("optin").kind == "render"
     rows = model.data_table_rows(80)
     assert [row[-1] for row in rows] == ["○ off"] * 5 + ["─ staged"]  # staged listed last
     assert model.handle_key("s").kind == "render"
@@ -352,7 +352,7 @@ def test_optin_rows_follow_the_scope_and_staged_packs_never_turn_on() -> None:
 
 def test_optin_aside_lists_the_rules() -> None:
     model = protection_model()
-    model.handle_key("2")
+    model.select_view("optin")
     _title, lines = model.aside()
     assert "  impact.sql_unbounded_delete · CRITICAL · SQL" in lines
     model.handle_key("down")
@@ -364,7 +364,7 @@ def test_optin_aside_lists_the_rules() -> None:
 
 def test_chains_are_grouped_by_domain_and_the_cursor_skips_headers() -> None:
     model = protection_model()
-    model.handle_key("3")
+    model.select_view("chains")
     rows = model.data_table_rows(80)
     headers = [row[1] for row in rows if not row[0]]
     assert headers == ["── SQL", "── Host", "── Security controls", "── Other"]
@@ -382,7 +382,7 @@ def test_chains_are_grouped_by_domain_and_the_cursor_skips_headers() -> None:
 
 def test_rule_families_follow_the_scopes_pack() -> None:
     model = protection_model()
-    model.handle_key("4")
+    model.select_view("families")
     assert [row[0] for row in model.data_table_rows(80)] == ["command", "secret"]
     model.handle_key("s")
     assert model.data_table_rows(80) == (("command", "139", "139", "-"),)
@@ -391,7 +391,7 @@ def test_rule_families_follow_the_scopes_pack() -> None:
 
 # ---- keys, hints, help ----------------------------------------------------------
 
-_HINT_KEYS = {"Space": "space", "Enter": "enter"}
+_HINT_KEYS = {"Space": "space", "Enter": "enter", "←": "left", "→": "right"}
 
 
 @pytest.mark.parametrize("view", POLICY_VIEWS)
@@ -400,7 +400,7 @@ def test_every_hinted_key_is_handled_and_fits_80_columns(view: str) -> None:
     assert len(hint) <= 78
     for segment in hint.removeprefix("KEYS").split("|"):
         token = segment.strip().split(" ")[0]
-        if token in {"read-only", "read-only:"} or token.startswith("1-"):
+        if token in {"read-only", "read-only:"}:
             continue
         for key in token.split("/"):
             model = protection_model()
@@ -435,9 +435,9 @@ def test_every_handled_key_is_in_the_help_sheet(view: str) -> None:
 def test_unsupported_sandbox_drops_the_seventh_view() -> None:
     model = protection_model(sandbox=False)
     assert model.views() == POLICY_VIEWS[:-1]
-    assert model.handle_key("7").kind == "hint"
-    assert "1-6" in model.keys_hint()
-    assert policy_keymap_rows(False)[0][0] == "1 … 6"
+    assert model.select_view("sandbox_packs").kind == "hint"
+    assert model.handle_key("7").handled is False
+    assert "Sandbox packs" not in policy_keymap_rows(False)[0][1]
 
 
 def test_header_switcher_and_nav_fit_80_columns() -> None:

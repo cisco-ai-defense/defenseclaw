@@ -278,7 +278,7 @@ def test_alerts_filter_selection_and_counts() -> None:
     model.deselect_all()
     assert model.selected_ids == set()
 
-    action = model.handle_key("2")
+    action = model.handle_key("h")  # High -> Critical
     assert action.filter_change is not None
     assert action.filter_change.panel == "alerts"
     assert action.filter_change.filter_type == "severity"
@@ -372,7 +372,7 @@ def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
     assert "In scope 4" in model.summary_text()
     assert "No actionable" not in model.empty_state()
 
-    assert model.handle_key("1").handled is True
+    assert model.handle_key("l").handled is True
     assert model.active_scope_key() == "all"
     assert model.active_filter_label() == "All severities"
     assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3", "a4"}

@@ -41,11 +41,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from rich.markup import escape as rich_escape
 from textual import events
 
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunch,

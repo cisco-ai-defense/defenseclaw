@@ -15,7 +15,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from rich.markup import escape as rich_escape
 from rich.table import Table
 from textual import events, on
 from textual.app import ComposeResult
@@ -24,6 +23,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 

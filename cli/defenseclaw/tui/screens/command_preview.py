@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rich.markup import escape as rich_escape
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -23,6 +22,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from defenseclaw.tui.command_line import ParsedCommand, display_argv, infer_command_risk
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 SECRET_FLAG_FRAGMENTS = ("key", "token", "secret", "password", "credential")

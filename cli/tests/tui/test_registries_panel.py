@@ -246,9 +246,9 @@ def test_registries_panel_focus_entry_miss_shows_full_entries_table(tmp_path: Pa
 def test_registries_panel_handle_key_tabs(tmp_path: Path) -> None:
     panel = new_panel(tmp_path)
 
-    assert panel.handle_key("2").handled is True
+    assert panel.handle_key("l").handled is True
     assert panel.current_tab == RegistriesTab.ENTRIES
-    assert panel.handle_key("3").handled is True
+    assert panel.handle_key("l").handled is True
     assert panel.current_tab == RegistriesTab.APPROVED
 
 

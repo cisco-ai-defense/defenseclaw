@@ -40,9 +40,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import RenderableType
-from rich.markup import escape as rich_escape
 
 from defenseclaw.platform_support import openshell_sandboxes_supported
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.consequence import (
     ConsequenceAction,
     ConsequenceModalModel,
@@ -379,11 +379,11 @@ class PolicyPanelMixin:
         return Aside(title, "\n".join(rich_escape(line) for line in lines))
 
     def _select_policy_nav(self, key: str) -> bool:
-        """A click on a nav item or switcher segment: the same as its 1-7 key."""
+        """A click on a nav item or switcher segment opens that view."""
         model = self.policy_model
         if key not in model.views() or key == model.view:
             return False
-        action = model.handle_key(str(model.views().index(key) + 1))
+        action = model.select_view(key)
         if action.kind == "load_sandbox_packs":
             self._schedule_policy_load(sandbox=True)
         return True

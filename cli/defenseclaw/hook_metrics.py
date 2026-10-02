@@ -191,14 +191,20 @@ def connector_hook_decision(
 def hook_decision_may_block_sql(details: str, structured: str, enforced: str) -> str:
     """SQL pre-check to put before ``dc_hook_decision(...) = 'block'``.
 
-    A block needs an enforced flag or an ``action`` field. Checking for them
-    in SQLite first keeps the per-row Python classifier off rows that can't
-    block: on a 1.27 GB audit.db of legacy rows it ran for minutes (GAP-1487).
+    A block needs an enforced flag or a block/deny ``action`` value. Checking
+    for them in SQLite first keeps the per-row Python classifier off rows that
+    can't block: on a 1.27 GB audit.db of legacy rows it ran for minutes
+    (GAP-1487), and legacy hook rows carry ``action=allow`` in their details,
+    so a bare ``action`` test still let every one through (GAP-1674). LIKE is
+    case-insensitive, as the classifier is on values; a quoted value is left
+    to the classifier.
     """
 
     return (
         f"(CAST(COALESCE({enforced}, 0) AS TEXT) NOT IN ('0', '')"
-        f" OR instr({details}, 'action') > 0"
+        f" OR {details} LIKE '%action=block%'"
+        f" OR {details} LIKE '%action=deny%'"
+        f" OR {details} LIKE '%action=\"%'"
         f" OR instr(COALESCE({structured}, ''), 'action') > 0"
         f" OR instr(COALESCE({structured}, ''), 'enforced') > 0)"
     )

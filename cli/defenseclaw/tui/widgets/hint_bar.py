@@ -186,11 +186,11 @@ class HintEngine:
         if state.critical_alerts > 0:
             scope = f" for {state.connector_filter}" if state.connector_filter else ""
             return (
-                f"{state.critical_alerts} critical/high alert(s){scope}. Click severity chips or press 1-5, "
+                f"{state.critical_alerts} critical/high alert(s){scope}. Click severity chips or press h/l, "
                 "Enter opens details, Dismiss filtered clears the view."
             )
         return (
-            "KEYS  j/k move | Enter detail | 1-5 severity | Space select | x ack selected | "
+            "KEYS  j/k move | Enter detail | h/l severity | Space select | x ack selected | "
             "d dismiss | c dismiss filtered | / search."
         )
 
@@ -277,7 +277,7 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         return (
-            "KEYS  1/2/3 sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
+            "KEYS  h/l sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
             "a approve | x reject | e require approval | d remove source."
         )
 

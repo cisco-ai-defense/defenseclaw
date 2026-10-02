@@ -25,7 +25,6 @@ from typing import Any
 import requests
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
-from rich.markup import escape as rich_escape
 from rich.measure import Measurement
 from rich.panel import Panel
 from rich.style import Style
@@ -55,6 +54,7 @@ from defenseclaw.tui.executor import (
     captured_subprocess_kwargs,
     resolve_subprocess_argv,
 )
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels import setup_catalog, setup_center, setup_keys
 from defenseclaw.tui.panels.activity import ActivityPanelModel
@@ -85,7 +85,7 @@ from defenseclaw.tui.panels.overview import (
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
 from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_keymap_rows, policy_posture_text
-from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
+from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTab, RegistryPanelAction
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
@@ -1462,13 +1462,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     )
                 with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
                     yield Button("Actionable", id="alerts-filter-actionable", compact=True)
-                    # On Alerts the digits pick a severity, not a tab, so the
-                    # chips carry them (GAP-1272).
-                    yield Button("1 All", id="alerts-filter-all", compact=True)
-                    yield Button("2 Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
-                    yield Button("3 High", id="alerts-filter-high", compact=True, classes="severity-high")
-                    yield Button("4 Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
-                    yield Button("5 Low", id="alerts-filter-low", compact=True, classes="severity-low")
+                    # h/l step through these chips; the digits stay panel
+                    # keys (GAP-1708).
+                    yield Button("All", id="alerts-filter-all", compact=True)
+                    yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
+                    yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
+                    yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
+                    yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
                     yield Button("Select all", id="alerts-select-all", compact=True)
                     yield Button("Ack selected", id="alerts-ack-selected", compact=True)
                     yield Button("Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning")
@@ -4642,7 +4642,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "alerts": [
                 ("j/k or Up/Down", "Navigate alerts"),
                 ("Enter", "Toggle detail pane"),
-                ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low); Tab or Ctrl+P switches panel"),
+                ("h/l", "Previous / next severity chip (Actionable, All, Critical, High, Medium, Low)"),
                 ("/", "Search target / action / details"),
                 ("Space", "Toggle select current alert"),
                 ("a / X", "Select all filtered / deselect all"),
@@ -4750,7 +4750,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
             ],
             "registries": [
-                ("1 / 2 / 3", "Sources / entries / approved"),
+                ("h/l", "Sources / entries / approved sub-tab"),
                 ("j/k or Up/Down", "Navigate rows"),
                 ("Enter / Esc", "Open / close detail"),
                 ("s / S", "Sync the selected source / sync all"),
@@ -5818,10 +5818,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._apply_logs_action(self.logs_model.handle_key(key_by_button[button_id]))
 
     def _handle_registries_control(self, button_id: str) -> None:
+        tab_by_button = {
+            "registries-tab-sources": RegistriesTab.SOURCES,
+            "registries-tab-entries": RegistriesTab.ENTRIES,
+            "registries-tab-approved": RegistriesTab.APPROVED,
+        }
+        if button_id in tab_by_button:
+            self.registries_model.set_tab(tab_by_button[button_id])
+            self._render_chrome()
+            return
         key_by_button = {
-            "registries-tab-sources": "1",
-            "registries-tab-entries": "2",
-            "registries-tab-approved": "3",
             "registries-refresh": "r",
             "registries-sync-source": "s",
             "registries-sync-all": "S",
@@ -13032,7 +13038,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._run_command(
                 command.binary,
                 command.args,
-                display_name=getattr(command, "label", "uninstall"),
+                # CommandSpec carries display_name ("uninstall dry-run"), not
+                # label, so the footer read "Done: uninstall." (GAP-1709).
+                display_name=getattr(command, "display_name", "") or "uninstall",
             ),
             exclusive=False,
             thread=False,
@@ -13329,7 +13337,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         if exit_code == 0:
-            self._set_status(f"Done: {display_name}.")
+            dry_run = "dry-run" in display_name or "dry run" in display_name
+            self._set_status(f"Done: {display_name}{' (nothing changed)' if dry_run else ''}.")
         elif exit_code == 130:
             self._set_status(f"Cancelled: {display_name}.")
         elif exit_code is not None:
