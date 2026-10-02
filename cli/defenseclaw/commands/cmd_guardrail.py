@@ -286,13 +286,12 @@ def _toggle_connector_guardrail(
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
 
-    if app.logger:
-        app.logger.log_action(
-            f"guardrail-{verb}",
-            "config",
-            f"connector={key} scope=per-connector "
-            f"enabled={str(enable).lower()} restart={restart}",
-        )
+    _log_guardrail_action(
+        app,
+        f"guardrail-{verb}",
+        f"connector={key} scope=per-connector "
+        f"enabled={str(enable).lower()} restart={restart}",
+    )
 
 
 @click.group("guardrail")
@@ -833,12 +832,11 @@ def disable_cmd(
             ux.ok(f"{_connector_label(connector)} connector teardown complete", indent="  ")
         click.echo()
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-disable",
-            "config",
-            f"connector={connector} restart={restart}",
-        )
+    _log_guardrail_action(
+        app,
+        "guardrail-disable",
+        f"connector={connector} restart={restart}",
+    )
 
 
 @guardrail.command("enable")
@@ -944,12 +942,11 @@ def enable_cmd(
             ux.ok(f"{_connector_label(connector)} connector setup complete", indent="  ")
         click.echo()
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-enable",
-            "config",
-            f"connector={connector} restart={restart}",
-        )
+    _log_guardrail_action(
+        app,
+        "guardrail-enable",
+        f"connector={connector} restart={restart}",
+    )
 
 
 def _apply_scoped_fail_mode_transaction(
@@ -1146,12 +1143,11 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         stored_mode=stored_mode,
     )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-fail-mode",
-            "config",
-            f"connector={key} scope=per-connector new={mode} restart={restart}",
-        )
+    _log_guardrail_action(
+        app,
+        "guardrail-fail-mode",
+        f"connector={key} scope=per-connector new={mode} restart={restart}",
+    )
 
 
 def _multi_connector_fail_mode_targets(app: AppContext) -> list[str]:
@@ -1511,16 +1507,15 @@ def fail_mode_cmd(
         single_runtime=single_state is not None,
     )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-fail-mode",
-            "config",
-            (
-                f"scope=active-connectors count={len(fail_mode_targets)} new={mode} restart={restart}"
-                if fail_mode_targets
-                else f"old={current} new={mode} restart={restart}"
-            ),
-        )
+    _log_guardrail_action(
+        app,
+        "guardrail-fail-mode",
+        (
+            f"scope=active-connectors count={len(fail_mode_targets)} new={mode} restart={restart}"
+            if fail_mode_targets
+            else f"old={current} new={mode} restart={restart}"
+        ),
+    )
 
 
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -1672,17 +1667,7 @@ def _set_connector_hilt(
 
 def _log_hilt(app: AppContext, details: str) -> None:
     """Audit a saved HILT change; a stopped gateway only skips the audit event."""
-    from defenseclaw.logger import CanonicalObservabilityUnavailableError
-
-    if not app.logger:
-        return
-    try:
-        app.logger.log_action("guardrail-hilt", "config", details)
-    except CanonicalObservabilityUnavailableError:
-        click.echo(
-            "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
-            err=True,
-        )
+    _log_guardrail_action(app, "guardrail-hilt", details)
 
 
 def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
@@ -2037,12 +2022,11 @@ def _set_connector_block_message(
             indent="  ",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-block-message",
-            "config",
-            f"connector={key} scope=per-connector cleared={clear} restart={restart}",
-        )
+    _log_guardrail_action(
+        app,
+        "guardrail-block-message",
+        f"connector={key} scope=per-connector cleared={clear} restart={restart}",
+    )
 
 
 def _multi_connector_block_message_targets(app: AppContext) -> list[str]:
@@ -2247,17 +2231,16 @@ def block_message_cmd(
             indent="  ",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-block-message",
-            "config",
-            (
-                f"scope=active-connectors count={len(block_message_targets)} "
-                f"cleared={clear} restart={restart}"
-                if block_message_targets
-                else f"cleared={clear} restart={restart}"
-            ),
-        )
+    _log_guardrail_action(
+        app,
+        "guardrail-block-message",
+        (
+            f"scope=active-connectors count={len(block_message_targets)} "
+            f"cleared={clear} restart={restart}"
+            if block_message_targets
+            else f"cleared={clear} restart={restart}"
+        ),
+    )
 
 
 #: Built-in guardrail rule-pack presets — parity with the ``--rule-pack``
@@ -2575,15 +2558,27 @@ def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None
     details (for example ``guardrail-mode scope=codex mode=action``).
     """
     from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+
+    _log_guardrail_action(app, ACTION_CONFIG_UPDATE, f"{operation} {details}".strip())
+
+
+def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
+    """Record the audit event of an already saved guardrail change.
+
+    The change is on disk before this runs, so a stopped gateway (for example
+    after ``defenseclaw-gateway stop``) or a refused event only skips the audit
+    event with one plain line; it never fails the command with a traceback.
+    """
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
     if not app.logger:
         return
     try:
-        app.logger.log_action(ACTION_CONFIG_UPDATE, "config", f"{operation} {details}".strip())
+        app.logger.log_action(action, "config", details)
     except CanonicalObservabilityUnavailableError:
         click.echo(
-            "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+            "  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded; "
+            "it loads the change when it starts (defenseclaw-gateway start).",
             err=True,
         )
     except CanonicalObservabilityError as exc:
