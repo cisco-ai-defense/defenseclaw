@@ -1,8 +1,10 @@
 """Standalone Windows deferred cleanup helper.
 
 The CLI copies this standard-library-only file outside the managed virtual
-environment before starting it. All paths arrive as JSON data; none are
-interpolated into shell text.
+environment before starting it. All paths arrive as JSON data. The only
+shell text is the cmd.exe line that removes the folders holding this
+helper's own Python once it exits (interpreter_dirs); those paths are
+validated first and must hold no cmd.exe metacharacter.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import ctypes
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from ctypes import wintypes
@@ -37,6 +40,8 @@ _LAUNCHER_WAIT_SECONDS = 15.0
 # An interactive cmd.exe that ran the shim stays open; do not wait long on it.
 _SHIM_SHELL_WAIT_SECONDS = 5.0
 _MAX_LAUNCHER_DEPTH = 4
+# cmd.exe would interpret these in a path (paths cannot hold a quote anyway).
+_CMD_METACHARACTERS = set('"%!^&|<>()')
 
 
 class _ProcessEntry(ctypes.Structure):
@@ -236,16 +241,76 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
     return handles
 
 
-def _remove_tree(path: str, *, marker_names: set[str] | None = None) -> None:
-    """Remove a tree without traversing a reparse-point entry."""
+def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
+    """Validate the folders that hold this helper's own Python.
+
+    Each is the data dir's .uv folder or a uv "python" folder, holds
+    sys.executable, is reached through no link or junction, and has no
+    cmd.exe metacharacter.
+    """
+    executable = _norm(os.path.realpath(sys.executable))
+    dirs: list[str] = []
+    for raw in plan.get("interpreter_dirs", []) or []:
+        path = _validate_root(str(raw), "interpreter folder")
+        name = os.path.basename(path)
+        allowed = path == _norm(os.path.join(data_dir, ".uv")) or (
+            name == "python" and os.path.basename(os.path.dirname(path)) == "uv"
+        )
+        holds = _contains(path, executable)
+        if not allowed or not holds or _CMD_METACHARACTERS & set(path) or not os.path.isdir(path):
+            raise ValueError(f"interpreter folder is not the helper's uv Python: {raw}")
+        dirs.append(path)
+    return dirs
+
+
+def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
+    """Start cmd.exe to remove dirs (and then empty_dirs, if empty) after this process exits.
+
+    rd /s does not follow junctions, and rd without /s removes only an
+    empty folder.
+    """
+    if not dirs:
+        return
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    cmd = os.path.join(system_root, "System32", "cmd.exe")
+    steps = ["ping -n 4 127.0.0.1 >nul"]
+    steps.extend(f'rd /s /q "{path}"' for path in dirs)
+    steps.extend(f'rd "{path}"' for path in empty_dirs if not _CMD_METACHARACTERS & set(path))
+    command = " & ".join(steps)
+    flags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    subprocess.Popen(
+        f'"{cmd}" /d /q /s /c "{command}"',
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=flags,
+        cwd=system_root,
+    )
+
+
+def _remove_tree(path: str, *, marker_names: set[str] | None = None, skip: set[str] | None = None) -> None:
+    """Remove a tree without traversing a reparse-point entry.
+
+    The paths in skip (normalized) stay, and so does each folder above them.
+    """
     if _is_reparse(path):
         raise ValueError(f"refusing reparse-point data root: {path}")
     with os.scandir(path) as entries:
         children = list(entries)
     marker_names = marker_names or set()
+    skip = skip or set()
+    if _norm(path) in skip:
+        return
     for marker_pass in (False, True):
         for entry in children:
             if (entry.name in marker_names) != marker_pass:
+                continue
+            if _norm(entry.path) in skip:
                 continue
             if _is_reparse(entry.path):
                 if entry.is_dir(follow_symlinks=False):
@@ -253,10 +318,19 @@ def _remove_tree(path: str, *, marker_names: set[str] | None = None) -> None:
                 else:
                     os.unlink(entry.path)
             elif entry.is_dir(follow_symlinks=False):
-                _remove_tree(entry.path)
+                _remove_tree(entry.path, skip=skip)
             else:
                 os.unlink(entry.path)
+    if any(_contains(_norm(path), kept) for kept in skip):
+        return
     os.rmdir(path)
+
+
+def _contains(parent: str, child: str) -> bool:
+    try:
+        return os.path.commonpath((parent, child)) == parent
+    except ValueError:
+        return False
 
 
 def _retry(action, description: str) -> None:
@@ -315,12 +389,15 @@ def main() -> int:
     ready_path = ""
     handle = 0
     launchers: list[tuple[int, float]] = []
+    after_exit: list[str] = []
+    after_exit_empty: list[str] = []
     try:
         with open(manifest_path, encoding="utf-8") as stream:
             plan = json.load(stream)
         status_path = os.path.abspath(str(plan["status_path"]))
         ready_path = os.path.abspath(str(plan["ready_path"]))
         _, data_dir, targets = _validate_plan(plan)
+        interpreter_dirs = _interpreter_dirs(plan, data_dir)
         handle = _open_parent(plan)
         try:
             launchers = _open_launchers(plan)
@@ -361,9 +438,14 @@ def main() -> int:
 
             def remove_data() -> None:
                 _validate_plan(plan)
-                _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS)
+                _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS, skip=set(interpreter_dirs))
 
             _retry(remove_data, f"remove {data_dir}")
+        after_exit = interpreter_dirs
+        after_exit_empty = [data_dir] if bool(plan.get("remove_data_dir")) else []
+        after_exit_empty.extend(
+            os.path.dirname(path) for path in interpreter_dirs if os.path.basename(path) == "python"
+        )
         _write_json(status_path, {"status": "succeeded"})
         _remove_earlier_results(status_path)
         return 0
@@ -394,6 +476,10 @@ def main() -> int:
         try:
             os.unlink(__file__)
             os.rmdir(os.path.dirname(__file__))
+        except OSError:
+            pass
+        try:
+            _remove_after_exit(after_exit, after_exit_empty)
         except OSError:
             pass
 

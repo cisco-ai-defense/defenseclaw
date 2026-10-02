@@ -553,3 +553,29 @@ func TestOrdinaryWindowsFileLockRetainsBlockingSemantics(t *testing.T) {
 		t.Fatal("ordinary blocking lock did not progress after contention release")
 	}
 }
+
+func TestRemoveIdleFileLockSentinelsDeletesOnlyUnheldLockFiles(t *testing.T) {
+	dir := t.TempDir()
+	idle := filepath.Join(dir, "settings.json")
+	held := filepath.Join(dir, "config.toml")
+	for _, path := range []string{idle, held} {
+		if err := withFileLockMode(path, false, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Another process still has the second lock file open.
+	other, err := os.OpenFile(held+".lock", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+
+	RemoveIdleFileLockSentinels()
+
+	if _, err := os.Lstat(idle + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("idle lock file: %v, want it removed", err)
+	}
+	if _, err := os.Lstat(held + ".lock"); err != nil {
+		t.Fatalf("a lock file another handle holds must stay: %v", err)
+	}
+}

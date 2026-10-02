@@ -69,7 +69,7 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # Data-dir entries that are install machinery, not user data.
-readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
+readonly NOT_DATA=".venv .uv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
 readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
 
 if [[ -t 1 ]] || [[ "${FORCE_COLOR:-}" == "1" ]]; then
@@ -487,6 +487,10 @@ fi
 has curl || [[ -n "${LOCAL_DIR}" ]] || die "curl is required"
 # Never pick up uv settings (overrides, indexes) from a project in the cwd.
 export UV_NO_CONFIG=1
+# The download cache and the Python uv fetches for the venv stay in the data
+# dir, so `uninstall --all` leaves nothing of them in ~/.cache or ~/.local.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}"
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${DEFENSECLAW_HOME}/.uv/python}"
 if ! has uv; then
     info "Installing uv ${UV_VERSION} (Python package manager)"
     install_uv || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"

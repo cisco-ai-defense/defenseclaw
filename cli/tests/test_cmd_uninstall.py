@@ -217,7 +217,7 @@ class ResetCommandTests(unittest.TestCase):
             self.assertTrue(plan.remove_data_dir)
             self.assertFalse(plan.remove_plugin)
             self.assertFalse(plan.remove_binaries)
-            self.assertEqual(plan.preserve_data_entries, (".venv",))
+            self.assertEqual(plan.preserve_data_entries, (".venv", ".uv"))
             self.assertIn("preserve runtime:", result.output)
 
     def test_reset_failure_is_nonzero_and_never_reports_complete(self):
@@ -358,7 +358,8 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 patch.object(cmd_uninstall.ux, "subhead") as subhead,
             ):
                 cmd_uninstall._remove_binaries(plan)
-            self.assertEqual(sorted(os.listdir(root)), [])
+            # The emptied install folder goes as well.
+            self.assertFalse(root.exists())
             self.assertEqual(os.listdir(legacy_tmp), ["unrelated"])
             if sys.platform != "win32":
                 self.assertEqual(os.listdir(home), [])

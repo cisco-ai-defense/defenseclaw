@@ -1664,6 +1664,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			names = append(names, unit.Name)
 		}
 		_, _ = env.Runner.Run(ctx, "systemctl", append([]string{"reset-failed"}, names...)...)
+		// A Persistent= timer leaves its last-trigger stamp behind.
+		for _, name := range append(names, legacyLinuxUnits...) {
+			if strings.HasSuffix(name, ".timer") {
+				_ = removeFile(env.P(systemdTimerStampPath(name)))
+			}
+		}
 	}
 	if env.GOOS == "darwin" {
 		// launchctl disable writes an override to launchd's database that

@@ -127,10 +127,18 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		report.Failed = append(report.Failed, "eligible accounts: "+boundedString(err.Error(), 256))
 	}
 	addEnterpriseHookLeftoverRemovals(jobs, manifest, accounts)
+	// The VS Code Local files also go from the accounts the guardian wrote
+	// them for that are no longer eligible.
+	vscodeRecordPath := enterprisehooks.UnixCopilotVSCodeAccountsPath(manifestPath)
+	recorded, recordErr := enterpriseHookLoadCopilotVSCodeAccounts(vscodeRecordPath)
+	if recordErr != nil {
+		report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(recordErr.Error(), 256))
+	}
+	vscodeAccounts := append(append([]enterprisehooks.UnixEligibleAccount{}, accounts...), staleCopilotVSCodeAccounts(recorded, accounts)...)
 	if vscode, err := enterpriseHookCopilotVSCodeRemoval(); err != nil {
 		report.Failed = append(report.Failed, "copilot vscode hooks: "+boundedString(err.Error(), 256))
 	} else {
-		addEnterpriseHookCopilotVSCodeRemovals(jobs, accounts, vscode)
+		addEnterpriseHookCopilotVSCodeRemovals(jobs, vscodeAccounts, vscode)
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
@@ -188,6 +196,12 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	sort.Strings(report.Purged)
 	sort.Strings(report.StateFailed)
 	report.OK = len(report.Failed) == 0
+	if report.OK && len(report.Pending) == 0 && recordErr == nil {
+		if err := os.Remove(vscodeRecordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(err.Error(), 256))
+			report.OK = false
+		}
+	}
 	return report, nil
 }
 

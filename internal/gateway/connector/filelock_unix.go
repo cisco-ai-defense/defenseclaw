@@ -60,3 +60,7 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 
 	return fn()
 }
+
+// RemoveIdleFileLockSentinels does nothing here: withFileLockMode removes
+// its lock file when it releases the lock.
+func RemoveIdleFileLockSentinels() {}

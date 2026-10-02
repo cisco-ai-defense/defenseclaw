@@ -20,6 +20,7 @@ Path entry the installer added.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -277,3 +278,76 @@ def test_native_windows_setup_keeps_binaries_flag(tmp_path: Path) -> None:
             assert "%USERPROFILE%\\.local\\bin" in result.output
         else:
             after.assert_not_called()
+
+
+@posix_only
+def test_all_binaries_removes_the_installer_uv_cache_and_python(per_user_install) -> None:
+    home, data_dir = per_user_install.home, per_user_install.data_dir
+    cache = home / ".cache" / "uv"
+    (cache / "archive-v0").mkdir(parents=True)
+    (cache / "archive-v0" / "wheel").write_bytes(b"w")
+    python_root = home / ".local" / "share" / "uv" / "python"
+    base = python_root / "cpython-3.12.0-linux-x86_64-gnu"
+    (base / "bin").mkdir(parents=True)
+    (base / "bin" / "python3").write_bytes(b"py")
+    (python_root / ".lock").write_bytes(b"")
+    (data_dir / ".venv" / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n", encoding="utf-8")
+    env = {"PATH": str(per_user_install.bin_dir), "XDG_CACHE_HOME": "", "XDG_DATA_HOME": ""}
+    with patch.dict(os.environ, env):
+        os.environ.pop("UV_CACHE_DIR", None)
+        os.environ.pop("UV_PYTHON_INSTALL_DIR", None)
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not cache.exists() and not (home / ".cache").exists()
+    assert not (home / ".local" / "share").exists()
+    assert _entries(per_user_install.bin_dir) == ["rg"]
+
+
+@posix_only
+def test_uv_python_with_other_pythons_stays(per_user_install) -> None:
+    python_root = per_user_install.home / ".local" / "share" / "uv" / "python"
+    base = python_root / "cpython-3.12.0"
+    (base / "bin").mkdir(parents=True)
+    (python_root / "cpython-3.13.0").mkdir()  # the account's own uv Python
+    (per_user_install.data_dir / ".venv" / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n", encoding="utf-8")
+    with patch.dict(os.environ, {"PATH": str(per_user_install.bin_dir)}):
+        os.environ.pop("UV_PYTHON_INSTALL_DIR", None)
+        leftovers = cmd_uninstall._installer_uv_leftovers(
+            str(per_user_install.bin_dir), (str(per_user_install.bin_dir / "uv"),), str(per_user_install.data_dir), "linux"
+        )
+    assert str(python_root) not in leftovers
+
+
+@posix_only
+def test_all_binaries_removes_an_emptied_local_bin(per_user_install) -> None:
+    (per_user_install.bin_dir / "rg").unlink()
+
+    result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not (per_user_install.home / ".local").exists()
+
+
+def test_remove_created_dirs_keeps_folders_with_content(tmp_path: Path) -> None:
+    home = tmp_path.resolve()
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir()
+    empty = home / ".copilot" / "hooks"
+    empty.mkdir(parents=True)
+    used = home / ".config" / "opencode" / "plugins"
+    used.mkdir(parents=True)
+    (used / "mine.js").write_text("x", encoding="utf-8")
+    record = data_dir / cmd_uninstall._CREATED_DIRS_RECORD
+    record.write_text(json.dumps({"dirs": [str(empty), str(empty.parent), str(used), "/etc/elsewhere"]}), encoding="utf-8")
+
+    with patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+        cmd_uninstall._remove_created_dirs(str(data_dir))
+
+    assert not (home / ".copilot").exists()
+    assert used.is_dir()
+    assert json.loads(record.read_text(encoding="utf-8"))["dirs"] == sorted([str(used), "/etc/elsewhere"])
+
+
+def test_reset_keeps_the_installer_uv() -> None:
+    assert ".uv" in cmd_uninstall._RESET_PRESERVED_ENTRIES

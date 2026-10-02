@@ -309,3 +309,83 @@ func TestRemoveAllRemovesCopilotVSCodeFilesForEveryAvailableAccount(t *testing.T
 		}
 	}
 }
+
+func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t *testing.T) {
+	previousCfg, previousManifest := cfg, enterpriseHookManifest
+	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
+	previousLoadVSCode, previousWriteVSCode := enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts
+	t.Cleanup(func() {
+		cfg, enterpriseHookManifest = previousCfg, previousManifest
+		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
+		enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts = previousLoadVSCode, previousWriteVSCode
+		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+	})
+	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{
+			Profile:       managed.ProfileStandalone,
+			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"cursor": {}}},
+		},
+	}
+	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
+	alice := enterprisehooks.UnixEligibleAccount{User: "alice", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7}
+	// dave got the VS Code Local files while eligible, then was excluded.
+	dave := enterprisehooks.UnixEligibleAccount{User: "dave", UID: 4343, GID: 4343, Home: "/home/dave", HomeInode: 7}
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{alice}, nil
+	}
+	enterpriseHookLoadCopilotVSCodeAccounts = func(path string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		if path != "/etc/defenseclaw/hook-guardian/"+enterprisehooks.UnixCopilotVSCodeAccountsFileName {
+			t.Errorf("VS Code accounts record read from %s", path)
+		}
+		return []enterprisehooks.UnixEligibleAccount{alice, dave}, nil
+	}
+	var written []enterprisehooks.UnixEligibleAccount
+	enterpriseHookWriteCopilotVSCodeAccounts = func(_ string, accounts []enterprisehooks.UnixEligibleAccount) error {
+		written = accounts
+		return nil
+	}
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable, Inode: 7}
+	}
+	var mu sync.Mutex
+	requests := map[string]enterpriseHookWorkerRequest{}
+	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		requests[account.User] = request
+		response := enterpriseHookWorkerResponse{}
+		for _, target := range request.Targets {
+			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{Index: target.Index, OK: true})
+		}
+		if request.CopilotVSCode != nil {
+			response.CopilotVSCode = &enterpriseHookWorkerCopilotVSCodeReport{Removed: []string{account.Home + "/.copilot/hooks/defenseclaw-vscode.json"}}
+		}
+		return response, nil
+	}
+	var log bytes.Buffer
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), nil)
+
+	got, ok := requests["dave"]
+	if !ok || got.CopilotVSCode == nil || got.CopilotVSCode.HookFile || got.CopilotVSCode.Plugin ||
+		!strings.HasSuffix(got.CopilotVSCode.HookBinary, "/defenseclaw-hook") || len(got.ForeignCleanup) != 0 || len(got.Targets) != 0 {
+		t.Fatalf("dave's request %+v, want only the VS Code Local removal; log:\n%s", got, log.String())
+	}
+	if !strings.Contains(log.String(), "removed DefenseClaw's VS Code Local hooks for dave") {
+		t.Fatalf("log:\n%s", log.String())
+	}
+	// dave leaves the record once removed; alice stays recorded.
+	if len(written) != 1 || written[0].User != "alice" {
+		t.Fatalf("record written %+v, want alice only", written)
+	}
+
+	// While the Local harness is governed every eligible account is recorded.
+	next := nextCopilotVSCodeAccounts(nil, []enterprisehooks.UnixEligibleAccount{alice, dave}, true, map[int]bool{})
+	if len(next) != 2 {
+		t.Fatalf("governed record %+v", next)
+	}
+	if len(nextCopilotVSCodeAccounts(next, nil, false, map[int]bool{4242: true, 4343: true})) != 0 {
+		t.Fatal("removed accounts must leave the record")
+	}
+}

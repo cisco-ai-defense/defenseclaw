@@ -845,7 +845,7 @@ func (g *HookConfigGuard) healLocked(
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	setupErr := conn.Setup(hctx, opts)
+	setupErr := connector.SetupRecordingCreatedDirs(hctx, conn, opts)
 
 	// Setup may have recreated a deleted parent directory even when a later
 	// verification step fails. Rebind before handling its result so the guard

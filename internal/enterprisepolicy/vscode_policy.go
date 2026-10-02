@@ -13,6 +13,7 @@ package enterprisepolicy
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -75,7 +76,7 @@ type vscodePolicyStore interface {
 func vscodePolicyStoreFor(opts Options) (vscodePolicyStore, error) {
 	switch opts.goos() {
 	case "linux":
-		return vscodePolicyFile{opts: opts, path: rooted(opts, "/etc/vscode/policy.json")}, nil
+		return vscodePolicyFile{opts: opts, path: rooted(opts, "/etc/vscode/policy.json"), created: new([]string)}, nil
 	case "windows":
 		if opts.SkipTrustChecks {
 			return nil, ErrUnsupported
@@ -162,6 +163,7 @@ func vscodeDevicePolicy(opts Options, state *State, write bool) error {
 	ownedNow := append(keep, add...)
 	if len(ownedNow) == 0 {
 		if record != nil {
+			removeVSCodePolicyDirs(opts, state, record)
 			return deleteRecord(opts, vscodePolicyRecord)
 		}
 		return nil
@@ -171,6 +173,7 @@ func vscodeDevicePolicy(opts Options, state *State, write bool) error {
 	}
 	record.Path = store.where()
 	record.OwnedKeys = ownedNow
+	record.CreatedDirs = appendUnique(record.CreatedDirs, vscodePolicyCreatedDirs(store)...)
 	return saveRecord(opts, record)
 }
 
@@ -205,13 +208,39 @@ func removeVSCodeDevicePolicy(opts Options, state *State) error {
 		state.Changed = true
 		state.detail("vscode: removed %s from %s", strings.Join(remove, ", "), store.where())
 	}
+	removeVSCodePolicyDirs(opts, state, record)
 	return deleteRecord(opts, vscodePolicyRecord)
 }
 
-// vscodePolicyFile is the Linux policy.json store.
+// vscodePolicyFile is the Linux policy.json store. created collects the
+// folders a write made (/etc/vscode), which go again with the last value.
 type vscodePolicyFile struct {
-	opts Options
-	path string
+	opts    Options
+	path    string
+	created *[]string
+}
+
+// vscodePolicyCreatedDirs returns the folders store's writes created.
+func vscodePolicyCreatedDirs(store vscodePolicyStore) []string {
+	if file, ok := store.(vscodePolicyFile); ok && file.created != nil {
+		return *file.created
+	}
+	return nil
+}
+
+// removeVSCodePolicyDirs removes the folders the record says DefenseClaw
+// created, deepest first, while they are empty.
+func removeVSCodePolicyDirs(opts Options, state *State, record *ownershipRecord) {
+	if record == nil {
+		return
+	}
+	dirs := append([]string(nil), record.CreatedDirs...)
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		if err := removeDirIfEmpty(opts, dir); err != nil {
+			state.detail("vscode: left %s in place: %v", dir, err)
+		}
+	}
 }
 
 func (f vscodePolicyFile) where() string { return f.path }
@@ -260,6 +289,9 @@ func (f vscodePolicyFile) apply(add, remove []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = writePolicyFile(f.opts, f.path, rendered)
+	created, err := writePolicyFile(f.opts, f.path, rendered)
+	if f.created != nil {
+		*f.created = append(*f.created, created...)
+	}
 	return err
 }
