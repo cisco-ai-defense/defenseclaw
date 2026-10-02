@@ -1229,6 +1229,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._sandbox_init(sandbox_model)
         self._policy_init(policy_model)
         self.setup_model = setup_model or SetupPanelModel(config)
+        self._catalog_load_seq: dict[str, int] = {}
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
             "mcps": self.mcps_model,
@@ -4824,6 +4825,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "[#475569]" + ("─" * 48) + "[/]",
             "",
         ]
+        # Wrap each description here so its continuation lines start
+        # under the description column, not at column 3 (GAP-1912). The
+        # body scrolls, so leave room for its 2-column scrollbar.
+        desc_width = max(20, self._body_width() - _HELP_DESC_INDENT - 2)
         for title, entries in self._help_sections():
             lines.append(f"[bold #FBBF24]{title}[/]")
             for key, desc in entries:
@@ -4832,7 +4837,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # scannable at a glance.
                 key_text = key.ljust(22)
                 if desc:
-                    lines.append(f"  [#22D3EE]{key_text}[/] {desc}")
+                    wrapped = ("\n" + " " * _HELP_DESC_INDENT).join(textwrap.wrap(desc, desc_width) or [desc])
+                    lines.append(f"  [#22D3EE]{key_text}[/] {wrapped}")
                 else:
                     lines.append(f"  {key_text}")
             lines.append("")
@@ -13163,6 +13169,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if announce is None:
             announce = not getattr(model, "loaded", False)
         model.loading = True
+        # Only the newest load of a panel may apply its rows: an older one
+        # (the slow refresh, an earlier r) finishing last put the previous
+        # enforcement state back on screen (GAP-1921).
+        seq = self._catalog_load_seq.get(panel, 0) + 1
+        self._catalog_load_seq[panel] = seq
         names = self._active_connector_names()
         asset_panel = panel in {"skills", "mcps", "plugins"}
         # 8.13 pass 2: Skills/MCPs/Plugins merge every active connector's list
@@ -13171,7 +13182,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # the original one-shot load (no column, no per-connector fan-out).
         if len(names) > 1 and asset_panel:
             model.show_connector_column = True
-            await self._load_catalog_merged(panel, model, names, announce=announce)
+            await self._load_catalog_merged(panel, model, names, announce=announce, seq=seq)
             return
         model.show_connector_column = False
         intent = model.load_intent_for(names[0]) if asset_panel and names else model.load_intent()
@@ -13181,11 +13192,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
+            if self._catalog_load_seq.get(panel) != seq:
+                return
             model.apply_loaded([], exc)
             self._end_load(panel, loading, announce, model.message, model.message)
             self._render_chrome()
             return
 
+        if self._catalog_load_seq.get(panel) != seq:
+            return
         if returncode != 0:
             model.apply_loaded([], stderr.decode(errors="replace").strip() or f"exit {returncode}")
         else:
@@ -13216,7 +13231,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._set_status(result)
 
     async def _load_catalog_merged(
-        self, panel: str, model: Any, names: list[str], *, announce: bool = True
+        self, panel: str, model: Any, names: list[str], *, announce: bool = True, seq: int | None = None
     ) -> None:
         """Load ``panel`` once per active connector and merge the rows.
 
@@ -13229,18 +13244,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         loading = f"Loading {panel} for {len(names)} connectors..."
         if announce and self.active_panel == panel:
             self._set_status(loading)
-        results: list[tuple[str, str | None]] = []
-        for name in names:
-            intent = model.load_intent_for(name)
+        async def load_one(name: str, intent: Any) -> tuple[str, str | None]:
             try:
                 returncode, stdout, _stderr = await _communicate_captured(intent.binary, intent.args)
             except OSError:
-                results.append((name, None))
-                continue
-            if returncode != 0:
-                results.append((name, None))
-            else:
-                results.append((name, stdout.decode(errors="replace")))
+                return name, None
+            return name, stdout.decode(errors="replace") if returncode == 0 else None
+
+        # All connectors at once: one after another, four CLI starts on
+        # Windows kept the old rows on screen for ~30 s after r (GAP-1921).
+        intents = [(name, model.load_intent_for(name)) for name in names]
+        results = list(await asyncio.gather(*(load_one(name, intent) for name, intent in intents)))
+        if seq is not None and self._catalog_load_seq.get(panel) != seq:
+            return
         model.apply_merged(results)
         if not any(text for _name, text in results):
             model.message = f"Could not load {panel} for any connector."
@@ -15331,6 +15347,9 @@ def _setup_config_validator(field: Any) -> Callable[[str], str | None]:
 
     return validate
 
+
+# "  " + the 22-column key + " " in the ? help overlay.
+_HELP_DESC_INDENT = 25
 
 _SETUP_VIEW_TITLES = {
     "wizards": "task list",

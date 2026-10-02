@@ -352,5 +352,40 @@ class HintBar(_Static):
         hint = self.engine.hint_for(state, status)
         if hint == self._rendered_hint:
             return
-        self.update(hint)
         self._rendered_hint = hint
+        self._paint()
+
+    def on_resize(self, _event: object) -> None:
+        self._paint()
+
+    def _paint(self) -> None:
+        try:  # 0 before the bar is laid out: paint the hint as is.
+            width = int(self.content_size.width)
+        except Exception:  # noqa: BLE001 - no app or layout yet.
+            width = 0
+        self.update(pack_hint_items(self._rendered_hint or "", width, max_lines=2))
+
+
+def pack_hint_items(hint: str, width: int, *, max_lines: int = 2) -> str:
+    """Break a ``key label · key label`` hint between items, never inside one.
+
+    Word wrap split "r refresh keys" over two rows at 80 columns (GAP-1912).
+    Items that don't fit in ``max_lines`` rows are dropped whole. Plain
+    sentences, and any hint that fits, are left to the normal wrap.
+    """
+
+    from rich.cells import cell_len
+
+    if width <= 0 or cell_len(hint) <= width or " · " not in hint:
+        return hint
+    lines: list[str] = []
+    line = ""
+    for item in hint.split(" · "):
+        joined = f"{line} · {item}" if line else item
+        if not line or cell_len(joined) <= width:
+            line = joined
+            continue
+        lines.append(line)
+        line = item
+    lines.append(line)
+    return "\n".join(lines[:max_lines])
