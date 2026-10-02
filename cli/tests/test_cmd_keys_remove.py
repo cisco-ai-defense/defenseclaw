@@ -13,6 +13,7 @@ from click.testing import CliRunner
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_keys import keys_cmd
+
 from tests.test_cmd_keys import _make_app_context
 
 

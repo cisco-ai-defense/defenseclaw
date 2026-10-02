@@ -818,7 +818,10 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     cmd = _rego_tool_cmd(["test", rd], ["policy", "test", "--rego-dir", rd])
     if cmd is None:
         ux.err("error: neither 'opa' nor 'defenseclaw-gateway' was found")
-        ux.subhead("Reinstall DefenseClaw, or install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa", indent="  ")
+        ux.subhead(
+            "Reinstall DefenseClaw, or install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa",
+            indent="  ",
+        )
         raise SystemExit(1)
     if verbose:
         cmd.append("-v")

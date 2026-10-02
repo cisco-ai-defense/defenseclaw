@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_policy import _rego_dir
+
 from tests.test_cmd_policy import PolicyCommandTestBase
 
 GATEWAY = "/opt/fake/defenseclaw-gateway"
