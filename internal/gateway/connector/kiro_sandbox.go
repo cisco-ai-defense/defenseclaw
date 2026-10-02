@@ -56,7 +56,9 @@ func kiroSandboxHookScript() string {
 }
 
 // kiroSandboxHookEvents are the CLI 2.x agent-hook triggers DefenseClaw
-// registers (the host's kiroV2HookSpecs). agentSpawn fires only for the
+// registers in the sandbox image: the host's kiroV2HookSpecs plus the
+// userPromptSubmit audit hook the pinned image was measured with (the host
+// no longer registers it; see kiroV2HookSpecs). agentSpawn fires only for the
 // default agent, not for one selected with --agent, and carries no tool call.
 var kiroSandboxHookEvents = []string{"userPromptSubmit", "preToolUse", "postToolUse", "stop"}
 
@@ -156,7 +158,7 @@ func kiroSandboxAgentHook(description string) map[string]interface{} {
 // but pre-approves none: --trust-all-tools (the launcher's yolo mode) is
 // what skips Kiro's own prompts.
 func renderKiroSandboxAgent() ([]byte, error) {
-	descriptions := map[string]string{}
+	descriptions := map[string]string{"userPromptSubmit": "DefenseClaw prompt inspection"}
 	for _, spec := range kiroV2HookSpecs {
 		descriptions[spec.event] = spec.description
 	}

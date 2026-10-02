@@ -60,15 +60,10 @@ def _refuse_on_managed_host(command: str) -> None:
 def upgrade(target_version: str | None, yes: bool, recover_corrupt_audit: bool) -> None:
     """Upgrade to the latest release (or X.Y.Z) using that release's installer."""
     _refuse_on_managed_host("upgrade")
-    if recover_corrupt_audit:
-        click.echo(
-            "  --recover-corrupt-audit is no longer needed: the gateway moves a corrupt audit store "
-            "aside and starts a new one by itself (see defenseclaw doctor).",
-            err=True,
-        )
     from defenseclaw.upgrade_shim import run
 
     args = ["upgrade"] + (["--version", target_version] if target_version else []) + (["--yes"] if yes else [])
+    args += ["--recover-corrupt-audit"] if recover_corrupt_audit else []
     raise SystemExit(run(args))
 
 

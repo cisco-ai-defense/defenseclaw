@@ -369,6 +369,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
+        from defenseclaw.bootstrap import choose_first_run_api_port
+
+        port_note = choose_first_run_api_port(cfg)
+        if port_note:
+            click.echo("  API port:      " + ux._style(port_note, fg="yellow"))
     else:
         cfg = load()
         if getattr(cfg, "_source_config_version", None) != 8:
@@ -669,6 +674,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     if verify is None:
         verify = True
 
+    connector_settings, unselectable = _leave_out_unselectable_connectors(connector_settings, data_dir)
     primary = connector_settings[0]
     extras = connector_settings[1:]
     # When extra connectors will be merged in after the primary bootstrap,
@@ -711,6 +717,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
+    if unselectable:
+        _report_unselectable_connectors(report, unselectable)
     if not start_gateway:
         _word_sidecar_skip(report, prompted=interactive_wizard, flag=start_gateway_flag)
 
@@ -1437,6 +1445,48 @@ def _append_mode_warning_steps(report, warnings: list[dict]) -> None:
         )
 
 
+def _leave_out_unselectable_connectors(
+    connector_settings: list[dict],
+    data_dir,
+) -> tuple[list[dict], dict[str, str]]:
+    """Drop Windows connectors whose agent executable setup would refuse.
+
+    Setup selects every protected connector's executable in one transaction,
+    so one refused agent failed the whole roster. When at least one selected
+    connector remains, the refused ones are left out and reported instead.
+    """
+    if platform_support.host_os() != "windows" or len(connector_settings) < 2:
+        return connector_settings, {}
+    from defenseclaw.agent_selection import setup_agent_selection_problems
+    from defenseclaw.config import default_data_path
+
+    names = [connector_paths.normalize(s["connector"]) for s in connector_settings]
+    problems = setup_agent_selection_problems(os.fspath(data_dir or default_data_path()), names)
+    kept = [s for s, name in zip(connector_settings, names) if name not in problems]
+    if not problems or not kept:
+        return connector_settings, {}
+    return kept, problems
+
+
+def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:
+    from defenseclaw.bootstrap import StepResult, _next_commands, _rollup_status
+
+    details = "; ".join(f"{name}: {reason}" for name, reason in sorted(problems.items()))
+    first = sorted(problems)[0]
+    first = "claude-code" if first == "claudecode" else first
+    report.setup.append(
+        StepResult(
+            "Agent Selection",
+            "warn",
+            f"left out {', '.join(sorted(problems))}: no usable agent executable was found ({details}); "
+            "fix that, then add each one with defenseclaw setup <agent>",
+            f"defenseclaw setup {first}",
+        )
+    )
+    report.status = _rollup_status(report.setup, report.readiness)
+    report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
+
+
 def _build_noninteractive_connector_settings(
     *,
     connector: str | None,
@@ -2114,7 +2164,12 @@ def _describe_connector_set(report, connectors: list[str]) -> None:
     selected its rows named that one connector alone.
     """
     from defenseclaw import config as cfg_mod
-    from defenseclaw.bootstrap import _connector_readiness, _next_commands, _rollup_status
+    from defenseclaw.bootstrap import (
+        _connector_readiness,
+        _defer_hooks_to_gateway_start,
+        _next_commands,
+        _rollup_status,
+    )
 
     try:
         cfg = cfg_mod.load(data_dir=report.data_dir)
@@ -2130,6 +2185,7 @@ def _describe_connector_set(report, connectors: list[str]) -> None:
             readiness.append(step)
         elif not any(item.name == "Connector" for item in readiness):
             readiness.extend(_connector_readiness(cfg, name) for name in connectors)
+    _defer_hooks_to_gateway_start(report.setup, readiness)
     report.readiness = readiness
     report.status = _rollup_status(report.setup, report.readiness)
     report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
@@ -2151,6 +2207,9 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if platform_support.host_os() in {"linux", "darwin"}:
+        # Nothing restarts a per-user gateway on Linux or macOS (RHEL-U3-06).
+        renderer.echo("  After a reboot or sign-out, start the gateway again: defenseclaw-gateway start")
     if _sandboxes_possible():
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():

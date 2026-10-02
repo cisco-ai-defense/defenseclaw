@@ -83,7 +83,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: devin hook refusing oversized payload, blocking devin tool (sandbox hooks fail closed)" >&2
-  printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+  printf 'DefenseClaw hook payload too large\n'
   exit 2
 }
 # The per-sandbox binding token is an OpenShell provider placeholder; the
@@ -94,14 +94,14 @@ API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 fail_unreachable() {
   defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking devin tool (sandbox hooks fail closed): $1" >&2
-  printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
+  printf 'DefenseClaw hook failed closed\n'
   exit 2
 }
 
 fail_response() {
   defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: devin hook error, blocking devin tool (sandbox hooks fail closed): $1" >&2
-  printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
+  printf 'DefenseClaw hook failed closed\n'
   exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
@@ -111,7 +111,7 @@ fi
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: devin hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+    printf 'DefenseClaw hook payload too large\n'
     exit 2
   fi
   exit 0
@@ -133,7 +133,7 @@ fail_unreachable() {
   defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "devin hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
+    printf 'DefenseClaw hook failed closed\n'
     exit 2
   fi
   exit 0
@@ -145,7 +145,7 @@ fail_response() {
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
-  printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
+  printf 'DefenseClaw hook failed closed\n'
   exit 2
 }
 {{end}}
@@ -190,6 +190,15 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/devin/hook" "$PAYLOAD" \
   fail_unreachable "gateway unreachable"
 }{{end}}
 
+# devin_block ends a block. Devin shows an exit-2 hook's stdout verbatim
+# ("Tool rejected: <stdout>") rather than parsing it, so the block prints its
+# reason as one plain line, not the {"decision":"block"} object.
+devin_block() {
+  printf '%s\n' "${1:-Blocked by DefenseClaw Devin policy.}" | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+  printf '\n'
+  exit 2
+}
+
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 if [ -z "$HTTP_CODE" ]; then
@@ -212,23 +221,26 @@ case "$ACTION" in
 esac
 DECISION=""
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  echo "$OUTPUT"
   DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || DECISION=""
+  if [ "$DECISION" = "block" ]; then
+    devin_block "$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null || true)"
+  fi
+  echo "$OUTPUT"
 elif [ "$ACTION" = "block" ]; then
   # A block without an event-native verdict still denies: exit 2 is Devin's
-  # veto. Print Devin's block object, and the gateway's reason on stderr.
-  printf '{"decision":"block","reason":"Blocked by DefenseClaw Devin policy."}\n'
+  # veto. The gateway's reason goes on stderr too.
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
   printf '%s\n' "${REASON:-Blocked by DefenseClaw Devin policy.}" >&2
+  devin_block "$REASON"
 fi
-if [ "$ACTION" = "block" ] || [ "$DECISION" = "block" ]; then
+if [ "$ACTION" = "block" ]; then
   exit 2
 fi
 exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  echo "$OUTPUT"
   DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
   if [ "$DECISION" = "block" ]; then
-    exit 2
+    devin_block "$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null || true)"
   fi
+  echo "$OUTPUT"
 fi
 exit 0{{end}}

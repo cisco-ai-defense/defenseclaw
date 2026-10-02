@@ -71,6 +71,16 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 	command := c.hookCommand(opts)
 	v3Command := c.hookCommandForV3Surface(opts)
+	// A workspace copy an earlier Setup wrote for another (or no longer
+	// selected) workspace runs a DefenseClaw hook nothing maintains, for
+	// example after a failed setup rolled the workspace setting back. A
+	// managed Setup reclaims it with the rest of the per-user footprint.
+	var staleErr error
+	if !kiroManaged(opts) {
+		for _, path := range c.staleRecordedKiroHookPaths(opts, c.hookConfigPaths(opts)) {
+			staleErr = errors.Join(staleErr, c.reclaimKiroHookFile(opts, path, v3Command))
+		}
+	}
 	for _, path := range c.hookConfigPaths(opts) {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroBackupLogicalName(path), path); err != nil {
 			return fmt.Errorf("kiro capture hook backup %s: %w", path, err)
@@ -118,7 +128,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
 		return errors.Join(reclaimErr, fmt.Errorf("kiro record settings backup: %w", err))
 	}
-	return reclaimErr
+	return errors.Join(staleErr, reclaimErr)
 }
 
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
@@ -127,7 +137,9 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
 		errs = append(errs, fmt.Errorf("kiro migrate hook backup: %w", err))
 	}
-	for _, path := range c.hookCleanupPaths(opts) {
+	cleanup := c.hookCleanupPaths(opts)
+	cleanup = append(cleanup, c.staleRecordedKiroHookPaths(opts, cleanup)...)
+	for _, path := range cleanup {
 		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
 			errs = append(errs, err)
 		}
@@ -195,6 +207,17 @@ func missingKiroScaffoldDirs() []string {
 		}
 	}
 	return missing
+}
+
+// RecordHookConfigParentDirs records the hook config folders an installer
+// created for the named connector before its Setup ran, so its teardown
+// removes them while they are still empty. Only Kiro keeps such a list; for
+// any other connector it does nothing. It is best effort.
+func RecordHookConfigParentDirs(name, dataDir string, dirs []string) {
+	if name != "kiro" || strings.TrimSpace(dataDir) == "" || len(dirs) == 0 {
+		return
+	}
+	_ = recordCreatedDirs(filepath.Join(dataDir, kiroCreatedDirsFile), dirs)
 }
 
 // recordKiroCreatedDirs records the folders of missing that Setup created.
@@ -600,6 +623,31 @@ func (c *KiroConnector) hookCleanupPaths(opts SetupOpts) []string {
 		paths = append(paths, workspace)
 	}
 	return uniqueNonEmptyStrings(paths)
+}
+
+// staleRecordedKiroHookPaths lists the v3 hook files a Kiro backup record
+// names that are not in current. The records outlive the workspace setting,
+// so a workspace copy is still found once claw.workspace_dir no longer names
+// it (RHEL-U3-09).
+func (c *KiroConnector) staleRecordedKiroHookPaths(opts SetupOpts, current []string) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, path := range current {
+		known[filepath.Clean(path)] = true
+	}
+	var stale []string
+	_ = forEachManagedFileBackup(opts.DataDir, func(b managedFileBackup) error {
+		if b.Connector != c.Name() || !strings.HasPrefix(b.LogicalName, kiroV3HooksLogicalName+"-") ||
+			b.LogicalName != kiroBackupLogicalName(b.Path) || known[filepath.Clean(b.Path)] {
+			return nil
+		}
+		known[filepath.Clean(b.Path)] = true
+		stale = append(stale, b.Path)
+		return nil
+	})
+	return stale
 }
 
 func kiroHooksPath(opts SetupOpts) string {

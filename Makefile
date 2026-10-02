@@ -182,6 +182,9 @@ path: _source-install-preflight
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
+# An existing config is kept as it is (first-run setup would replace its
+# connectors and modes with the defaults); only newly detected hook connectors
+# are added, unless CONNECTOR or PROFILE asks for first-run setup.
 # When no TTY is available, the follow-up additive setup observes only newly
 # detected hook connectors, preserves existing modes, and restarts the gateway
 # only when it actually adds a connector.
@@ -202,6 +205,7 @@ quickstart: _source-install-preflight
 			echo "  Developers: run 'make all'. Release installs: run 'defenseclaw upgrade'."; \
 			exit 1; \
 		fi; \
+		cfg_file="$${DEFENSECLAW_CONFIG:-$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}/config.yaml}"; \
 		if [ -n "$${CONNECTOR:-}" ]; then \
 			if ! "$$dc_bin" init --non-interactive --yes \
 				--connector "$${CONNECTOR}" \
@@ -209,6 +213,12 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
+			fi; \
+		elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then \
+			echo "  • Existing config kept ($$cfg_file); change connectors or modes with: defenseclaw init"; \
+			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
+				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
 				exit 1; \
 			fi; \
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
@@ -284,9 +294,9 @@ uninstall:
 build: pycli gateway plugin
 	@echo ""
 	@echo "All components built:"
-	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw"
-	@echo "  • Go gateway   → ./$(GATEWAY)"
-	@echo "  • ACP guard    → ./$(ACP_GUARD)"
+	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)"
+	@echo "  • Go gateway   → ./$(GATEWAY)$(EXE)"
+	@echo "  • ACP guard    → ./$(ACP_GUARD)$(EXE)"
 	@echo "  • OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo ""
 	@echo "Build only: checkout artifacts were not published and managed install state was not changed."
@@ -300,9 +310,9 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo ""
 	@echo "All components installed:"
-	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
-	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
-	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
+	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
+	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
@@ -429,8 +439,9 @@ endif
 # `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
 # who don't need the plugin at all. Instead we drop a placeholder file
-# so //go:embed has at least one entry, and the OpenClaw connector
-# detects the placeholder at runtime and returns a clear error when
+# so //go:embed has at least one entry (the tracked .placeholder is kept
+# even after a sync, so a build leaves the checkout clean), and the
+# OpenClaw connector finds no package.json at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension: _checkout-write-preflight
@@ -438,11 +449,10 @@ sync-openclaw-extension: _checkout-write-preflight
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
 	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
-	  if [ -f "$$embed_dir/.placeholder" ] || [ ! -d "$$embed_dir" ] \
-	      || [ -z "$$(ls -A "$$embed_dir" 2>/dev/null | grep -v '^\.placeholder$$' || true)" ]; then \
+	  if [ ! -f "$$embed_dir/package.json" ]; then \
 	    mkdir -p "$$embed_dir"; \
-	    printf '%s\n' "OpenClaw extension not built." \
-	      "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+	    [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
+	      "OpenClaw extension bundle is not present in this source checkout." \
 	      > "$$embed_dir/.placeholder"; \
 	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
 	  else \
@@ -450,7 +460,11 @@ sync-openclaw-extension: _checkout-write-preflight
 	  fi; \
 	  exit 0; \
 	fi; \
-	rm -rf "$$embed_dir"; \
+	mkdir -p "$$embed_dir"; \
+	for entry in "$$embed_dir"/* "$$embed_dir"/.[!.]*; do \
+	  [ -e "$$entry" ] || continue; \
+	  [ "$${entry##*/}" = .placeholder ] || rm -rf "$$entry"; \
+	done; \
 	mkdir -p "$$embed_dir/node_modules"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
@@ -589,9 +603,9 @@ _source-dev-install: _source-install-dev-preflight
 	@$(MAKE) --no-print-directory $(SOURCE_PLUGIN_INSTALL_TARGET)
 	@echo ""
 	@echo "All components installed:"
-	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
-	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
-	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
+	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
+	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \

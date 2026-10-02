@@ -179,6 +179,45 @@ def test_alert_detail_hydration_preserves_visible_non_info_promotion() -> None:
     assert detail.event.severity == "HIGH"
 
 
+def test_alert_detail_for_a_block_finding_names_target_rule_and_connector() -> None:
+    # RHEL-U3-05: the audit row behind a canonical finding has no target and
+    # only "finding.observed" as details, and hydration blanked the pane.
+    projected = alerts_from_v8_history(
+        (
+            _v8_alert_row(
+                "marker-finding",
+                bucket="security.finding",
+                event_name="finding.observed",
+                severity="CRITICAL",
+                action="scan-finding",
+                payload={
+                    "defenseclaw.finding.target_ref": "kiro:preToolUse",
+                    "defenseclaw.finding.rule_id": "R1-MARKER-BLOCK",
+                    "defenseclaw.finding.title": "Test marker command (block)",
+                    "defenseclaw.scan.scanner": "hook-rules",
+                },
+            ),
+        )
+    )[0]
+
+    class Store:
+        @staticmethod
+        def get_event(_event_id: str) -> AlertEvent:
+            return AlertEvent(
+                id=projected.id, severity="CRITICAL", action="scan-finding", target="", details="finding.observed"
+            )
+
+    model = AlertsPanelModel(store=Store())
+    model.set_events([projected])
+    model.detail_open = True
+
+    text = model.detail_text()
+
+    assert "Target: kiro:preToolUse" in text
+    assert "Rule: R1-MARKER-BLOCK: Test marker command (block)" in text
+    assert "Connector: codex" in text
+
+
 def test_alert_detail_survives_malformed_sqlite_history() -> None:
     class CorruptDatabase:
         def execute(self, *_args: object, **_kwargs: object) -> None:
@@ -483,6 +522,10 @@ def test_alerts_slash_search_and_exact_severity_filter() -> None:
     assert model.handle_key("escape").handled is True
     assert model.filter_text == ""
     assert model.filtered
+    # RHEL-U2-10: the hint says Esc clears a severity filter; a second Esc does.
+    assert model.handle_key("escape").handled is True
+    assert model.active_filter_label() == "Actionable"
+    assert model.handle_key("escape").handled is False
 
 
 def test_alerts_connector_column_and_shared_filter() -> None:

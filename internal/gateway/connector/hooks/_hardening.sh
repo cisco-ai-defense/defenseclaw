@@ -734,10 +734,38 @@ defenseclaw_log_hook_failure() {
   return 0
 }
 
+# defenseclaw_own_gateway_stopped returns 0 when this account's per-user
+# gateway is not running (no gateway.pid, or its process is gone). A 401 then
+# came from another listener on the port, typically another account's gateway
+# on the same default port, so token drift is the wrong diagnosis. Managed
+# hooks and unreadable records keep the token advice.
+defenseclaw_own_gateway_stopped() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  local pid_file="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.pid"
+  local data="" pid=""
+  [ -e "$pid_file" ] || return 0
+  IFS= read -r -n 4096 data < "$pid_file" 2>/dev/null || [ -n "$data" ] || return 1
+  if [[ "$data" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    pid="${BASH_REMATCH[1]}"
+  elif [[ "$data" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+    pid="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
 defenseclaw_response_failure_reason() {
   case "$1" in
     *"HTTP 401"*|*"HTTP 403"*)
-      printf '%s (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)' "$1"
+      if defenseclaw_own_gateway_stopped; then
+        printf '%s (this account'"'"'s gateway is not running, so another account or program answered on its port. Run `defenseclaw-gateway start`; if another account holds the port, it names a free one.)' "$1"
+      else
+        printf '%s (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)' "$1"
+      fi
       ;;
     *)
       printf '%s' "$1"

@@ -156,7 +156,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         self.assertIn("failed --version (exit 1)", result.checks[0]["detail"])
         self.assertIn("ModuleNotFoundError", result.checks[0]["detail"])
         self.assertIn(
-            "DefenseClawSetup-x64.exe /repair" if os.name == "nt" else "`bash defenseclaw-upgrade.sh --yes`",
+            "running the install command again" if os.name == "nt" else "`bash defenseclaw-upgrade.sh --yes`",
             result.checks[0]["detail"],
         )
         expected_launcher = (

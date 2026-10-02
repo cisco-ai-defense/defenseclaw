@@ -6559,6 +6559,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         else:
             active_alerts = current.active_alerts
+        # Connector hook stats count blocks apart from alerts, while the
+        # Alerts tab lists blocks and scan alerts too; never show fewer
+        # alerts here than that tab and the critical/high banner do.
+        active_alerts = max(active_alerts, self.alerts_model.total_count())
         counts = EnforcementCounts(
             blocked_skills=current.blocked_skills,
             allowed_skills=current.allowed_skills,
@@ -9893,7 +9897,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _active_filter_label(self) -> str:
         if self.active_panel == "alerts":
-            return self.alerts_model.active_filter_label()
+            alerts = self.alerts_model
+            if not (alerts.filter_text or alerts.severity_filter or alerts.show_all_severities):
+                # The default actionable queue is not a filter to clear.
+                return ""
+            return alerts.active_filter_label()
         if self.active_panel == "audit":
             return self.audit_model.active_filter_label()
         if self.active_panel == "logs":
@@ -12800,10 +12808,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _destructive_intent_modal(self, intent: Any) -> ConsequenceModalModel:
         """Build the C1 consequence modal for a destructive catalog intent (N1).
 
-        A single ``danger`` action carries the command; the consequence modal
-        paints a red border and requires the danger re-press before it
-        dismisses with the action, so the dispatch only fires on an explicit
-        second confirm.
+        A safe "Go back" action is preselected, so stray Enter presses close
+        the modal. The ``danger`` action carries the command: it has to be
+        picked (its ``d`` hotkey or the arrow keys) and then confirmed twice,
+        because the consequence modal re-asks before a danger action runs.
         """
 
         command_line = " ".join((intent.binary, *intent.args))
@@ -12815,6 +12823,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             consequence=consequence or "This deletes files from disk.",
             actions=(
                 ConsequenceAction(
+                    action_id="back",
+                    hotkey="b",
+                    label="Go back",
+                    description="Closes this without running anything.",
+                ),
+                ConsequenceAction(
                     action_id="run",
                     hotkey="d",
                     label=intent.label,
@@ -12825,7 +12839,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     danger=True,
                 ),
             ),
-            default_action_id="run",
+            default_action_id="back",
             border_color=TOKENS.accent_red,
         )
 
@@ -12833,7 +12847,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         chosen = await self.push_screen_wait(
             ConsequenceModalScreen(self._destructive_intent_modal(intent))
         )
-        if chosen is None:
+        if chosen is None or chosen.action_id != "run":
             self._write_activity(f"[#FBBF24]Cancelled:[/] {intent.label}")
             self._set_status("Command cancelled.")
             return None

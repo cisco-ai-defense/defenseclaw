@@ -89,6 +89,24 @@ case ":${PATH}:" in
         ;;
 esac
 
+# Git Bash on Windows inherits the Windows user PATH, which install.ps1
+# manages. When the directory is already there, a new terminal picks it up
+# and no rc file needs to change.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
+            win_dir="$(cygpath -w "${TARGET_DIR}" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+            user_path="$(powershell.exe -NoProfile -NonInteractive -Command "[Environment]::GetEnvironmentVariable('Path','User')" 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+            case ";${user_path};" in
+                *";${win_dir};"*|*";${win_dir}\\;"*)
+                    ok "${TARGET_DIR} is on your Windows user PATH; open a new terminal to use it"
+                    exit 0
+                    ;;
+            esac
+        fi
+        ;;
+esac
+
 # Decide which shell's rc file to mutate. Honour the override, then fall
 # back to ${SHELL}, then to a plain ~/.profile that every POSIX shell
 # reads at login.

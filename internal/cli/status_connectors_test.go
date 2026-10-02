@@ -524,3 +524,26 @@ func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
 		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
 	}
 }
+
+// TestPrintSubsystemsHidesUnusedFleetUplink: a hook-only roster never uses the
+// OpenClaw fleet uplink, so status must not lead with its DISABLED state and
+// OpenClaw advice (MAC-U2-02); an OpenClaw roster still sees it.
+func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
+	now := time.Now()
+	snap := &gateway.HealthSnapshot{
+		Gateway:    gateway.SubsystemHealth{State: gateway.StateDisabled, Since: now, Details: map[string]interface{}{"hint": "point gateway.host at a real OpenClaw upstream"}},
+		Guardrail:  gateway.SubsystemHealth{State: gateway.StateRunning, Since: now},
+		Connectors: []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning, Since: now}},
+	}
+	out := captureStdout(t, func() { printSubsystems(snap) })
+	if strings.Contains(out, "Gateway:") || strings.Contains(out, "OpenClaw") {
+		t.Fatalf("hook-only roster shows the unused fleet uplink:\n%s", out)
+	}
+	if strings.Contains(out, "Guardrail:R") || strings.Contains(out, "Guardrail:\x1b") {
+		t.Fatalf("label runs into the state:\n%s", out)
+	}
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "openclaw", State: gateway.StateRunning, Since: now}}
+	if out := captureStdout(t, func() { printSubsystems(snap) }); !strings.Contains(out, "Gateway:") {
+		t.Fatalf("OpenClaw roster must still show the fleet uplink:\n%s", out)
+	}
+}

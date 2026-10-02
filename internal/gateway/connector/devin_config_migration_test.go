@@ -101,3 +101,43 @@ func TestDevinSetupMigratesAReceiptBoundToTheOldMacOSConfigRoot(t *testing.T) {
 		})
 	}
 }
+
+// RHEL-U3-03: `setup devin --workspace` pins claw.workspace_dir, which moves
+// Copilot's hooks from ~/.copilot/hooks to <workspace>/.github/hooks. The
+// gateway's Copilot Setup then failed with a backup target mismatch and Setup
+// rolled the whole roster back.
+func TestCopilotSetupMovesItsHooksWhenAWorkspaceIsPinned(t *testing.T) {
+	previousPath, previousWorkspace := CopilotHooksPathOverride, CopilotWorkspaceDirOverride
+	CopilotHooksPathOverride, CopilotWorkspaceDirOverride = "", ""
+	t.Cleanup(func() { CopilotHooksPathOverride, CopilotWorkspaceDirOverride = previousPath, previousWorkspace })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("COPILOT_HOME", filepath.Join(home, ".copilot"))
+	dataDir := filepath.Join(home, ".defenseclaw")
+	workspace := filepath.Join(home, "proj")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := NewCopilotConnector()
+	global := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	if err := conn.Setup(context.Background(), global); err != nil {
+		t.Fatalf("global Setup: %v", err)
+	}
+	globalConfig := copilotHooksPath(global)
+
+	pinned := global
+	pinned.WorkspaceDir = workspace
+	if err := conn.Setup(context.Background(), pinned); err != nil {
+		t.Fatalf("Setup after a workspace was pinned: %v", err)
+	}
+	if present, err := OwnedHooksPresent(conn, pinned); err != nil || !present {
+		t.Fatalf("workspace hooks present = %v, %v", present, err)
+	}
+	if got, want := managedFileBackupTargetPath(dataDir, "copilot", "config", ""), filepath.Join(workspace, ".github", "hooks", "defenseclaw.json"); got != want {
+		t.Fatalf("receipt bound to %q, want %q", got, want)
+	}
+	if _, err := os.Stat(globalConfig); !os.IsNotExist(err) {
+		t.Fatalf("global hook file DefenseClaw created is still present (err=%v)", err)
+	}
+}

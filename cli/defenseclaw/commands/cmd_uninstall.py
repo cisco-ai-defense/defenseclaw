@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import ntpath
 import os
 import shutil
 import stat
@@ -52,7 +53,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import click
@@ -582,9 +583,15 @@ def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> boo
         link = _launcher_link_target(path)
         return bool(link) and os.path.commonpath((_normalized(link), venv)) == venv
     name = os.path.basename(path)
-    if not name.lower().endswith(".cmd") or not os.path.isfile(path) or _is_reparse_path(path):
+    if not os.path.isfile(path) or _is_reparse_path(path):
         return False
-    expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
+    if name.lower().endswith(".cmd"):
+        expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
+    elif name.lower() == "defenseclaw":
+        # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
+        expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
+    else:
+        return False
     try:
         with open(path, encoding="utf-8-sig", errors="replace") as stream:
             contents = stream.read(16_385)
@@ -667,6 +674,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         install_root = os.path.abspath(os.path.join(home, ".local", "bin"))
         names = (
             "defenseclaw.cmd",
+            # The installer's extensionless launcher for Git Bash.
+            "defenseclaw",
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
@@ -883,7 +892,10 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             and target not in plan.data_bound_launchers
             and os.path.basename(target) != _UV_RECORD
         ]
-        if kept:
+        developer = _windows_developer_files(plan.install_root) if plan.platform_name == "win32" else []
+        if developer:
+            click.echo(f"      {ux.dim('·')} kept: {_windows_developer_removal(developer)}")
+        elif kept:
             click.echo(
                 f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
                 f"in {plan.install_root} (add --binaries to remove them too)"
@@ -907,7 +919,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         try:
             action()
         except Exception as exc:
-            phases.append(ExecutionPhaseResult(name, "failed", str(exc)))
+            # The raised error below carries the full reason (and any recovery
+            # recipe); repeating it in the ledger printed long guidance twice.
+            phases.append(ExecutionPhaseResult(name, "failed", "see the error below"))
             _render_execution_result(ExecutionResult(tuple(phases)))
             if isinstance(exc, click.ClickException):
                 raise
@@ -922,6 +936,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+    if "copilot" in plan.connectors or plan.remove_data_dir:
+        _remove_orphan_copilot_plugin()
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
@@ -988,6 +1004,65 @@ def _remove_data_bound_launchers(plan: UninstallPlan) -> None:
         raise OSError("; ".join(failures))
 
 
+# The manifest of the Copilot plugin a managed deployment renders into each
+# account (~/.copilot/installed-plugins/defenseclaw/defenseclaw).
+_COPILOT_PLUGIN_MANIFEST = {
+    "name": "defenseclaw",
+    "description": "DefenseClaw guardrail hooks",
+    "version": "1.0.0",
+    "hooks": "hooks/hooks.json",
+}
+
+
+def _remove_orphan_copilot_plugin() -> None:
+    """Remove DefenseClaw's managed Copilot plugin once nothing manages it.
+
+    A managed deployment renders this plugin into each account and its own
+    uninstall removes it. On a host with no managed deployment a leftover
+    copy only names a hook binary that may be gone, so the per-user
+    uninstall removes it. The plugin must hold exactly DefenseClaw's
+    rendered manifest and managed Copilot hook commands; anything else is
+    the user's and stays.
+    """
+    from defenseclaw import upgrade_shim
+
+    if upgrade_shim.managed_deployment():
+        return
+    plugin = os.path.join(os.path.expanduser("~"), ".copilot", "installed-plugins", "defenseclaw", "defenseclaw")
+    hooks_dir = os.path.join(plugin, "hooks")
+    manifest = os.path.join(plugin, "plugin.json")
+    hooks_file = os.path.join(hooks_dir, "hooks.json")
+    try:
+        if _is_reparse_path(plugin) or _is_reparse_path(hooks_dir):
+            return
+        if sorted(os.listdir(plugin)) != ["hooks", "plugin.json"] or os.listdir(hooks_dir) != ["hooks.json"]:
+            return
+        if not all(stat.S_ISREG(os.lstat(path).st_mode) for path in (manifest, hooks_file)):
+            return
+        with open(manifest, encoding="utf-8") as handle:
+            if json.load(handle) != _COPILOT_PLUGIN_MANIFEST:
+                return
+        with open(hooks_file, encoding="utf-8") as handle:
+            events = json.load(handle).get("hooks")
+        handlers = [h for group in events.values() for h in group] if isinstance(events, dict) else []
+        if not handlers or not all(
+            isinstance(h, dict)
+            and "copilot" in str(h.get("command", ""))
+            and "enterprise-managed" in str(h.get("command", ""))
+            for h in handlers
+        ):
+            return
+        os.unlink(hooks_file)
+        os.unlink(manifest)
+        os.rmdir(hooks_dir)
+        os.rmdir(plugin)
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(plugin))
+        ux.ok(f"removed orphaned Copilot plugin {plugin}")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return
+
+
 def _remove_empty_plugin_cache() -> None:
     """Remove the gateway's plugin cache folder in TempDir while it is empty.
 
@@ -1035,6 +1110,49 @@ def _validate_windows_ancestor_chain(path: str, label: str) -> None:
         candidate = candidate.parent
 
 
+# What `make all` (Makefile _source-dev-install) publishes into the Windows
+# install root: regular-file copies plus the source ownership marker.
+_WINDOWS_DEVELOPER_FILES = (
+    "defenseclaw.exe",
+    "defenseclaw-gateway.exe",
+    "defenseclaw-acp.exe",
+    "litellm.exe",
+    "skill-scanner.exe",
+    "skill-scanner-api.exe",
+    "skill-scanner-pre-commit.exe",
+    "mcp-scanner.exe",
+    "mcp-scanner-api.exe",
+    ".defenseclaw-source-root",
+)
+
+
+def _windows_developer_files(install_root: str) -> list[str]:
+    """Return the files a `make all` developer install published, if it is one.
+
+    A developer install has the source ownership marker and no installer
+    shim. Uninstall does not remove it (the CLI runs from one of these
+    copies); the plan and the refusal name the files instead.
+    """
+    if not install_root or os.path.lexists(os.path.join(install_root, "defenseclaw.cmd")):
+        return []
+    if not os.path.lexists(os.path.join(install_root, ".defenseclaw-source-root")):
+        return []
+    return [
+        os.path.join(install_root, name)
+        for name in _WINDOWS_DEVELOPER_FILES
+        if os.path.lexists(os.path.join(install_root, name))
+    ]
+
+
+def _windows_developer_removal(files: list[str]) -> str:
+    quoted = ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+    return (
+        "this is a developer install from 'make all', which uninstall does not remove. "
+        "Run 'defenseclaw uninstall' without --binaries (add --all to remove data too), "
+        f"then remove the developer files from PowerShell:\n  Remove-Item -LiteralPath {quoted}"
+    )
+
+
 def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
     """Require the installer-authored CLI shim before removing paired artifacts."""
     existing = [path for path in plan.binary_targets if os.path.lexists(path)]
@@ -1042,6 +1160,9 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         return
     shim = os.path.join(plan.install_root, "defenseclaw.cmd")
     if not os.path.isfile(shim) or _is_reparse_path(shim):
+        developer = _windows_developer_files(plan.install_root)
+        if developer:
+            raise click.ClickException(f"refusing Windows binary removal: {_windows_developer_removal(developer)}")
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
         with open(shim, encoding="utf-8-sig", errors="strict") as stream:
@@ -1117,6 +1238,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
         allowed_names = (
             {
                 "defenseclaw.cmd",
+                "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
@@ -1166,12 +1288,14 @@ def _validate_plan(plan: UninstallPlan) -> None:
 
 
 def _requires_deferred_cleanup(plan: UninstallPlan) -> bool:
-    if (
-        plan.platform_name != "win32"
-        or not plan.remove_data_dir
-        or not plan.managed_venv
-        or ".venv" in plan.preserve_data_entries
-    ):
+    if not plan.remove_data_dir or ".venv" in plan.preserve_data_entries:
+        return False
+    return _running_from_managed_venv(plan)
+
+
+def _running_from_managed_venv(plan: UninstallPlan) -> bool:
+    """Whether this Windows CLI runs from the plan's managed runtime (so its shim may be running)."""
+    if plan.platform_name != "win32" or not plan.managed_venv:
         return False
     executable = _normalized(sys.executable)
     runtime = _normalized(plan.managed_venv)
@@ -1896,7 +2020,19 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     failures: list[str] = []
     targets = list(plan.binary_targets)
     if plan.platform_name == "win32":
-        targets.sort(key=lambda path: os.path.basename(path).lower() == "defenseclaw.cmd")
+        targets.sort(key=lambda path: ntpath.basename(path).lower() == "defenseclaw.cmd")
+    deferred_shim = ""
+    if targets and ntpath.basename(targets[-1]).lower() == "defenseclaw.cmd" and os.path.lexists(targets[-1]):
+        if _running_from_managed_venv(plan):
+            # cmd.exe reads defenseclaw.cmd again after this CLI exits, so
+            # deleting it now ends the command with "The batch file cannot be
+            # found." and exit 1. The helper removes it once cmd.exe is done.
+            try:
+                _schedule_deferred_cleanup(replace(plan, binary_targets=(targets[-1],), remove_data_dir=False))
+            except click.ClickException:
+                pass
+            else:
+                deferred_shim = targets.pop()
     for path in targets:
         if not os.path.lexists(path):
             # The plan lists only the launchers that exist; the owned-name
@@ -1924,14 +2060,16 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
 
     if failures:
         raise OSError("; ".join(failures))
+    if deferred_shim:
+        ux.ok(f"{deferred_shim} is removed right after this command exits")
 
-    _remove_install_bookkeeping(plan.install_root)
+    _remove_install_bookkeeping(plan.install_root, plan.data_dir)
 
     # A pip-installed CLI is outside this plan; we don't shell out to pip
     # because we can't be sure which environment was used. Mention it only
     # when another defenseclaw is still on PATH.
     remaining = shutil.which("defenseclaw")
-    if remaining:
+    if remaining and not (deferred_shim and _normalized(remaining) == _normalized(deferred_shim)):
         ux.subhead(
             f"another defenseclaw remains at {remaining}; if you installed it with pip, run 'pip uninstall defenseclaw'"
         )
@@ -1950,8 +2088,21 @@ def _legacy_custody_parents() -> list[str]:
     return sorted({tempfile.gettempdir(), "/tmp"})
 
 
-def _remove_install_bookkeeping(install_root: str) -> None:
+def _legacy_home_custody_dirs(data_dir: str) -> list[str]:
+    """Custody folders pre-1.0 installers left beside DEFENSECLAW_HOME.
+
+    install.sh removes the same folders after a 1.0 install, but a source
+    install never runs it, so they pile up with each 0.8.x install.
+    """
+    if sys.platform == "win32" or not data_dir:
+        return []
+    parents = {os.path.expanduser("~"), os.path.dirname(os.path.abspath(os.path.expanduser(data_dir)))}
+    return [os.path.join(parent, ".defenseclaw-install-custody") for parent in sorted(parents)]
+
+
+def _remove_install_bookkeeping(install_root: str, data_dir: str = "") -> None:
     paths = [os.path.join(install_root, name) for name in _INSTALL_BOOKKEEPING]
+    paths.extend(_legacy_home_custody_dirs(data_dir))
     for parent in _legacy_custody_parents():
         try:
             names = os.listdir(parent)

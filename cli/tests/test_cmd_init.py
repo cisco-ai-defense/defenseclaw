@@ -417,6 +417,30 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertIn("requested action, configured observe: version not verified", result.output)
         self.assertIn("hooks for claudecode, devin are installed when the gateway starts", result.output)
 
+    def test_next_says_to_start_the_gateway_after_a_reboot_on_linux_and_macos(self):
+        # RHEL-U3-06: nothing restarts a per-user gateway on Linux or macOS,
+        # while a Windows hook starts a stopped one.
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_init
+
+        report = SimpleNamespace(
+            status="ok", connector="codex", profile="observe", setup=[], readiness=[], next_commands=[]
+        )
+        hint = "After a reboot or sign-out, start the gateway again: defenseclaw-gateway start"
+        for host, shown in (("linux", True), ("darwin", True), ("windows", False)):
+            lines: list[str] = []
+            renderer = SimpleNamespace(
+                title=lambda *a: None, section=lambda *a: None, step=lambda *a: None, echo=lines.append
+            )
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value=host),
+                patch.object(cmd_init, "_sandboxes_possible", return_value=False),
+                patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
+            ):
+                cmd_init._render_first_run_report(report, renderer)
+            self.assertEqual(any(hint in line for line in lines), shown, (host, lines))
+
     def test_sidecar_step_names_how_the_start_was_declined(self):
         # Manual test R2-41: the Sidecar step names the answer given, not a
         # flag the operator never typed, and the Next list points at
@@ -4390,3 +4414,27 @@ class TestResolveGatewayForConnectorGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_init_leaves_out_a_connector_setup_cannot_select_on_windows(tmp_path):
+    # One refused Amp executable failed the whole roster (WIN2-U2-07).
+    from defenseclaw.bootstrap import StepResult
+    from defenseclaw.commands import cmd_init
+
+    settings = [{"connector": "claudecode"}, {"connector": "amp"}, {"connector": "codex"}]
+    with (
+        patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+        patch(
+            "defenseclaw.agent_selection.setup_agent_selection_problems",
+            return_value={"amp": "cannot select amp executable"},
+        ),
+    ):
+        kept, problems = cmd_init._leave_out_unselectable_connectors(settings, tmp_path)
+    assert [s["connector"] for s in kept] == ["claudecode", "codex"]
+
+    report = SimpleNamespace(setup=[StepResult("Config", "ok")], readiness=[], profile="action", data_dir="")
+    cmd_init._report_unselectable_connectors(report, problems)
+    assert report.status == "partial"
+    assert report.setup[-1].next_command == "defenseclaw setup amp"
+    assert "cannot select amp executable" in report.setup[-1].detail
+

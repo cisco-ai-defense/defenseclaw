@@ -83,10 +83,14 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
+# Git Bash does not run a .cmd file by its bare name, so `defenseclaw` there
+# runs this extensionless script. cmd.exe and PowerShell ignore it: it has no
+# PATHEXT extension.
+$PosixShim = "defenseclaw"
 # defenseclaw-hook.exe reads its data dir from the state file beside it, never
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
 $HookState = "defenseclaw-hook-state.json"
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($HookState)
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
@@ -475,14 +479,27 @@ function Update-UserPath([string]$Add = "", [string]$Remove = "") {
     return $true
 }
 
-function Wait-BeforeClose {
-    # `defenseclaw upgrade` runs this installer in a console of its own, which
-    # closes when it exits: keep the outcome on screen unless -Yes was given.
-    if ($Yes -or -not $RunAsFile) { return }
+function Wait-BeforeClose([int]$Code) {
+    # `defenseclaw upgrade` and `rollback` run this installer in a console of
+    # their own, which closes when it exits: keep the outcome on screen. With
+    # -Yes nobody may be watching, so wait a bounded time instead of forever.
+    if (-not $RunAsFile) { return }
     try {
         Initialize-Native
-        if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint[]" 4), 4) -eq 1) {
+        # Windows PowerShell 5.1 has no [uint] accelerator, so a uint array threw here
+        # and the catch below closed the window at once.
+        if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint32[]" 4), 4) -ne 1) { return }
+        if ($Run.Log) { Write-Host "  Install log: $($Run.Log)" }
+        if (-not $Yes) {
             [void](Read-Host "  Press Enter to close this window")
+            return
+        }
+        $seconds = if ($Code -eq 0) { 15 } else { 120 }
+        Write-Host "  This window closes in $seconds seconds (press any key to close it now)."
+        $deadline = (Get-Date).AddSeconds($seconds)
+        while ((Get-Date) -lt $deadline) {
+            if ([Console]::KeyAvailable) { [void][Console]::ReadKey($true); break }
+            Start-Sleep -Milliseconds 200
         }
     } catch { }
 }
@@ -550,7 +567,16 @@ function Start-Gateway {
 }
 
 function Get-ProcessesUnder([string[]]$Prefixes) {
-    return @(Get-CimInstance Win32_Process | Where-Object {
+    # Win32_Process names every process's image, but WMI refuses a standard
+    # user signed in over the network (an SSH session). Get-Process then still
+    # reads the image of this account's own processes, the only ones that can
+    # run from this install.
+    $all = try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        @(Get-Process | ForEach-Object {
+            [pscustomobject]@{ ProcessId = $_.Id; Name = "$($_.ProcessName).exe"; ExecutablePath = $_.Path }
+        })
+    }
+    return @($all | Where-Object {
         $image = $_.ExecutablePath
         $image -and @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count
     })
@@ -712,6 +738,16 @@ function Install-File([string]$Source, [string]$Destination) {
     Move-Path "$Destination.new" $Destination
 }
 
+function Write-PosixShim([string]$Target) {
+    # `defenseclaw uninstall` recognizes this launcher by its exec line.
+    $path = Join-Path $BinDir $PosixShim
+    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.cmd.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
+    [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
+    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
+    Move-Path "$path.new" $path
+}
+
 function Write-Shim([string]$Name, [string]$Target) {
     # `defenseclaw uninstall` recognizes the CLI shim by this exact command line.
     $path = Join-Path $BinDir "$Name.cmd"
@@ -764,9 +800,12 @@ function New-Venv([string]$Path) {
         if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", ">=3.11,<3.14")) -ne 0) { return $false }
     }
     # The requirements file is the complete hashed lock, so nothing resolves.
-    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--python", $python, "--require-hashes", "--no-deps",
+    # Compile the bytecode now: uv skips it by default, and the first start of
+    # the CLI and the scanners would otherwise compile thousands of modules
+    # (over a minute on a Windows host while the files are also first scanned).
+    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
             "-r", (Join-Path $Staging $Requirements))) -ne 0) { return $false }
-    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
+    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
 }
 
 function Save-Snapshot {
@@ -848,6 +887,9 @@ function Install-New {
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
+    $target = Join-Path $Venv "Scripts\defenseclaw.exe"
+    if (Test-Path -LiteralPath $target) { Write-PosixShim $target }
+    elseif (Test-Path -LiteralPath (Join-Path $BinDir $PosixShim)) { Remove-Aside (Join-Path $BinDir $PosixShim) }
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
@@ -856,6 +898,12 @@ function Install-New {
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
         if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $migrateArgs) -ne 0) { return $false }
+        # The previous version's agent discovery is absent or stale. Refresh
+        # it (bounded --version probes, no telemetry) before the gateway
+        # starts, so the gateway records each agent's version in the hook
+        # contract lock and doctor can check compatibility. Best effort.
+        Write-Info "Refreshing agent discovery"
+        Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("agent", "discover", "--refresh", "--no-emit-otel") -Quiet | Out-Null
     }
     return $true
 }
@@ -1173,7 +1221,7 @@ Options:
   -Rollback             Restore the install that the last upgrade replaced
   -Connector NAME       First install only: agent to guard ($($ConnectorChoices -join ', '))
   -NoOpenclaw           First install only: same as -Connector none
-  -Quickstart           First install only: run 'defenseclaw quickstart' afterwards
+  -Quickstart           Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   -QuickstartMode MODE  observe or action (implies -Quickstart)
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
@@ -1499,10 +1547,17 @@ function Invoke-Install {
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
+    $configured = (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG
     if (-not $PrevVersion) {
         Invoke-FirstInstallExtras
+    } elseif ($Quickstart -and -not $configured) {
+        # Installed but never set up, so the asked-for quickstart is still the first run.
+        Invoke-FirstInstallExtras
     } elseif ($Quickstart) {
-        Write-Warn "Skipped -Quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+        $rerun = "defenseclaw quickstart"
+        if ($Connector -and $Connector -ne "none") { $rerun += " --connector $Connector" }
+        if ($QuickstartMode) { $rerun += " --mode $QuickstartMode" }
+        Write-Warn "Skipped -Quickstart: DefenseClaw is already configured. To run it now: $rerun"
     }
     $setupBin = if ($Setup) { Join-Path $Setup.Root "bin" } else { "" }
     $pathChanged = Update-UserPath -Add $BinDir -Remove $setupBin
@@ -1546,7 +1601,13 @@ try {
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
     if ($Run.Lock) { Invoke-Quietly { Remove-Tree $LockDir } }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
-    foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], "Process") }
+    # A variable that was unset stays unset. PowerShell 7 passes $null to
+    # SetEnvironmentVariable as "", which leaves an empty variable behind
+    # (an empty CLAUDE_CONFIG_DIR signs Claude Code out).
+    foreach ($name in $savedEnv.Keys) {
+        if ($null -eq $savedEnv[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], "Process") }
+    }
     # `defenseclaw upgrade` and `rollback` run a copy of this installer from a
     # temporary directory of their own (with it as the working directory),
     # holding only the installer and checksums.txt.
@@ -1558,7 +1619,7 @@ try {
         Invoke-Quietly { Remove-Tree $launchDir }
     }
 }
-Wait-BeforeClose
+Wait-BeforeClose $code
 if ($RunAsFile) { exit $code }
 # `irm | iex` cannot exit, so a failure ends in a terminating error. Raising
 # it from a one-line script block keeps PowerShell 7 from printing an excerpt

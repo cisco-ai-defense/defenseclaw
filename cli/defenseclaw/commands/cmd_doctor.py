@@ -1994,12 +1994,13 @@ def _scanner_repair_hint() -> str:
     On macOS and Linux the release upgrade resolver reconciles the launcher
     with the managed virtualenv, at the installed version too (the built-in
     ``defenseclaw upgrade`` stops early when the version is already current);
-    on Windows, DefenseClaw Setup's repair does.
+    on Windows, running the install command again does (from 1.0 the 0.8.x
+    Setup package and its ``/repair`` are retired).
     """
 
     if os.name == "nt":
         return (
-            "repair the install with `DefenseClawSetup-x64.exe /repair` "
+            "repair the install by running the install command again "
             f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
         )
     return (
@@ -2049,11 +2050,15 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
                 check=False,
             )
         except subprocess.TimeoutExpired:
+            # Slow is not broken: a first start after an install or upgrade
+            # (files scanned on first use, modules cached) or a busy machine
+            # can exceed the budget. A scanner that cannot start fails below.
             _emit(
-                "fail",
+                "warn",
                 f"Scanner: {name}",
-                f"{probe_path} did not answer --version within 30 s; a busy machine can cause this, so run "
-                f"`defenseclaw doctor` again, and if it keeps failing, {_scanner_repair_hint()}",
+                f"{probe_path} did not answer --version within 30 s; the first start after an install or "
+                f"upgrade, or a busy machine, can take longer, so run `defenseclaw doctor` again, and if it "
+                f"keeps timing out, {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -4107,7 +4112,9 @@ def _windows_native_hook_check(
         if paths:
             config_path = paths[0]
         elif connector == "codex":
-            config_path = os.path.join(codex_home(), "managed_config.toml")
+            from defenseclaw.fail_mode import codex_windows_hook_config_path
+
+            config_path = codex_windows_hook_config_path(cfg)
         elif connector == "copilot":
             workspace = _workspace_dir(cfg)
             data_dir = getattr(cfg, "data_dir", "") or ""
@@ -4155,6 +4162,10 @@ def _windows_native_hook_check(
         managed_enterprise=(
             connector == "claudecode"
             and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        ),
+        codex_per_user=(
+            connector == "codex"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
         ),
     )
 
@@ -5609,6 +5620,34 @@ def _omnigent_setup_repair_command(cfg) -> str:
     return " ".join(args)
 
 
+def _omnigent_config_entries_intact(body: bytes) -> bool:
+    """Return True when OmniGent's config still holds the DefenseClaw entries.
+
+    OmniGent rewrites its own config.yaml during normal use (hosts,
+    providers), so a changed file digest alone is not drift. The entries
+    setup manages are the policy module registration and the
+    ``policies.defenseclaw_guardrail`` function handler.
+    """
+    import yaml
+
+    try:
+        data = yaml.safe_load(body.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    modules = data.get("policy_modules")
+    policies = data.get("policies")
+    if not isinstance(modules, list) or "defenseclaw_omnigent_policy" not in modules:
+        return False
+    entry = policies.get("defenseclaw_guardrail") if isinstance(policies, dict) else None
+    return (
+        isinstance(entry, dict)
+        and entry.get("type") == "function"
+        and entry.get("handler") == "defenseclaw_omnigent_policy.defenseclaw_policy"
+    )
+
+
 def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
     """Return an integrity/custody failure for one OmniGent-managed artifact."""
     record, detail = _omnigent_backup_record(cfg, logical)
@@ -5629,7 +5668,9 @@ def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
     if status != "ok" or body is None:
         return detail
     expected = str(record["post_sha256"])
-    if hashlib.sha256(body).hexdigest() != expected:
+    if hashlib.sha256(body).hexdigest() != expected and not (
+        logical == "config" and _omnigent_config_entries_intact(body)
+    ):
         repair = _omnigent_setup_repair_command(cfg)
         return (
             f"managed OmniGent {logical} drift detected; run "
@@ -5704,6 +5745,9 @@ def _windows_command_line_argv(command_line: str) -> tuple[str, ...] | None:
 
 
 _HERMES_HOST_EXECUTABLES = frozenset({"hermes", "hermes-agent"})
+_HERMES_LAUNCHERS = frozenset(
+    {"uv", "uvx", "pipx", "env", "poetry", "pdm", "hatch", "rye", "pixi", "conda", "mamba", "micromamba"}
+)
 
 
 def _hermes_host_running() -> bool | None:
@@ -5735,8 +5779,16 @@ def _hermes_host_running() -> bool | None:
         if len(fields) < 3 or fields[1] != uid or fields[0] in own:
             continue
         args = fields[2:]
+        program = os.path.basename(args[0]).lower()
+        if program in _HERMES_HOST_EXECUTABLES:
+            return True
+        # Only an interpreter or launcher can run Hermes under another name.
+        # Any other program (an agent whose prompt mentions Hermes, an
+        # editor) is not a Hermes host, whatever words its arguments hold.
+        if not (program.startswith("python") or program in _HERMES_LAUNCHERS):
+            continue
         # A script launcher puts the interpreter first: python .../bin/hermes.
-        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in args[:2]):
+        if len(args) > 1 and os.path.basename(args[1]).lower() in _HERMES_HOST_EXECUTABLES:
             return True
         # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
         # that is not proof of absence.
@@ -5806,13 +5858,20 @@ def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:
 
 
 def _omnigent_server_command(argv: tuple[str, ...]) -> bool:
-    """Recognize official CLI and ``python -m omnigent server`` shapes."""
+    """Recognize the official CLI and ``python -m omnigent[.cli] server``.
+
+    ``omnigent run`` starts its local server as ``python -P -m omnigent.cli
+    server ...``.
+    """
     if len(argv) < 2:
         return False
     executable = os.path.basename(argv[0]).lower()
     if executable in {"omnigent", "omnigent.exe", "omni", "omni.exe"}:
         return argv[1] == "server"
-    return any(argv[index : index + 3] == ("-m", "omnigent", "server") for index in range(len(argv) - 2))
+    return any(
+        argv[index] == "-m" and argv[index + 1] in {"omnigent", "omnigent.cli"} and argv[index + 2] == "server"
+        for index in range(len(argv) - 2)
+    )
 
 
 def _omnigent_config_argument(argv: tuple[str, ...]) -> str:
@@ -5866,10 +5925,12 @@ def _omnigent_live_config_evidence(config_path: str) -> tuple[str, str]:
             f"{record_detail}; live {source} selects {_omnigent_path_ref('live-config', configured_path)}, "
             f"not {_omnigent_path_ref('managed-config-artifact', config_path)}",
         )
+    # "bound": the live server runs the managed config. That is the most
+    # OmniGent exposes, so Status keeps it running and Doctor warns.
     return (
-        "warn",
+        "bound",
         f"{record_detail}; live {source} selects {_omnigent_path_ref('managed-config-artifact', config_path)}, "
-        "but OmniGent 0.7.0 "
+        "but OmniGent "
         "does not expose a loaded policy generation/module/config identity; policy registration "
         "is configured but live action/fail-closed enforcement is unverified pending reload/restart",
     )
@@ -5991,7 +6052,7 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
             return
     live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
     _emit(
-        live_status,
+        "warn" if live_status == "bound" else live_status,
         "OmniGent policy",
         f"native-degraded; {live_detail}; {_omnigent_path_ref('managed-module-artifact', module_path)}; "
         f"{_omnigent_path_ref('managed-pth-artifact', pth_path)}",

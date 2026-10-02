@@ -115,7 +115,7 @@ from defenseclaw.file_permissions import (
     windows_acl_write_error,
 )
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.logger import CanonicalObservabilityUnavailableError
+from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
@@ -246,6 +246,7 @@ def _log_setup_action(
     details: str,
     *,
     allow_offline: bool,
+    offline_note: str = "",
 ) -> None:
     """Audit a setup mutation without breaking explicit offline staging.
 
@@ -271,10 +272,19 @@ def _log_setup_action(
                 "stage the change for the next gateway start."
             ) from exc
         click.echo(
-            "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
+            offline_note
+            or "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
             "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change.",
             err=True,
         )
+    except CanonicalObservabilityError as exc:
+        # Still fail-closed, without a traceback: for example another
+        # account's gateway on this port refuses this account's token.
+        raise click.ClickException(
+            f"The change was saved, but the gateway did not accept its setup audit event ({exc.__cause__ or exc}). "
+            "Check with 'defenseclaw doctor' that the gateway on this port is this account's, "
+            "then run the command again."
+        ) from exc
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
@@ -1073,6 +1083,15 @@ def setup_llm(
         _clear_legacy_llm_fields(cfg)
     else:
         _configure_llm(cfg, cfg.data_dir, target_path=target_path)
+        missing_key_env = _interactive_llm_missing_key_env(cfg, target_path)
+        if missing_key_env:
+            ux.warn(
+                f"{missing_key_env} has no value, so the LLM judge and LLM scanners cannot use "
+                f"{cfg.resolve_llm(target_path).model} and doctor reports the key as missing."
+            )
+            if not click.confirm("  Save this LLM configuration without a key?", default=False):
+                click.echo("  LLM configuration not saved. Run 'defenseclaw setup llm' when you have a key.")
+                return
     cfg.save()
 
     click.echo()
@@ -1268,6 +1287,24 @@ def _role_to_target_path(role: str) -> str:
     :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
     """
     return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
+
+
+
+def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
+    """Name the key variable an interactively configured LLM still lacks, or "".
+
+    Only the key prompt sets ``api_key_env``; local providers and the
+    Bedrock, Vertex and Azure credential modes clear it and need no key here.
+    """
+    resolved = cfg.resolve_llm(target_path)
+    env_name = resolved.api_key_env
+    if not env_name or not resolved.model or resolved.is_local_provider():
+        return ""
+    if os.environ.get(env_name, "").strip():
+        return ""
+    if _load_dotenv(os.path.join(cfg.data_dir, ".env")).get(env_name, "").strip():
+        return ""
+    return env_name
 
 
 def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
@@ -4087,8 +4124,11 @@ def setup_gateway(
     previous_api_port = gw.api_port
 
     data_dir = app.cfg.data_dir
+    uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
 
-    if non_interactive:
+    # Values given as flags are used as given, with or without a terminal;
+    # only a bare `setup gateway` asks for them.
+    if non_interactive or any(v is not None for v in (host, port, api_port, token, ssm_param)):
         if host is not None:
             gw.host = host
         if port is not None:
@@ -4120,10 +4160,9 @@ def setup_gateway(
     elif remote:
         _interactive_gateway_remote(gw, data_dir)
     else:
-        _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir)
+        _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir, uses_openclaw=uses_openclaw)
 
     app.cfg.save()
-    uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
     # A new API port takes effect only when the gateway (re)starts, so nothing
     # listens on it yet: the connectivity check and the audit event cannot
     # succeed until then, and the gateway may be down precisely because the
@@ -4155,10 +4194,18 @@ def setup_gateway(
         # unavailability; server rejections and every other admission failure
         # remain fatal through _log_setup_action.
         allow_offline=not verify or api_port_changed,
+        # The start hint follows from the setup restart step; say only what
+        # the missing gateway means for this change.
+        offline_note=(
+            "  Note: nothing listens on the new API port until the gateway restarts, so this change "
+            "was not written to the audit log."
+            if api_port_changed
+            else "  Note: the gateway could not be reached, so this change was not written to the audit log."
+        ),
     )
 
 
-def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
+def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str, *, uses_openclaw: bool = True) -> None:
     click.echo()
     ux.section("Gateway Configuration (local)")
     click.echo()
@@ -4171,6 +4218,10 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> 
     if detected:
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected, data_dir)
         click.echo(f"  OpenClaw token saved to ~/.defenseclaw/.env ({_mask(detected)})")
+    # A hook-only roster has no OpenClaw gateway to authenticate to; keep its
+    # gateway token setting as it is.
+    if not (detected or uses_openclaw):
+        return
     gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
     click.echo()
     click.echo("  Auth: token is read from OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env when set.")
@@ -5881,9 +5932,7 @@ def setup_guardrail(
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
         raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n"
-            "Nothing was changed. Run the command again; if it still fails, run "
-            "'defenseclaw doctor' and include the bracketed reference in a report."
+            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
         ) from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
@@ -6612,6 +6661,12 @@ _SETUP_ROLLBACK_MAX_FAILURES = 64
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x400
 
 
+_SETUP_ROLLBACK_POINT_NEXT_STEP = (
+    "Nothing was changed. Run the command again; if it still fails, run "
+    "'defenseclaw doctor' and include the bracketed reference in a report."
+)
+
+
 def _windows_runtime_rollback(restart: bool) -> bool:
     return restart and platform_support.host_os() == "windows"
 
@@ -6714,6 +6769,7 @@ def _capture_protected_setup_file(
     repair_owned_read_bits: bool = False,
     skip_if_untrusted: bool = False,
     hasher: Any = None,
+    trust_windows_administrators: bool = False,
 ) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
     """Read one bounded private regular file without following path redirects.
 
@@ -6726,6 +6782,9 @@ def _capture_protected_setup_file(
     or foreign-owned files stay untrusted. ``skip_if_untrusted`` treats
     those untrusted hint files as missing instead of failing the
     transaction — used only for advisory files such as ``picked_connector``.
+    ``trust_windows_administrators`` admits the built-in Administrators
+    group's write entry on Windows, which every file under the profile
+    (``~\\.local\\bin`` included) inherits.
     """
 
     try:
@@ -6745,7 +6804,7 @@ def _capture_protected_setup_file(
         if info.st_size > maximum:
             raise OSError(f"{label} rollback source is unexpectedly large")
         if os.name == "nt":
-            acl_error = windows_acl_write_error(path)
+            acl_error = windows_acl_write_error(path, trust_administrators=trust_windows_administrators)
             if acl_error is not None:
                 if skip_if_untrusted:
                     return False, b"", None
@@ -6828,6 +6887,11 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
             _SETUP_RUNTIME_ARTIFACT_MAX_BYTES,
             role,
             hasher=digest,
+            # Runtime evidence is only fingerprinted, never restored from.
+            # The hook executable and agent registrations live in the
+            # profile, which grants Administrators full control, so the
+            # gateway's custody rule (#1026) applies here as well.
+            trust_windows_administrators=True,
         )
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
@@ -8726,7 +8790,11 @@ def _apply_hook_connector_setup(
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        click.echo(f"  ✗ Cannot establish connector setup rollback point: {exc}", err=True)
+        click.echo(
+            f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
+            f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+            err=True,
+        )
         return False
 
     verified = _protected_selection
@@ -9013,7 +9081,7 @@ def _apply_hook_connector_setup(
         elif connector == "omnigent":
             click.echo("  ✓ OmniGent on-disk policy registration staged")
             ux.warn(
-                "OmniGent 0.7.0 does not expose a loaded policy generation/module/config identity. "
+                "OmniGent does not expose a loaded policy generation/module/config identity. "
                 "Reload or restart every running OmniGent server; action/fail-closed enforcement "
                 "remains unverified until then."
             )
@@ -9157,7 +9225,7 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         )
     elif connector == "omnigent":
         click.echo(
-            "    • Reload/restart every running OmniGent server; OmniGent 0.7.0 does not expose "
+            "    • Reload/restart every running OmniGent server; OmniGent does not expose "
             "loaded policy generation/module/config identity for live verification"
         )
     if os_name == "nt":
@@ -9254,7 +9322,7 @@ def _print_observability_summary(
                 ("running OmniGent hosts", "unverified; reload/restart required"),
                 (
                     "validation evidence",
-                    "on-disk registration only; loaded policy identity unavailable in OmniGent 0.7.0",
+                    "on-disk registration only; loaded policy identity unavailable from OmniGent",
                 ),
             ]
         )
@@ -14575,9 +14643,10 @@ def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool 
     click.echo()
 
     resolved = gw.resolved_token()
-    rows = [
-        ("host", gw.host),
-        ("port", str(gw.port)),
+    # gateway.host and gateway.port address the OpenClaw gateway, so a
+    # hook-only roster has no use for them.
+    rows = [("host", gw.host), ("port", str(gw.port))] if openclaw else []
+    rows += [
         ("api_port", str(gw.api_port)),
         ("token", f"via {gw.token_env} (in .env)" if resolved else "(none — local mode)"),
     ]
@@ -14587,12 +14656,10 @@ def _print_gateway_summary(gw, *, openclaw: bool = True, api_port_changed: bool 
         click.echo(f"    {ux._style(label, fg='bright_black', bold=True)} {val}")
     click.echo()
 
+    # The setup restart step that runs after every saved change restarts a
+    # running gateway or prints the start command, so no start hint here.
     if api_port_changed:
-        ux.subhead("The new API port takes effect when the gateway starts:")
-        ux.subhead("  defenseclaw-gateway start    (or 'defenseclaw-gateway restart' if it is running)")
-    else:
-        ux.subhead("Start the gateway with:")
-        ux.subhead("  defenseclaw-gateway start")
+        ux.subhead("The new API port takes effect when the gateway starts.")
     if openclaw and not resolved:
         ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()

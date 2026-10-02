@@ -116,12 +116,23 @@ sha256_of() {
     fi
 }
 
+# Read one answer from the terminal. A terminal left in -icrnl by an earlier
+# program sends Enter as a bare carriage return, so map CR to NL for this
+# read only, and drop a stray trailing CR from the answer.
+read_tty_line() {
+    local saved="" line=""
+    saved=$(stty -g < /dev/tty 2>/dev/null) && stty icrnl < /dev/tty 2>/dev/null
+    read -r line < /dev/tty 2>/dev/null || { [[ -n "${saved}" ]] && stty "${saved}" < /dev/tty 2>/dev/null; return 1; }
+    [[ -n "${saved}" ]] && stty "${saved}" < /dev/tty 2>/dev/null
+    printf '%s' "${line%$'\r'}"
+}
+
 ask_yes_no() {
     local prompt="$1" default="${2:-y}" answer
     [[ "${YES}" == true ]] && return 0
     if [[ "${default}" == y ]]; then prompt="${prompt} [Y/n]"; else prompt="${prompt} [y/N]"; fi
     printf "  %s " "${prompt}" >&2
-    read -r answer < /dev/tty 2>/dev/null || answer="${default}"
+    answer=$(read_tty_line) || answer="${default}"
     answer="${answer:-${default}}"
     [[ "${answer}" =~ ^[Yy]$ ]]
 }
@@ -166,7 +177,7 @@ Options:
   --rollback               Restore the install that the last upgrade replaced
   --connector NAME         First install only: agent to guard (${CONNECTOR_CHOICES// /, })
   --no-openclaw            First install only: do not install OpenClaw
-  --quickstart             First install only: run 'defenseclaw quickstart' afterwards
+  --quickstart             Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   --quickstart-mode MODE   observe or action (implies --quickstart)
   --sandbox                Deprecated no-op (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
@@ -458,14 +469,19 @@ if [[ "${ROLLBACK}" == true ]]; then
     fi
     if [[ "${restart}" == true ]]; then
         start_gateway && restart_openclaw \
-            || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+            || warn_not_started
     fi
     if version_lt "${back_to}" 1.0.0; then
         ok "Now running DefenseClaw ${back_to}. To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
     else
         ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
-    info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+    # The swap keeps the install just left, with its data, in previous/.
+    if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
+        info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+    else
+        info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
+    fi
     exit 0
 fi
 
@@ -557,8 +573,10 @@ make_venv() {
         || uv venv "${venv}" --quiet --python '>=3.11,<3.14' \
         || return 1
     # The requirements file is the complete hashed lock, so nothing resolves.
-    uv pip install --quiet --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
-        && uv pip install --quiet --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+    # --compile-bytecode: uv skips compiling by default, which moves that cost
+    # to the first start of the CLI and the scanners.
+    uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
+        && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
 }
 make_venv "${STAGING}/venv" || die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
 "${STAGING}/venv/bin/defenseclaw" --version 2>/dev/null | grep -qF "${VERSION}" \
@@ -641,8 +659,14 @@ fi
 
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
+elif [[ "${RUN_QUICKSTART}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # Installed but never set up, so the asked-for quickstart is still the first run.
+    first_install_extras
 elif [[ "${RUN_QUICKSTART}" == true ]]; then
-    warn "Skipped --quickstart: it runs on a first install only. To run it now: defenseclaw quickstart"
+    QUICKSTART_HINT="defenseclaw quickstart"
+    [[ -n "${CONNECTOR}" && "${CONNECTOR}" != "none" ]] && QUICKSTART_HINT+=" --connector ${CONNECTOR}"
+    [[ -n "${QUICKSTART_MODE}" ]] && QUICKSTART_HINT+=" --mode ${QUICKSTART_MODE}"
+    warn "Skipped --quickstart: DefenseClaw is already configured. To run it now: ${QUICKSTART_HINT}"
 fi
 rm -rf "${STAGING}"
 ensure_path_hint
@@ -728,16 +752,24 @@ data_entries() {
 }
 
 snapshot() {
-    local binary link name need have
+    local binary link name need have size biggest="" biggest_kb=0
     rm -rf "${SNAP}"
     mkdir -p "${SNAP}/bin" "${SNAP}/data" || return 1
     need=0
     while IFS= read -r name; do
-        need=$((need + $(du -sk "${DEFENSECLAW_HOME}/${name}" 2>/dev/null | awk '{print $1}')))
+        size="$(du -sk "${DEFENSECLAW_HOME}/${name}" 2>/dev/null | awk '{print $1}')"
+        size="${size:-0}"
+        need=$((need + size))
+        if [[ "${size}" -gt "${biggest_kb}" ]]; then biggest="${name}" biggest_kb="${size}"; fi
     done < <(data_entries)
     have="$(df -Pk "${DEFENSECLAW_HOME}" | awk 'NR==2{print $4}')"
     if [[ -n "${need}" && -n "${have}" && "${have}" -lt $((need + 102400)) ]]; then
-        err "Not enough free disk space next to ${DEFENSECLAW_HOME} for a rollback copy"
+        need=$((need + 102400))
+        err "Not enough free disk space next to ${DEFENSECLAW_HOME} for a rollback copy: it needs about $(((need + 1023) / 1024)) MB (a copy of the data plus 100 MB) and $((have / 1024)) MB is free"
+        if [[ -n "${biggest}" ]]; then
+            err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+        fi
+        err "Free at least $(((need - have + 1023) / 1024)) MB on that filesystem (df -h ${DEFENSECLAW_HOME}), or move the largest item elsewhere, then rerun"
         return 1
     fi
     for binary in ${MANAGED_BINARIES}; do
@@ -840,7 +872,7 @@ recover_interrupted_run() {
     fi
     [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
     if [[ "${restart}" == true && -z "$(gateway_pid || true)" ]]; then
-        start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+        start_gateway || warn_not_started
     fi
 }
 
@@ -874,6 +906,12 @@ swap_in() {
         local args=(migrate --yes)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        # The previous version's agent discovery is absent or stale. Refresh
+        # it (bounded --version probes, no telemetry) before the gateway
+        # starts, so the gateway records each agent's version in the hook
+        # contract lock and doctor can check compatibility. Best effort.
+        info "Refreshing agent discovery"
+        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
     fi
 }
 
@@ -944,8 +982,63 @@ restart_old() {
 }
 
 start_gateway() {
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 waited=0 up=0
     info "Starting the gateway"
-    PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start
+    [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
+    PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+    [[ ${rc} -eq 0 || ${rc} -eq 3 ]] && return "${rc}"
+    explain_start_failure "${log}" "${from}"
+    # A readiness timeout leaves the gateway running. A restored older release
+    # checks a large audit database before it logs anything, and only then
+    # says why it stops, so wait for it before falling back to generic advice.
+    [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
+    info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    while [[ -z "${START_EXPLAINED:-}" && ${waited} -lt 180 && -n "$(gateway_pid || true)" ]]; do
+        sleep 3
+        waited=$((waited + 3))
+        explain_start_failure "${log}" "${from}"
+        if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
+            # Answering twice in a row, without a refusal in between: it is up.
+            up=$((up + 1))
+            [[ ${up} -lt 2 ]] || { ok "The gateway finished starting"; return 0; }
+        else
+            up=0
+        fi
+    done
+    return "${rc}"
+}
+
+# warn_not_started: the generic advice, unless the start already said why.
+warn_not_started() {
+    [[ -n "${START_EXPLAINED:-}" ]] || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+}
+
+# explain_start_failure LOG OFFSET: say why the gateway stopped, from what it
+# wrote to its log during this start. A restored older release, for example,
+# refuses to start when an agent was updated after it recorded its hook lock,
+# and its start command only reports a readiness timeout.
+explain_start_failure() {
+    local log=$1 from=$2 size lines reason conn before after
+    [[ -f "${log}" ]] || return 0
+    size="$(wc -c < "${log}" | tr -d ' ')"
+    [[ "${size}" -ge "${from}" ]] || from=0
+    lines="$(tail -c "+$((from + 1))" "${log}" 2>/dev/null | tail -n 400)"
+    reason="$(printf '%s\n' "${lines}" | grep 'hook contract drift detected' | tail -n 1)"
+    if [[ -n "${reason}" ]]; then
+        conn="$(printf '%s' "${reason}" | sed -nE 's/.*connector ([A-Za-z0-9_-]+) hook contract drift detected.*/\1/p')"
+        before="$(printf '%s' "${reason}" | sed -nE 's/.*previous version="([^"]*)".*/\1/p')"
+        after="$(printf '%s' "${reason}" | sed -nE 's/.*current version="([^"]*)".*/\1/p')"
+        warn "The gateway refused to start: ${conn:-a connector}'s agent changed (${before:-?} -> ${after:-?}) after this DefenseClaw recorded its hook contract lock"
+        if [[ "${reason}" == *DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1* ]]; then
+            info "To accept the new agent version and refresh the lock, start it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start"
+        else
+            info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
+        fi
+        START_EXPLAINED=1
+        return 0
+    fi
+    reason="$(printf '%s\n' "${lines}" | grep -E '^Error: |exited with error: ' | tail -n 1 | sed -E 's/^Error: //; s/.*exited with error: //' | cut -c1-300)"
+    [[ -z "${reason}" ]] || { warn "The gateway stopped: ${reason}"; info "Its log: ${log}"; START_EXPLAINED=1; }
 }
 
 finish_swap() {
@@ -970,8 +1063,9 @@ finish_swap() {
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
     # Pre-1.0 installers kept retired binaries in the temp folder they ran
     # with. On macOS that is often /tmp although TMPDIR now names a per-user
-    # folder, so look in both.
-    find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
+    # folder, so look in both. -H follows a symlinked start path such as
+    # macOS /tmp -> private/tmp; BSD find otherwise lists nothing under it.
+    find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
 }
@@ -1131,7 +1225,7 @@ pick_connector() {
         index=$((index + 1))
     done
     printf "  Choice [default 1=codex]: " >&2
-    read -r choice < /dev/tty 2>/dev/null || choice=""
+    choice=$(read_tty_line) || choice=""
     choice="${choice:-1}"
     index=1
     CONNECTOR=codex

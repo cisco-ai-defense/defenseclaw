@@ -59,7 +59,7 @@ from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.file_permissions import atomic_write_private_bytes
-from defenseclaw.logger import CanonicalObservabilityUnavailableError
+from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
 
@@ -3536,8 +3536,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.gateway.api_port, 19091)
         self.assertTrue(os.path.isfile(self.cfg_path))
-        self.assertIn("Change saved", result.output)
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("was not written to the audit log", result.output)
 
     def test_new_api_port_saves_without_a_running_gateway(self):
         # The gateway cannot listen on the new port until it starts, so a
@@ -3552,9 +3551,30 @@ class TestGatewayOfflineStaging(_BaseSetup):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.gateway.api_port, 19093)
-        self.assertIn("defenseclaw-gateway start", result.output)
+        self.assertEqual(result.output.count("defenseclaw-gateway start"), 1, result.output)
         self.assertNotIn("OpenClaw", result.output)
+        # MAC-U3-03: no OpenClaw gateway.port and no internal audit wording.
+        self.assertNotIn("gateway.port:", result.output)
+        self.assertNotIn("canonical", result.output)
         openclaw_check.assert_not_called()
+
+    def test_api_port_flag_is_used_on_a_terminal(self):
+        # MAC-U2-03: the port hint run on a terminal prompted with the old
+        # port, repointed a hook-only roster at OPENCLAW_GATEWAY_TOKEN and
+        # ended in a traceback when another account's gateway refused it.
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityError("not confirmed")
+        self._seed_map("codex")
+        token_env = self.app.cfg.gateway.token_env
+
+        result = _invoke(["gateway", "--api-port", "19094"], self.app)
+
+        self.assertEqual(self.app.cfg.gateway.api_port, 19094)
+        self.assertEqual(self.app.cfg.gateway.token_env, token_env)
+        self.assertNotIn("Sidecar API port [", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("The change was saved", result.output)
+        self.assertNotIsInstance(result.exception, CanonicalObservabilityError)
 
     def test_no_verify_keeps_non_availability_audit_errors_fatal(self):
         self.app.logger = MagicMock()

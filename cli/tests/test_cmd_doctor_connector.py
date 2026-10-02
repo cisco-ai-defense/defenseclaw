@@ -1939,6 +1939,8 @@ class TestCheckHookHealth(unittest.TestCase):
             ("uv run hermes", None),
             ("python3 -m hermes_cli.main", None),
             ("vim notes.txt", False),
+            ("claude --system-prompt You are polly, not hermes", False),
+            ("claude hermes help", False),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
@@ -2943,6 +2945,26 @@ class TestCheckHookHealth(unittest.TestCase):
         )
         self.assertIn("without changing enforcement posture", detail)
 
+    def test_omnigent_config_rewritten_by_omnigent_is_not_drift(self) -> None:
+        managed = (
+            "policy_modules: [defenseclaw_omnigent_policy]\n"
+            "policies:\n"
+            "  defenseclaw_guardrail: {type: function, handler: defenseclaw_omnigent_policy.defenseclaw_policy}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = os.path.join(tmp, "config.yaml")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed)
+            self._write_omnigent_backup(tmp, "config", artifact)
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write("hosts: {local: {port: 62998}}\n" + managed)
+            self.assertEqual(_omnigent_managed_artifact_drift(cfg, "config", artifact), "")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed.replace("defenseclaw_policy}", "other}"))
+            self.assertIn("drift detected", _omnigent_managed_artifact_drift(cfg, "config", artifact))
+
     def test_omnigent_missing_import_shim_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = os.path.join(tmp, "config.yaml")
@@ -3078,12 +3100,13 @@ class TestCheckHookHealth(unittest.TestCase):
             ),
             patch(
                 "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--config", config),
+                # ``omnigent run`` starts its server through the module CLI.
+                return_value=("/usr/bin/python3", "-P", "-m", "omnigent.cli", "server", "--config", config),
             ),
         ):
             status, detail = _omnigent_live_config_evidence(config)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("--config", detail)
         self.assertIn("loaded policy generation/module/config identity", detail)
         self.assertIn("action/fail-closed enforcement is unverified", detail)
@@ -3120,7 +3143,7 @@ class TestCheckHookHealth(unittest.TestCase):
         ):
             status, detail = _omnigent_live_config_evidence(managed)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("--config", detail)
         self.assertIn("pending reload/restart", detail)
 
@@ -3198,7 +3221,7 @@ class TestCheckHookHealth(unittest.TestCase):
         ):
             status, detail = _omnigent_live_config_evidence(managed)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("OMNIGENT_CONFIG", detail)
         self.assertIn("loaded policy generation/module/config identity", detail)
 
@@ -3683,3 +3706,9 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         row = self._scope_row("codex", "")
         self.assertEqual(row["status"], "pass")
         self.assertEqual(row["detail"], "global user config")
+
+
+def test_safe_display_path_keeps_windows_backslashes_and_escapes_controls():
+    # WIN2-U2-23: the doctor Rule pack line doubled every backslash.
+    assert safe_display_path("C:\\Users\\u\\rules") == '"C:\\Users\\u\\rules"'
+    assert safe_display_path('a"b\x1b') == '"a\\"b\\u001b"'

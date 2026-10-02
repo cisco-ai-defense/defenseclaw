@@ -126,6 +126,15 @@ class BuildPlanTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(bin_dir / "defenseclaw"))
         self.assertTrue((bin_dir / "defenseclaw-gateway").is_file())
 
+    def test_windows_git_bash_launcher_is_bound_to_the_data_dir(self):
+        data_dir = Path(self._tmp.name) / "data"
+        launcher = Path(self._tmp.name) / "defenseclaw"
+        exe = os.path.join(os.path.normcase(os.path.abspath(data_dir)), ".venv", "Scripts", "defenseclaw.exe")
+        launcher.write_text(f'#!/bin/sh\nexec "{exe.replace(os.sep, "/")}" "$@"\n', encoding="utf-8")
+        self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
+        launcher.write_text('#!/bin/sh\nexec "/opt/other/defenseclaw" "$@"\n', encoding="utf-8")
+        self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
+
     def test_non_windows_gateway_path_preserves_path_resolution(self):
         with patch.object(cmd_uninstall.shutil, "which", return_value="/usr/local/bin/defenseclaw-gateway"):
             plan = cmd_uninstall._build_plan(
@@ -247,6 +256,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             tuple(Path(path).name for path in plan.binary_targets),
             (
                 "defenseclaw.cmd",
+                "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
@@ -329,6 +339,9 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             legacy_tmp = Path(tmp).resolve() / "tmp"
             (legacy_tmp / ".defenseclaw-install-custody-1-abc" / "retired-x").mkdir(parents=True)
             (legacy_tmp / "unrelated").mkdir()
+            # MAC-U2-12: pre-1.0 installers also parked retired binaries beside DEFENSECLAW_HOME.
+            home = Path(tmp).resolve() / "home"
+            (home / ".defenseclaw-install-custody" / "retired-x").mkdir(parents=True)
             gateway = "defenseclaw-gateway.exe" if sys.platform == "win32" else "defenseclaw-gateway"
             plan = cmd_uninstall.UninstallPlan(
                 platform_name=sys.platform,
@@ -336,15 +349,19 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 gateway_path=str(root / gateway),
                 binary_targets=(),
                 remove_binaries=True,
+                data_dir=str(home / ".defenseclaw"),
             )
             with (
                 patch.object(cmd_uninstall.shutil, "which", return_value=None),
                 patch.object(cmd_uninstall, "_legacy_custody_parents", return_value=[str(legacy_tmp)]),
+                patch.dict(os.environ, {"HOME": str(home)}),
                 patch.object(cmd_uninstall.ux, "subhead") as subhead,
             ):
                 cmd_uninstall._remove_binaries(plan)
             self.assertEqual(sorted(os.listdir(root)), [])
             self.assertEqual(os.listdir(legacy_tmp), ["unrelated"])
+            if sys.platform != "win32":
+                self.assertEqual(os.listdir(home), [])
             subhead.assert_not_called()
 
     def test_binary_failure_propagates(self):
@@ -368,6 +385,37 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             with patch.object(cmd_uninstall.os, "unlink", side_effect=PermissionError("locked")):
                 with patch.object(cmd_uninstall.time, "sleep"), self.assertRaises(OSError):
                     cmd_uninstall._remove_binaries(plan)
+
+    def test_failed_phase_prints_its_reason_once(self):
+        plan = cmd_uninstall.UninstallPlan(platform_name="win32", remove_binaries=True)
+        refusal = click.ClickException("refusing Windows binary removal:\n  Remove-Item -LiteralPath 'x'")
+        buf = io.StringIO()
+        with patch.object(cmd_uninstall, "_validate_plan", side_effect=refusal), contextlib.redirect_stdout(buf):
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._execute_plan(plan)
+        self.assertIn("plan validation: failed", buf.getvalue())
+        self.assertNotIn("Remove-Item", buf.getvalue())
+
+    def test_windows_developer_install_refusal_names_the_files_to_remove(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            root.mkdir()
+            for name in ("defenseclaw.exe", "defenseclaw-gateway.exe", "litellm.exe", ".defenseclaw-source-root"):
+                (root / name).write_text("dev", encoding="ascii")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                gateway_path=str(root / "defenseclaw-gateway.exe"),
+                binary_targets=(str(root / "defenseclaw-gateway.exe"),),
+                remove_binaries=True,
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                cmd_uninstall._validate_windows_binary_ownership(plan)
+            message = raised.exception.message
+            self.assertIn("developer install from 'make all'", message)
+            self.assertIn(f"'{root / 'litellm.exe'}'", message)
+            self.assertIn(f"'{root / '.defenseclaw-source-root'}'", message)
+            self.assertTrue((root / "defenseclaw-gateway.exe").is_file())
 
     def test_same_named_unrelated_windows_files_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,6 +507,35 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         self.assertEqual(order, ["validate", "stop", "teardown", "schedule"])
         self.assertEqual(result.phases[-1].status, "scheduled")
         self.assertTrue(result.succeeded)
+
+    def test_binaries_only_leaves_the_running_cli_shim_to_the_helper(self):
+        root = "C:\\Users\\test\\.local\\bin"
+        shim = root + "\\defenseclaw.cmd"
+        gateway = root + "\\defenseclaw-gateway.exe"
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            install_root=root,
+            gateway_path=gateway,
+            binary_targets=(shim, gateway),
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv="C:\\Users\\test\\.defenseclaw\\.venv",
+            remove_binaries=True,
+        )
+        scheduled = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_running_from_managed_venv", return_value=True),
+            patch.object(cmd_uninstall, "_schedule_deferred_cleanup", side_effect=scheduled.append),
+            patch.object(cmd_uninstall.os.path, "lexists", return_value=True),
+            patch.object(cmd_uninstall.os, "unlink") as unlink,
+            patch.object(cmd_uninstall, "_remove_install_bookkeeping"),
+            patch.object(cmd_uninstall.shutil, "which", return_value=None),
+        ):
+            cmd_uninstall._remove_binaries(plan)
+
+        unlink.assert_called_once_with(gateway)
+        self.assertEqual([p.binary_targets for p in scheduled], [(shim,)])
+        self.assertFalse(scheduled[0].remove_data_dir)
 
     def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
         plan = cmd_uninstall.UninstallPlan(
@@ -1373,6 +1450,29 @@ class StopGatewayOnAManagedHostTests(unittest.TestCase):
         with self.assertRaises(click.ClickException) as raised:
             self._stop(managed="/etc/defenseclaw/runtime.json")
         self.assertIn("could not stop sidecar", str(raised.exception))
+
+
+class OrphanCopilotPluginTests(unittest.TestCase):
+    def test_orphan_managed_copilot_plugin_is_removed_without_a_managed_deployment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse'"
+            hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": command, "timeout": 30}]}}
+            (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value="/managed"),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertTrue(plugin.exists(), "a managed deployment owns the plugin")
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertFalse(plugin.parent.exists())
 
 
 if __name__ == "__main__":

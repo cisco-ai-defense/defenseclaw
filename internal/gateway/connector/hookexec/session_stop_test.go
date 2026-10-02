@@ -120,12 +120,12 @@ func TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked(t *testing.T) 
 		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`}, 2, ""},
 		{sessionStopEvent{connector: "codex", event: "SessionStart"}, 0, `"continue":false`},
 		{sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"preToolUse"}`}, -1, `"permission":"deny"`},
-		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`}, 2, `"decision":"block"`},
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`}, 2, ""},
 		{sessionStopEvent{connector: "copilot", event: "permissionRequest"}, 0, `"behavior":"deny"`},
 		// A payload that names no event, or names a stop only in a field
 		// the connector does not read, is not a stop event.
 		{sessionStopEvent{connector: "claudecode", payload: `{}`}, 2, ""},
-		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop","event":"PreToolUse"}`}, 2, `"decision":"block"`},
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop","event":"PreToolUse"}`}, 2, ""},
 	}
 	for _, cause := range sessionStopCauses {
 		for _, tc := range stops {
@@ -167,7 +167,7 @@ func TestManagedFailClosedStopOutsideStandaloneIsUnchanged(t *testing.T) {
 	}{
 		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"Stop"}`}, 2, ""},
 		{sessionStopEvent{connector: "codex", event: "Stop"}, 0, `{"decision":"block","reason":"DefenseClaw hook failed closed"}`},
-		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop"}`}, 2, `{"decision":"block","reason":"DefenseClaw hook failed closed"}`},
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop"}`}, 2, "DefenseClaw hook failed closed"},
 		// The runtime failure never reads Cursor's payload there: the event
 		// stays unnamed, so Cursor gets exit 2 and an empty body.
 		{sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"stop"}`}, 2, `{}`},

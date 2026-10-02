@@ -49,7 +49,7 @@ which runs the latest release's installer for you.
 | `--local DIR` / `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `--rollback` / `-Rollback` | Restore the install that the last upgrade replaced |
 | `--connector NAME` / `-Connector NAME` | First install only: the agent to guard |
-| `--quickstart` / `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
+| `--quickstart` / `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet (a first install, or an install that was never set up) |
 
 The installers exit with one of these codes (`install.ps1` when run as a file;
 `irm | iex` reports a failure as an error instead):
@@ -181,8 +181,24 @@ performed the current install, used by `defenseclaw rollback`),
 On Windows the same layout lives under `%USERPROFILE%`:
 `%USERPROFILE%\.defenseclaw\` holds configuration, data, and the Python
 environment, and `%USERPROFILE%\.local\bin\` holds `defenseclaw.cmd`,
-`defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`.
+`defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`,
+plus an extensionless `defenseclaw` launcher so the command also works in Git
+Bash.
 The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
+
+## Startup behavior
+
+On Linux and macOS the gateway runs as a background process of your account.
+It starts when you run `defenseclaw quickstart`, `defenseclaw setup`, or
+`defenseclaw-gateway start`. Nothing starts it again after a reboot, after a
+sign-out that ends your processes, or after `defenseclaw-gateway stop`: the
+install adds no systemd unit, LaunchAgent, or login item, and hooks do not
+start it. Run `defenseclaw-gateway start` again after you sign in.
+
+While the gateway is stopped, fail-closed hooks (the action profile) block
+agent calls, and fail-open hooks (the observe default) let them through with a
+`gateway unreachable` line on stderr. On Windows a hook starts a stopped
+gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
 ## Verify
 

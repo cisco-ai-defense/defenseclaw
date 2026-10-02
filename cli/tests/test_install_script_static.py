@@ -117,6 +117,27 @@ def test_dependencies_install_from_the_hashed_lock_only() -> None:
     assert re.search(r"uv pip install [^\n]*--no-deps \"\$\{STAGING\}/\$\{WHEEL\}\"", text)
 
 
+def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
+    # An upgrade starts without fresh discovery; the gateway records agent
+    # versions in the hook contract lock from it, and doctor checks them.
+    posix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    posix_refresh = posix.index("agent discover --refresh --no-emit-otel")
+    windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
+    assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
+    assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+
+
+def test_windows_process_listing_survives_a_wmi_refusal() -> None:
+    # WMI refuses a standard user signed in over SSH; an upgrade must still
+    # find this account's own processes.
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = windows[windows.index("function Get-ProcessesUnder") :]
+    body = body[: body.index("\n}\n")]
+    assert "try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {" in body
+    assert "Get-Process" in body
+
+
 def test_installer_never_uses_retired_asset_names() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
@@ -295,3 +316,117 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     assert completed.stdout.strip() == f"7|{rerun}"
     summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
+
+
+def test_a_carriage_return_answer_takes_the_default(tmp_path: Path) -> None:
+    # MAC-U3-01: a terminal left in -icrnl sends Enter as a bare CR, which
+    # used to read as "no" and cancel the install.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("read_tty_line() {")
+    funcs = text[start : text.index("\n}\n", text.index("ask_yes_no() {")) + 3]
+    tty = tmp_path / "tty"
+    tty.write_bytes(b"\r\n")
+    script = tmp_path / "ask.sh"
+    script.write_text(
+        "set -euo pipefail\nYES=false\n"
+        + funcs.replace("/dev/tty", str(tty))
+        + 'if ask_yes_no "Reinstall?"; then echo yes; else echo no; fi\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, check=False)
+    assert proc.stdout.strip() == "yes", proc.stdout + proc.stderr
+
+
+def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
+    # MAC-U2-01: after a rollback, the restored 0.8.x gateway refused to start
+    # on hook contract drift, and the installer only relayed a readiness timeout.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("start_gateway() {")
+    funcs = text[start : text.index("\n}\n", text.index("explain_start_failure() {")) + 3]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "gateway.log").write_text("Error: an older failure\n", encoding="utf-8")
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f"echo '[sidecar] guardrail exited with error: connector claudecode hook contract drift detected: "
+        f'previous version="2.1.276 (Claude Code)" contract=v1 current version="2.1.286 (Claude Code)" contract=v1 '
+        f"(rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)' >> '{tmp_path}/gateway.log'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = tmp_path / "start.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + funcs
+        + f'DEFENSECLAW_HOME="{tmp_path}" BIN_DIR="{bin_dir}"\nrc=0; start_gateway || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    out = completed.stdout
+    assert "rc=1" in out, out + completed.stderr
+    assert "claudecode's agent changed (2.1.276 (Claude Code) -> 2.1.286 (Claude Code))" in out
+    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start" in out
+    assert "an older failure" not in out
+
+    # MAC-U3-02: with a large audit database the restored gateway was still
+    # starting when its start command timed out, and logged the drift later.
+    (tmp_path / "gateway.log").write_text("", encoding="utf-8")
+    pid_file = tmp_path / "gateway.pid"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = start ] || exit 1\n'
+        "(sleep 4; echo '[sidecar] guardrail exited with error: connector codex hook contract drift detected'"
+        f" >> '{tmp_path}/gateway.log') &\n"
+        f"echo $! > '{pid_file}'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    stub = f"gateway_pid() {{ kill -0 \"$(cat '{pid_file}')\" 2>/dev/null && cat '{pid_file}'; }}\n"
+    script.write_text(script.read_text(encoding="utf-8").replace("rc=0; start_gateway", stub + "rc=0; start_gateway"))
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out, out
+    assert "still starting" in out
+    assert "The gateway refused to start: codex's agent changed" in out
+
+
+def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:
+    # RHEL-U3-02: the low-disk refusal named no sizes, no culprit and no next step.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("is_machinery() {")
+    funcs = text[start : text.index("\n}\n", text.index("snapshot() {")) + 3]
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
+    bin_dir = tmp_path / "fake"
+    bin_dir.mkdir()
+    (bin_dir / "df").write_text("#!/bin/sh\necho head\necho fs 1 1 51200 1% /\n", encoding="utf-8")
+    (bin_dir / "df").chmod(0o755)
+    script = tmp_path / "snap.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*"; }\n'
+        + funcs
+        + f'NOT_DATA="" DEFENSECLAW_HOME="{home}" SNAP="{tmp_path / "snap"}"\n'
+        + f'PATH="{bin_dir}:$PATH"\nrc=0; snapshot || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out, out
+    assert "needs about 103 MB" in out and "50 MB is free" in out
+    assert f"{home}/audit.db (3 MB)" in out
+    assert "Free at least 53 MB" in out
+
+
+def test_windows_installer_leaves_unset_variables_unset() -> None:
+    # pwsh 7 turns SetEnvironmentVariable(name, $null) into an empty value (WIN2-U2-08).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    restore = text[text.index("foreach ($name in $savedEnv.Keys)") :][:400]
+    assert 'if ($null -eq $savedEnv[$name]) { Remove-Item -LiteralPath "Env:$name"' in restore
+

@@ -96,6 +96,26 @@ def setup_agent_selection_connectors(connectors: Iterable[str]) -> tuple[str, ..
     )
 
 
+def setup_agent_selection_problems(
+    data_dir: str | os.PathLike[str],
+    connectors: Iterable[str],
+) -> dict[str, str]:
+    """Return why each protected connector has no selectable executable.
+
+    Read-only: nothing is recorded. Batch callers use it to leave out a
+    connector that setup would refuse before the protected transaction starts.
+    """
+
+    target_dir = os.path.abspath(os.fspath(data_dir))
+    problems: dict[str, str] = {}
+    for connector in setup_agent_selection_connectors(connectors):
+        try:
+            _select_agent_executable(target_dir, connector)
+        except OSError as exc:
+            problems[connector] = str(exc)
+    return problems
+
+
 def record_setup_agent_selections(
     data_dir: str | os.PathLike[str],
     connectors: Iterable[str],
@@ -153,7 +173,11 @@ def record_setup_agent_selections(
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
-        rejection = "the exact official SST WinGet opencode.exe image was not found or was not trusted"
+        rejection = (
+            "neither the official SST WinGet opencode.exe nor the npm opencode-ai package's opencode.exe "
+            "was found or trusted for this user; install one with 'winget install SST.opencode' or "
+            "'npm install -g opencode-ai'"
+        )
     else:
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
     untrusted_found = ""
@@ -399,12 +423,17 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     """Enumerate PATH candidates plus exact names under trusted API roots."""
 
     if connector == "opencode" and os.name == "nt":
-        # Protected native setup has one executable authority. Passive
-        # inventory may still display aliases and other installations, but
-        # PATH, WinGet Links, generic roots, and configured prefixes never
-        # participate in the mutation-authorizing selection.
-        candidate = _windows_opencode_winget_executable()
-        return (candidate,) if candidate and os.path.isfile(candidate) else ()
+        # Protected native setup admits exactly two images, the same ones the
+        # gateway admits (opencode_admission_windows.go): the official SST
+        # WinGet image, then the native image of the npm opencode-ai package.
+        # Passive inventory may still display aliases and other
+        # installations, but PATH, WinGet Links, generic roots, and configured
+        # prefixes never participate in the mutation-authorizing selection.
+        return tuple(
+            candidate
+            for candidate in (_windows_opencode_winget_executable(), _windows_opencode_npm_executable())
+            if candidate and os.path.isfile(candidate)
+        )
 
     discovered = list(agent_discovery._binary_candidates_for_agent(connector, spec))
     _require, configured = agent_discovery._ai_discovery_trust_config(data_dir)
@@ -471,6 +500,13 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                 pass
         if connector == "codex" and os.path.normcase(os.path.abspath(root)) != paired_codex_root:
             candidates.extend(_codex_npm_native_candidates(root))
+        if connector == "amp" and os.name == "nt":
+            # npm puts only amp.cmd/amp.ps1 shims on PATH; the native image
+            # they launch sits at this fixed package-relative path, the same
+            # one the per-user admission table names.
+            candidate = os.path.join(root, *_AMP_NPM_NATIVE_RELATIVE)
+            if os.path.isfile(candidate):
+                candidates.append(candidate)
 
     # Prefer a native image over a script wrapper. This both avoids shell
     # interpretation and binds the protected digest to the process that
@@ -488,6 +524,10 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             seen.add(key)
             result.append(candidate)
     return tuple(result)
+
+
+_AMP_NPM_NATIVE_RELATIVE = ("node_modules", "@ampcode", "cli", "bin", "amp.exe")
+_OPENCODE_NPM_NATIVE_RELATIVE = ("npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
 
 
 def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
@@ -696,6 +736,7 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
                 os.path.join(local, "OpenAI", "Codex", "bin"),
                 os.path.join(local, "OpenAI", "Codex", "runtimes"),
                 os.path.join(local, "hermes", "hermes-agent", "venv", "Scripts"),
+                os.path.join(local, "hermes", "bin"),
                 os.path.join(local, "Microsoft", "WinGet", "Links"),
                 os.path.join(local, "pnpm"),
             )
@@ -757,18 +798,46 @@ def _windows_opencode_winget_executable(local_app_data: str = "") -> str:
     )
 
 
-def _is_windows_opencode_setup_binary(candidate: str) -> bool:
-    """Admit only the exact official SST image with its protected chain."""
+def _windows_opencode_npm_executable(roaming_app_data: str = "") -> str:
+    """Return the current-token npm opencode-ai native image path."""
 
-    local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
-    expected = _windows_opencode_winget_executable(local)
-    if not local or not expected:
+    roaming = roaming_app_data or _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
+    if not roaming:
+        return ""
+    return os.path.abspath(os.path.join(roaming, *_OPENCODE_NPM_NATIVE_RELATIVE))
+
+
+def _opencode_npm_package_identity_verified(executable: str) -> bool:
+    """Mirror the gateway: the package.json beside bin\\ names opencode-ai."""
+
+    manifest = os.path.join(os.path.dirname(os.path.dirname(executable)), "package.json")
+    try:
+        if os.path.islink(manifest) or not os.path.isfile(manifest) or os.path.getsize(manifest) > 256 << 10:
+            return False
+        with open(manifest, encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except (OSError, ValueError):
         return False
+    return isinstance(parsed, dict) and parsed.get("name") == "opencode-ai"
+
+
+def _is_windows_opencode_setup_binary(candidate: str) -> bool:
+    """Admit only the exact SST WinGet or npm opencode-ai image with its protected chain."""
+
+    lexical = os.path.abspath(candidate)
+    local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
+    expected = _windows_opencode_winget_executable(local) if local else ""
+    if not expected or os.path.normcase(lexical) != os.path.normcase(expected):
+        local = _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
+        expected = _windows_opencode_npm_executable(local) if local else ""
+        if (
+            not expected
+            or os.path.normcase(lexical) != os.path.normcase(expected)
+            or not _opencode_npm_package_identity_verified(lexical)
+        ):
+            return False
     try:
         local = os.path.abspath(local)
-        lexical = os.path.abspath(candidate)
-        if os.path.normcase(lexical) != os.path.normcase(expected):
-            return False
         if not os.path.isfile(lexical):
             return False
         if not agent_discovery._windows_path_chain_has_no_reparse_points(lexical, local):
@@ -785,12 +854,17 @@ def _is_windows_opencode_setup_binary(candidate: str) -> bool:
 
 
 def _windows_managed_hermes_prefixes() -> tuple[str, ...]:
-    """Return only the official updater-managed Hermes executable directory."""
+    """Return only the official updater-managed Hermes executable directory.
+
+    The same single image the gateway admits (internal/hermespath): the
+    hermes-agent venv image, else the bootstrap installer's bin launcher.
+    """
 
     local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
     if not local:
         return ()
-    return (os.path.abspath(os.path.join(local, "hermes", "hermes-agent", "venv", "Scripts")),)
+    executable = agent_discovery._windows_hermes_managed_executable(local)
+    return (os.path.abspath(os.path.dirname(executable)),)
 
 
 def _windows_known_folder(identifier: str) -> str:

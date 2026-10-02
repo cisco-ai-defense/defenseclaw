@@ -917,8 +917,20 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	case styleHookEchoDecision:
 		if output != "" {
+			d := decodeDecision(output)
+			blocked := d == "deny" || d == "block"
+			if blocked && sp.connector == "devin" {
+				// Devin shows an exit-2 hook's stdout verbatim ("Tool
+				// rejected: <stdout>"), so its block is the plain reason.
+				reason := decodeReason(output)
+				if reason == "" {
+					reason = sp.defaultBlockReason
+				}
+				fmt.Fprintln(opts.Stdout, devinBlockText(reason))
+				return blockExit
+			}
 			fmt.Fprintln(opts.Stdout, output)
-			if d := decodeDecision(output); d == "deny" || d == "block" {
+			if blocked {
 				return blockExit
 			}
 		}
@@ -1277,7 +1289,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 			return 0
 		}
 	case "devin":
-		fmt.Fprintln(opts.Stdout, `{"decision":"block","reason":`+message+`}`)
+		fmt.Fprintln(opts.Stdout, devinBlockText(reason))
 		return sp.unreachableStrict.exit
 	case "openhands":
 		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+message+`}`)
@@ -1388,7 +1400,7 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, true, text))
 		return result.exit
 	case "devin":
-		fmt.Fprintln(opts.Stdout, `{"decision":"block","reason":`+mustJSONString(text)+`}`)
+		fmt.Fprintln(opts.Stdout, devinBlockText(text))
 		return result.exit
 	case "opencode":
 		fmt.Fprintln(opts.Stdout, openCodeDenyBody(text))
@@ -1967,6 +1979,14 @@ func decodeDecision(output string) string {
 		return ""
 	}
 	return rawStringOr(m, "decision", "")
+}
+
+// devinBlockText is the stdout of a Devin hook that exits 2. Devin shows that
+// stdout verbatim as the rejection ("Tool rejected: <stdout>") instead of
+// parsing it, so a block prints its reason on one plain line, not the
+// {"decision":"block"} object; exit 2 alone is the veto.
+func devinBlockText(reason string) string {
+	return strings.Join(strings.Fields(reason), " ")
 }
 
 // decodeReason pulls the `reason` string from an already-compact JSON

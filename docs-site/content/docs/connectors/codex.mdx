@@ -48,7 +48,9 @@ defenseclaw setup codex --mode action  # block on policy hits via PreToolUse den
 ```
 
 DefenseClaw writes each selected Codex event and hook contract into
-`%CODEX_HOME%\managed_config.toml`. The registered command invokes system
+`%CODEX_HOME%\config.toml` and marks those hooks trusted there, because Codex
+on Windows does not read hooks from `%CODEX_HOME%\managed_config.toml`. Setup
+moves hooks an earlier release left in that file. The registered command invokes system
 Windows PowerShell with `-EncodedCommand`, synchronously starts the protected
 `defenseclaw-hook.exe` with inherited standard handles, and passes the bound
 `--event` and `--hook-contract` values. This bridge is native Windows plumbing;
@@ -93,8 +95,8 @@ once on the [Defaults page](/docs/defaults).
 <Tabs items={['Native Windows', 'macOS/Linux']}>
   <Tab value="Native Windows">
 
-`%CODEX_HOME%\managed_config.toml` carries the managed hook matrix.
-`%CODEX_HOME%\config.toml` carries DefenseClaw-marked OTLP and notify fields.
+`%CODEX_HOME%\config.toml` carries the DefenseClaw hook matrix, its hook trust
+entries, and DefenseClaw-marked OTLP and notify fields.
 Generated runtime and protected connector credentials live below
 `%USERPROFILE%\.defenseclaw\hooks`. Use setup/teardown commands; do not edit or
 copy those entries manually. See the

@@ -455,6 +455,9 @@ def call_llm(request: dict) -> dict:
     kwargs["messages"] = messages
     kwargs["max_tokens"] = request.get("max_tokens", 8192)
     kwargs["temperature"] = request.get("temperature", 0.0)
+    # Some models accept only their default temperature (Claude Opus 4.8
+    # takes 1 only); let LiteLLM drop what the model refuses, not fail.
+    kwargs["drop_params"] = True
 
     t0 = time.perf_counter()
     try:
@@ -593,6 +596,7 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 1,
         "temperature": 0.0,
+        "drop_params": True,
         "timeout": max(1, int(timeout or 5)),
         "num_retries": 0,
     }

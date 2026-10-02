@@ -1863,6 +1863,45 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 	}
 }
 
+// claudeCodeEarlierReleaseEnv lists Claude env values that earlier releases
+// wrote and the current profile renders differently. 0.8.x turned prompt
+// capture on at the source.
+var claudeCodeEarlierReleaseEnv = map[string]string{
+	"OTEL_LOG_USER_PROMPTS": "1",
+}
+
+// claudeCodeEnvSnapshotIsDefenseClawWritten reports whether a "pristine" env
+// snapshot was really taken from a DefenseClaw env block, for example after a
+// rollback to an earlier release dropped the restore metadata. Only
+// DefenseClaw-only values count as proof: the fail-mode key, which only
+// DefenseClaw hooks read, or a DefenseClaw-scoped OTel value.
+func claudeCodeEnvSnapshotIsDefenseClawWritten(snapshot map[string]interface{}, managed map[string]string) bool {
+	if _, present := snapshot["DEFENSECLAW_FAIL_MODE"]; present {
+		return true
+	}
+	for key, value := range snapshot {
+		if claudeCodeOtelValueLooksManaged(key, value, managed[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeCodeOtelValueWrittenByDefenseClaw reports whether value is one that
+// this or an earlier release writes for key. A generic value is no proof of
+// ownership on its own; use it only on a snapshot that
+// claudeCodeEnvSnapshotIsDefenseClawWritten accepted.
+func claudeCodeOtelValueWrittenByDefenseClaw(key string, value interface{}, written string) bool {
+	got, ok := value.(string)
+	if !ok || got == "" {
+		return false
+	}
+	if key == "DEFENSECLAW_FAIL_MODE" {
+		return true
+	}
+	return got == written || claudeCodeEarlierReleaseEnv[key] == got
+}
+
 func claudeCodeOtelHeadersAreDefenseClawOnly(value string) bool {
 	parts := strings.Split(value, ",")
 	if len(parts) == 0 {
@@ -2012,19 +2051,46 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					// were recorded, and for best-effort backupless cleanup.
 					managedEnv = buildClaudeCodeOtelEnv(opts)
 				}
+				// A snapshot that carries DefenseClaw-only values was taken from an
+				// earlier release's env block, so the values DefenseClaw writes in it
+				// are not the operator's either.
+				predecessorSnapshot := claudeCodeEnvSnapshotIsDefenseClawWritten(originalEnv, managedEnv)
 				for _, key := range claudeCodeOtelEnvKeys {
 					written, managed := managedEnv[key]
 					current, present := envMap[key]
+					if key == "DEFENSECLAW_FAIL_MODE" {
+						// Only DefenseClaw hooks read this key, so whatever value it
+						// holds is DefenseClaw config: never keep or restore it.
+						delete(envMap, key)
+						continue
+					}
 					if !managed || !present {
 						continue
 					}
 					owned := claudeCodeOtelValueIsManaged(current, written) ||
 						claudeCodeOtelValueLooksManaged(key, current, written)
+					if _, inSnapshot := originalEnv[key]; !owned && !inSnapshot {
+						// The operator's file did not have the key, and the value is
+						// one an earlier release wrote: a stale DefenseClaw block was
+						// put back (by a rollback or another tool), so remove it.
+						currentString, _ := current.(string)
+						owned = currentString != "" && claudeCodeEarlierReleaseEnv[key] == currentString
+					}
+					if !owned && predecessorSnapshot {
+						// The snapshot restore can already have put the earlier
+						// release's value back; it is still not the operator's.
+						original, existed := originalEnv[key]
+						originalString, _ := original.(string)
+						currentString, _ := current.(string)
+						owned = existed && originalString == currentString &&
+							claudeCodeOtelValueWrittenByDefenseClaw(key, current, written)
+					}
 					if !owned {
 						continue
 					}
 					if original, existed := originalEnv[key]; existed &&
-						!claudeCodeOtelValueLooksManaged(key, original, written) {
+						!claudeCodeOtelValueLooksManaged(key, original, written) &&
+						!(predecessorSnapshot && claudeCodeOtelValueWrittenByDefenseClaw(key, original, written)) {
 						envMap[key] = original
 					} else {
 						// A predecessor can lose its ownership metadata and later

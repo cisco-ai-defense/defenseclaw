@@ -284,6 +284,10 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 		if err != nil {
 			return err
 		}
+		if rel == openClawPlaceholderName {
+			// The tracked build marker stays in the embed next to a synced bundle; it is not a plugin file.
+			return nil
+		}
 		target := filepath.Join(absDstRoot, rel)
 		if !strings.HasPrefix(target, absDstRoot+string(filepath.Separator)) && target != absDstRoot {
 			return fmt.Errorf("path traversal detected: %s escapes %s", rel, absDstRoot)

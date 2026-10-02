@@ -211,7 +211,9 @@ The `devin-hooks-v1` contract registers exactly eight events:
 | `SessionStart` | Observe lifecycle and optionally return additional context. |
 | `SessionEnd` | Observe lifecycle teardown. |
 
-Top-level `decision` and `reason` carry allow/block results.
+The gateway's verdict uses Devin's top-level `decision` and `reason`. A block
+exits `2`, and Devin shows that hook's output as it is (`Tool rejected:
+<output>`), so on a block the hook prints only the reason text.
 `hookSpecificOutput` is event-tagged; DefenseClaw emits `additionalContext`
 only for `UserPromptSubmit`, `SessionStart`, and `PostToolUse`. Exit `2`
 blocks, while every other hook error fails open. Restricted Mode disables

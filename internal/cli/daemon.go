@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 const (
@@ -275,6 +276,9 @@ func runStart(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("rotation start requires a stopped gateway; managed PID %d is already running", pid)
 		}
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
+		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
+			fmt.Println(note)
+		}
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
 	}
@@ -942,7 +946,7 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 		return false, 0, fmt.Errorf("inspect configured gateway listener: %w", err)
 	}
 	if !running || managedPID != ownerPID {
-		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d", cfg.Gateway.APIPort, ownerPID)
+		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d (often another account's gateway); choose a free port with: defenseclaw setup gateway --api-port <free port> --non-interactive", cfg.Gateway.APIPort, ownerPID)
 	}
 	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
@@ -2236,4 +2240,18 @@ func collectDaemonArgs(cmd *cobra.Command) []string {
 	}
 
 	return args
+}
+
+// otherGatewayBinaryNote says when the running sidecar was started from a
+// different gateway binary than this one, so "already running" does not
+// hide that the old build is still serving.
+func otherGatewayBinaryNote(running string) string {
+	if running == "" {
+		return ""
+	}
+	self, err := os.Executable()
+	if err != nil || pathidentity.Same(self, running) {
+		return ""
+	}
+	return fmt.Sprintf("It runs %s, not this binary (%s). To switch: 'defenseclaw-gateway stop', then start again.", running, self)
 }

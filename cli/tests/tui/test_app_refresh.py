@@ -678,8 +678,9 @@ def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_
 
 
 def test_destructive_intent_modal_is_danger_gated() -> None:
-    """N1: a destructive catalog intent builds a red-bordered consequence modal
-    whose only action is danger-gated (requires the explicit second confirm)."""
+    """N1: a destructive catalog intent builds a red-bordered consequence modal.
+    "Go back" is preselected so stray Enter presses cancel; the run action is
+    danger-gated (requires the explicit second confirm)."""
 
     from defenseclaw.tui.app import TOKENS
     from defenseclaw.tui.services.catalog_state import CatalogCommandIntent
@@ -692,7 +693,8 @@ def test_destructive_intent_modal_is_danger_gated() -> None:
         risk="destructive",
     )
     model = app._destructive_intent_modal(intent)
-    assert len(model.actions) == 1
-    assert model.default_action().danger is True
+    assert [action.action_id for action in model.actions] == ["back", "run"]
+    assert model.default_action().danger is False
+    assert model.action_for_hotkey("d").danger is True
     assert model.border_color == TOKENS.accent_red
     assert "plugin remove foo" in model.details[0]
