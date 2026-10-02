@@ -279,7 +279,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
 
 WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup <connector> --yes. Need connector, restart preference, guardrail mode, and scanner mode.",
-    "Runs: defenseclaw keys list --json / check / set / fill-missing. Need env var name and secret only for set.",
+    "Runs: defenseclaw keys list / check / set / fill-missing. Need env var name and secret only for set.",
     "Runs: defenseclaw setup llm --non-interactive. Need provider, model, optional base URL, and API key env or value.",
     "Runs: defenseclaw setup local-observability <action>. "
     "Need Docker for up/reset; status/url require no credentials.",
@@ -1942,7 +1942,7 @@ def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
             value="list",
             default="list",
             options=("list", "check", "fill-missing", "set"),
-            hint="list uses keys list --json; set writes to env-backed storage.",
+            hint="list shows the keys list table; set writes to env-backed storage.",
         ),
         WizardFormField("Env Name", "string", hint="Credential environment variable name."),
         WizardFormField("Secret Value", "password", hint="Only used by Action=set."),
@@ -3992,9 +3992,9 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
         return f"AI discovery: {enabled}  ·  Mode: {mode}"
     if wizard == SetupWizard.GATEWAY:
-        host = _cfg_str(cfg, "gateway.host") or "localhost"
-        port = _cfg_str(cfg, "gateway.port") or "9090"
-        return f"Gateway: {host}:{port}"
+        host = _cfg_str(cfg, "gateway.api_bind") or "127.0.0.1"
+        port = _cfg_str(cfg, "gateway.api_port") or "?"
+        return f"Gateway API: {host}:{port}"
     return ""
 
 
@@ -6922,7 +6922,9 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         # carried on the intent's ``secret_stdin`` and written (then stdin
         # closed) by the executor. See F-0801.
         return tuple(args)
-    return ("keys", "list", "--json")
+    # The readable table, not --json: this output is read by a person in
+    # Activity (GAP-1162). The Setup panel loads its own JSON copy.
+    return ("keys", "list")
 
 
 def _build_local_observability_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
@@ -8350,6 +8352,11 @@ def _value(cfg: object | Mapping[str, Any] | None, key: str) -> str:
 
 def _fmt_config_version(cfg: object | Mapping[str, Any] | None) -> str:
     version = get_config_value(cfg, "config_version", "")
+    if not version:
+        # ``Config`` keeps the on-disk version in ``_source_config_version``
+        # (there is no ``config_version`` attribute), so a v8 file showed
+        # "(unset)" (GAP-1161).
+        version = getattr(cfg, "_source_config_version", 0) or ""
     if not version:
         return "(unset)"
     return str(version)

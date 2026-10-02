@@ -482,7 +482,8 @@ def test_logs_filter_change_metadata_and_modal_hooks() -> None:
 
     panel.searching = False
     assert panel.handle_key("R").modal is None
-    assert panel.handle_key("N").modal == "notifications"
+    assert panel.handle_key("b").modal == "notifications"
+    assert panel.handle_key("N").modal is None  # N is the Runtime tab (GAP-1159)
     assert panel.handle_key("J").modal == "judge-history"
 
 

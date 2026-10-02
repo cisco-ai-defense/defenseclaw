@@ -207,3 +207,5 @@ class HintState:
     # False when the active panel's table is empty (Sandboxes uses it to
     # stop advertising row keys that have no row to act on).
     panel_has_rows: bool = True
+    # True when no config.yaml was loaded (first run, wizard declined).
+    not_configured: bool = False

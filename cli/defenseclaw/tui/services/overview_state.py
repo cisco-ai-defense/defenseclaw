@@ -115,6 +115,26 @@ class HealthSnapshot:
     connectors: tuple[ConnectorHealth, ...] = ()
 
 
+# Connectors enforced through their own hook/plugin surface; they never use
+# the guardrail proxy port. Mirrors ``cmd_doctor._HOOK_ENFORCED_CONNECTORS``.
+_HOOK_ENFORCED_CONNECTORS = frozenset(
+    {
+        "codex",
+        "claudecode",
+        "hermes",
+        "cursor",
+        "devin",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "amp",
+        "omnigent",
+        "kiro",
+    }
+)
+
+
 @dataclass(frozen=True)
 class OverviewConfig:
     data_dir: str = ""
@@ -187,6 +207,18 @@ class OverviewConfig:
 
         want = (name or "").strip().lower()
         return any(want == d.strip().lower() for d in self.connector_disabled)
+
+
+    def uses_guardrail_proxy_port(self) -> bool:
+        """Whether any active connector routes through the guardrail proxy port.
+
+        Hook- and plugin-enforced connectors talk to their provider directly,
+        so the proxy port is intentionally closed for them (doctor says so);
+        the Overview must not show it as if it were listening (GAP-1158).
+        """
+
+        names = [c for c, _m in self.connector_modes if c] or [self.guardrail_connector or self.claw_mode]
+        return any((name or "").strip().lower() not in _HOOK_ENFORCED_CONNECTORS for name in names)
 
 
 @dataclass(frozen=True)
@@ -498,7 +530,7 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("m", "Mode", ("setup", "connector")),
     # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
-    ("N", "Notify", ("setup", "notifications")),
+    ("b", "Notify", ("setup", "notifications")),
     ("u", "Upgrade", ("upgrade",)),
     ("X", "Uninstall", ("uninstall",)),
     # NOTE: ``?`` is intentionally NOT mapped here. Routing ``?``
@@ -515,6 +547,8 @@ class OverviewPanelModel:
     def __init__(self, cfg: OverviewConfig | None = None, *, version: str = "") -> None:
         self.cfg = cfg
         self.version = version
+        # Set by the app when no config.yaml was loaded (GAP-1163).
+        self.not_configured = False
         self.active_policy: object | None = None
         self.health: HealthSnapshot | None = None
         # Availability of the sidecar management endpoint is deliberately
@@ -634,7 +668,17 @@ class OverviewPanelModel:
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
-        if gateway_broken and guardrail_off and not self.skill_scanner_available:
+        if self.not_configured:
+            # No config.yaml (first run, wizard declined): say so instead of
+            # implying the gateway will show up on its own (GAP-1163).
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    "DefenseClaw is not set up yet (no config.yaml). "
+                    "Press 0 for Setup, or run: defenseclaw init",
+                )
+            )
+        elif gateway_broken and guardrail_off and not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
                     "info",
@@ -647,9 +691,15 @@ class OverviewPanelModel:
                 suffix = f": {detail}" if detail else ""
                 notices.append(OverviewNotice("error", f"Gateway health check failed{suffix}"))
             elif gateway_state == "unknown":
-                notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
+                if not self.not_configured:
+                    notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
             else:
-                notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+                notices.append(
+                    OverviewNotice(
+                        "error",
+                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                    )
+                )
         elif gateway_state in {"starting", "reconnecting"}:
             notices.append(OverviewNotice("info", "Gateway is starting - health checks will retry automatically"))
         elif gateway_standalone:
@@ -782,10 +832,11 @@ class OverviewPanelModel:
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes:
+            why = f" ({runtime.degraded_reason}; press N for details)" if runtime.degraded_reason else ""
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"Runtime is {runtime.health_title or 'watching'}: "
+                    f"Runtime is {runtime.health_title or 'watching'}{why}: "
                     f"{runtime.processes} processes and {runtime.connections} connections, "
                     "no findings above the reporting floor.",
                 )
@@ -1224,13 +1275,13 @@ class OverviewPanelModel:
                     return f"{total} connectors configured"
                 if running == total:
                     return f"{total} connectors active"
-                return f"{running}/{total} connectors running"
+                return f"{running}/{total} connectors running{self._not_running_suffix()}"
             # One or more connectors disabled: report them separately.
             suffix = f" · {disabled_n} disabled"
             if enabled_total == 0:
                 return f"0 active{suffix}"
             if live and running < enabled_total:
-                return f"{running}/{enabled_total} running{suffix}"
+                return f"{running}/{enabled_total} running{suffix}{self._not_running_suffix()}"
             return f"{enabled_total} active{suffix}"
         if self.health is None or self.health.connector is None:
             if not configured:
@@ -1256,6 +1307,24 @@ class OverviewPanelModel:
             parts.append(f"{connector.subprocess_blocks} subprocess blocks")
         return " - ".join(parts)
 
+    def _not_running_suffix(self) -> str:
+        """`` · not running: OpenCode`` for the enabled connectors that are down."""
+
+        if self.cfg is None:
+            return ""
+        live = {
+            conn.name.strip().lower(): conn for conn in (self.health.connectors if self.health else ())
+        }
+        down: list[str] = []
+        for connector, _mode in self.cfg.connector_modes:
+            name = (connector or "").strip().lower()
+            if not name or self.cfg.connector_is_disabled(name):
+                continue
+            conn = live.get(name)
+            if conn is None or self._effective_connector_runtime(conn)[0] not in self._RUNNING_STATES:
+                down.append(friendly_connector_name(name))
+        return f" · not running: {', '.join(down)}" if down else ""
+
     def watchdog_detail(self) -> str:
         if self.health is None:
             return ""
@@ -1273,7 +1342,7 @@ class OverviewPanelModel:
         parts: list[str] = []
         if self.cfg.guardrail_mode:
             parts.append(self.cfg.guardrail_mode)
-        if self.cfg.guardrail_port:
+        if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         # The rule pack, not guardrail_strategy: that is read from a
         # "strategy" key the config doesn't have, so it always said "default".
@@ -1471,28 +1540,28 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
     match connector_name.strip().lower():
         case "codex":
             return (
-                f"{name} connector has seen 0 hook events after {formatted} - "
+                f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until Codex emits a hook/notify event; verify "
                 f"{connector_config_files('codex')[0]} hooks if this persists"
             )
         case "claudecode":
             return (
-                f"{name} connector has seen 0 hook events after {formatted} - "
+                f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
         case "omnigent":
             return (
-                f"{name} connector has seen 0 policy events after {formatted} - "
+                f"{name} connector has seen 0 policy events since the gateway started {formatted} ago - "
                 "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
             )
         case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
             return (
-                f"{name} connector has seen 0 hook events after {formatted} - "
+                f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
             )
         case _:
             return (
-                f"{name} connector has seen 0 requests after {formatted} - "
+                f"{name} connector has seen 0 requests since the gateway started {formatted} ago - "
                 "verify your agent is dialing the gateway port (gateway.port)"
             )
 

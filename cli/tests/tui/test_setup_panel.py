@@ -986,7 +986,7 @@ def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> Non
 def test_credentials_matrix_actions_are_data_only_and_validate_required_fields() -> None:
     fields = wizard_form_defs(SetupWizard.CREDENTIALS)
 
-    assert build_wizard_args(SetupWizard.CREDENTIALS, fields) == ("keys", "list", "--json")
+    assert build_wizard_args(SetupWizard.CREDENTIALS, fields) == ("keys", "list")
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "check")) == ("keys", "check")
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "fill-missing")) == (
         "keys",

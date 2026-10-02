@@ -326,12 +326,28 @@ def test_registries_panel_mixed_effective_state_toggles_broad_enforcement_on(tmp
     panel = RegistriesPanelModel(cfg)
     panel.set_tab(RegistriesTab.ENTRIES)
 
-    action = panel.handle_key("R")
+    action = panel.handle_key("e")
 
     assert action.intent is not None
     assert action.intent.args == (
         "registry", "require", "--type", "skill", "--enabled", "--json",
     )
+    assert action.intent.risk == "mutation"
+    assert "refused" in action.intent.hint
+
+
+def test_registries_tab_key_and_sync_are_not_read_only(tmp_path: Path) -> None:
+    """GAP-1152: R (the tab key) never starts a policy change; sync is a mutation."""
+    write_index(
+        tmp_path,
+        "corp-skills",
+        {"verdicts": [{"name": "demo-skill", "type": "skill", "status": "clean"}]},
+    )
+    panel = new_panel(tmp_path)
+    panel.set_tab(RegistriesTab.ENTRIES)
+    assert panel.handle_key("R").intent is None
+    panel.set_tab(RegistriesTab.SOURCES)
+    assert panel.handle_key("S").intent.risk == "mutation"
 
 
 def test_registries_panel_approve_requires_selection(tmp_path: Path) -> None:

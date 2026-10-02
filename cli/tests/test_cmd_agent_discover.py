@@ -802,10 +802,10 @@ class AiUsageRendererTests(unittest.TestCase):
         )
 
     def test_grouped_view_surfaces_per_component_confidence(self):
-        """Default grouped table must show Identity / Presence so
+        """``--wide`` grouped table shows Identity / Presence so
         operators don't have to drop into ``--detail`` to see the
-        engine's verdict. Bug regression: pre-fix the columns only
-        appeared in detail mode and were repeated 488x per group."""
+        engine's verdict; the default table leaves them out so it fits
+        (GAP-1101)."""
         from defenseclaw.commands import cmd_agent
 
         sigs = []
@@ -835,9 +835,14 @@ class AiUsageRendererTests(unittest.TestCase):
                         "files_scanned": 1},
             "signals": sigs,
         }
-        out = cmd_agent._render_ai_usage_table(payload)
+        default = cmd_agent._render_ai_usage_table(payload)
+        self.assertNotIn("Identity", default)
+        self.assertNotIn("Version", default)
+        self.assertIn("--wide", " ".join(default.split()))
+        out = cmd_agent._render_ai_usage_table(payload, wide=True)
         self.assertIn("Identity", out)
         self.assertIn("Presence", out)
+        self.assertIn("Version", out)
         # Bands rendered with percentage just like --detail does.
         # Rich may wrap the cell across lines depending on terminal
         # width; assert each fragment separately so the test is

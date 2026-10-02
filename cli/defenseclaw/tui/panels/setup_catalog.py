@@ -344,7 +344,7 @@ def _llm_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
     if problems:
         return TaskStatus("attention", "no region" if provider and (model or instance) else "not set")
     if not provider and not model:
-        return TaskStatus("off", "not set")
+        return TaskStatus("off", "not needed" if not _flag(cfg, "guardrail.judge.enabled") else "not set")
     if model and "/" not in model and provider:
         model = f"{provider}/{model}"
     return TaskStatus("ok", _short(model or f"{provider} via {instance}"))
@@ -356,8 +356,10 @@ def _gateway_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
         return TaskStatus("attention", "not running")
     if "Restart Pending" in names:
         return TaskStatus("attention", "restart queued")
-    host = _text(cfg, "gateway.host") or "127.0.0.1"
-    port = _text(cfg, "gateway.port")
+    # The sidecar API listener, not gateway.host/port (the OpenClaw
+    # gateway uplink, 18789 by default) (GAP-1160).
+    host = _text(cfg, "gateway.api_bind") or "127.0.0.1"
+    port = _text(cfg, "gateway.api_port")
     return TaskStatus("ok", _short(f"{host}:{port}" if port else host))
 
 

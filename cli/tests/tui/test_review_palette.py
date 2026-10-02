@@ -53,3 +53,21 @@ async def test_typing_a_burst_keeps_the_palette_columns_readable(tmp_path) -> No
         await pilot.pause()
         text = screen_text(app)
         assert "guardrail mode" in text and "[policy/mutation]" in text
+
+
+async def test_down_then_enter_runs_the_highlighted_row(tmp_path) -> None:
+    """GAP-1154: Enter after Down runs the highlighted row, not the filter text."""
+
+    app = snapshot_app(tmp_path)
+    submitted: list[str] = []
+    app._submit_command_text = submitted.append  # type: ignore[method-assign]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.press(":", *"discovery")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        highlighted = app._selected_palette_value()  # noqa: SLF001
+        assert highlighted and highlighted != "discovery"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert submitted == [highlighted]

@@ -930,7 +930,7 @@ class LogsPanelModel:
 
         if key == "J" and not self.searching and self.source == "verdicts":
             return LogPanelAction(True, hint="Open the SQLite-backed judge response history.", modal="judge-history")
-        if key == "N" and not self.searching:
+        if key == "b" and not self.searching:
             return LogPanelAction(True, hint="Open notifications toggle confirmation.", modal="notifications")
         if key == "space":
             self.paused = not self.paused

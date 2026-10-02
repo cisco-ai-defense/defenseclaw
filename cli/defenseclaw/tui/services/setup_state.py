@@ -236,6 +236,12 @@ def missing_credential_rows(rows: Sequence[CredentialRow]) -> tuple[CredentialRo
 _REGIONAL_BLOCK: dict[str, str] = {"bedrock": "bedrock", "vertex_ai": "vertex", "azure": "azure"}
 
 
+def _all_hook_enforced(connectors: Sequence[str]) -> bool:
+    from defenseclaw.tui.services.overview_state import _HOOK_ENFORCED_CONNECTORS
+
+    return all(str(name).strip().lower() in _HOOK_ENFORCED_CONNECTORS for name in connectors)
+
+
 def build_readiness_checks(
     cfg: object | Mapping[str, Any] | None,
     health: object | Mapping[str, Any] | None,
@@ -374,9 +380,16 @@ def build_readiness_checks(
     # A custom-provider instance overlay supplies base_url/model/keys at
     # resolve time, so binding one is a complete config even when the
     # inline llm.model is blank.
+    judge_on = bool(_get_path(cfg, "guardrail.judge.enabled", False))
     if provider and (model or instance_name):
         detail = f"{provider}/{model}" if model else f"{provider} (via instance {instance_name})"
         checks.append(ReadinessCheck("LLM Config", detail, "pass"))
+    elif not judge_on and connectors and _all_hook_enforced(connectors):
+        # Rules-only install: hook enforcement needs no LLM while the judge
+        # is off (doctor says the same), so this is not a problem (GAP-1160).
+        checks.append(
+            ReadinessCheck("LLM Config", "not required while the LLM judge is disabled", "pass")
+        )
     else:
         checks.append(
             ReadinessCheck(

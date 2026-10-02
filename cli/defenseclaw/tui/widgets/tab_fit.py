@@ -10,12 +10,13 @@
 
 """Fit the top tab strip into the terminal width.
 
-Fifteen tabs with full names need about 170 columns. ``fit_tab_labels``
+Sixteen tabs with full names need about 180 columns. ``fit_tab_labels``
 starts from the key letter alone and then gives tabs a short name, and then
 their full name, in order of importance (``LABEL_PRIORITY``), stopping at the
-first tab that no longer fits. The active tab always keeps its full name, every tab
-keeps its key letter, and unread badges stay unless even letter-only
-tabs with badges overflow. PANELS order never changes.
+first tab that no longer fits. That choice depends on the width only, so
+labels stay put as you switch panels or badges change. The active tab always
+shows its full name, every tab keeps its key letter, and unread badges stay
+unless even letter-only tabs with badges overflow. PANELS order never changes.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ LABEL_PRIORITY: tuple[str, ...] = (
     "skills",
     "mcps",
     "plugins",
+    "tools",
     "sandboxes",
     "logs",
     "audit",
@@ -79,6 +81,11 @@ def strip_width(labels: Sequence[str]) -> int:
     return sum(len(label) + TAB_GUTTER for label in labels)
 
 
+# Cells kept free when choosing which tabs get a name, so the names don't
+# change as unread badges come and go (GAP-1155).
+BADGE_RESERVE = 6
+
+
 def fit_tab_labels(
     panels: Sequence[tuple[str, str, str]],
     active: str,
@@ -89,33 +96,64 @@ def fit_tab_labels(
 
     ``panels`` is the visible ``(name, key, label)`` rows in order. A width
     of 0 or less means "unknown" and returns full labels.
+
+    Which tabs get a name depends only on the width (badges come out of a
+    fixed reserve), so moving between panels or a new badge never renames
+    another tab. The active tab shows its full name when the room left over
+    allows it.
     """
 
     full = {name: _label(key, label, unread.get(name, 0)) for name, key, label in panels}
     if width <= 0 or strip_width(tuple(full.values())) <= width:
         return full
-    short = {name: _label(key, SHORT_LABELS.get(name, label), unread.get(name, 0)) for name, key, label in panels}
-    labels = {name: full[name] if name == active else _label(key, "", unread.get(name, 0)) for name, key, _ in panels}
-    # Upgrade the most useful tabs first, so the labels you see stay the same
-    # as you move between panels instead of shifting with the active tab.
-    names = [name for name, _key, _label in panels if name != active]
-    ranked = sorted(names, key=lambda name: LABEL_PRIORITY.index(name) if name in LABEL_PRIORITY else len(names))
-    # Plain "8(3)" badges cost three cells, so letter-only tabs with badges
-    # can still overflow; drop the least important tabs' badges until it fits.
     keys = {name: key for name, key, _label in panels}
+    plain_full = {name: _label(key, label, 0) for name, key, label in panels}
+    plain_short = {name: _label(key, SHORT_LABELS.get(name, label), 0) for name, key, label in panels}
+    ranked = sorted(
+        (name for name, _key, _label in panels),
+        key=lambda name: LABEL_PRIORITY.index(name) if name in LABEL_PRIORITY else len(LABEL_PRIORITY),
+    )
+    # 1. Names from the width alone. Stop at the first tab that doesn't fit,
+    #    so a named tab is always more important than every letter-only one.
+    budget = width - BADGE_RESERVE
+    names = dict(keys)
+    for tier in (plain_short, plain_full):
+        for name in ranked:
+            candidate = {**names, name: tier[name]}
+            if strip_width(tuple(candidate.values())) > budget:
+                break
+            names = candidate
+    # 2. Badges go on every tab.
+    named = {name: names[name] != keys[name] for name in names}
+    tier_label = {name: plain_full[name] == names[name] for name in names}
+    labels: dict[str, str] = {}
+    for name, key, label in panels:
+        if tier_label[name]:
+            labels[name] = _label(key, label, unread.get(name, 0))
+        elif named[name]:
+            labels[name] = _label(key, SHORT_LABELS.get(name, label), unread.get(name, 0))
+        else:
+            labels[name] = _label(key, "", unread.get(name, 0))
+    # 3. The active tab gets its full name from the room that is left, so
+    #    no other tab changes for it.
+    if active in labels:
+        key, label = keys[active], next(label for name, _key, label in panels if name == active)
+        candidate = {**labels, active: _label(key, label, unread.get(active, 0))}
+        if strip_width(tuple(candidate.values())) <= width:
+            labels = candidate
+    # 4. Only when the reserve is not enough (many large badges on a tiny
+    #    terminal): drop the least important badges, then names.
+    for name in reversed(ranked):
+        if strip_width(tuple(labels.values())) <= width:
+            return labels
+        if name != active and unread.get(name, 0):
+            labels[name] = names[name] if named[name] else keys[name]
     for name in reversed(ranked):
         if strip_width(tuple(labels.values())) <= width:
             break
-        labels[name] = keys[name]
-    # Stop at the first tab that doesn't fit, so a named tab is always more
-    # important than every letter-only one.
-    for tier in (short, full):
-        for name in ranked:
-            candidate = {**labels, name: tier[name]}
-            if strip_width(tuple(candidate.values())) > width:
-                break
-            labels = candidate
+        if name != active:
+            labels[name] = keys[name]
     return labels
 
 
-__all__ = ["LABEL_PRIORITY", "SHORT_LABELS", "TAB_GUTTER", "fit_tab_labels", "strip_width"]
+__all__ = ["BADGE_RESERVE", "LABEL_PRIORITY", "SHORT_LABELS", "TAB_GUTTER", "fit_tab_labels", "strip_width"]

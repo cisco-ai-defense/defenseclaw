@@ -2934,7 +2934,7 @@ def _gateway_process_trust(
 ) -> _GatewayTrust:
     """Prove a PID generation and bind it to this installation when possible."""
     if record.status == "missing":
-        return _GatewayTrust("missing", "managed gateway PID file is missing", record=record)
+        return _GatewayTrust("missing", "the gateway is not running (PID file is missing)", record=record)
     if record.status == "malformed":
         return _GatewayTrust("identity", "managed gateway PID file is invalid", record=record)
     if record.status in {"denied", "unavailable"}:

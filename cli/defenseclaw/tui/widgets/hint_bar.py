@@ -140,6 +140,8 @@ class HintEngine:
         return ""
 
     def _overview_hint(self, state: HintState, status: StatusModel | None) -> str:
+        if state.not_configured:
+            return "DefenseClaw is not set up yet. Press 0 for Setup, or run: defenseclaw init"
         if status:
             gateway_state = status.gateway.state.strip().lower()
             if gateway_state in {"starting", "reconnecting"}:
@@ -154,7 +156,7 @@ class HintEngine:
             if gateway_state in {"", "unknown"}:
                 return "Gateway status is not available yet. Health checks will retry automatically."
             if gateway_state in {"offline", "stopped", "down"}:
-                return 'Gateway is offline. Open the command palette and run "doctor" to diagnose.'
+                return 'Gateway is not running. Press : and run "start", or run "doctor" to diagnose.'
         if status and status.guardrail.state in {"disabled", "offline", "unknown"}:
             return 'LLM guardrail is not configured. Press "g" to set it up.'
         if state.critical_alerts > 0:
@@ -227,7 +229,7 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         return (
-            "KEYS  h/l sub-tab | j/k move | Enter detail | 1 all, 2-4 filter Skills/Plugins | "
+            "KEYS  h/l sub-tab | j/k move | Enter detail | 1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."
         )
 
@@ -267,7 +269,7 @@ class HintEngine:
             return hint
         return (
             "KEYS  1/2/3 sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
-            "a approve | x reject | d remove source."
+            "a approve | x reject | e require approval | d remove source."
         )
 
     def _runtime_hint(self, state: HintState) -> str:

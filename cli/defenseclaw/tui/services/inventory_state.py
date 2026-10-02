@@ -934,12 +934,30 @@ class InventoryPanelModel:
         if summary is None:
             return ()
         inv = self._summary_inventory()
+        # Under "All" in a multi-connector install the merged snapshot's
+        # Source/Home/Config belong to the primary connector only; name every
+        # connector instead and leave the per-connector paths to the filter
+        # (GAP-1156).
+        merged_names = (
+            [friendly_connector_name(name) for name, _snap in self.connector_snapshots]
+            if not (self.connector_filter or "").strip() and len(self.connector_snapshots) > 1
+            else []
+        )
+        if merged_names:
+            origin: list[tuple[str, str]] = [
+                ("Source", f"All {len(merged_names)} connectors: {', '.join(merged_names)}"),
+                ("Home / Config", "per connector (press m to pick one)"),
+            ]
+        else:
+            origin = [
+                ("Source", summary.source_label),
+                ("Home", summary.home_path),
+                ("Config", summary.config_path),
+            ]
         rows: list[tuple[str, str]] = [
             ("AIBOM version", summary.version),
             ("Generated", summary.generated_at),
-            ("Source", summary.source_label),
-            ("Home", summary.home_path),
-            ("Config", summary.config_path),
+            *origin,
             ("Total items", summary.counts["total_items"]),
             ("Skills", _count_with_suffix(summary.counts["skills"], "eligible", inv.summary.skills if inv else {})),
             (
@@ -1203,14 +1221,17 @@ class InventoryPanelModel:
                 return self.summary_table_rows()
 
     def handle_key(self, key: str) -> InventoryPanelAction:
+        # Digits 1-4 are filters only on the Skills and Plugins sub-tabs.
+        # Everywhere else they fall through to the panel shortcuts, so "3"
+        # opens Skills as the tab bar says (GAP-1156).
+        if key in {"1", "2", "3", "4"} and self.active_sub not in {"skills", "plugins"}:
+            return InventoryPanelAction(False)
         if key == "1":
             self.filter = ""
             self.cursor = 0
             self.detail_open = False
-            return InventoryPanelAction(True, hint="Inventory filter: all.")
+            return InventoryPanelAction(True, hint="Inventory filter: all. (Digits filter on this sub-tab; Ctrl+P switches panel.)")
         if key in {"2", "3", "4"}:
-            if self.active_sub not in {"skills", "plugins"}:
-                return InventoryPanelAction(True, hint="Filters 2-4 apply to the Skills and Plugins sub-tabs.")
             if self.active_sub == "skills":
                 filters: Mapping[str, InventoryFilter] = {
                     "2": "eligible",
@@ -1227,7 +1248,10 @@ class InventoryPanelModel:
             self.cursor = 0
             self.detail_open = False
             label = self.filter or "all"
-            return InventoryPanelAction(True, hint=f"Inventory filter: {label}.")
+            return InventoryPanelAction(
+                True,
+                hint=f"Inventory filter: {label} (1 shows all). Digits filter on this sub-tab; Ctrl+P switches panel.",
+            )
         if key in {"h", "left", "shift+tab"}:
             before = self.active_sub
             self.move_subtab(-1)

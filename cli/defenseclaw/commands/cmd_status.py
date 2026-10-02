@@ -423,7 +423,10 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
             )
         else:
-            _status_row("Sidecar", ux._style("not running", fg="yellow"))
+            _status_row(
+                "Sidecar",
+                ux._style("not running; start it: defenseclaw-gateway start", fg="yellow"),
+            )
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
         _print_agents(cfg, sidecar_down=True)

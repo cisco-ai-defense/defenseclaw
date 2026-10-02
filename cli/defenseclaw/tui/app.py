@@ -399,6 +399,7 @@ PANELS = (
     ("skills", "3", "Skills"),
     ("mcps", "4", "MCPs"),
     ("plugins", "5", "Plugins"),
+    ("tools", "T", "Tools"),
     ("inventory", "6", "Inventory"),
     ("sandboxes", "7", "Sandboxes"),
     ("logs", "8", "Logs"),
@@ -411,7 +412,11 @@ PANELS = (
     ("setup", "0", "Setup"),
 )
 
-PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+# Panel keys that only work in the exact case shown: lowercase ``t`` stays
+# free for panel-local use (AI Discovery and Sandboxes use it).
+CASE_SENSITIVE_PANEL_KEYS = frozenset({"T"})
+PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS if key not in CASE_SENSITIVE_PANEL_KEYS}
+CASE_SENSITIVE_PANEL_SHORTCUTS = {key: name for name, key, _label in PANELS if key in CASE_SENSITIVE_PANEL_KEYS}
 
 # How long a successful command's progress strip stays before hiding itself.
 STRIP_SUCCESS_SECONDS = 8.0
@@ -596,7 +601,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     .panel-controls {
-        height: 3;
+        /* Buttons that don't fit scroll sideways (a scrollbar row appears)
+           instead of being cut off mid-word at 80 columns (GAP-1166). */
+        height: auto;
+        max-height: 4;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-size-horizontal: 1;
         margin-bottom: 1;
         padding: 0 1;
         border: round TOKEN_BORDER_MUTED;
@@ -1171,6 +1182,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.logs_model = logs_model or LogsPanelModel(self.data_dir, store=audit_store)
         self.audit_model = audit_model or AuditPanelModel(audit_store)
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
+        self.overview_model.not_configured = config is None
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
         self._runtime_model_injected = runtime_model is not None
@@ -1322,6 +1334,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._strip_spinner_tick: int = 0
         self._command_registry = build_registry()
         self._command_palette_values: list[str] = []
+        # True once Up/Down moved the palette cursor since the last edit:
+        # Enter then runs the highlighted row, not the typed filter text.
+        self._palette_cursor_moved = False
         self._last_table_click: tuple[str, int] | None = None
         # Textual posts Tabs.TabActivated for programmatic ``tabs.active``
         # changes too. Keep a one-shot count for tab ids that _render_chrome
@@ -2262,7 +2277,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             event.prevent_default()
             return
 
-        panel = PANEL_SHORTCUTS.get(event.key.lower())
+        panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(event.character or "") or PANEL_SHORTCUTS.get(event.key.lower())
         if panel is None:
             return
 
@@ -2352,49 +2367,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _panel_hidden(self, panel: str) -> bool:
         """Return True if ``panel`` should be hidden from tabs + cycling.
 
-        Mirrors Go's ``Model.panelHidden`` (see ``internal/tui/app.go``).
-        Today only the Plugins panel is connector-gated — DefenseClaw
-        plugins are an OpenClaw-only concept (G4); showing the tab for
-        any other connector would yield an empty list and operator
-        confusion.
-
-        E3/A4: in a multi-connector install the gate follows the connector
-        filter so the tab tracks whatever catalog the operator is looking at,
-        and under the merged "All" view it shows whenever OpenClaw is anywhere
-        in the active set — not just when it is the primary. Both the tab gate
-        (here) and the body/bar render gate route through
-        :meth:`_plugins_visible_for_connector` so they always agree.
+        No panel is hidden today. Plugins used to be OpenClaw-only, but
+        Amp, Hermes and other connectors have plugins too (``plugin list``
+        shows them), so the tab is always reachable and shows each
+        connector's plugins or an empty state (GAP-1153). The hook stays so
+        a future connector-gated panel has one place to opt out.
         """
 
-        if panel != "plugins":
-            return False
-        return not self._plugins_visible_for_connector()
-
-    def _plugins_visible_for_connector(self) -> bool:
-        """Whether the Plugins panel is reachable for the current filter (A4).
-
-        Plugins are an OpenClaw-only concept, so the panel is shown only while
-        the operator is looking at OpenClaw's catalog:
-
-        * an explicit filter shows Plugins only when it is OpenClaw;
-        * under "All" (or a single-connector install) it shows when OpenClaw
-          is the resolved connector, or — in a multi-connector install — when
-          OpenClaw is *anywhere* in the active set.
-
-        The last clause is the A4 fix: the singular
-        ``PluginsPanelModel.is_visible_for_connector`` gate (fed the primary
-        connector under "All") hid Plugins whenever OpenClaw was
-        active-but-not-primary (e.g. roster ``[codex, openclaw]``). Resolving
-        from the active set here closes that without touching the catalog
-        state layer.
-        """
-
-        filt = self._connector_filter()
-        if filt:
-            return filt.lower() == "openclaw"
-        if "openclaw" in self._active_connector_names():
-            return True
-        return _active_connector(self.config).lower() == "openclaw"
+        return False
 
     def _visible_panels(self) -> list[str]:
         """Ordered list of panel names that should currently be visible.
@@ -2581,6 +2561,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except Exception:  # noqa: BLE001 - persistence is cosmetic
             pass
         self._schedule_state_save()
+
+        # A load message from the panel we just left ("MCPs: 0 loaded." on
+        # Sandboxes) is about that panel, not this one (GAP-1166).
+        if _is_load_status(self.status_text) and not self.command_running:
+            self._set_status(self._status_text())
 
         self._panel_render_generation += 1
         generation = self._panel_render_generation
@@ -3609,6 +3594,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             delta = -1 if event.key == "up" else 1
             target = max(0, min(palette.cursor_row + delta, len(self._command_palette_values) - 1))
             palette.move_cursor(row=target, column=0, animate=False)
+            self._palette_cursor_moved = True
             return True
         if event.key == "tab" and self._command_palette_values:
             selected = self._selected_palette_value()
@@ -3623,6 +3609,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette = self.query_one("#command-palette", DataTable)
         matches = self._palette_matches(query)
         self._command_palette_values = [entry.tui_name for entry in matches]
+        self._palette_cursor_moved = False
         palette.remove_class("hidden")
         palette.clear(columns=True)
         # New 4-column layout: command | cat/risk badge | argv preview
@@ -3763,6 +3750,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         suggestion = self._selected_palette_value().strip()
         if not suggestion or suggestion == typed:
             return raw_value
+        # The operator moved the cursor onto a row (Down x4 on the
+        # "discovery" matches): run that row (GAP-1154).
+        if self._palette_cursor_moved:
+            return suggestion
         # Only override when the suggestion is an extension of the
         # filter typed so far. That covers the autocomplete intent
         # ("agent discov" → highlighted "agent discovery enable")
@@ -3822,6 +3813,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._submit_command_text(selected)
 
     def _submit_command_text(self, value: str) -> None:
+        # Read the highlighted row before closing: closing clears the rows,
+        # which made the "typed text did not parse" fallback below a no-op.
+        highlighted = self._selected_palette_value()
         self._close_command_palette()
         stripped = value.strip()
         if not stripped:
@@ -3832,7 +3826,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         try:
             parsed = parse_command_line(value)
         except CommandLineError as exc:
-            selected = self._selected_palette_value()
+            selected = highlighted
             if selected and selected != stripped:
                 try:
                     parsed = parse_command_line(selected)
@@ -4166,6 +4160,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     next_hint = suggested_next_action(label, exit_code)
                     self.activity_model.finish_entry(
                         exit_code,
+                        # The header said "exit 0 (0:00:00)" for a 13 s run
+                        # because the duration was never passed (GAP-1160).
+                        timedelta(seconds=float(event.duration or 0.0)),
                         cancelled=event.cancelled,
                         config_reloaded=config_reloaded,
                         restart_completed=restart_completed,
@@ -4458,7 +4455,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 0 A V N R P", "Switch panel (Tab / Ctrl+P where digits are taken)"),
+            ("1-9 0 A V N R P T", "Switch panel (Tab / Ctrl+P where digits are taken)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
@@ -4466,7 +4463,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("Ctrl+\\", "Pick a colour theme"),
             ("Y / Ctrl+S", "Copy / save the last command's output"),
             ("D", "Run doctor in the background"),
-            ("Ctrl+C", "Cancel running command (or quit when idle)"),
+            ("Ctrl+C", "Quit DefenseClaw (cancels the running command first)"),
+            ("q", "Close the drawer or overlay (does not quit)"),
         ]
 
         # Per-active-panel cheat sheets. Anything we don't have a
@@ -4478,9 +4476,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
-                ("m", "Switch connector mode"),
+                ("m", "Filter by connector (Overview, Alerts, Audit, Logs)"),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
-                ("N", "Turn notifications on or off"),
+                ("b", "Turn desktop notifications on or off"),
                 ("u / X", "Upgrade / uninstall (both preview first)"),
             ],
             "alerts": [
@@ -4528,7 +4526,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l or Tab", "Switch sub-tab"),
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
-                ("1 / 2-4", "Show all / filter the Skills and Plugins sub-tabs"),
+                ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
                 ("o", "Toggle a faster scan of skills and plugins only"),
                 ("r", "Scan inventory"),
             ],
@@ -4543,7 +4541,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("G / g", "Jump to end / start"),
                 ("a / t / s", "Verdicts: filter action / event type / severity"),
                 ("J", "Verdicts: judge response history"),
-                ("N", "Turn notifications on or off"),
+                ("b", "Turn desktop notifications on or off"),
             ],
             "audit": [
                 ("j/k or Up/Down", "Navigate entries"),
@@ -4598,7 +4596,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("Enter / Esc", "Open / close detail"),
                 ("s / S", "Sync the selected source / sync all"),
                 ("a / x", "Approve / reject the selected entry"),
-                ("R", "Require registry approval for the entry's type"),
+                ("e", "Require (or stop requiring) registry approval for the entry's type"),
                 ("d", "Remove the selected source"),
                 ("r", "Refresh"),
             ],
@@ -4755,9 +4753,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
-            if self.active_panel == "plugins" and not self._plugins_visible_for_connector():
-                self.body_text = f"[bold #22D3EE]Plugins[/]\n\n{self.plugins_model.openclaw_only_notice()}"
-                return self.body_text
             self._sync_catalog_connector_filters()
             self._table_columns = model.data_table_columns()
             self._table_rows = model.data_table_rows()
@@ -5652,7 +5647,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         key_by_button = {
             "logs-toggle-pause": "space",
-            "logs-notifications": "N",
+            "logs-notifications": "b",
             "logs-judge-history": "J",
         }
         if button_id in key_by_button:
@@ -6224,7 +6219,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             guardrail_bits: list[str] = [
                 f"[{TOKENS.accent_green}]{guardrail_mode}[/]"
             ]
-            if cfg and cfg.guardrail_port:
+            if cfg and cfg.guardrail_port and cfg.uses_guardrail_proxy_port():
                 guardrail_bits.append(f":{cfg.guardrail_port}")
             llm_label = self._compact_llm_provider(
                 cfg.llm_provider if cfg else "",
@@ -8437,6 +8432,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         )
         for display_name, key in services_layout:
             state = state_by_key.get(key, "unknown")
+            # The gateway does not report sink health yet; a permanent
+            # "unknown" row only adds noise (GAP-1158).
+            if key == "sinks" and not _service_reported(state):
+                continue
             color = state_color(state)
             normalized = (state or "").strip().lower()
             dot = "●" if normalized in {"running", "active", "enabled", "clean", "allowed"} else "○"
@@ -8906,10 +8905,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("d", "Doctor"),
             ("i", "Inventory"),
             ("g", "Guardrail"),
-            ("m", "Mode"),
+            ("m", "Connector"),
             ("p", "Policies"),
             ("l", "Logs"),
-            ("N", "Notify"),
+            ("b", "Notify"),
             ("u", "Upgrade"),
             ("X", "Uninstall"),
             ("?", "Help"),
@@ -9479,7 +9478,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("Watchdog", state_by_key.get("watcher", "unknown"), detail_by_key.get("watcher", "")),
             ("Guardrail", state_by_key.get("guardrail", "unknown"), detail_by_key.get("guardrail", "")),
             ("API", state_by_key.get("api", "unknown"), detail_by_key.get("api", "")),
-            ("Sinks", state_by_key.get("sinks", "unknown"), detail_by_key.get("sinks", "")),
+            *(
+                (("Sinks", state_by_key["sinks"], detail_by_key.get("sinks", "")),)
+                if _service_reported(state_by_key.get("sinks", ""))
+                else ()
+            ),
             ("Telemetry", state_by_key.get("telemetry", "unknown"), detail_by_key.get("telemetry", "")),
             ("AI Discovery", state_by_key.get("ai_discovery", "unknown"), detail_by_key.get("ai_discovery", "")),
         ]
@@ -9887,6 +9890,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 tuple(sorted(setup_keys.setup_conditions(self.setup_model))) if self.active_panel == "setup" else ()
             ),
             panel_has_rows=bool(self._table_rows) if active_panel == "sandboxes" else True,
+            not_configured=self.config is None,
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
@@ -10695,8 +10699,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if key in {"i", "l", "p"}:
                 self.action_switch_panel({"i": "inventory", "l": "logs", "p": "policies"}[key])
                 return True
-            if key in {"N", "X"}:
-                if key == "N":
+            # ``b`` (bell), not ``N``: N is the Runtime tab key (GAP-1159).
+            if key in {"b", "X"}:
+                if key == "b":
                     self.run_worker(self._open_notifications_toggle(), exclusive=False, thread=False)
                 else:
                     self.run_worker(self._open_uninstall_modal(), exclusive=False, thread=False)
@@ -11216,6 +11221,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
             # size the Field column and push values off an 80-column screen;
             # the focused field's full label is in the body line above.
+            width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
+            if 0 < width < 100:
+                # Narrow: the hint is already in the body line, and long values
+                # end with "…" so the Validation column stays on screen (GAP-1166).
+                value_room = max(12, width - 34 - 12 - 10)
+                return (
+                    ("Field", "Value", "Validation"),
+                    tuple(
+                        (
+                            _truncate_ellipsis(field.label, 30),
+                            _truncate_ellipsis(_config_display_value(field), value_room),
+                            _truncate_ellipsis(_validation_label(field), 12),
+                        )
+                        for field in section.fields
+                    ),
+                )
             return (
                 ("Field", "Value", "Validation", "Hint"),
                 tuple(
@@ -11758,7 +11779,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if storage_changed:
                 self._schedule_signal_data_refresh()
             self._schedule_active_panel_refresh("config-save")
-            self.setup_model.queue_restart(restart_reason)
+            # Record the gateway's current start time so the next health poll
+            # can clear the banner once the gateway really restarted.
+            self.setup_model.queue_restart(
+                restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
+            )
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
@@ -11997,6 +12022,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._refresh_hint()
 
     async def _handle_successful_command(self, binary: str, args: tuple[str, ...]) -> None:
+        if binary == "defenseclaw-gateway" and args[:1] in {("restart",), ("start",)}:
+            # A successful restart (G on the queued-restart banner) applies the
+            # queued config; the banner used to stay up afterwards (GAP-1161).
+            self.setup_model.clear_restart_queue()
+            return
         if binary != "defenseclaw" or not args:
             return
         command = args[0]
@@ -12232,6 +12262,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         self.config = new_cfg
         self.data_dir = new_data_dir
+        self.overview_model.not_configured = new_cfg is None
         self.overview_model.set_cfg(new_overview_cfg)
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)
@@ -13968,9 +13999,14 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
 
         trust = _trusted_gateway_listener(config)
     except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
-        return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
+        return GatewayHealthResult("error", "gateway listener identity is unavailable")
     if not trust.trusted:
-        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+        if getattr(trust, "code", "") == "missing":
+            # No PID file: the gateway was never started or was stopped.
+            # Report it as offline so the Overview gives the start command
+            # instead of an identity error (GAP-1110).
+            return GatewayHealthResult("offline", "the gateway is not running")
+        return GatewayHealthResult("error", f"gateway listener identity is unverified: {trust.detail}")
 
     try:
         document = client.status()
@@ -15094,6 +15130,17 @@ def _truncate_for_strip(value: str, width: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+_LOAD_STATUS_RE = re.compile(r"^(Loading .+\.\.\.|.+: \d+ loaded\.|Inventory updated\.)$")
+
+
+def _is_load_status(text: object) -> bool:
+    return bool(_LOAD_STATUS_RE.match(str(text or "")))
+
+
+def _service_reported(state: str) -> bool:
+    return (state or "").strip().lower() not in {"", "unknown"}
 
 
 def _palette_risk_style(badge: str) -> str:
