@@ -481,6 +481,16 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
 
     if code == "secret_reference_unresolved" and "protected credential" not in text:
         env = ""
+        if isinstance(node, yaml.MappingNode):
+            # setup writes the reference as a mapping, {env: NAME} (GAP-1442).
+            node = next(
+                (
+                    value
+                    for key, value in node.value
+                    if isinstance(key, yaml.ScalarNode) and key.value == "env" and isinstance(value, yaml.ScalarNode)
+                ),
+                None,
+            )
         if isinstance(node, yaml.ScalarNode):
             value = node.value.strip()
             reference = _ENV_REFERENCE.fullmatch(value)

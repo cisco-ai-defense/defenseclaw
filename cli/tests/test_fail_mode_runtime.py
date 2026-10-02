@@ -850,3 +850,28 @@ def test_unix_registration_freshness_requires_current_script_path(
             encoding="utf-8",
         )
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: observe connectors already run fail-open, and a mixed roster
+    # (hermes has no runtime registration) must not start a stopped gateway.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    reconcile.assert_called_once_with(cfg, "claudecode")
+    assert "closed → open" not in result.output
+    assert "(hermes): already open; saved as its own setting" in result.output
+    assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
+    assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"

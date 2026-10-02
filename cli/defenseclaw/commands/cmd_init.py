@@ -1797,6 +1797,9 @@ def _prompt_first_run(
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
         )
+        if "cursor" in action_set and (shared_fail or "").lower() == "open":
+            # GAP-1517: Cursor's hook contract ties failures to its mode.
+            ux.subhead("Cursor keeps fail mode closed: in action mode its hooks always fail closed.")
 
     # Offer the judge for every connector the operator selected for action.
     # Hook-contract downgrades still apply to the saved profile, but they
@@ -2327,7 +2330,14 @@ def _describe_connector_set(report, connectors: list[str]) -> None:
         cfg = cfg_mod.load(data_dir=report.data_dir)
     except Exception:  # noqa: BLE001 - keep the primary-only rows.
         return
-    modes = ", ".join(f"{name}={cfg.guardrail.effective_mode(name)}" for name in connectors)
+    def _mode(name: str) -> str:
+        # GAP-1517: an action connector's fail mode differs per connector.
+        mode = cfg.guardrail.effective_mode(name)
+        if str(mode).lower() != "action":
+            return f"{name}={mode}"
+        return f"{name}={mode} (fail {cfg.guardrail.effective_hook_fail_mode(name)})"
+
+    modes = ", ".join(_mode(name) for name in connectors)
     for step in report.setup:
         if step.name == "Guardrail" and step.status == "pass":
             step.detail = f"{len(connectors)} connectors: {modes}"

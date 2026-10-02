@@ -3728,6 +3728,19 @@ def _refresh_local_observability_bundle(data_dir: str, bundle_version: str) -> N
         if result.installed:
             ux.ok("Refreshed the local observability bundle", indent="    ")
     except (LocalObservabilityUpgradeError, ObservabilityV8UpgradeMigrationError, OSError) as exc:
+        if getattr(exc, "code", "") == "docker_state_unknown":
+            # GAP-1367: plain words, and nothing at all for a stack this
+            # config no longer sends to.
+            from defenseclaw.commands.cmd_setup_local_observability import _local_destination_enabled
+
+            if not _local_destination_enabled(data_dir):
+                return
+            ux.warn(
+                "the local observability stack was not refreshed: Docker could not be queried from this "
+                "account (is it in the docker group?). Check it with: defenseclaw setup local-observability status",
+                indent="    ",
+            )
+            return
         ux.warn(
             f"local observability bundle was not refreshed ({exc}); "
             "run 'defenseclaw setup local-observability status' to check it",

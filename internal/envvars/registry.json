@@ -967,6 +967,10 @@
         {
           "location": "internal/gateway/client.go",
           "description": "Client struct gates verbose logging on this var"
+        },
+        {
+          "location": "extensions/defenseclaw/src/log.ts",
+          "description": "OpenClaw plugin also prints its routine diagnostics when stdout is an interactive terminal"
         }
       ],
       "since": "0.1.0"

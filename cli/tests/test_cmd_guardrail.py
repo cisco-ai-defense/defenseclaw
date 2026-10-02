@@ -802,6 +802,13 @@ class PerConnectorToggleTests(unittest.TestCase):
 class PerConnectorFailModeTests(unittest.TestCase):
     """`guardrail fail-mode [open|closed] --connector X` — scoped override."""
 
+    def setUp(self):
+        # These cases restart a running gateway; a stopped one is left
+        # stopped (GAP-1370).
+        patcher = patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
@@ -1193,6 +1200,13 @@ class HILTCommandTests(unittest.TestCase):
 
 class BlockMessageCommandTests(unittest.TestCase):
     """`guardrail block-message [TEXT] [--clear] [--connector X]`."""
+
+    def setUp(self):
+        # These cases restart a running gateway; a stopped one is left
+        # stopped (GAP-1370).
+        patcher = patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_show_global_default_when_empty(self):
         runner = CliRunner()
