@@ -213,8 +213,32 @@ def test_windows_output_piped_through_a_legacy_console_uses_ascii_glyphs() -> No
         stream = ux.ascii_safe_redirected_stream(piped)
         console = _Stream(tty=True)
         assert ux.ascii_safe_redirected_stream(console) is console
-    stream.write("restarting... ✓ — Málaga")
-    assert piped.getvalue() == "restarting... OK - Málaga"
+    stream.write("restarting... ✓ — Málaga (≤1s)")
+    assert piped.getvalue() == "restarting... OK - Málaga (<=1s)"
+
+
+def test_alerts_table_stays_aligned_when_piped_through_ascii_stream() -> None:
+    # WIN2-U3-13 item 1: the stream turned a 1-cell "…" into "..." after Rich
+    # sized the columns, so cut cells overran the border.
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_alerts
+
+    event = SimpleNamespace(
+        severity="HIGH",
+        timestamp=datetime(2026, 10, 2, 4, 5),
+        action="guardrail-degraded-subsystem",
+        target="C:/Users/dcw-std1/.codex/hooks/very/long/target/path.json",
+        details="subsystem.degraded=" + "x" * 120,
+    )
+    out = io.StringIO()
+    with _render_mode(False), redirect_stdout(out):
+        cmd_alerts._render_table([event], store=None)
+    text = out.getvalue().translate(ux._ASCII_PRESENTATION_TRANSLATION)
+    rows = [line for line in text.splitlines() if line[:1] in "|+"]
+    assert rows and len({len(line) for line in rows}) == 1
+    assert "..." in text and not any(glyph in out.getvalue() for glyph in "…└┏┃")
 
 
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:
