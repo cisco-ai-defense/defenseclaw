@@ -386,10 +386,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer cancelCompletion()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
-			// Correlation persistence is fail-closed for the LLM event export,
-			// not for policy enforcement. The hook must still be evaluated if the
-			// local ledger is temporarily unavailable; the verdict keeps its local
-			// audit row and its decision export (finalizeAgentHook).
+			// Correlation persistence is fail-closed for the cross-call join IDs,
+			// not for policy enforcement or export. The hook must still be
+			// evaluated if the local ledger is temporarily unavailable; the
+			// verdict keeps its local audit row, its decision export
+			// (finalizeAgentHook) and its LLM event (hookLLMEventExportable).
 			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, correlationErr)
 			req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
@@ -509,7 +510,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// the emit stays BEFORE the evaluator (audit-honest ordering) and
 		// behavior is byte-for-byte unchanged.
 		deferManagedHookEmit := managedEnterpriseActive.Load()
-		if !deferManagedHookEmit && !req.SuppressCorrelationEmit {
+		if !deferManagedHookEmit && hookLLMEventExportable(req) {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -593,7 +594,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// still precedes the hook_decision event, preserving the OSS event
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
-		if deferManagedHookEmit && !req.SuppressCorrelationEmit {
+		if deferManagedHookEmit && hookLLMEventExportable(req) {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -644,6 +645,16 @@ func validAntigravityHookEvent(event string) bool {
 	default:
 		return false
 	}
+}
+
+// hookLLMEventExportable reports whether the hook's prompt/tool/response
+// event (the invoke_agent and execute_tool spans Galileo receives) is
+// exported. A hook whose correlation ledger write failed (disk full) is
+// exported without the cross-call join IDs, like its decision: otherwise
+// Galileo gets nothing while the local audit store is down (GAP-1536). Only
+// an exact replay of an already exported delivery stays unexported.
+func hookLLMEventExportable(req agentHookRequest) bool {
+	return !req.SuppressCorrelationEmit || req.CorrelationUnavailable
 }
 
 func (a *APIServer) finalizeAgentHook(
@@ -975,6 +986,8 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	var rawEventIDs []string
 	if !req.SuppressCorrelationEmit {
 		rawEventIDs = a.rememberHookRawEvents(req)
+	}
+	if hookLLMEventExportable(req) {
 		a.emitAgentHookLLMEvent(ctx, req, rawBody)
 	}
 
