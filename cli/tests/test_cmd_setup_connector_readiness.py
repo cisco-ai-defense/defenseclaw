@@ -498,7 +498,25 @@ def test_setup_wait_commits_truthful_hermes_pending_reload(monkeypatch, tmp_path
     assert readiness.invariant != "pending-reload"
 
 
-def test_setup_wait_does_not_skip_an_idle_opencode_peer(monkeypatch, tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize(
+    ("invariant", "detail"),
+    [
+        (
+            "live-runtime",
+            "OpenCode hooks: warn: managed plugin digest current; runtime load unverified: "
+            "no authenticated load heartbeat; OpenCode may be stopped or idle",
+        ),
+        # GAP-1763: right after the restart the status has no OpenCode row yet.
+        (
+            "digest",
+            "OpenCode hooks: warn: plugin installed at ~/.config/opencode/plugins/defenseclaw.js "
+            "(digest current); runtime load unverified: authenticated status has no OpenCode connector row",
+        ),
+    ],
+)
+def test_setup_wait_does_not_skip_an_idle_opencode_peer(
+    monkeypatch, tmp_path: Path, capsys, invariant: str, detail: str
+) -> None:
     """GAP-1271: a stopped OpenCode peer is not 'skipped' with a re-run hint."""
     cfg = _config(tmp_path)
     entries = {name: _entry(name, tmp_path) for name in ("codex", "opencode")}
@@ -514,13 +532,7 @@ def test_setup_wait_does_not_skip_an_idle_opencode_peer(monkeypatch, tmp_path: P
 
     def readiness(_cfg, name):
         if name == "opencode":
-            return cmd_doctor.ConnectorSetupReadiness(
-                False,
-                "opencode",
-                "live-runtime",
-                "OpenCode hooks: warn: managed plugin digest current; runtime load unverified: "
-                "no authenticated load heartbeat; OpenCode may be stopped or idle",
-            )
+            return cmd_doctor.ConnectorSetupReadiness(False, "opencode", invariant, detail)
         return cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
 
     monkeypatch.setattr(cmd_doctor, "connector_setup_readiness", readiness)

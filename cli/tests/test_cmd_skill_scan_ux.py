@@ -266,6 +266,20 @@ class TestPathTargetUX(_SkillScanUXBase):
         self.assertNotIn("on openclaw", result.output)
 
 
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_json_names_no_connector(self, mock_cls) -> None:
+        # GAP-1766: the JSON matches the banner, not "connector": "openclaw".
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+        self.app.cfg.claw.mode = ""
+        mock_cls.return_value.scan.return_value = self._clean_result(self.skill_dir)
+        result = self.invoke(["scan", self.skill_dir, "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output[result.output.index("{"):])
+        self.assertNotIn("connector", payload)
+
+
 def test_skill_finding_line_counts_front_matter(tmp_path) -> None:
     # GAP-1599: the SDK numbers SKILL.md lines after the front matter.
     from defenseclaw.scanner.skill import _snippet_file_line

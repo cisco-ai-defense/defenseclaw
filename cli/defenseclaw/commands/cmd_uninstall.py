@@ -317,6 +317,9 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
         ux.subhead("Kept:")
         for line in kept:
             click.echo(f"  • {line}")
+    if plan.remove_binaries:
+        _render_next_steps_without_commands(plan)
+        return
     ux.subhead("Next steps:")
     if plan.remove_data_dir:
         click.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
@@ -336,6 +339,33 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
         click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(developer)}")
         return
     click.echo("  • remove everything:         defenseclaw uninstall --all --binaries")
+
+
+_INSTALL_URL = "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download"
+
+
+def _render_next_steps_without_commands(plan: UninstallPlan) -> None:
+    """Next steps after --binaries kept the data: none may run defenseclaw (GAP-1745)."""
+    windows = plan.platform_name == "win32"
+    ux.subhead("Next steps (the defenseclaw command was removed):")
+    if plan.data_dir and windows:
+        click.echo("  • remove the kept data (PowerShell):")
+        click.echo(f"      Remove-Item -Recurse -Force -LiteralPath {_powershell_quoted_paths([plan.data_dir])}")
+    elif plan.data_dir:
+        import shlex
+
+        click.echo(f"  • remove the kept data:      rm -rf {shlex.quote(plan.data_dir)}")
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    if managed_deployment():
+        # The organization's deployment installs DefenseClaw and guards the
+        # account; a per-user reinstall is not the way back.
+        return
+    click.echo("  • use DefenseClaw again:     reinstall it, then run 'defenseclaw setup guardrail'")
+    if windows:
+        click.echo(f"      irm {_INSTALL_URL}/install.ps1 | iex")
+    else:
+        click.echo(f"      curl -LsSf {_INSTALL_URL}/install.sh | bash")
 
 
 def _dispatch_native_windows_uninstall(

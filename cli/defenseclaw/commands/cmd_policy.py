@@ -463,7 +463,7 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
 )
 @pass_ctx
 def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
-    """Activate a policy — applies it to config.yaml and syncs OPA data.json.
+    """Activate a policy — makes it the policy DefenseClaw enforces.
 
     By default the running gateway is then asked to reload its policy
     (POST /policy/reload) so the change takes effect immediately. If the
@@ -528,6 +528,29 @@ def _gateway_pid_alive(app: AppContext) -> bool:
 
 
 _SEVERITY_RANK_NAMES = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
+
+
+class _SeverityRank(click.ParamType):
+    """A guardrail threshold: LOW, MEDIUM, HIGH, CRITICAL (any case) or 1-4 (GAP-1724)."""
+
+    name = "LEVEL"
+
+    def get_metavar(self, param, ctx=None) -> str:  # noqa: ARG002 - click API
+        return "[LOW|MEDIUM|HIGH|CRITICAL|1-4]"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int) and value in _SEVERITY_RANK_NAMES:
+            return value
+        text = str(value).strip()
+        by_name = {label: rank for rank, label in _SEVERITY_RANK_NAMES.items()}
+        if text.upper() in by_name:
+            return by_name[text.upper()]
+        if text.isdigit() and int(text) in _SEVERITY_RANK_NAMES:
+            return int(text)
+        self.fail(f"{value!r} is not a severity. Use LOW, MEDIUM, HIGH, CRITICAL or 1-4.", param, ctx)
+
+
+_SEVERITY_RANK = _SeverityRank()
 
 
 def _severity_rank_label(value: object) -> str:
@@ -739,7 +762,6 @@ def _activate_policy(app: AppContext, name: str) -> str:
                     )
             app.cfg.webhooks = merged
     app.cfg.save()
-    click.echo(f"Config updated with policy '{name}'.")
     for note in webhook_notes:
         click.echo(f"  {note}")
 
@@ -838,7 +860,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
                    "~/.defenseclaw/policies/rego; the bundled copy before init)")
 @pass_ctx
 def validate(app: AppContext, rego_dir: str | None) -> None:
-    """Validate OPA Rego modules and data.json schema.
+    """Check the policy rule files (Rego modules and data.json) for errors.
 
     Checks:\n
       1. data.json is valid JSON with required top-level keys\n
@@ -990,7 +1012,7 @@ def edit() -> None:
 
     Each edit changes the active policy unless --policy-name (-p) names
     another one; the result line names the policy it changed. Editing the
-    active policy also syncs OPA data.json and, by default, asks the running
+    active policy applies the change and, by default, asks the running
     gateway to reload it (``--no-reload`` to skip). Editing any other policy
     only saves the draft.
     """
@@ -1121,10 +1143,10 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
 
 
 @edit.command("guardrail")
-@click.option("--block-threshold", type=int, default=None,
-              help="Minimum severity rank to block (1=LOW .. 4=CRITICAL)")
-@click.option("--alert-threshold", type=int, default=None,
-              help="Minimum severity rank to alert (1=LOW .. 4=CRITICAL)")
+@click.option("--block-threshold", type=_SEVERITY_RANK, default=None,
+              help="Lowest severity to block: LOW, MEDIUM, HIGH, CRITICAL (or 1-4)")
+@click.option("--alert-threshold", type=_SEVERITY_RANK, default=None,
+              help="Lowest severity to alert on: LOW, MEDIUM, HIGH, CRITICAL (or 1-4)")
 @click.option("--cisco-trust-level", type=click.Choice(["full", "advisory", "none"]), default=None,
               help="How Cisco AI Defense verdicts count: full (can block), advisory (shown, never block), none")
 @click.option("--add-pattern", nargs=2, multiple=True, metavar="CATEGORY PATTERN",
@@ -1141,7 +1163,8 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
                    set_severity_mapping: tuple, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit guardrail thresholds, patterns, and severity mappings.
 
-    Thresholds are severity ranks (4=CRITICAL, 3=HIGH, 2=MEDIUM, 1=LOW).
+    Thresholds are severities: LOW, MEDIUM, HIGH or CRITICAL (or their
+    ranks 1-4).
     They govern LLM traffic through the guardrail proxy only. Tool calls
     from hook connectors (Claude Code, Codex, ...) are blocked at the level
     set with 'defenseclaw guardrail block-at' / 'alert-at' instead.
@@ -1621,8 +1644,6 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     with open(data_json_path, "w") as f:
         json.dump(opa_data, f, indent=2)
         f.write("\n")
-
-    click.echo(ux.dim(f"OPA data.json synced at {data_json_path}"))
 
 
 def _has_rego_tests(rego_dir: str) -> bool:

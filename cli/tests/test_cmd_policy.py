@@ -569,6 +569,29 @@ class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
             dj = json.load(f)
         self.assertEqual(dj["guardrail"]["block_threshold"], 3)
 
+    def test_edit_guardrail_threshold_takes_severity_names(self):
+        """GAP-1724/GAP-1725: names like policy show prints; no plumbing lines."""
+        import yaml
+
+        activated = self.invoke(["activate", "default"])
+        self.assertEqual(activated.exit_code, 0, activated.output)
+        result = self.invoke(
+            ["edit", "guardrail", "--block-threshold", "high", "--alert-threshold", "MEDIUM",
+             "-p", "default", "--no-reload"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("block_threshold=HIGH (3)", result.output)
+        with open(os.path.join(self.app.cfg.policy_dir, "default.yaml")) as f:
+            data = yaml.safe_load(f)
+        self.assertEqual((data["guardrail"]["block_threshold"], data["guardrail"]["alert_threshold"]), (3, 2))
+        for output in (activated.output, result.output):
+            self.assertNotIn("data.json", output)
+            self.assertNotIn("Config updated", output)
+
+        bad = self.invoke(["edit", "guardrail", "--block-threshold", "5", "-p", "default", "--no-reload"])
+        self.assertEqual(bad.exit_code, 2, bad.output)
+        self.assertIn("Use LOW, MEDIUM, HIGH, CRITICAL or 1-4", bad.output)
+
     def test_edit_nonactive_builtin_copies_without_sync(self):
         import yaml
 
