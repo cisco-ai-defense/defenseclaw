@@ -412,7 +412,7 @@ def manual_set_verdict(
             # ``status`` so list filters and the TUI badge reflect
             # the decision before the next scan run.
             if verdict.status == "blocked":
-                verdict.status = "pending"
+                verdict.status = _status_after_decision(verdict)
     if rejected is not None:
         verdict.rejected = rejected
         if rejected:
@@ -427,9 +427,26 @@ def manual_set_verdict(
             # so a subsequent scan can write a real verdict without
             # an explicit re-approve.
             if verdict.status == "blocked":
-                verdict.status = "pending"
+                verdict.status = _status_after_decision(verdict)
     save_index(data_dir, source_id, idx)
     return verdict
+
+
+def _status_after_decision(verdict: EntryVerdict) -> str:
+    """The status an approve or un-reject leaves behind.
+
+    A reject overwrote the scanner's status with ``blocked``; the scan facts
+    are still cached, so a scanned entry gets its last verdict back instead of
+    ``pending`` (GAP-1764). An entry the scanner itself blocked, or one never
+    scanned, becomes ``pending`` until the next scan.
+    """
+    if verdict.error:
+        return "error"
+    if not verdict.last_scanned_at or verdict.severity in _BLOCKING_SEVERITIES:
+        return "pending"
+    if verdict.severity in _WARNING_SEVERITIES:
+        return "warning"
+    return "clean"
 
 
 def promote_from_cache(
