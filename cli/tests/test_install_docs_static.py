@@ -941,3 +941,14 @@ def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
     assert "/docs/policies/rulepack-validation" in overview
     assert "invalid Go regular expression" in validation
     assert "does not silently discard the bad file" in " ".join(validation.split())
+
+
+def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
+    # GAP-1191: ai_discovery.enabled defaults to false, so the managed
+    # install pages and every sample config must turn it on explicitly.
+    for page in ("linux.mdx", "macos.mdx"):
+        text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text()
+        assert "ai_discovery:\n  enabled: true" in text, page
+    configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text()
+    samples = configuration[configuration.index("## Sample configs"):]
+    assert samples.count("ai_discovery:\n  enabled: true") == 3
