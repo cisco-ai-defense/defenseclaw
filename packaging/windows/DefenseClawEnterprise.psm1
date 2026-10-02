@@ -16248,6 +16248,7 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
     }
 
     $issues = [Collections.Generic.List[string]]::new()
+    $pendingCount = 0
     $resultsProperty = $report.PSObject.Properties['results']
     if ($null -ne $resultsProperty) {
         foreach ($row in @($resultsProperty.Value)) {
@@ -16258,6 +16259,15 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
             if ($null -ne $rowOK -and
                 $rowOK.Value -is [bool] -and
                 [bool]$rowOK.Value) {
+                continue
+            }
+            # A deferred row of a signed-out account is pending, not a
+            # failure: list it after the real causes (GAP-1940).
+            $pendingProperty = $row.PSObject.Properties['pending']
+            if ($null -ne $pendingProperty -and
+                $pendingProperty.Value -is [bool] -and
+                [bool]$pendingProperty.Value) {
+                $pendingCount++
                 continue
             }
 
@@ -16312,6 +16322,12 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
     if ($issues.Count -eq 0) {
         $issues.Add(
             'verifier reported failure without a per-target diagnostic'
+        )
+    }
+    if ($pendingCount -gt 0) {
+        $issues.Add(
+            "$pendingCount target(s) of signed-out accounts are pending " +
+            'until those accounts sign in (not failures)'
         )
     }
     return ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')

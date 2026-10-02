@@ -1827,6 +1827,10 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 	}
 	home = filepath.Clean(abs)
 	info, err := os.Lstat(home)
+	if errors.Is(err, os.ErrNotExist) {
+		// Name the cause, not the raw Win32 lookup error (GAP-1940).
+		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (%w)", home, os.ErrNotExist)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)
 	}

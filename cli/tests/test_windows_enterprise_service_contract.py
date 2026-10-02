@@ -1910,6 +1910,9 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "PSObject.Properties['authorization_error']" in guardian_failure
     assert "ConvertTo-DefenseClawBoundedDiagnostic" in guardian_failure
     assert "verification failed without a target error" in guardian_failure
+    # GAP-1940: pending rows of signed-out accounts are counted, not failures.
+    assert "PSObject.Properties['pending']" in guardian_failure
+    assert "are pending " in guardian_failure
     assert "ready = $ready" in guardian_probe
     assert "return [bool]$readiness.ready" in guardian_boolean
     assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
