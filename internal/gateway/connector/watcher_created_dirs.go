@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -115,19 +116,34 @@ func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) er
 }
 
 // missingConfigDirs returns the missing folders between the home directory
-// and each agent config file conn writes, deepest first.
+// and each agent file conn writes, deepest first: its hook config files and
+// the agent files its Setup patches (AgentPaths: OpenCode's plugin and
+// opencode.json, say, which make ~/.config/opencode in a home where OpenCode
+// never ran). Files in the data directory are DefenseClaw's own and go with it.
 func missingConfigDirs(conn Connector, opts SetupOpts) []string {
 	home := strings.TrimSpace(userHomeDir())
 	if home == "" || conn == nil {
 		return nil
 	}
 	home = filepath.Clean(home)
+	paths := HookConfigPathsForConnector(conn, opts)
+	if provider, ok := conn.(AgentPathProvider); ok {
+		paths = append(paths, provider.AgentPaths(opts).PatchedFiles...)
+	}
+	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
 	var missing []string
-	for _, path := range HookConfigPathsForConnector(conn, opts) {
+	for _, path := range uniqueNonEmptyStrings(paths) {
 		if !filepath.IsAbs(path) {
 			continue
 		}
-		missing = append(missing, missingParentDirs(home, path)...)
+		if strings.TrimSpace(opts.DataDir) != "" && (filepath.Clean(path) == dataDir || belowDir(dataDir, path)) {
+			continue
+		}
+		for _, dir := range missingParentDirs(home, path) {
+			if !slices.Contains(missing, dir) {
+				missing = append(missing, dir)
+			}
+		}
 	}
 	return missing
 }
