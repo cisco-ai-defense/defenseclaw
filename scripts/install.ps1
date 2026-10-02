@@ -577,7 +577,25 @@ function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
     Write-Info "Starting the gateway"
-    return Invoke-Native (Join-Path $BinDir "defenseclaw-gateway.exe") @("start")
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    $rc = Invoke-Native $gateway @("start")
+    if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
+    # A first start over a large audit database can outlast start's own
+    # 60-second readiness wait while the gateway keeps starting (GAP-1348).
+    # Wall-clock wait; up once status answers twice in a row.
+    Write-Info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    $deadline = (Get-Date).AddMinutes(3)
+    $up = 0
+    while ((Get-Date) -lt $deadline -and (Get-GatewayProcess)) {
+        Start-Sleep -Seconds 3
+        if ((Invoke-Native $gateway @("status") -Quiet) -eq 0) {
+            $up++
+            if ($up -ge 2) { Write-Ok "The gateway finished starting"; return 0 }
+        } else {
+            $up = 0
+        }
+    }
+    return $rc
 }
 
 function Get-ProcessesUnder([string[]]$Prefixes) {
