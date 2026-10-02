@@ -2375,10 +2375,13 @@ func TestHookContractChangedByDefenseClawReleaseOnlyForContractIDChanges(t *test
 			want:   true,
 		},
 		{
-			name: "same release",
+			// GAP-1467: a source build of the next release still reports the
+			// checked-in version of the last one.
+			name: "source build with the previous release's version string",
 			mutate: func(previous, current *HookContractLockEntry) {
 				current.DefenseClawVersion = previous.DefenseClawVersion
 			},
+			want: true,
 		},
 		{
 			name: "raw agent version changed",

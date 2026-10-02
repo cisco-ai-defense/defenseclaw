@@ -1543,16 +1543,19 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 }
 
 // HookContractChangedByDefenseClawRelease reports whether the only
-// compatibility drift is a ContractID that a different DefenseClaw release
-// resolved for the same agent version. A lock with no writer version predates
-// DefenseClawVersion and counts as a different release. Admission refreshes
-// such a lock instead of refusing it; any agent version change still drifts.
+// compatibility drift is a ContractID that DefenseClaw itself now resolves
+// differently for the same agent version. Admission refreshes such a lock
+// instead of refusing it; any agent version change still drifts.
+//
+// The writer's DefenseClawVersion is deliberately not compared: a release
+// binary always resolves the same contract for the same agent version, so a
+// changed contract with an unchanged agent comes from a different contract
+// table. A source build (make all) carries the checked-in development version,
+// which equals the last release (GAP-1467), so the version string cannot tell
+// the two tables apart.
 func HookContractChangedByDefenseClawRelease(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" || previous.ContractID == "" ||
 		current.ContractID == "" || previous.ContractID == current.ContractID {
-		return false
-	}
-	if previous.DefenseClawVersion != "" && previous.DefenseClawVersion == current.DefenseClawVersion {
 		return false
 	}
 	previousRaw := stableRawAgentVersionForContract(previous)
