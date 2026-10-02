@@ -84,6 +84,15 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 	return newCodexAppServerCommand(ctx, executable)
 }
 
+// errCodexAppServerNoAnswer marks a Codex app-server that closed its output
+// before it answered: it exited at startup and said nothing about the policy.
+var errCodexAppServerNoAnswer = errors.New("the Codex app-server exited before answering")
+
+// codexPolicyWarningOutput receives the policy fallback warning; tests replace it.
+var codexPolicyWarningOutput io.Writer = os.Stderr
+
+const codexPolicyNoAnswerHint = "if a Codex session is open (for example one that ran out of disk space), quit it, then run: defenseclaw-gateway restart"
+
 // enforceCodexUserHookPolicy prevents Setup from reporting success when Codex
 // will ignore the hook source DefenseClaw is about to write. Managed enterprise
 // Windows setup writes managed_config.toml, which is itself a Codex-managed
@@ -98,14 +107,53 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return fmt.Errorf("inspect effective Codex managed requirements: %w (%w)", err, ErrAgentVersionProbeTimeout)
 		}
+		if errors.Is(err, errCodexAppServerNoAnswer) && ctx.Err() == nil {
+			return codexPolicyAfterAppServerNoAnswer(opts, err)
+		}
 		return fmt.Errorf("inspect effective Codex managed requirements: %w", err)
 	}
+	return refuseCodexManagedHooksOnly(opts, policy)
+}
+
+func refuseCodexManagedHooksOnly(opts SetupOpts, policy codexEffectivePolicy) error {
 	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly && !codexUsesManagedHookLayer(opts) {
 		return fmt.Errorf(
 			"Codex user hooks are prohibited by allow_managed_hooks_only from %s; deploy the DefenseClaw hook through the administrator-managed Codex requirements source",
 			policy.Source,
 		)
 	}
+	return nil
+}
+
+// codexPolicyAfterAppServerNoAnswer handles a Codex app-server that exited
+// before it answered. An open Codex session that ran out of disk space leaves
+// Codex's state runtime unusable for new Codex processes until it is quit,
+// and that aborted the whole gateway start, so every agent stayed fail-closed
+// (GAP-1973, GAP-1983). When an earlier setup already admitted these per-user
+// Codex hooks through the full effective-requirements read, the documented
+// system requirements source decides and the gateway keeps enforcing, with a
+// warning. Otherwise Setup refuses before it changes anything and says what
+// to do.
+func codexPolicyAfterAppServerNoAnswer(opts SetupOpts, cause error) error {
+	previous := LoadHookContractLockEntry(opts.DataDir, "codex")
+	executable := filepath.Clean(strings.TrimSpace(opts.AgentExecutable))
+	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" || previous.Connector == "" ||
+		(previous.AgentExecutable != "" && filepath.Clean(previous.AgentExecutable) != executable) {
+		return setupRefusedUnchanged{err: fmt.Errorf(
+			"inspect effective Codex managed requirements: %w; %s", cause, codexPolicyNoAnswerHint)}
+	}
+	policy, err := inspectCodexSystemRequirementsForMode(false)
+	if err != nil {
+		return setupRefusedUnchanged{err: fmt.Errorf(
+			"inspect effective Codex managed requirements: %w; system requirements fallback: %v; %s",
+			cause, err, codexPolicyNoAnswerHint)}
+	}
+	if err := refuseCodexManagedHooksOnly(opts, policy); err != nil {
+		return err
+	}
+	fmt.Fprintf(codexPolicyWarningOutput,
+		"[guardrail] WARNING: connector codex: could not read Codex's effective managed requirements (%v); kept enforcing the hooks an earlier setup admitted, checked against %s; %s\n",
+		cause, policy.Source, codexPolicyNoAnswerHint)
 	return nil
 }
 
@@ -453,9 +501,12 @@ func waitCodexRPC(
 			return codexRPCEnvelope{}, fmt.Errorf("timed out waiting for response %d: %w", wantID, ctx.Err())
 		case event, ok := <-events:
 			if !ok {
-				return codexRPCEnvelope{}, errors.New("app-server response stream closed")
+				return codexRPCEnvelope{}, fmt.Errorf("app-server response stream closed (%w)", errCodexAppServerNoAnswer)
 			}
 			if event.Err != nil {
+				if errors.Is(event.Err, io.EOF) || errors.Is(event.Err, io.ErrUnexpectedEOF) {
+					return codexRPCEnvelope{}, fmt.Errorf("read app-server response: %w (%w)", event.Err, errCodexAppServerNoAnswer)
+				}
 				return codexRPCEnvelope{}, fmt.Errorf("read app-server response: %w", event.Err)
 			}
 			envelope := event.Envelope
