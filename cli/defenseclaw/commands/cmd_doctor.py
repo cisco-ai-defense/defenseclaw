@@ -6225,6 +6225,35 @@ _HERMES_LAUNCHERS = frozenset(
 )
 
 
+def _hermes_argv_verdict(args, basename=os.path.basename) -> bool | None:
+    """Classify one process argv: True a Hermes host, None maybe one, False not.
+
+    Only an interpreter or launcher can run Hermes under another name. Any
+    other program (an agent whose prompt mentions Hermes, an editor) is not a
+    Hermes host, whatever words its arguments hold.
+    """
+
+    def name(arg: str) -> str:
+        base = basename(arg).lower()
+        return base[:-4] if base.endswith(".exe") else base
+
+    if not args:
+        return None
+    program = name(args[0])
+    if program in _HERMES_HOST_EXECUTABLES:
+        return True
+    if not (program.startswith("python") or program in _HERMES_LAUNCHERS):
+        return False
+    # A script launcher puts the interpreter first: python .../bin/hermes.
+    if len(args) > 1 and name(args[1]) in _HERMES_HOST_EXECUTABLES:
+        return True
+    # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
+    # that is not proof of absence.
+    if any(name(arg) in _HERMES_HOST_EXECUTABLES or arg.lower().startswith("hermes_cli") for arg in args[2:]):
+        return None
+    return False
+
+
 def _hermes_host_running() -> bool | None:
     """Whether a Hermes host runs as this account; ``None`` when unknown.
 
@@ -6255,24 +6284,10 @@ def _hermes_host_running() -> bool | None:
         fields = line.split()
         if len(fields) < 3 or fields[1] != uid or fields[0] in own:
             continue
-        args = fields[2:]
-        program = os.path.basename(args[0]).lower()
-        if program in _HERMES_HOST_EXECUTABLES:
+        verdict = _hermes_argv_verdict(fields[2:])
+        if verdict is True:
             return True
-        # Only an interpreter or launcher can run Hermes under another name.
-        # Any other program (an agent whose prompt mentions Hermes, an
-        # editor) is not a Hermes host, whatever words its arguments hold.
-        if not (program.startswith("python") or program in _HERMES_LAUNCHERS):
-            continue
-        # A script launcher puts the interpreter first: python .../bin/hermes.
-        if len(args) > 1 and os.path.basename(args[1]).lower() in _HERMES_HOST_EXECUTABLES:
-            return True
-        # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
-        # that is not proof of absence.
-        if any(
-            os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES or arg.lower().startswith("hermes_cli")
-            for arg in args[2:]
-        ):
+        if verdict is None:
             wrapped = True
     return None if wrapped else False
 
@@ -6284,6 +6299,44 @@ _WINDOWS_PROCESS_LISTING_PS = (
     "catch { $p = Get-Process }; "
     "$q = [char]34; $p | ForEach-Object { $q + $_.ProcessName + $q + ',' + $q + $_.Id + $q }"
 )
+
+
+def _windows_process_command_lines(pids: list[str]) -> dict[str, str] | None:
+    """Command lines of these PIDs as ``{pid: command line}``; None when unknown.
+
+    A PID that is gone is left out; one whose command line cannot be read maps
+    to an empty string.
+    """
+    import shutil
+
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    ids = [pid for pid in pids if pid.isdigit()]
+    if not shell or not ids:
+        return None
+    script = (
+        f"$ids = @({','.join(ids)}); "
+        "Get-CimInstance -ClassName Win32_Process | Where-Object { $ids -contains [int]$_.ProcessId } | "
+        "ForEach-Object { [string]$_.ProcessId + [char]9 + ([string]$_.CommandLine -replace '[\\r\\n]', ' ') }"
+    )
+    try:
+        proc = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    lines: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        pid, _, command_line = line.partition("\t")
+        if pid.strip().isdigit():
+            lines[pid.strip()] = command_line.strip()
+    return lines
 
 
 def _windows_process_listing_powershell() -> str | None:
@@ -6317,8 +6370,10 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
     """Windows form of :func:`_hermes_host_running` (GAP-1298).
 
     ``tasklist`` lists this account's processes by image name only, so a
-    hermes.exe is proof of a host, any interpreter or launcher leaves it
-    unknown, and anything else means no Hermes host is running.
+    hermes.exe is proof of a host and anything other than an interpreter or
+    launcher is not one. An interpreter or launcher is judged by its command
+    line, as on Unix: DefenseClaw's own TUI is a python.exe too (GAP-1605).
+    An unreadable command line leaves it unknown.
     """
     if tasklist_output is None:
         user = os.environ.get("USERNAME", "")
@@ -6347,23 +6402,41 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
                 return None
     import csv
 
+    import ntpath
+
     own = {str(os.getpid()), str(os.getppid())}
-    unknown = False
+    candidates: list[str] = []
     listed = False
     for fields in csv.reader(tasklist_output.splitlines()):
         if len(fields) < 2 or not fields[1].strip().isdigit():
             continue
         listed = True
-        if fields[1].strip() in own:
+        pid = fields[1].strip()
+        if pid in own:
             continue
         program = fields[0].strip().lower().removesuffix(".exe")
         if program in _HERMES_HOST_EXECUTABLES:
             return True
         if program.startswith("python") or program in _HERMES_LAUNCHERS:
-            unknown = True
+            candidates.append(pid)
     if not listed:
         return None  # tasklist printed only an "INFO: no tasks" line or nothing usable
-    return None if unknown else False
+    if not candidates:
+        return False
+    command_lines = _windows_process_command_lines(candidates)
+    if command_lines is None:
+        return None
+    wrapped = False
+    for pid in candidates:
+        if pid not in command_lines:
+            continue  # exited since the listing
+        argv = _windows_command_line_argv(command_lines[pid])
+        verdict = _hermes_argv_verdict(argv, ntpath.basename) if argv else None
+        if verdict is True:
+            return True
+        if verdict is None:
+            wrapped = True
+    return None if wrapped else False
 
 
 def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> WindowsHookCheck:

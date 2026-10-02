@@ -434,6 +434,30 @@ def test_omnigent_without_a_server_record_reads_plainly(tmp_path, monkeypatch) -
     assert pid == 0 and detail == "OmniGent server has not started yet (no server record)"
 
 
+def test_windows_hermes_check_reads_python_command_lines() -> None:
+    # GAP-1605: DefenseClaw's own TUI is a python.exe; only a Hermes command line is a host.
+    listing = '"pwsh.exe","4100"\n"python.exe","4400"\n"uv.exe","4500"\n'
+    tui = {"4400": r'"C:\u\python.exe" "C:\u\Scripts\defenseclaw.exe" tui', "4500": "uv.exe tool run x"}
+    argv = lambda line: tuple(part.strip('"') for part in line.split()) if line else None  # noqa: E731
+    with (
+        mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=tui),
+        mock.patch.object(cmd_doctor, "_windows_command_line_argv", side_effect=argv),
+    ):
+        assert cmd_doctor._hermes_host_running_windows(listing) is False
+    host = dict(tui, **{"4400": r'"C:\u\python.exe" "C:\u\Scripts\hermes.exe" chat'})
+    with (
+        mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=host),
+        mock.patch.object(cmd_doctor, "_windows_command_line_argv", side_effect=argv),
+    ):
+        assert cmd_doctor._hermes_host_running_windows(listing) is True
+    for lines in ({"4400": "", "4500": "uv.exe x"}, None):  # unreadable command line, no listing
+        with (
+            mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=lines),
+            mock.patch.object(cmd_doctor, "_windows_command_line_argv", side_effect=argv),
+        ):
+            assert cmd_doctor._hermes_host_running_windows(listing) is None
+
+
 def test_windows_hermes_check_falls_back_to_get_process(monkeypatch) -> None:
     # GAP-1298: tasklist prints "ERROR: Access denied" for a standard user over SSH.
     import subprocess
