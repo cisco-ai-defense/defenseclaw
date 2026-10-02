@@ -50,6 +50,11 @@ LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _TIMEOUT = 30
 
+RECOVER_CORRUPT_AUDIT_NOTE = (
+    "  --recover-corrupt-audit is no longer needed: the gateway moves a corrupt audit store "
+    "aside and starts a new one by itself (see defenseclaw doctor)."
+)
+
 USAGE = """Usage: defenseclaw upgrade [--version X.Y.Z] [--yes]
        defenseclaw rollback [--yes]
 
@@ -163,6 +168,9 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             options["version"] = args[index]
         elif command == "upgrade" and arg.startswith("--version="):
             options["version"] = arg.split("=", 1)[1]
+        elif command == "upgrade" and arg == "--recover-corrupt-audit":
+            # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
+            print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)
         else:
             raise ShimError(f"unknown option {arg!r} for 'defenseclaw {command}' (see --help)")
         index += 1
@@ -243,7 +251,10 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        print("  → The installer continues in a new window.")
+        home = os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
+        print("  → The installer continues in a new window, which shows the result when it ends.")
+        print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
+        print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
