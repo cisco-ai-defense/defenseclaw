@@ -73,6 +73,7 @@ class ConnectorCustodyStatus:
     credential_state: str = "no_recent_failure"
     last_native_activity: str = ""
     last_authentication_failure: str = ""
+    drop_only_signals: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -173,9 +174,11 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             detail = f"drop-only native stream ({drop_only}/{normalized} batches); no accepted native delivery observed"
         elif drop_only:
             state = "partial_drop_only"
+            signals = ", ".join(item.drop_only_signals)
             detail = (
-                f"partial drop-only evidence ({drop_only}/{normalized} batches); "
-                "accepted native delivery observed in remaining batches"
+                f"partial drop-only evidence ({drop_only}/{normalized} batches"
+                + (f"; dropped signals: {signals}" if signals else "")
+                + "); accepted native delivery observed in remaining batches"
             )
         else:
             state = "accepted"
@@ -271,6 +274,7 @@ def inspect_connector_custody(
             # they share a connector name.
             evidence_connector = connector if is_default else ""
             normalized, drop_only = _batch_counts(evidence, evidence_connector)
+            drop_signals = _drop_only_signals(evidence, evidence_connector)
             last_native = evidence.last_native.get(evidence_connector)
             last_auth = evidence.last_auth.get(evidence_connector)
             instances.append(
@@ -284,6 +288,7 @@ def inspect_connector_custody(
                     managed_config_files=managed_files,
                     normalized_batches=normalized,
                     drop_only_batches=drop_only,
+                    drop_only_signals=drop_signals,
                     authentication_failures=evidence.auth_count.get(evidence_connector, 0),
                     credential_state=_credential_state(last_auth, last_native),
                     last_native_activity=_format_time(last_native),
@@ -434,6 +439,16 @@ def _batch_counts(evidence: _Evidence, connector: str) -> tuple[int, int]:
         if count > 0 and evidence.dropped.get(key, 0) >= count:
             drop_only += 1
     return batches, drop_only
+
+
+def _drop_only_signals(evidence: _Evidence, connector: str) -> tuple[str, ...]:
+    """Name the signals (logs, metrics, traces) of the drop-only batches."""
+    signals = {
+        key[2]
+        for key, count in evidence.normalized.items()
+        if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count
+    }
+    return tuple(sorted(signals))
 
 
 def _credential_state(last_auth: datetime | None, last_native: datetime | None) -> str:
