@@ -90,3 +90,25 @@ def test_nothing_bundled_means_no_packs(tmp_path, monkeypatch) -> None:
     assert paths.bundled_guardrail_use_cases_dir() is None
     assert paths.bundled_tool_chains_file() is None
     assert pc.protection_packs() == [] and pc.tool_chains() == [] and pc.enabled_protection("") == ()
+
+
+def test_bundled_mcp_yara_pack_is_package_data_and_staged() -> None:
+    """GAP-1084: the wheel shipped without policies/yara/mcp-tools."""
+    patterns = _package_data()
+    rules = sorted((ROOT / "policies" / "yara" / "mcp-tools").glob("*.yara"))
+    assert rules
+    missing = [
+        rule.name
+        for rule in rules
+        if not any(_glob_match(pat, f"_data/policies/yara/mcp-tools/{rule.name}") for pat in patterns)
+    ]
+    assert missing == []
+
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    recipe = re.search(r"(?ms)^_bundle-data:.*?(?=^\S)", makefile)
+    assert recipe
+    assert "cp -r policies/yara/mcp-tools cli/defenseclaw/_data/policies/yara/" in recipe.group(0)
+
+    harness = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
+    stage = re.search(r"(?ms)^function Stage-PackageData\b.*?(?=^function |\Z)", harness)
+    assert stage and "policies\\yara\\mcp-tools" in stage.group(0)

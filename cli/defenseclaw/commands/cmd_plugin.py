@@ -215,6 +215,10 @@ def scan(
         from defenseclaw.commands import resolve_list_connector
 
         connector = resolve_list_connector(app, connector_flag)
+        if not connector_flag:
+            # Without --connector, name the connector whose plugin root holds
+            # the path rather than the first active one.
+            connector = _connector_for_plugin_path(app, name_or_path) or connector
         scan_dir = _resolve_plugin_dir(
             name_or_path,
             app.cfg.plugin_dir,

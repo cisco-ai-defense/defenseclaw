@@ -1306,6 +1306,10 @@ def _print_skill_list_table(
         verdict_label, verdict_style = _compute_verdict(
             actions_map.get(name), scan_map.get(name),
         )
+        if s.get("bundled") and name not in scan_map and name not in actions_map:
+            # Vendor-bundled skills are discovery-only: never scanned or blocked.
+            severity, sev_style = "bundled", "dim"
+            verdict_label, verdict_style = "discovery-only", "dim"
 
         status_style = ""
         if "✗" in status_display:
@@ -1324,6 +1328,12 @@ def _print_skill_list_table(
         )
 
     console.print(table)
+    bundled_count = sum(1 for s in skills if s.get("bundled"))
+    if bundled_count:
+        console.print(
+            f"[dim]{bundled_count} vendor-bundled skill(s) are discovery-only: "
+            "listed here, not scanned or blocked.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2292,6 +2302,7 @@ def _scan_all(
     sources: list[str] = []
     scan_dirs = list(app.cfg.skill_dirs(resolved_connector))
     unresolved_names: set[str] = set()
+    bundled_skipped: set[str] = set()
 
     if skill_entries:
         from defenseclaw.safety import is_symlink, is_within_roots
@@ -2300,6 +2311,7 @@ def _scan_all(
             name = str(info["name"])
             base_dir = _skill_info_path(info)
             if bool(info.get("bundled")) or _is_bundled_skill_scan_path(base_dir):
+                bundled_skipped.add(name)
                 continue
             if not base_dir:
                 resolved_info = _get_openclaw_skill_info(
@@ -2350,6 +2362,7 @@ def _scan_all(
                 entry = discovered.name
                 path = discovered.path
                 if discovered.bundled or _is_bundled_skill_scan_path(path):
+                    bundled_skipped.add(entry)
                     continue
                 if entry in seen_names:
                     continue
@@ -2382,15 +2395,24 @@ def _scan_all(
         for name in sorted(unresolved_names):
             click.echo(f"[scan] warning: no baseDir for {name}", err=True)
 
+    bundled_note = (
+        f"{len(bundled_skipped)} vendor-bundled skill(s) skipped for "
+        f"connector={connector!r} (discovery-only: listed, not scanned or blocked)"
+    )
     if not targets:
         if not as_json:
-            _render_skill_scan_empty_state(connector, scan_dirs)
+            if bundled_skipped:
+                click.echo(f"No scannable skills: {bundled_note}.")
+            else:
+                _render_skill_scan_empty_state(connector, scan_dirs)
         return []
 
     ctx = _scan_ui.ScanContext.for_skill(
         connector=connector, paths=sources, as_json=as_json,
     )
     _scan_ui.render_preamble(ctx, target_count=len(targets))
+    if bundled_skipped and not as_json:
+        click.echo(f"  Note: {bundled_note}.")
 
     import time
     started = time.monotonic()

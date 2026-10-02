@@ -1218,6 +1218,8 @@ _bundle-data: _checkout-write-preflight
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
 	@rm -rf cli/defenseclaw/_data/policies/guardrail-use-cases
+	@rm -rf cli/defenseclaw/_data/policies/yara
+	@mkdir -p cli/defenseclaw/_data/policies/yara
 	@rm -rf cli/defenseclaw/_data/splunk_o11y_dashboards
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
@@ -1228,6 +1230,7 @@ _bundle-data: _checkout-write-preflight
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp policies/guardrail/tool-chains.json cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail-use-cases cli/defenseclaw/_data/policies/
+	cp -r policies/yara/mcp-tools cli/defenseclaw/_data/policies/yara/
 	@# Use the canonical generator without repairing tracked docs before CI checks.
 	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/

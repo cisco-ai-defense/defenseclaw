@@ -1990,6 +1990,23 @@ class TestSkillList(SkillCommandTestBase):
         self.assertIn("code-review", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_marks_vendor_bundled_skills_discovery_only(self, mock_list):
+        """GAP-1085: bundled skills looked scannable in skill list."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "imagegen", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "bundled", "bundled": True, "homepage": ""},
+            ]
+        }
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "1 vendor-bundled skill(s) are discovery-only",
+            " ".join(result.output.split()),
+        )
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_table_title_shows_connector_in_scope(self, mock_list):
         # Mirror the MCP table's (connector=...) banner so the active
         # connector the list is scoped to is discoverable.

@@ -1613,6 +1613,7 @@ function Stage-PackageData(
     }
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\guardrail\tool-chains.json') -Destination (Join-Path $data 'policies\guardrail') -Force
     Copy-Tree (Join-Path $WorkspaceRoot 'policies\guardrail-use-cases') (Join-Path $data 'policies\guardrail-use-cases')
+    Copy-Tree (Join-Path $WorkspaceRoot 'policies\yara\mcp-tools') (Join-Path $data 'policies\yara\mcp-tools')
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
     $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
     $targetRegistry = Join-Path $data 'envvars\registry.json'
@@ -1855,6 +1856,7 @@ function Invoke-BuildArtifacts {
             'defenseclaw/_data/policies/guardrail-use-cases/kubernetes-production-protection/rules/kubernetes-production.yaml',
             'defenseclaw/_data/policies/guardrail-use-cases/privacy-high-assurance/rules/enterprise-data.yaml',
             'defenseclaw/_data/policies/guardrail-use-cases/ssh-authorized-keys-protection/README.md',
+            'defenseclaw/_data/policies/yara/mcp-tools/description_injection.yara',
             'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',
             'defenseclaw/_data/config/v8/observability.yaml',
             'defenseclaw/_data/config/v8/observability.md',

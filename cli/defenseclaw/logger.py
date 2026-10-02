@@ -240,7 +240,7 @@ class Logger:
                 "scanner": result.scanner,
                 "target": result.target,
                 "timestamp": result.timestamp.isoformat(),
-                "findings": [finding.to_dict() for finding in result.findings],
+                "findings": [_scan_finding_wire(finding) for finding in result.findings],
                 "duration_ms": int(result.duration.total_seconds() * 1000),
             },
         }
@@ -373,6 +373,29 @@ class Logger:
             raise
         except Exception as exc:
             raise CanonicalObservabilityError("canonical Observability v8 admission was not confirmed") from exc
+
+
+# Fields the gateway's canonical scan ingress accepts for one finding
+# (cliObservabilityV8Finding). Detector-internal fields such as confidence and
+# evidence stay in CLI output only; the gateway rejects unknown members, so
+# sending them would fail admission for every scan that reports a finding.
+_SCAN_FINDING_WIRE_FIELDS = (
+    "id",
+    "severity",
+    "title",
+    "description",
+    "location",
+    "remediation",
+    "scanner",
+    "tags",
+    "rule_id",
+    "line_number",
+)
+
+
+def _scan_finding_wire(finding: Any) -> dict[str, Any]:
+    data = finding.to_dict()
+    return {key: data[key] for key in _SCAN_FINDING_WIRE_FIELDS if key in data}
 
 
 def _gateway_api_host(cfg: Any) -> str:
