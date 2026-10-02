@@ -4249,6 +4249,26 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_fail_mode_answer_is_the_global_default_with_observe_primary(self, mock_discover, _gate):
+        # GAP-1321: the fail mode asked for the action connectors is also the
+        # global default, so `guardrail mode action --connector codex` later
+        # keeps it instead of flipping codex to the built-in "closed".
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--observe-all", "--action-connectors", "claudecode", "--fail-mode", "open",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        from defenseclaw.config import _normalize_hook_fail_mode
+
+        self.assertEqual(_normalize_hook_fail_mode(self._load_cfg()["guardrail"].get("hook_fail_mode", "")), "open")
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_action_connectors_only_configures_named_connector(self, mock_discover, _gate):
         mock_discover.return_value = self._disc({"codex", "claudecode"})
 

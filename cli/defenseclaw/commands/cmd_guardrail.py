@@ -3315,7 +3315,10 @@ def mode_cmd(
     Sets only ``guardrail.mode``, or with ``--connector X`` only
     ``guardrail.connectors.X.mode`` (creating that block if needed); ``--clear
     --connector X`` removes X's override. The guardrail's on/off state, rule
-    pack and port are never touched. Hook decisions read the configuration
+    pack and port are never touched. A connector without its own fail mode
+    fails open in observe mode and uses the global hook fail mode
+    (``guardrail fail-mode``) in action mode; the command says when that
+    changes. Hook decisions read the configuration
     the gateway started with, so any mode change restarts a running gateway
     (``--no-restart`` to skip; a stopped gateway is never started).
     """

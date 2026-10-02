@@ -714,7 +714,10 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # bootstrap layer treats "" as a no-op so first-run flows
         # that don't surface this option don't accidentally reset
         # an operator's earlier choice.
-        hook_fail_mode=(primary["fail_mode"] or "").lower(),
+        # The wizard asks the fail mode once for every action connector, so
+        # it is the global default too: a connector switched to action later
+        # keeps the answer (GAP-1321), even when the primary is observe.
+        hook_fail_mode=next((s["fail_mode"] for s in connector_settings if s.get("fail_mode")), "").lower(),
         # HITL: ``None`` is "leave alone", ``True``/``False`` set
         # the toggle. Empty severity preserves the existing floor;
         # bootstrap normalizes case and falls back to ``HIGH`` on
