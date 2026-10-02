@@ -375,11 +375,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     cfg.registries.sources.append(new_source)
     cfg.save()
 
-    if app.logger:
-        app.logger.log_action(
-            "registry-add", "config",
-            f"id={sid} kind={kind} content={content} url={url}",
-        )
+    _log_registry_action(app, "registry-add", f"id={sid} kind={kind} content={content} url={url}")
 
     if emit_json:
         _emit_json({"action": "add", "source": _source_to_dict(new_source)})
@@ -486,10 +482,7 @@ def edit_cmd(  # noqa: PLR0913
     _validate_file_url(source.kind, source.url)
 
     cfg.save()
-    if app.logger:
-        app.logger.log_action(
-            "registry-edit", "config", f"id={source.id}",
-        )
+    _log_registry_action(app, "registry-edit", f"id={source.id}")
 
     if emit_json:
         _emit_json({"action": "edit", "source": _source_to_dict(source)})
@@ -604,6 +597,26 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     click.echo()
 
 
+def _log_registry_action(app: AppContext, action: str, details: str) -> None:
+    """Record a saved registry change; a stopped gateway only skips the audit event.
+
+    The config is already saved, so a stopped gateway prints one warning on
+    stderr instead of a traceback and rc=1 (like policy and setup webhook).
+    """
+    if not app.logger:
+        return
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    try:
+        app.logger.log_action(action, "config", details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            "  ⚠ Saved. The gateway isn't running, so the audit event was not recorded "
+            "(start it with: defenseclaw-gateway start).",
+            err=True,
+        )
+
+
 @registry.command("remove")
 @click.argument("source_id")
 @click.option("--keep-cache", is_flag=True,
@@ -648,8 +661,7 @@ def remove_cmd(
     if not keep_cache:
         remove_source_cache(cfg.data_dir, sid)
 
-    if app.logger:
-        app.logger.log_action("registry-remove", "config", f"id={sid}")
+    _log_registry_action(app, "registry-remove", f"id={sid}")
 
     if emit_json:
         _emit_json({"action": "remove", "source_id": sid})
@@ -1449,11 +1461,7 @@ def _do_manual_verdict(
             cfg, cfg.data_dir, source, save=True,
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "registry-edit", "config",
-            f"{action_label} id={source.id} {entry_type}:{entry_name}",
-        )
+    _log_registry_action(app, "registry-edit", f"{action_label} id={source.id} {entry_type}:{entry_name}")
 
     if emit_json:
         out: dict[str, Any] = {
