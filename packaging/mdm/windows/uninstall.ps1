@@ -192,7 +192,9 @@ function Invoke-DefenseClawNative {
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.RedirectStandardInput = $true
-    $info.WorkingDirectory = [System.IO.Path]::GetDirectoryName($FilePath)
+    # Start the CLI in System32, never in the install's bin folder: a working
+    # directory inside InstallRoot keeps an uninstall from retiring it (GAP-1684).
+    $info.WorkingDirectory = [System.Environment]::SystemDirectory
     foreach ($name in @($info.EnvironmentVariables.Keys)) {
         if ($name -match '^(DOTNET_|COMPLUS_|CORECLR_|COR_ENABLE_PROFILING$|COR_PROFILER|PSMODULEPATH$|PSEXECUTIONPOLICYPREFERENCE$|__PSLOCKDOWNPOLICY$)') {
             $info.EnvironmentVariables.Remove($name)

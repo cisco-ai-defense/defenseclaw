@@ -238,6 +238,34 @@ def test_standalone_default_uninstall_removes_the_machine_state() -> None:
     assert entry.count("$Purge = ") == 1
 
 
+def test_standalone_uninstall_retry_binds_the_receipt_to_the_retrying_cli() -> None:
+    # GAP-1684/GAP-1679: when the first self-uninstall could not rename
+    # InstallRoot aside, its retry by the installed CLI runs from InstallRoot.
+    # The recovery binds the prepared receipt to that caller (same CLI file)
+    # before the rename, so the detached finalizer waits for it, and the
+    # retry finishes the committed cleanup and machine-state purge. Secure
+    # Client recovery is unchanged.
+    module = _text(MODULE)
+    recovery = _function_body(module, "Invoke-DefenseClawSelfUninstallRecovery")
+    rebind = recovery.index("$receipt = Set-DefenseClawSelfUninstallReceiptCaller")
+    guard = recovery.rindex("if ($SelfUninstallCallerPID -gt 0 -and", 0, rebind)
+    assert "(Test-DefenseClawStandaloneProfile)" in recovery[guard:rebind]
+    move = recovery.index("[IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)")
+    cleanup = recovery.index("$result = Invoke-DefenseClawCommittedUninstallCleanup")
+    assert rebind < move < cleanup
+    assert recovery.rindex("if ($reboundCaller) {", 0, cleanup) > move
+    caller = _function_body(module, "Set-DefenseClawSelfUninstallReceiptCaller")
+    assert "Get-DefenseClawSelfUninstallCallerIdentity" in caller
+    assert "caller_file_identity" in caller and "caller_sha256" in caller
+    assert "'prepared_install_retirement'" in caller
+    prelayout = _function_body(module, "Invoke-DefenseClawPreLayoutRecovery")
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in prelayout
+    entry = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    call = entry[entry.index("$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery") :]
+    call = call[: call.index("if ([bool]$preLayoutRecovery.handled)")]
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in call
+
+
 def test_lifecycles_retire_a_stale_committed_journal_through_the_fallback() -> None:
     # GAP-1322: a journal the installed gateway cannot retire no longer
     # blocks every later upgrade, ensure and uninstall (behaviour in

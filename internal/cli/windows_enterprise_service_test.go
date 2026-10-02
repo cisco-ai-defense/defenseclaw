@@ -1722,3 +1722,67 @@ func TestWindowsEnterpriseEnsureAcceptsShorthandOnlyForStandalone(t *testing.T) 
 		t.Fatal("standalone status accepted the QA shorthand")
 	}
 }
+
+// GAP-1679: an uninstall run from an installed image other than
+// bin\defenseclaw.exe (the gateway) is refused before it changes anything.
+func TestWindowsEnterpriseInstalledNonCLIUninstallCaller(t *testing.T) {
+	installer := `C:\Program Files\Cisco\DefenseClaw\libexec\install-enterprise.ps1`
+	gateway := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`
+	for executable, want := range map[string]bool{
+		gateway: true,
+		`C:\PROGRAM FILES\Cisco\DefenseClaw\bin\DefenseClaw-Gateway.exe`:  true,
+		`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`:          false,
+		`C:\Program Files\Cisco\DefenseClaw2\bin\defenseclaw-gateway.exe`: false,
+		`C:\stage\defenseclaw-gateway.exe`:                                false,
+	} {
+		if got := windowsEnterpriseInstalledNonCLIUninstallCaller("uninstall", installer, executable); got != want {
+			t.Errorf("%s refused = %t, want %t", executable, got, want)
+		}
+	}
+	if windowsEnterpriseInstalledNonCLIUninstallCaller("repair", installer, gateway) {
+		t.Error("a repair from the gateway was refused")
+	}
+	if windowsEnterpriseInstalledNonCLIUninstallCaller("uninstall", `C:\stage\other.ps1`, gateway) {
+		t.Error("an uninstall with a staged installer was refused")
+	}
+}
+
+// GAP-1684: the CLI leaves a working directory inside InstallRoot before a
+// self-uninstall, which would otherwise keep InstallRoot from being retired.
+func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing.T) {
+	root := t.TempDir()
+	installRoot := filepath.Join(root, "DefenseClaw")
+	bin := filepath.Join(installRoot, "bin")
+	safe := filepath.Join(root, "System32")
+	for _, directory := range []string{bin, safe} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := windowsEnterpriseUninstallWorkingDirectory
+	t.Cleanup(func() { windowsEnterpriseUninstallWorkingDirectory = original })
+	windowsEnterpriseUninstallWorkingDirectory = func() (string, error) { return safe, nil }
+	workingDirectory := func() string {
+		t.Helper()
+		current, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return current
+	}
+
+	t.Chdir(root)
+	if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+		t.Fatal(err)
+	}
+	if current := workingDirectory(); !strings.EqualFold(current, root) {
+		t.Fatalf("a working directory outside InstallRoot moved to %s", current)
+	}
+	t.Chdir(bin)
+	if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+		t.Fatal(err)
+	}
+	if current := workingDirectory(); !strings.EqualFold(current, safe) {
+		t.Fatalf("working directory = %s, want %s", current, safe)
+	}
+}

@@ -637,6 +637,13 @@ parent keys and `C:\Program Files\Cisco` when nothing else is left in them.
 The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. On a computer without DefenseClaw,
 uninstall succeeds and changes nothing.
 
+Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
+such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
+anything, because a running binary keeps its own folder in use. If an
+uninstall reports that it committed but could not finish, run the same
+`defenseclaw.exe` uninstall (or the MDM `uninstall.ps1`) again: it finishes
+the cleanup.
+
 ### Per-user registrations at uninstall
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
