@@ -604,6 +604,8 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int) -> subprocess.CompletedProcess[s
     text = INSTALL_SH.read_text(encoding="utf-8")
     snippet = text[text.index('export UV_CACHE_DIR="') : text.index('rm -rf "${STAGING}"\nmkdir -p "${STAGING}/bin"')]
     install_uv = text[text.index("install_uv() {") : text.index("\n}\n", text.index("install_uv() {")) + 3]
+    start = text.index("is_machinery() {")
+    preflight = text[start : text.index("\n}\n", text.index("require_free_space() {")) + 3]
     home = tmp_path / "home"
     data_dir = home / ".defenseclaw"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -619,8 +621,11 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int) -> subprocess.CompletedProcess[s
         'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ninfo() { echo "info: $*"; }\n'
         "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
         f'OS=darwin ARCH=arm64 UV_VERSION=0 DEFENSECLAW_HOME="{data_dir}" BIN_DIR="{bin_dir}"\n'
+        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging"\n'
         f'PATH="{fake}:/usr/bin:/bin"\nunset UV_CACHE_DIR UV_PYTHON_INSTALL_DIR\n'
         + install_uv
+        + preflight
+        + "require_free_space\n"
         + snippet
         + 'echo "uv=$(command -v uv)"\n',
         encoding="utf-8",
@@ -690,6 +695,33 @@ def test_an_upgrade_without_room_refuses_before_staging(tmp_path: Path) -> None:
     assert "the install needs about 400 MB and 8 MB is free" in proc.stdout
     assert "nothing was changed" in proc.stdout
     assert not (tmp_path / "home" / ".defenseclaw" / ".staging").exists()
+
+
+def test_an_upgrade_counts_the_rollback_copy_before_staging_or_stopping(tmp_path: Path) -> None:
+    # GAP-1527: the rollback-copy check ran only after staging and after the
+    # gateway stopped, and left the staged files behind.
+    data_dir = tmp_path / "home" / ".defenseclaw"
+    (data_dir / ".uv" / "cache").mkdir(parents=True)
+    (data_dir / ".venv").mkdir()
+    (data_dir / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
+    proc = _uv_bootstrap(tmp_path, free_kb=450 * 1024)
+
+    assert proc.returncode == 1, proc.stdout
+    assert "the upgrade needs about 503 MB (400 MB for the new version and 103 MB for a rollback copy" in proc.stdout
+    assert "450 MB is free" in proc.stdout and "Free at least 53 MB" in proc.stdout
+    assert f"The largest item is {data_dir}/audit.db (3 MB)" in proc.stdout
+    assert "nothing was changed" in proc.stdout
+
+
+def test_a_full_disk_is_checked_before_the_lock() -> None:
+    # GAP-1538 / GAP-1527: a full disk showed a raw "echo: write error" or
+    # "Could not take the install lock", which reads like a concurrent install.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert text.index("|| require_free_space") < text.index("# ── Lock and log")
+    lock = text[text.index("# ── Lock and log") : text.index('LOG="${DEFENSECLAW_HOME}/logs/install-')]
+    assert 'die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"' in lock
+    assert "check the free space" in lock and "nothing was changed" in lock
+    assert 'rm -rf "${STAGING}"' in text[text.index("if ! snapshot; then") :][:200]
 
 
 def test_a_staging_copy_that_fails_on_a_full_disk_says_so_and_cleans_up(tmp_path: Path) -> None:

@@ -363,9 +363,13 @@ if [[ -n "${TARGET_VERSION}" && "${TARGET_VERSION}" != "${VERSION}" && "${ROLLBA
     run_release_installer "${TARGET_VERSION}" ${FORWARD[@]+"${FORWARD[@]}"}
 fi
 
+[[ "${ROLLBACK}" == true ]] || require_free_space
+
 # ── Lock and log ─────────────────────────────────────────────────────────────
 
-mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs"
+LOCK_HINT="check the free space (df -h ${DEFENSECLAW_HOME%/*}) and that $(id -un) can write there; nothing was changed"
+mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs" 2>/dev/null \
+    || die "Could not create ${DEFENSECLAW_HOME}/logs: ${LOCK_HINT}"
 chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
@@ -373,9 +377,12 @@ if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
         die "Another DefenseClaw install is running (pid ${holder})"
     fi
     rm -rf "${LOCK_DIR}"
-    mkdir "${LOCK_DIR}" || die "Could not take the install lock at ${LOCK_DIR}"
+    mkdir "${LOCK_DIR}" 2>/dev/null || die "Could not create the install lock ${LOCK_DIR}: ${LOCK_HINT}"
 fi
-echo $$ > "${LOCK_DIR}/pid"
+if ! { echo $$ > "${LOCK_DIR}/pid"; } 2>/dev/null; then
+    rm -rf "${LOCK_DIR}"
+    die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"
+fi
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 exec > >(tee -a "${LOG}") 2>&1
 trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
@@ -524,17 +531,8 @@ export UV_NO_CONFIG=1
 # dir, so `uninstall --all` leaves nothing of them in ~/.cache or ~/.local.
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}"
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${DEFENSECLAW_HOME}/.uv/python}"
-# uv's cache, the Python it fetches and the new environment take about 1 GB on
-# a first install and less once the cache exists. Refuse before writing them.
 UV_DIR_NEW=""
 [[ -e "${DEFENSECLAW_HOME}/.uv" ]] || UV_DIR_NEW=1
-space_needed_kb=$((400 * 1024))
-[[ -d "${UV_CACHE_DIR}" ]] || space_needed_kb=$((1100 * 1024))
-space_free_kb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print $4}')"
-if [[ "${space_free_kb}" =~ ^[0-9]+$ && "${space_free_kb}" -lt "${space_needed_kb}" ]]; then
-    err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((space_needed_kb / 1024)) MB and $((space_free_kb / 1024)) MB is free"
-    die "Free at least $(((space_needed_kb - space_free_kb + 1023) / 1024)) MB on that filesystem (df -h ${DEFENSECLAW_HOME}), then rerun; nothing was changed"
-fi
 # A uv already in BIN_DIR belongs to the user (or an earlier run) even when
 # BIN_DIR is not on this shell's PATH yet: use it, never overwrite it.
 if ! has uv && [[ -x "${BIN_DIR}/uv" && ! -d "${BIN_DIR}/uv" ]]; then
@@ -689,7 +687,13 @@ else
 fi
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
 trap '' HUP PIPE
-snapshot || { undo_snapshot; restart_old; die "Could not save the current install; nothing was changed"; }
+if ! snapshot; then
+    undo_snapshot
+    restart_old
+    rm -rf "${STAGING}"
+    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
+    die "Could not save the current install; nothing was changed"
+fi
 
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
@@ -841,6 +845,45 @@ data_entries() {
         [[ -S "${path}" || -p "${path}" ]] && continue
         printf '%s\n' "${name}"
     done
+}
+
+# require_free_space refuses before anything is written when the disk cannot
+# hold the install: uv's cache, the Python it fetches and the new environment
+# (about 1 GB on a first install, less once the cache exists) plus, over an
+# existing install, the rollback copy of the data that the swap saves. Runs
+# before the lock and before the gateway is stopped (GAP-1249, GAP-1527,
+# GAP-1538).
+require_free_space() {
+    local cache="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}" dir="${DEFENSECLAW_HOME}"
+    local free_kb need_kb copy_kb=0 size name biggest="" biggest_kb=0
+    space_needed_kb=$((400 * 1024))
+    [[ -d "${cache}" ]] || space_needed_kb=$((1100 * 1024))
+    while [[ ! -d "${dir}" && "${dir}" == */* ]]; do dir="${dir%/*}"; done
+    free_kb="$(df -Pk "${dir:-/}" 2>/dev/null | awk 'NR==2{print $4}')"
+    [[ "${free_kb}" =~ ^[0-9]+$ ]] || return 0
+    # A .staging left by an interrupted run is replaced, so its space counts as free.
+    if [[ -d "${STAGING}" ]]; then
+        size="$(du -sk "${STAGING}" 2>/dev/null | awk '{print $1}')"
+        free_kb=$((free_kb + ${size:-0}))
+    fi
+    if [[ -d "${VENV}" ]]; then
+        while IFS= read -r name; do
+            size="$(du -sk "${DEFENSECLAW_HOME}/${name}" 2>/dev/null | awk '{print $1}')"
+            size="${size:-0}"
+            copy_kb=$((copy_kb + size))
+            if [[ "${size}" -gt "${biggest_kb}" ]]; then biggest="${name}" biggest_kb="${size}"; fi
+        done < <(data_entries)
+        copy_kb=$((copy_kb + 102400))
+    fi
+    need_kb=$((space_needed_kb + copy_kb))
+    [[ "${free_kb}" -lt "${need_kb}" ]] || return 0
+    if [[ ${copy_kb} -gt 0 ]]; then
+        err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the upgrade needs about $(((need_kb + 1023) / 1024)) MB ($((space_needed_kb / 1024)) MB for the new version and $(((copy_kb + 1023) / 1024)) MB for a rollback copy of your data) and $((free_kb / 1024)) MB is free"
+        [[ -z "${biggest}" ]] || err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+    else
+        err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
+    fi
+    die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${dir}), then rerun; nothing was changed"
 }
 
 snapshot() {

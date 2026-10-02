@@ -7448,6 +7448,38 @@ func TestHookScripts_TokenedHooks_FailOpen_OnMissingToken(t *testing.T) {
 	}
 }
 
+func TestHookScripts_MissingTokenNamesTheFile(t *testing.T) {
+	// GAP-1425: the block line said ".token absent and DEFENSECLAW_GATEWAY_TOKEN
+	// unset" instead of naming the file to restore.
+	if runtime.GOOS == "windows" {
+		t.Skip("hook scripts are POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, ".token")); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"),
+		"--event", "UserPromptSubmit", "--hook-contract", "codex-hooks-v4")
+	env := []string{"DEFENSECLAW_HOME=" + t.TempDir(), "DEFENSECLAW_STRICT_AVAILABILITY=1"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "DEFENSECLAW_") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	want := "missing gateway token: " + filepath.Join(dir, ".token") + " not found"
+	if got := stderr.String(); !strings.Contains(got, want) || strings.Contains(got, "DEFENSECLAW_GATEWAY_TOKEN") {
+		t.Fatalf("stderr = %q, want it to contain %q", got, want)
+	}
+}
+
 // runHookAndReturnCurlArgsWithHome is the sentinel-aware variant of
 // runHookAndReturnCurlArgs. It takes an explicit DEFENSECLAW_HOME so
 // tests can drive the .disabled / missing-home branches deterministically

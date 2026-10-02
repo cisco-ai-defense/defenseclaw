@@ -2723,7 +2723,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self.assertIn(f"runtime_state={expected_state}", detail)
                 self.assertIn(evidence, detail)
                 self.assertIn("setup codex --yes --restart", detail)
-                self.assertIn(detail, human)
+                self.assertIn(cmd_doctor._plain_commands(detail), human)
                 self.assertNotRegex(
                     detail.lower(),
                     r"inspect-tool\.sh|codex-hook\.sh|claude-code-hook\.sh|\bbash\b|\bwsl\b|\bchmod\b",

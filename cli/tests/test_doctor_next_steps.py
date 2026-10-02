@@ -574,3 +574,42 @@ def test_proxy_connector_without_a_guardrail_model_needs_no_llm_key(tmp_path, mo
     cmd_doctor._check_llm_api_key(cfg, r)
     assert r.checks[-1]["status"] == "skip" and "no guardrail LLM model" in r.checks[-1]["detail"]
     assert not credentials._any_llm_component_uses_default_key(cfg)
+
+
+def test_text_rows_show_commands_in_quotes_not_backticks() -> None:
+    # GAP-1526: text doctor printed markdown backticks literally.
+    r = _DoctorResult()
+    text = _render(
+        lambda: cmd_doctor._emit(
+            "fail", "Row", "run `defenseclaw doctor --fix`", r=r, remediation="then `defenseclaw-gateway start`"
+        )
+    )
+    assert "run 'defenseclaw doctor --fix'" in text
+    assert "Next step: then 'defenseclaw-gateway start'" in text
+    assert "`" not in text
+    assert r.checks[0]["detail"] == "run `defenseclaw doctor --fix`"
+
+
+def test_stopped_gateway_row_carries_its_next_step(tmp_path) -> None:
+    # GAP-1526: the Sidecar API FAIL row had an empty remediation in --json-output.
+    from types import SimpleNamespace
+
+    from defenseclaw.config import GatewayConfig
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=GatewayConfig(api_bind="127.0.0.1", api_port=18_970))
+    r = _DoctorResult()
+    with mock.patch.object(cmd_doctor, "_http_probe", return_value=(0, "Connection refused")):
+        text = _render(lambda: cmd_doctor._check_sidecar(cfg, r))
+    row = r.checks[-1]
+    assert row["status"] == "fail" and "defenseclaw-gateway start" in row["remediation"]
+    assert "`" not in text and text.count("defenseclaw-gateway start") == 1
+
+
+def test_drifted_exporter_warn_names_setup_in_remediation() -> None:
+    # GAP-1526: the Connector OTLP drift WARN row had an empty remediation.
+    report = _custody_report(managed_config_state="drifted", drop_only_batches=0, drop_only_signals=())
+    r = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(report, r)
+    check = r.checks[-1]
+    assert check["status"] == "warn"
+    assert check["remediation"] == "run 'defenseclaw setup claude-code' to re-apply"

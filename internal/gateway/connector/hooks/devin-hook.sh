@@ -105,7 +105,7 @@ fail_response() {
   exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token devin devin-hook "devin hook"
+  defenseclaw_handle_missing_token devin devin-hook "devin hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {

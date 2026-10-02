@@ -1210,7 +1210,9 @@ func TestMissingToken(t *testing.T) {
 		if r.code != 2 {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
-		if !strings.Contains(r.stderr, "missing gateway token") {
+		// GAP-1425: name the file, not an env var the scoped hook ignores.
+		if !strings.Contains(r.stderr, ".hook-claudecode.token not found") ||
+			strings.Contains(r.stderr, "DEFENSECLAW_GATEWAY_TOKEN") {
 			t.Errorf("stderr = %q", r.stderr)
 		}
 	})

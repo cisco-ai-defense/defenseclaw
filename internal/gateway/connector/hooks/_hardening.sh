@@ -1016,14 +1016,19 @@ defenseclaw_own_gateway_alive() {
 # missed inspection.
 #
 # Usage:
-#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT
+#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT [TOKEN_FILE]
+#
+# TOKEN_FILE is the token file the hook looked for; the message names it so
+# the user can find it (GAP-1425).
 #
 # Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
   local connector="${1:-unknown}"
   local hook_name="${2:-unknown}"
   local subject="${3:-tool}"
-  local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+  local token_file="${4:-}"
+  local reason="missing gateway token file"
+  [ -z "$token_file" ] || reason="missing gateway token: ${token_file} not found"
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2

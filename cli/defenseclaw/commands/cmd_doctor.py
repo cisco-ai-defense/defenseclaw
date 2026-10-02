@@ -462,6 +462,14 @@ def _doctor_label_suffix(suffix: str):
         _label_suffix = prev
 
 
+_BACKTICK_COMMAND = re.compile(r"`([^`\n]+)`")
+
+
+def _plain_commands(text: str) -> str:
+    """Show `cmd` as 'cmd' in terminal output (the JSON keeps the raw text)."""
+    return _BACKTICK_COMMAND.sub(r"'\1'", text)
+
+
 def _emit(
     tag: str,
     label: str,
@@ -488,13 +496,13 @@ def _emit(
             # Em-dash separator dims so it visually recedes between
             # the bold label and the detail value without losing the
             # connection between the two halves.
-            line += "  " + ux.dim("—") + f"  {detail}"
+            line += "  " + ux.dim("—") + f"  {_plain_commands(detail)}"
         ux.echo(line)
         # A warn/fail row names its next step. Rows that already spell the
         # step out in their detail stay one line.
         hint = remediation.strip()
         if tag in {"warn", "fail"} and hint and hint not in detail:
-            _emit_hint(f"Next step: {hint}")
+            _emit_hint(f"Next step: {_plain_commands(hint)}")
     if r is not None:
         r.record(
             tag,
@@ -2679,20 +2687,31 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
             _emit("warn", "Sidecar health JSON", detail, r=r)
     elif code == 0 and "refused" in body.lower():
+        start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
         _emit(
             "fail",
             "Sidecar API",
-            f"the gateway is not running (nothing listens on {bind}:{cfg.gateway.api_port}). "
-            "Start it: `defenseclaw-gateway start` or `defenseclaw doctor --fix`",
+            f"the gateway is not running (nothing listens on {bind}:{cfg.gateway.api_port}); {start}",
             r=r,
+            remediation=start,
         )
         r.gateway_down = "stopped"
     elif holder := _foreign_gateway_port_holder(cfg):
         # Something else answers on the port without a gateway /health.
-        _emit("fail", "Sidecar API", _foreign_gateway_port_detail(cfg, holder), r=r)
+        detail = _foreign_gateway_port_detail(cfg, holder)
+        _emit("fail", "Sidecar API", detail, r=r, remediation=detail)
         r.gateway_down = "foreign"
     else:
-        _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
+        _emit(
+            "fail",
+            "Sidecar API",
+            f"not reachable on port {cfg.gateway.api_port}",
+            r=r,
+            remediation=(
+                "run 'defenseclaw-gateway restart', then 'defenseclaw doctor'; "
+                f"if it still fails, read {os.path.join(cfg.data_dir, 'gateway.log')}"
+            ),
+        )
     return None
 
 
@@ -6635,18 +6654,30 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
-                    access = (
-                        "Setup targets user/administrator-only access, but this row "
-                        "does not revalidate the Windows DACL and is not tamper-proof"
-                        if os.name == "nt"
-                        else "this row does not recheck the plugin's file permissions and is not tamper-proof"
-                    )
-                    _emit(
-                        status,
-                        label,
-                        f"managed plugin digest current at {path}; {access}; {runtime_detail}",
-                        r=r,
-                    )
+                    if status == "warn" and "no authenticated load heartbeat" in runtime_detail:
+                        # OpenCode reports the load when it starts, so a closed
+                        # OpenCode is normal, not a warning (GAP-1565).
+                        _emit(
+                            "skip",
+                            label,
+                            f"plugin installed at {path} (digest current); OpenCode has not loaded it "
+                            "since the gateway started, which is normal while OpenCode is closed "
+                            "(no load heartbeat yet)",
+                            r=r,
+                        )
+                    else:
+                        _emit(
+                            status,
+                            label,
+                            f"plugin installed at {path} (digest current); {runtime_detail}",
+                            r=r,
+                            remediation=(
+                                "start OpenCode (restart it if it is open) so it loads the plugin, "
+                                "then rerun 'defenseclaw doctor'"
+                                if status == "warn"
+                                else ""
+                            ),
+                        )
             elif connector == "hermes":
                 if not r.passive and _hermes_host_running() is False:
                     _emit(
@@ -8485,12 +8516,21 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             if tag == "pass":
                 tag = "warn"
         conditions.append(delivery.detail)
+        remediation = _native_drop_remediation(item.connector, delivery.state)
+        if not remediation and tag != "pass":
+            if item.managed_config_state == "drifted":
+                remediation = f"run 'defenseclaw setup {setup_name}' to re-apply"
+            else:
+                remediation = (
+                    f"run 'defenseclaw setup {setup_name}' to rewrite the native exporter, "
+                    "then rerun 'defenseclaw doctor'"
+                )
         _emit(
             tag,
             label,
             f"custody=defenseclaw; profile={item.profile_version}; " + "; ".join(conditions),
             r=r,
-            remediation=_native_drop_remediation(item.connector, delivery.state),
+            remediation=remediation,
         )
 
     if report.unattributed_authentication_failures:

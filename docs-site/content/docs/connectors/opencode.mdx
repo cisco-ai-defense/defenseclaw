@@ -155,10 +155,12 @@ fail-mode result. Generic lifecycle delivery is non-awaited. Neither path
 becomes enforceable when fail mode is closed.
 
 The plugin also emits a secret-free `defenseclaw.plugin.loaded` heartbeat from
-its awaited config hook. Doctor reports a warning when the managed file digest
-is current but the running sidecar has no heartbeat: OpenCode may be stopped or
-running with `--pure`/external plugins disabled. File presence alone is not
-reported as runtime health.
+its awaited config hook. When the managed file digest is current but the
+running gateway has no heartbeat yet, Doctor shows a skip row: that is normal
+while OpenCode is closed. Open OpenCode and run `defenseclaw doctor` again to
+confirm the plugin loads; if the row still shows no heartbeat, OpenCode may be
+running with `--pure`/external plugins disabled. A stale heartbeat is a warning.
+File presence alone is not reported as runtime health.
 
 ## Local surfaces
 

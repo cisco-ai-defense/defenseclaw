@@ -109,7 +109,7 @@ fail_response() {
   hermes_sandbox_block "$(defenseclaw_response_failure_reason "$1")" response
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token hermes hermes-hook "hermes tool"
+  defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {

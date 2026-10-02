@@ -488,7 +488,7 @@ func Run(ctx context.Context, opts Options) int {
 		// no-auth path, same as the .sh.)
 		tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, opts.Connector)
 		if opts.Token == "" && !fileExists(tokenFile) {
-			return handleMissingToken(opts, sp, failMode)
+			return handleMissingToken(opts, sp, failMode, missingTokenFile(opts.HookDir, opts.Connector, tokenFile))
 		}
 
 		token = opts.Token
@@ -1053,8 +1053,8 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 // Managed enterprise mode has no unauthenticated path, so a missing token is
 // always fatal there regardless of the caller-supplied fail mode.
 // No connector-specific JSON body is emitted on this path.
-func handleMissingToken(opts Options, sp spec, failMode string) int {
-	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
+func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
+	reason := "missing gateway token: " + tokenFile + " not found"
 	logHookFailure(opts, sp, reason, "transport", failMode)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
@@ -1944,6 +1944,15 @@ func liveManagedCursorHook(path string) bool {
 	}
 	version := marker[len(prefix):]
 	return len(version) > 0 && version[0] >= '1' && version[0] <= '9'
+}
+
+// missingTokenFile names the token file a user can find and restore: the
+// connector-scoped one Setup writes, else the legacy shared one (GAP-1425).
+func missingTokenFile(hookDir, connector, legacy string) string {
+	if name := strings.ToLower(strings.TrimSpace(connector)); name != "" {
+		return filepath.Join(hookDir, ".hook-"+name+".token")
+	}
+	return legacy
 }
 
 func hookTokenFile(hookDir, connector string) (string, bool) {
