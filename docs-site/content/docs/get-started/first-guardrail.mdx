@@ -33,17 +33,27 @@ a Windows policy rule that the default pack does not ship.
 curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode
 ```
 
+The installer only installs the binaries. It ends with
+`Next: defenseclaw init --connector claudecode`, which is the next step.
+
 </Step>
 
 <Step>
 
-### Wire DefenseClaw into Claude Code
+### Initialize DefenseClaw for Claude Code
 
 ```bash
-defenseclaw setup claude-code
+defenseclaw init --connector claudecode
 ```
 
-This runs the [observability-only alias](/docs/connectors/claudecode) — DefenseClaw collects telemetry but does not yet block. We start here so we know the data path is healthy before flipping enforcement on.
+Press Enter to accept each default, and leave `claudecode` unchecked at the
+action enforcement prompt. `init` writes `~/.defenseclaw/config.yaml`, starts
+the gateway and wires Claude Code in
+[observe mode](/docs/connectors/claudecode): DefenseClaw collects telemetry but
+does not yet block. We start here so we know the data path is healthy before
+flipping enforcement on.
+
+To re-apply the Claude Code hooks later, run `defenseclaw setup claude-code`.
 
 </Step>
 
