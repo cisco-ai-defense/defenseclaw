@@ -55,3 +55,30 @@ func TestWatchdogDegradedProbesDoNotCountTowardDown(t *testing.T) {
 		t.Fatalf("watchdog state = %s (err %v), want degraded", state, err)
 	}
 }
+
+// GAP-1857: a gateway that answers again but degraded moves the watchdog from
+// down to degraded instead of keeping "down (gateway health is unavailable)".
+func TestWatchdogDownThenDegradedRecordsDegraded(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	saveWatchdogState(config.DefaultDataPath(), stateDown)
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		_, _ = w.Write([]byte(`{"guardrail":{"state":"starting"}}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for probes.Load() < 4 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		cancel()
+	}()
+	runWatchdogLoop(ctx, srv.URL+"/health", 5*time.Millisecond, 2, watchdogHealthRequirements{requireGuardrail: true}, nil, nil)
+
+	state, err := readWatchdogState(config.DefaultDataPath())
+	if err != nil || state != stateDegraded {
+		t.Fatalf("watchdog state = %s (err %v), want degraded", state, err)
+	}
+}
