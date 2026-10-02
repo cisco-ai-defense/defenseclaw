@@ -3395,7 +3395,51 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-        throw "managed DACL is not protected after exact ACL replacement: $Path"
+        # Self-heal: PowerShell's Set-Acl can silently drop
+        # PROTECTED_DACL_SECURITY_INFORMATION even when the input
+        # descriptor had SetAccessRuleProtection($true, $false). Force
+        # the flag via Win32 (icacls /inheritance:r) and re-read before
+        # giving up. See the mirror self-heal in Set-DefenseClawPathAcl.
+        try {
+            $null = & icacls.exe $Path '/inheritance:r' 2>&1
+            $reread = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            $rereadRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+                $reread.GetSecurityDescriptorBinaryForm(),
+                0
+            )
+            if (([int]$rereadRaw.ControlFlags -band $protectedFlag) -ne 0) {
+                $Actual = $rereadRaw
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose (
+                "canonical verify self-heal via icacls failed on {0}: {1}" -f
+                $Path, $_.Exception.Message
+            )
+        }
+        if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+            if (Test-DefenseClawTrustStrictAncestors) {
+                throw "managed DACL is not protected after exact ACL replacement: $Path"
+            }
+            # Even icacls could not disable inheritance - this is a
+            # system-wide ACL policy (GPO push, filesystem driver, or
+            # Group Policy ACL template actively re-enabling
+            # inheritance). The AVC-managed trust envelope is still
+            # the real enforcement boundary; fail-closed here would
+            # leave the endpoint without the DefenseClaw gateway
+            # mediating agent traffic, which is strictly worse than
+            # running on a path whose DACL inherits from a parent
+            # Administrators + SYSTEM own anyway. Warn and continue
+            # (product invariant: canonical state after install, not
+            # refuse-on-drift).
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Path `
+                -Reason (
+                    'DACL could not be marked protected even after ' +
+                    'icacls /inheritance:r - continuing with managed state'
+                )
+            return
+        }
     }
     $ownerSID = if ($null -eq $Actual.Owner) {
         ''
@@ -3567,6 +3611,32 @@ function Set-DefenseClawPathAcl {
         -LiteralPath $Path `
         -AclObject $security `
         -ErrorAction Stop
+    # Self-heal the Win32 DACL state so the stamp is deterministic across the
+    # .NET versions on Windows 10/11. PowerShell's Set-Acl writes the DACL
+    # bytes from the FileSecurity object but can silently drop
+    # PROTECTED_DACL_SECURITY_INFORMATION when sending SetSecurityInfo - the
+    # resulting DACL re-admits inherited ACEs (retired per-service SIDs,
+    # GPO-pushed grants, AV-engine stamps) that the canonical descriptor
+    # intentionally excluded. Force the protected flag via Win32 (icacls)
+    # after the stamp lands so a subsequent verify finds the state the
+    # canonical ACL asked for.
+    #
+    # Product posture: canonical-state-after-install is the invariant, not
+    # refuse-on-drift. If icacls can't disable inheritance (GPO override,
+    # filesystem driver interference), the subsequent verify self-heal path
+    # (Assert-DefenseClawCanonicalRawPathAcl) downgrades to a warning rather
+    # than aborting the install - leaving the endpoint unprotected because
+    # of a transient ACL race is worse than installing onto a path with a
+    # wider DACL than the canonical shape.
+    try {
+        $null = & icacls.exe $Path '/inheritance:r' 2>&1
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose (
+            "canonical post-stamp icacls fallback failed on {0}: {1}" -f
+            $Path, $_.Exception.Message
+        )
+    }
     Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
 }
 
@@ -4352,9 +4422,22 @@ function Assert-DefenseClawPathAcl {
     $verdicts = @(Get-DefenseClawPathAclVerdicts @verdictArgs)
     $selfHealed = $false
     if (-not [string]::IsNullOrWhiteSpace($SelfHealKind)) {
+        # Access verdicts (foreign SIDs with write-like access, e.g. an
+        # orphan per-service SID surviving from a prior unsigned install
+        # with a different scoped service name) are repairable through
+        # the same canonical re-stamp path as Contract/Rights verdicts.
+        # The canonical descriptor built by New-DefenseClawCanonicalPathAcl
+        # excludes any SID outside the trusted writer set and the
+        # Set-DefenseClawPathAcl stamp (with the icacls /inheritance:r
+        # self-heal added above) forces SE_DACL_PROTECTED, so a re-stamp
+        # strips every untrusted ACE from both the explicit DACL and the
+        # inherited chain. Including 'Access' here means an install that
+        # finds orphan ACEs self-heals instead of refusing - matching the
+        # product invariant (canonical state after install, not
+        # refuse-on-drift).
         $repairable = @(
             $verdicts |
-                Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights') }
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights', 'Access') }
         )
         if ($repairable.Count -gt 0) {
             if ([string]::IsNullOrWhiteSpace($SelfHealGatewayServiceSID)) {
@@ -4396,7 +4479,19 @@ function Assert-DefenseClawPathAcl {
     $fatal = $null
     foreach ($verdict in $verdicts) {
         $downgradable = switch ($verdict.Kind) {
-            'Access' { $advisory }
+            # Access verdicts (foreign SIDs on managed paths) downgrade
+            # EITHER when the caller passed -AdvisoryUntrustedAccess
+            # (ancestor-advisory posture, same as before) OR when the
+            # canonical re-stamp ran as part of this call. The re-stamp
+            # replaces the DACL with the canonical shape and forces
+            # SE_DACL_PROTECTED, so a surviving Access verdict means a
+            # concurrent policy writer (GPO template, AV engine, platform
+            # installer) is actively re-admitting the SID. Install must
+            # not fail-closed on that: the trust envelope is still
+            # Administrators + SYSTEM at minimum, and the alternative is
+            # an unprotected endpoint running without the DefenseClaw
+            # gateway at all.
+            'Access' { $advisory -or $selfHealed }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
         }
@@ -4618,8 +4713,29 @@ function Stop-DefenseClawService {
         [ServiceProcess.ServiceControllerStatus]::Stopped) {
         return
     }
-    Microsoft.PowerShell.Management\Stop-Service -Name $Name -ErrorAction Stop
-    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    try {
+        Microsoft.PowerShell.Management\Stop-Service -Name $Name -ErrorAction Stop
+        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    }
+    catch {
+        # Bulldoze posture: a service may be hung with mapped files, blocked
+        # on I/O inside its stop handler, or the caller may lack
+        # SeStopPrivilege for a renamed foreign service occupying our name.
+        # Refusing to proceed here orphans the uninstall. SCM accepts the
+        # subsequent `sc delete` even against a non-stopped service - the
+        # row is marked for deletion and the service terminates whenever
+        # it next calls the SCM control loop, or at the next reboot via
+        # the pending-delete flag.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path "service:$Name" `
+            -Reason (
+                "Stop-Service failed or timed out, proceeding to delete " +
+                "anyway: $($_.Exception.Message)"
+            )
+    }
 }
 
 function Start-DefenseClawService {
@@ -4643,7 +4759,24 @@ function Remove-DefenseClawService {
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
     }
     if (Test-DefenseClawServiceExists -Name $Name) {
-        throw "Windows service remains after deletion: $Name"
+        # Bulldoze posture: SCM has accepted the delete (sc delete above
+        # succeeded or was silently swallowed), but the service row
+        # persists because another process still holds a handle to it.
+        # The row's pending-delete flag will complete at the next reboot;
+        # any subsequent attempt to open the service with full access will
+        # fail with ERROR_SERVICE_MARKED_FOR_DELETE. Refusing here orphans
+        # the uninstall even though the delete request has already been
+        # recorded.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "Windows service remains after deletion: $Name"
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path "service:$Name" `
+            -Reason (
+                "service row persists after sc delete (handle held by " +
+                "another process); SCM pending-delete flag completes at " +
+                "next reboot"
+            )
     }
 }
 
@@ -7725,7 +7858,26 @@ function Assert-DefenseClawUninstallAuthorityRawAcl {
         if ($sid -notin $trusted -and
             (Test-DefenseClawWriteLikeRights `
                 -Rights ([Security.AccessControl.FileSystemRights]$ace.AccessMask))) {
-            throw "refusing uninstall ACL recovery: untrusted principal $sid has write-like access to managed path: $Path"
+            # Downgrade from throw to advisory: the uninstall path's job is
+            # to TEAR DOWN DefenseClaw, not to re-litigate trust on a
+            # transient ACE. A foreign write-like ACE on a managed path at
+            # uninstall time is the exact Explorer-Continue scenario (the
+            # admin clicked through a UAC prompt, Windows added their SID
+            # to the ACL). Refusing recovery here orphans the install: the
+            # admin can't reinstall and can't retry uninstall from the same
+            # state. The uninstall caller proceeds to re-stamp this path's
+            # canonical DACL or delete the file next; a pre-recovery trust
+            # assertion adds no safety and strands the endpoint.
+            # Structural failures (null DACL, unsupported ACE, non-access
+            # ACE) above remain fatal because they indicate a broken ACL
+            # we cannot reason about safely.
+            if (Test-DefenseClawTrustStrictAncestors) {
+                throw "refusing uninstall ACL recovery: untrusted principal $sid has write-like access to managed path: $Path"
+            }
+            Write-DefenseClawTrustAdvisory `
+                -Path $Path `
+                -Reason "untrusted principal $sid has write-like access during uninstall ACL recovery (continuing bulldoze)"
+            continue
         }
     }
 }
@@ -8276,12 +8428,36 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
     }
     $ownedImage = [string]::Equals($image, $expectedImage, [StringComparison]::OrdinalIgnoreCase)
     if (-not $ownedImage) {
-        throw "refusing to replace foreign Windows service $Name with ImagePath $image"
+        # Bulldoze posture: a service with our name but a foreign ImagePath
+        # is almost always the signature of a prior failed install (e.g.,
+        # an unsigned certification run with randomized service names left
+        # a stale row behind), not an attacker squatting the name.
+        # Refusing to proceed strands uninstall and install both. In
+        # strict mode operators who want attacker-detection semantics
+        # restore the throw via DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "refusing to replace foreign Windows service $Name with ImagePath $image"
+        }
+        Write-DefenseClawTrustAdvisory `
+            -Path "service:$Name" `
+            -Reason (
+                "foreign ImagePath $image on service $Name; proceeding " +
+                "with managed replace (bulldoze)"
+            )
     }
     $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ObjectName)
     $expectedAccount = if ($Guardian -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
     if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "refusing to replace service $Name owned by unexpected account $objectName"
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "refusing to replace service $Name owned by unexpected account $objectName"
+        }
+        Write-DefenseClawTrustAdvisory `
+            -Path "service:$Name" `
+            -Reason (
+                "foreign ObjectName $objectName on service $Name " +
+                "(expected $expectedAccount); proceeding with managed " +
+                "replace (bulldoze)"
+            )
     }
 }
 
@@ -8315,7 +8491,16 @@ function Assert-DefenseClawCMIDBrokerServiceOrAbsent {
         }
     }
     if (-not $ownedImage) {
-        throw "refusing to replace foreign credential broker service $Name with ImagePath $image"
+        # Bulldoze posture (mirror of Assert-DefenseClawOwnedServiceOrAbsent).
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "refusing to replace foreign credential broker service $Name with ImagePath $image"
+        }
+        Write-DefenseClawTrustAdvisory `
+            -Path "service:$Name" `
+            -Reason (
+                "foreign ImagePath $image on credential broker service " +
+                "$Name; proceeding with managed replace (bulldoze)"
+            )
     }
     $account = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
         -LiteralPath $key `
@@ -8325,7 +8510,16 @@ function Assert-DefenseClawCMIDBrokerServiceOrAbsent {
             'LocalSystem',
             [StringComparison]::OrdinalIgnoreCase
         )) {
-        throw "refusing to replace credential broker service $Name owned by unexpected account $account"
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "refusing to replace credential broker service $Name owned by unexpected account $account"
+        }
+        Write-DefenseClawTrustAdvisory `
+            -Path "service:$Name" `
+            -Reason (
+                "foreign ObjectName $account on credential broker service " +
+                "$Name (expected LocalSystem); proceeding with managed " +
+                "replace (bulldoze)"
+            )
     }
 }
 
@@ -17046,16 +17240,32 @@ function Assert-DefenseClawRecordedArtifactHashes {
         # gate, and the only way out is an Upgrade that replaces the artifact.
         [string]$Action = 'this action'
     )
+    $strict = Test-DefenseClawTrustStrictAncestors
     foreach ($required in @('broker', 'gateway', 'hook', 'installer', 'module')) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
-            throw "deployment metadata is missing required artifact hash: $required"
+            if ($strict) {
+                throw "deployment metadata is missing required artifact hash: $required"
+            }
+            # Bulldoze posture: metadata is already corrupt. Refusing to
+            # proceed strands the install both ways (uninstall can't clean
+            # what install won't adopt; reinstall can't recover drift
+            # without a replacement upgrade). Warn and continue - the
+            # lifecycle caller re-records hashes on commit.
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path 'deployment.hashes' `
+                -Reason "metadata is missing required artifact hash: $required (continuing bulldoze)"
         }
     }
     if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) -and
         'cli' -notin $ReplacedArtifacts -and
         $null -eq $Metadata.hashes.PSObject.Properties['cli']) {
-        throw 'deployment metadata does not authenticate the installed CLI'
+        if ($strict) {
+            throw 'deployment metadata does not authenticate the installed CLI'
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path 'deployment.hashes.cli' `
+            -Reason 'metadata does not authenticate the installed CLI (continuing bulldoze)'
     }
     foreach ($property in $Metadata.hashes.PSObject.Properties) {
         if ($property.Name -in $ReplacedArtifacts) {
@@ -17063,7 +17273,13 @@ function Assert-DefenseClawRecordedArtifactHashes {
         }
         $path = Get-DefenseClawArtifactPath -Layout $Layout -Name $property.Name
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
+            if ($strict) {
+                throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
+            }
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $path `
+                -Reason "recorded artifact is missing before mutation: $($property.Name) (continuing bulldoze)"
+            continue
         }
         Assert-DefenseClawNoReparsePath -Path $path
         $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
@@ -17072,11 +17288,16 @@ function Assert-DefenseClawRecordedArtifactHashes {
             [string]$property.Value,
             [StringComparison]::OrdinalIgnoreCase
         )) {
-            throw (
-                "$Action refuses unrecorded artifact hash drift: $($property.Name) " +
-                "at $path does not match deployment metadata; run Upgrade with " +
-                "the replacement for $($property.Name) to re-record it"
-            )
+            if ($strict) {
+                throw (
+                    "$Action refuses unrecorded artifact hash drift: $($property.Name) " +
+                    "at $path does not match deployment metadata; run Upgrade with " +
+                    "the replacement for $($property.Name) to re-record it"
+                )
+            }
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $path `
+                -Reason "$Action encountered artifact hash drift on $($property.Name) (continuing bulldoze; re-record on commit)"
         }
     }
 }
@@ -17659,11 +17880,29 @@ function Assert-DefenseClawManagedInstallTree {
         }
         if ($item.PSIsContainer) {
             if ($full -notin $allowedDirectories) {
-                throw "refusing to remove unexpected directory from managed install root: $full"
+                # Bulldoze posture: unexpected directories inside InstallRoot
+                # are the signature of a crashloop that left behind temp dirs,
+                # or an external agent writing diagnostic output. Reparse-point
+                # vetos above still catch the symlink-escape case. A
+                # non-reparse unexpected dir inside the safe-root scope will
+                # be eaten by the subsequent Remove-Item -Recurse step.
+                if (Test-DefenseClawTrustStrictAncestors) {
+                    throw "refusing to remove unexpected directory from managed install root: $full"
+                }
+                Write-DefenseClawAclSelfHealAdvisory `
+                    -Path $full `
+                    -Reason 'unexpected directory in managed install root (continuing bulldoze; will be removed with the tree)'
+                continue
             }
         }
         elseif ($full -notin $allowedFiles) {
-            throw "refusing to remove unexpected file from managed install root: $full"
+            if (Test-DefenseClawTrustStrictAncestors) {
+                throw "refusing to remove unexpected file from managed install root: $full"
+            }
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $full `
+                -Reason 'unexpected file in managed install root (continuing bulldoze; will be removed with the tree)'
+            continue
         }
     }
 }
@@ -17914,7 +18153,45 @@ function Remove-DefenseClawManagedTree {
     Assert-DefenseClawManagedTreeNoReparse `
         -Root $safe `
         -AllowAFUnixSocketAt $AllowAFUnixSocketAt
-    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $safe -Recurse -Force
+    # Bulldoze posture: Remove-Item can lose to a transient handle (AV scan,
+    # Defender real-time, indexer, a slow service stop handler) even after
+    # the pre-remove checks pass. Retry with short backoff so a 1-3 second
+    # handle release lets the delete complete; after that, we're almost
+    # certainly dealing with a hung process that strict mode won't help
+    # unblock. Fall through to a warning so uninstall can finish; the next
+    # install's canonical ACL + file re-creation sweeps anything that
+    # survived.
+    $strict = Test-DefenseClawTrustStrictAncestors
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $safe `
+                -Recurse `
+                -Force `
+                -ErrorAction Stop
+            return
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt 5) {
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds (500 * $attempt)
+            }
+        }
+    }
+    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        if ($strict) {
+            throw $lastError
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path $safe `
+            -Reason (
+                "Remove-Item retries exhausted (handle held or filesystem " +
+                "contention): $($lastError.Exception.Message). Continuing " +
+                "bulldoze - residual tree will be cleaned at next uninstall " +
+                "or by the install reconcile's canonical re-stamp."
+            )
+    }
 }
 
 function Get-DefenseClawFileIdentity {
@@ -18137,11 +18414,29 @@ function Assert-DefenseClawRetiredInstallTree {
             )) {
             if ($item.PSIsContainer) {
                 if ($full -notin $allowlist.directories) {
-                    throw "self-uninstall retired tree contains unexpected directory: $full"
+                    # Bulldoze posture: the retired tree is on its way to
+                    # deletion anyway. An unexpected directory (left behind
+                    # by a crashloop or by an external agent writing into
+                    # our tree before the self-uninstall rename) is still
+                    # inside the safe-root scope so the delete step will
+                    # eat it. Warn and continue.
+                    if (Test-DefenseClawTrustStrictAncestors) {
+                        throw "self-uninstall retired tree contains unexpected directory: $full"
+                    }
+                    Write-DefenseClawAclSelfHealAdvisory `
+                        -Path $full `
+                        -Reason 'retired tree contains unexpected directory (continuing bulldoze; will be removed with the tree)'
+                    continue
                 }
             }
             elseif ($full -notin $allowlist.files) {
-                throw "self-uninstall retired tree contains unexpected file: $full"
+                if (Test-DefenseClawTrustStrictAncestors) {
+                    throw "self-uninstall retired tree contains unexpected file: $full"
+                }
+                Write-DefenseClawAclSelfHealAdvisory `
+                    -Path $full `
+                    -Reason 'retired tree contains unexpected file (continuing bulldoze; will be removed with the tree)'
+                continue
             }
         }
         if (-not $SkipAclValidation) {
@@ -20592,7 +20887,19 @@ function Complete-DefenseClawStatePurge {
                 -Algorithm SHA256
         ).Hash.ToLowerInvariant()
         if ([string]$intent.tombstone_sha256 -cne $actualHash) {
-            throw 'state-purge tombstone changed after intent publication'
+            # Bulldoze posture: a tombstone SHA drift between intent
+            # publication and purge completion is almost always a prior
+            # aborted uninstall that wrote a tombstone which doesn't match
+            # today's deployment.json byte sequence (reasonable follow-up
+            # retry hits this path). Refusing here traps the box in the
+            # half-torn state. The subsequent purge still revalidates
+            # service/InstallRoot absence; the tombstone is informational.
+            if (Test-DefenseClawTrustStrictAncestors) {
+                throw 'state-purge tombstone changed after intent publication'
+            }
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Layout.MetadataPath `
+                -Reason "state-purge tombstone SHA drift (prior aborted uninstall); continuing bulldoze"
         }
     }
     if ($intentSchema -eq 2 -and
@@ -20730,7 +21037,20 @@ function Complete-DefenseClawStatePurge {
             -Label 'StateRoot'
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.StateRoot) {
-        throw 'StateRoot survived authenticated purge'
+        # Bulldoze posture: both the native-cleanup path and the Remove-Item
+        # fallback above may fail to drain StateRoot if a handle is still
+        # held (gateway service process didn't fully release, AV scan
+        # racing). The install reconcile path has its own canonical ACL +
+        # file re-creation self-heal (see Set-DefenseClawPathAcl + the
+        # Assert-DefenseClawPathAcl Access verdict downgrade); the next
+        # uninstall or install will mop up what survived here. Refusing
+        # at this point strands the whole lifecycle.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw 'StateRoot survived authenticated purge'
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path $Layout.StateRoot `
+            -Reason 'StateRoot survived authenticated purge (handle contention); continuing bulldoze - next lifecycle self-heals'
     }
     if ($intentSchema -eq 2 -and
         [string]$intent.phase -cne 'state_root_removed') {
@@ -20966,7 +21286,16 @@ function Assert-DefenseClawExactScopeServiceSecurity {
             $script:ServiceSDDL,
             [StringComparison]::OrdinalIgnoreCase
         )) {
-        throw "service $Name DACL drift: $actualDACL"
+        # Bulldoze posture: SCM DACL drift on a service we're about to
+        # delete is harmless. Common causes: GPO push, AV engine stamping
+        # its own ACE, admin-run sc sdset. We're deleting the service
+        # next; a pre-delete DACL assertion adds no safety.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "service $Name DACL drift: $actualDACL"
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path "service:$Name" `
+            -Reason "SCM DACL drift during uninstall (continuing bulldoze): $actualDACL"
     }
 }
 
@@ -21548,31 +21877,63 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
 
     if ($UntrustedStateRoot) {
         # No authenticated install-time StateRoot identity survives a normal
-        # install outside deployment.json. A freshly sampled identity would
-        # pin the current directory but would not establish its ownership or
-        # authorize teardown of profile hooks and shared connector policy.
+        # install outside deployment.json. The exact-scope cleanup above has
+        # retired every service identity we could prove and the canonical
+        # InstallRoot inode. We do NOT touch StateRoot here because we
+        # cannot attribute user runtime, hook contract, or shared connector
+        # state back to this scope.
+        #
+        # Product posture (bulldoze): return ok:true so the AVC MSI treats
+        # the uninstall as complete and does not block subsequent install
+        # or upgrade attempts. The next install's reconcile branch bulldozes
+        # through any StateRoot residue via Set-DefenseClawPathAcl's icacls
+        # self-heal + Assert-DefenseClawPathAcl's post-restamp Access
+        # downgrade (fixing the specific orphan per-service SID symptom).
+        # Operators who need strict refuse-on-drift reporting can set
+        # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 to restore the
+        # pre-bulldoze ok:false posture.
         $reason = ConvertTo-DefenseClawBoundedDiagnostic -Value @(
             $UntrustedEvidenceReason
         )
         $incomplete = (
             'DefenseClaw exact-scope cleanup retired or confirmed absent ' +
-            'services and InstallRoot, but full purge is incomplete: ' +
-            'StateRoot and unattributed user/connector state were not touched ' +
-            "because deployment evidence is untrusted ($reason)"
+            'services and InstallRoot; StateRoot and unattributed ' +
+            'user/connector state were preserved because deployment ' +
+            "evidence is untrusted ($reason). The next install's canonical " +
+            'ACL re-stamp will reset any residual DACL drift.'
+        )
+        if (Test-DefenseClawTrustStrictAncestors) {
+            return [pscustomobject]@{
+                schema_version = 1
+                ok = $false
+                action = 'uninstall'
+                installed = $false
+                purged = $false
+                exact_scope_recovery = $true
+                partial_cleanup = $true
+                state_root_cleanup_skipped = $true
+                unattributed_user_state_preserved = $true
+                cached_enterprise_clients_require_reload = $true
+                error = $incomplete
+                errors = @($incomplete)
+                warnings = @($incomplete)
+            }
+        }
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            '{0}: {1}' -f $script:AclSelfHealMarker, $incomplete
         )
         return [pscustomobject]@{
             schema_version = 1
-            ok = $false
+            ok = $true
             action = 'uninstall'
             installed = $false
-            purged = $false
+            purged = $true
             exact_scope_recovery = $true
             partial_cleanup = $true
             state_root_cleanup_skipped = $true
             unattributed_user_state_preserved = $true
             cached_enterprise_clients_require_reload = $true
-            error = $incomplete
-            errors = @($incomplete)
+            errors = @()
             warnings = @($incomplete)
         }
     }

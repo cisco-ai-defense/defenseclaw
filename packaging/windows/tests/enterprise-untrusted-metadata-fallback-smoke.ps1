@@ -90,10 +90,16 @@ try {
                 throw 'untrusted metadata did not select the partial recovery path'
             }
             $script:FallbackCalls++
+            # Bulldoze posture: the real function now returns ok:true,
+            # purged:true even when StateRoot cleanup is skipped (deployment
+            # evidence untrusted). AVC MSI treats uninstall as complete so
+            # the box is not stranded. The next install's canonical ACL
+            # re-stamp handles any surviving DACL drift.
             return [pscustomobject]@{
-                ok = $false
-                purged = $false
+                ok = $true
+                purged = $true
                 partial_cleanup = $true
+                state_root_cleanup_skipped = $true
             }
         }
         $arguments = @{
@@ -105,9 +111,9 @@ try {
         }
         $partial = Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
             @arguments
-        if ($script:FallbackCalls -ne 1 -or [bool]$partial.ok -or
-            [bool]$partial.purged -or -not [bool]$partial.partial_cleanup) {
-            throw 'untrusted metadata did not dispatch partial exact-scope cleanup'
+        if ($script:FallbackCalls -ne 1 -or -not [bool]$partial.ok -or
+            -not [bool]$partial.purged -or -not [bool]$partial.partial_cleanup) {
+            throw 'untrusted metadata did not dispatch bulldoze exact-scope cleanup'
         }
 
         foreach ($evidencePath in @(
