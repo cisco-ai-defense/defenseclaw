@@ -39,6 +39,7 @@ and
 | Actual-peer audit record | `internal/gateway/provider.go` | `internal/gateway/private_upstream_audit_test.go` |
 | Startup and reload | `internal/gateway/sidecar.go` | `internal/gateway/sidecar_observability_v8_bootstrap_test.go` |
 | Python registry guard | `cli/defenseclaw/registries/ssrf.py` | `cli/tests/test_registry_ssrf.py` |
+| CLI (`defenseclaw guardrail allow-private-upstream`) | `cli/defenseclaw/commands/cmd_guardrail.py` | `cli/tests/test_guardrail_allow_private_upstream.py` |
 | Doctor warning | `cli/defenseclaw/commands/cmd_doctor.py` | `cli/tests/test_cmd_doctor.py` |
 | Env-var metadata | `internal/envvars/registry.json` | `cli/tests/test_envvars.py`, `cli/tests/test_envvars_codebase_coverage.py` |
 

@@ -2319,6 +2319,96 @@ _RULE_PACK_PRESETS = (
 )
 
 
+_NEVER_ALLOWED_PRIVATE_UPSTREAMS = frozenset({"169.254.169.254", "169.254.170.2", "fd00:ec2::254"})
+
+
+def _private_upstream_ips(target: str) -> list[str]:
+    """The addresses ``target`` (an IP or a hostname) stands for, checked the
+    way the gateway checks guardrail.allow_private_upstreams."""
+    import ipaddress
+    import socket
+
+    try:
+        addresses = [ipaddress.ip_address(target)]
+    except ValueError:
+        if "/" in target:
+            raise click.ClickException(f"{target} is a CIDR range; give single addresses or a hostname.") from None
+        try:
+            infos = socket.getaddrinfo(target, 443, proto=socket.IPPROTO_TCP)
+        except OSError as exc:
+            raise click.ClickException(f"could not resolve {target}: {exc}") from None
+        addresses = []
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+            if ip not in addresses:
+                addresses.append(ip)
+    out = []
+    for ip in addresses:
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        text = str(ip)
+        if text in _NEVER_ALLOWED_PRIVATE_UPSTREAMS or ip.is_loopback or ip.is_link_local \
+                or ip.is_multicast or ip.is_unspecified:
+            raise click.ClickException(
+                f"{target} resolves to {text}; loopback, link-local and cloud metadata addresses are never allowed."
+            )
+        out.append(text)
+    return out
+
+
+@guardrail.command("allow-private-upstream")
+@click.argument("targets", nargs=-1)
+@click.option("--remove", is_flag=True, help="Remove these addresses instead of adding them.")
+@pass_ctx
+def guardrail_allow_private_upstream(app: AppContext, targets: tuple[str, ...], remove: bool) -> None:
+    """Let the guardrail proxy reach an LLM endpoint on a private address.
+
+    The proxy refuses upstreams that resolve to private addresses. An AWS
+    PrivateLink (VPC interface) endpoint for Bedrock is one: its hostname
+    resolves to the endpoint's private IPs, and every proxied call fails.
+    Give the hostname or its IPs; a hostname is resolved now and its private
+    addresses are stored in guardrail.allow_private_upstreams. Run it again if
+    the endpoint's addresses change. With no arguments it lists the entries.
+    Loopback, link-local and cloud metadata addresses are never allowed.
+
+    \b
+    Example:
+      defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws.com
+    """
+    gc = app.cfg.guardrail
+    current = [str(v).strip() for v in (gc.allow_private_upstreams or []) if str(v).strip()]
+    if not targets:
+        if current:
+            click.echo("  guardrail.allow_private_upstreams: " + ", ".join(current))
+        else:
+            click.echo("  guardrail.allow_private_upstreams: (none)")
+        return
+    import ipaddress
+
+    wanted: list[str] = []
+    for target in targets:
+        for ip in _private_upstream_ips(target.strip()):
+            if not remove and not ipaddress.ip_address(ip).is_private:
+                click.echo(f"  {ip} ({target}) is a public address; the proxy already reaches it.")
+                continue
+            if ip not in wanted:
+                wanted.append(ip)
+    if remove:
+        updated = [ip for ip in current if ip not in wanted]
+    else:
+        updated = current + [ip for ip in wanted if ip not in current]
+    if updated == current:
+        ux.ok("No change: guardrail.allow_private_upstreams is " + (", ".join(current) or "(none)"), indent="  ")
+        return
+    gc.allow_private_upstreams = updated
+    try:
+        app.cfg.save()
+    except OSError as exc:
+        raise click.ClickException(f"could not save the config: {exc}") from exc
+    ux.ok("guardrail.allow_private_upstreams: " + (", ".join(updated) or "(none)"), indent="  ")
+    click.echo("  Restart the gateway to apply it: defenseclaw-gateway restart")
+
+
 @guardrail.command("validate-pack")
 @click.argument("path", type=click.Path(path_type=str))
 @click.option(

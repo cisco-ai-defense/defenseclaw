@@ -705,6 +705,17 @@ func secureDialResolver() netguard.V8Resolver {
 // for test webhooks pointing at httptest.Server). A standalone
 // gateway then reaches the checked host through the enterprise.network
 // proxy unless no_proxy excludes it (see SetEnterpriseEgress).
+// privateUpstreamHint names the fix for an upstream on a private address the
+// operator can allow, such as an AWS PrivateLink (VPC) endpoint for Bedrock
+// (GAP-1406). Loopback, link-local and metadata addresses can never be
+// allowed, so they get no hint.
+func privateUpstreamHint(host string, ip net.IP) string {
+	if ip == nil || ip.IsLoopback() || netguard.IsHardDeniedIP(ip) {
+		return ""
+	}
+	return fmt.Sprintf("; if it is a private endpoint you trust (for example an AWS VPC endpoint), allow it with: defenseclaw guardrail allow-private-upstream %s", host)
+}
+
 func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: timeout}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -721,7 +732,7 @@ func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx conte
 				if allowLoopback && ip.IP.IsLoopback() {
 					continue
 				}
-				return nil, fmt.Errorf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)", host, ip.IP)
+				return nil, fmt.Errorf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)%s", host, ip.IP, privateUpstreamHint(host, ip.IP))
 			}
 		}
 		// Use the first safe IP literal so we don't re-resolve and
