@@ -19711,6 +19711,9 @@ function Get-DefenseClawSelfUninstallHelperContent {
         "'",
         "''"
     )
+    # This is an expandable here-string: a backtick before a newline is an
+    # escape here, not a line continuation, so every generated command must
+    # stay on one line.
     return @"
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
@@ -19741,9 +19744,7 @@ try {
     }
     & `$module {
         param(`$ProtectedReceiptPath)
-        Complete-DefenseClawSelfUninstallRetirement `
-            -ReceiptPath `$ProtectedReceiptPath `
-            -WaitForCallerExit
+        Complete-DefenseClawSelfUninstallRetirement -ReceiptPath `$ProtectedReceiptPath -WaitForCallerExit
     } `$receiptPath
 }
 catch {
