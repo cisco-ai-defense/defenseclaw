@@ -52,6 +52,23 @@ func claimGatewayAPIPort(cfg *config.Config) {
 	}
 }
 
+// removeOwnGatewayPortClaims drops every port claim this account owns. The
+// enterprise purge removes the account's per-user install (GAP-1502), as
+// per-user `uninstall --all` does (bootstrap.remove_own_api_port_claims), so
+// other accounts' init stops skipping the port. Best effort.
+func removeOwnGatewayPortClaims() {
+	matches, err := filepath.Glob(filepath.Join(gatewayPortClaimDir, gatewayPortClaimPrefix+"*"))
+	if err != nil {
+		return
+	}
+	own := uint32(os.Getuid())
+	for _, match := range matches {
+		if claimOwnedBy(match, own) {
+			_ = os.Remove(match)
+		}
+	}
+}
+
 func claimOwnedBy(path string, uid uint32) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {

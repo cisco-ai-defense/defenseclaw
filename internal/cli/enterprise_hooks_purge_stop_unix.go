@@ -31,7 +31,16 @@ import (
 // the purge. An error means one may still run, so the purge keeps the
 // account's state rather than leave an orphan gateway without its files.
 // stopped reports that a per-user gateway was running and is stopped now.
+// Once none runs, the account's gateway port claims go too (GAP-1502).
 func stopPerUserGatewayForPurge(opts enterprisehooks.InstallOptions) (stopped bool, err error) {
+	stopped, err = stopPerUserGatewayProcesses(opts)
+	if err == nil {
+		removeOwnGatewayPortClaims()
+	}
+	return stopped, err
+}
+
+func stopPerUserGatewayProcesses(opts enterprisehooks.InstallOptions) (stopped bool, err error) {
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
 		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
