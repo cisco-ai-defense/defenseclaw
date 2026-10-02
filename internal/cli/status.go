@@ -500,10 +500,13 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 	printGatewayKV("Agents", fmt.Sprintf("%d active", len(conns)))
 	for i := range conns {
 		c := conns[i]
-		stateStr := strings.ToUpper(string(c.State))
+		stateStr, detail := connectorDisplayState(&c, time.Now())
 		header := fmt.Sprintf("%s (%s)%s",
 			friendlyConnectorName(c.Name), c.Name, styledConnectorStateVerb(stateStr))
 		fmt.Printf("             %s\n", header)
+		if detail != "" {
+			fmt.Printf("               %s\n", Dim(detail))
+		}
 		printConnectorBody(&c)
 	}
 	// A connector whose setup failed at start is not enforced (GAP-1714).
@@ -513,6 +516,29 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 			"see gateway.log, then run: defenseclaw setup "+name))
 	}
 	fmt.Println()
+}
+
+// opencodeHeartbeatFreshness matches the CLI's OpenCode freshness window.
+const opencodeHeartbeatFreshness = 15 * time.Minute
+
+// connectorDisplayState returns the state word for a connector row. OpenCode
+// is shown the way `defenseclaw status` shows it (GAP-1871): a running adapter
+// without a load heartbeat is IDLE (OpenCode is closed) and a stale heartbeat
+// is DEGRADED, so the two status views agree.
+func connectorDisplayState(c *gateway.ConnectorHealth, now time.Time) (string, string) {
+	state := strings.ToUpper(string(c.State))
+	if c.Name != "opencode" || c.State != gateway.StateRunning {
+		return state, ""
+	}
+	if c.LastLoadHeartbeatAt == nil {
+		return "IDLE", "no load heartbeat yet: OpenCode has not loaded the plugin since the gateway started, " +
+			"which is normal while OpenCode is closed"
+	}
+	if now.Sub(*c.LastLoadHeartbeatAt) > opencodeHeartbeatFreshness {
+		return "DEGRADED", "load heartbeat is stale (last received at " +
+			c.LastLoadHeartbeatAt.UTC().Format(time.RFC3339) + "); OpenCode may be stopped or idle"
+	}
+	return state, ""
 }
 
 // guardrailConnectorsNotStarted reads the guardrail's connectors_not_started

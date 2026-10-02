@@ -643,3 +643,33 @@ func TestPrintConnectorsNamesConnectorsNotStarted(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintConnectors_OpenCodeMatchesCLIStatus pins GAP-1871: OpenCode
+// without a load heartbeat reads IDLE here as in `defenseclaw status`.
+func TestPrintConnectors_OpenCodeMatchesCLIStatus(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-time.Hour)
+	fresh := now.Add(-time.Minute)
+	cases := []struct {
+		heartbeat *time.Time
+		want      string
+	}{
+		{nil, "OpenCode (opencode) - IDLE"},
+		{&stale, "OpenCode (opencode) - DEGRADED"},
+		{&fresh, "OpenCode (opencode) - RUNNING"},
+	}
+	for _, tc := range cases {
+		snap := &gateway.HealthSnapshot{Connectors: []gateway.ConnectorHealth{
+			{Name: "opencode", State: gateway.StateRunning, Since: now, LastLoadHeartbeatAt: tc.heartbeat},
+			{Name: "codex", State: gateway.StateRunning, Since: now},
+		}}
+		out := captureStdout(t, func() { printConnectors(snap) })
+		out = strings.ReplaceAll(out, "\u2014", "-")
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("want %q in:\n%s", tc.want, out)
+		}
+		if !strings.Contains(out, "Codex (codex) - RUNNING") {
+			t.Errorf("codex row changed:\n%s", out)
+		}
+	}
+}

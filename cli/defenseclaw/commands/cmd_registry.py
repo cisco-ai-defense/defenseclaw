@@ -1667,27 +1667,28 @@ def require_cmd(
     if empty_registry:
         if empty_action == "deny":
             ux.warn(
-                f"registries.{asset}.registry is EMPTY and "
+                f"asset_policy.{asset}.registry is EMPTY and "
                 f"registry_empty_action='deny' — every {asset} will be "
                 "blocked at admission until you `registry sync` (or add "
                 "manual rules).",
             )
         elif empty_action == "warn":
             ux.warn(
-                f"registries.{asset}.registry is empty and "
+                f"asset_policy.{asset}.registry is empty and "
                 "registry_empty_action='warn' — assets will be allowed "
                 "but flagged in the audit log. Run `registry sync` to "
                 "populate the list.",
             )
         else:
             ux.subhead(
-                f"registries.{asset}.registry is empty and "
+                f"asset_policy.{asset}.registry is empty and "
                 f"registry_empty_action={empty_action!r} — admission "
                 "will fall back to the configured default action.",
             )
     else:
         ux.subhead(
-            f"registry has {len(effective.registry)} entries; "
+            f"registry has {len(effective.registry)} "
+            f"{'entry' if len(effective.registry) == 1 else 'entries'}; "
             f"registry_empty_action={empty_action!r} (only matters when "
             "the list is empty).",
         )

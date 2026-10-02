@@ -705,7 +705,9 @@ def _print_agents(
             dim_text = ux.dim(
                 f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
             )
-            if conn == "opencode":
+            if conn == "opencode" and not sidecar_down:
+                # With the sidecar stopped the header already says no
+                # connector is enforced; tag none of them (GAP-1871).
                 runtime_state, runtime_detail = _opencode_runtime_truth(
                     None,
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",

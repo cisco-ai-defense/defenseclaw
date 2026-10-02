@@ -531,6 +531,20 @@ class TestRegistryRequire(RegistryCommandTestBase):
             self.assertEqual(len(actions), 1, actions)
             self.assertIn(f"require scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
 
+    def test_require_messages_name_asset_policy_key_and_count(self):
+        # GAP-1880: singular "1 entry" and the same key name as the success line.
+        from defenseclaw.config import AssetPolicyRule
+
+        self.app.cfg.asset_policy.mcp.registry = [AssetPolicyRule(name="one", reason="registry:corp")]
+        result = self.invoke(["require", "--type", "mcp", "--enabled"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("registry has 1 entry;", result.output)
+        self.app.cfg.asset_policy.mcp.registry = []
+        result = self.invoke(["require", "--type", "mcp", "--enabled"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("asset_policy.mcp.registry is EMPTY", result.output)
+        self.assertNotIn("registries.", result.output)
+
     def test_require_plugin_rejected(self):
         # OTHER-5: --type plugin is no longer a valid choice. Nothing can
         # populate asset_policy.plugin.registry, so arming require here
