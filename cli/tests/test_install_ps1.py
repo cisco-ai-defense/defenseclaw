@@ -256,9 +256,15 @@ def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
 def test_the_locked_package_install_is_retried_once() -> None:
     # GAP-1315: a sharing violation (os error 32) on uv's cache rename failed
     # the whole Windows install.
-    body = _text()[_text().index("function New-Venv") :][:1600]
-    assert body.count("(Invoke-Native $Uv $lockArgs) -ne 0") == 2
-    assert "Retrying the Python package install once" in body
+    # The DefenseClaw wheel install hit the same hold, so both uv pip steps
+    # go through the single-retry helper.
+    start = _text().index("function New-Venv")
+    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    assert body.count("Invoke-UvPipInstall") == 2
+    assert "Invoke-Native $Uv @(\"pip\"" not in body
+    helper = _text()[_text().index("function Invoke-UvPipInstall") :][:600]
+    assert helper.count("Invoke-Native $Uv $UvArgs") == 2
+    assert "Retrying the Python package install once" in helper
 
 
 def _ps1_function(name: str) -> str:

@@ -857,14 +857,17 @@ function New-Venv([string]$Path) {
     # (over a minute on a Windows host while the files are also first scanned).
     $lockArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
         "-r", (Join-Path $Staging $Requirements))
-    if ((Invoke-Native $Uv $lockArgs) -ne 0) {
-        # A scanner holding a file uv just wrote fails its cache rename with
-        # os error 32 (GAP-1315); the cache makes a second attempt cheap.
-        Write-Warn "Retrying the Python package install once"
-        Start-Sleep -Seconds 5
-        if ((Invoke-Native $Uv $lockArgs) -ne 0) { return $false }
-    }
-    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
+    if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
+    return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
+}
+
+function Invoke-UvPipInstall([string[]]$UvArgs) {
+    if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    # A scanner holding a file uv just wrote fails its cache rename with
+    # os error 32 or 5 (GAP-1315); the cache makes a second attempt cheap.
+    Write-Warn "Retrying the Python package install once"
+    Start-Sleep -Seconds 5
+    return (Invoke-Native $Uv $UvArgs) -eq 0
 }
 
 function Save-Snapshot {
