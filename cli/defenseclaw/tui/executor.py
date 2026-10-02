@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from defenseclaw import credential_provenance
 from defenseclaw.gateway import resolve_gateway_binary
 
 _CREATE_SUSPENDED = 0x00000004
@@ -150,7 +151,8 @@ class CommandExecutor:
         resolved_argv = resolve_subprocess_argv(binary, args)
         started = time.monotonic()
         self._cancelled = False
-        child_env = os.environ.copy()
+        # Children reload ~/.defenseclaw/.env themselves (GAP-1176).
+        child_env = credential_provenance.child_environ()
         if env_overrides:
             child_env.update(env_overrides)
         yield CommandEvent("start", " ".join((binary, *args)))
