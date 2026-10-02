@@ -51,6 +51,7 @@ export class HealthMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private _unprotected = false;
   private _wasUnprotected = false;
+  private _connecting = false;
 
   constructor(opts: HealthMonitorOptions) {
     this.statusUrl = opts.statusUrl;
@@ -118,6 +119,15 @@ export class HealthMonitor {
           }
           this._unprotected = false;
           this._wasUnprotected = false;
+          this._connecting = false;
+        } else if (gwState === "starting" || gwState === "reconnecting") {
+          // The DefenseClaw gateway answered; only its link to this freshly
+          // started OpenClaw gateway is still coming up. That is not "not
+          // running", and starting it again would not help (GAP-1799).
+          if (!this._connecting && !this._unprotected) {
+            console.log("[defenseclaw] DefenseClaw is connecting to this OpenClaw gateway.");
+          }
+          this._connecting = true;
         } else {
           this.markUnprotected();
         }

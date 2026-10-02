@@ -82,6 +82,34 @@ func TestFreeGatewayAPIPortSkipsSandboxPorts(t *testing.T) {
 	}
 }
 
+// GAP-1762: setup gateway refuses a port another account claimed, so the
+// suggestion skips it too and names the next free one.
+func TestFreeGatewayAPIPortSkipsOtherAccountsClaims(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	from := listener.Addr().(*net.TCPAddr).Port
+	if from+gatewayAPIPortTries*gatewayAPIPortStep+2 > 65535 {
+		t.Skip("ephemeral port too close to the top of the range")
+	}
+	free := freeGatewayAPIPort("127.0.0.1", from)
+	if free == 0 {
+		t.Skip("no free candidate ports on this host")
+	}
+	previous := gatewayPortClaimedByOtherAccount
+	t.Cleanup(func() { gatewayPortClaimedByOtherAccount = previous })
+	gatewayPortClaimedByOtherAccount = func(port int) bool { return port == free }
+	got := freeGatewayAPIPort("127.0.0.1", from)
+	if got == free || (got != 0 && (got-from)%gatewayAPIPortStep != 0) {
+		t.Fatalf("freeGatewayAPIPort(%d) = %d, want a port other than the claimed %d", from, got, free)
+	}
+	if fix := foreignGatewayListenerFixAt("127.0.0.1", from); strings.Contains(fix, fmt.Sprintf("--api-port %d ", free)) {
+		t.Fatalf("fix = %q, names the claimed port %d", fix, free)
+	}
+}
+
 // GAP-1344: Windows names a holder by PID only (no uid). Another account's
 // gateway on this account's port is not this account's gateway, so status
 // must not show its status as ours; a managed install keeps its own checks.

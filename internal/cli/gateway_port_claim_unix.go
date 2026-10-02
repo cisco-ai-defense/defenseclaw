@@ -69,6 +69,18 @@ func removeOwnGatewayPortClaims() {
 	}
 }
 
+// gatewayPortClaimedByOtherAccount reports whether another account, also a
+// deleted one, holds the claim for port, as bootstrap.py's
+// _api_port_claimed_by_other_account does. A seam for tests.
+var gatewayPortClaimedByOtherAccount = func(port int) bool {
+	info, err := os.Lstat(filepath.Join(gatewayPortClaimDir, gatewayPortClaimPrefix+strconv.Itoa(port)))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid != uint32(os.Getuid())
+}
+
 func claimOwnedBy(path string, uid uint32) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {

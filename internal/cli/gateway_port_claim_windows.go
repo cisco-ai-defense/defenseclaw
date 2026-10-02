@@ -78,6 +78,18 @@ func gatewayPortClaimSID(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
+// gatewayPortClaimedByOtherAccount reports whether another account's SID
+// holds the claim for port, as bootstrap.py's
+// _api_port_claimed_by_other_account does. A seam for tests.
+var gatewayPortClaimedByOtherAccount = func(port int) bool {
+	sid := gatewayPortClaimSID(filepath.Join(gatewayPortClaimDir, gatewayPortClaimPrefix+strconv.Itoa(port)))
+	if !strings.HasPrefix(strings.ToUpper(sid), "S-1-") {
+		return false
+	}
+	own := currentAccountSID()
+	return own != "" && !strings.EqualFold(sid, own)
+}
+
 func currentAccountSID() string {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {

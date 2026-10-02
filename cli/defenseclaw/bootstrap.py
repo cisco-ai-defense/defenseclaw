@@ -231,7 +231,10 @@ class FirstRunReport:
 _DEFAULT_API_PORT = 18970
 # Step past the sandbox ingress and egress ports (api_port + 1 and + 2).
 _FIRST_RUN_API_PORT_STEP = 10
-_FIRST_RUN_API_PORT_TRIES = 10
+# The gateway's own suggestion (freeGatewayAPIPort, gatewayAPIPortTries) looks
+# at the same window, so init, setup gateway, doctor, status and start agree
+# on a busy shared host (GAP-1807).
+_FIRST_RUN_API_PORT_TRIES = 50
 
 
 def _api_port_free(host: str, port: int) -> bool:
@@ -426,7 +429,8 @@ def choose_first_run_api_port(cfg: Config) -> str:
                 f"so this account's gateway uses port {port}"
             )
     return (
-        f"{host}:{_DEFAULT_API_PORT} is in use; choose a free port with "
+        f"{host}:{_DEFAULT_API_PORT} and the next {_FIRST_RUN_API_PORT_TRIES} candidate ports are in use or "
+        "configured by other accounts; choose a free port with "
         "`defenseclaw setup gateway --api-port <free port> --non-interactive`"
     )
 

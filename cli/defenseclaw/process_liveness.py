@@ -134,6 +134,40 @@ def _pid_alive_windows(pid: int) -> bool:  # pragma: no cover - Windows only
         close_handle(handle)
 
 
+def process_access_denied(pid: int) -> bool:
+    """Whether Windows refuses this account a query handle to ``pid``.
+
+    That is how the gateway tells another account's process from this
+    account's (internal/daemon/foreign_listener_windows.go). False on other
+    platforms and when the process is gone.
+    """
+    if os.name != "nt" or pid <= 0:
+        return False
+    return _process_access_denied_windows(pid)
+
+
+def _process_access_denied_windows(pid: int) -> bool:  # pragma: no cover - Windows only
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if handle:
+        close_handle(handle)
+        return False
+    return ctypes.get_last_error() == error_access_denied
+
+
 def read_pid_file(pid_file: str) -> int | None:
     """Parse a daemon PID file.
 

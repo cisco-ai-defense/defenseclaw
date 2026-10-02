@@ -129,12 +129,23 @@ var gatewayPortHeldByOtherAccount = func(host string, port int) bool {
 // same step init uses when it moves a new account off a held port.
 const gatewayAPIPortStep = 10
 
+// gatewayAPIPortTries is how many candidates a suggestion looks at. It
+// matches bootstrap._FIRST_RUN_API_PORT_TRIES, so the gateway, doctor,
+// init and setup gateway search the same window (GAP-1807).
+const gatewayAPIPortTries = 50
+
 // freeGatewayAPIPort returns the first port after from, in steps of
 // gatewayAPIPortStep, that host can bind right now together with its two
-// sandbox ports, or 0 when none of the next few is free.
+// sandbox ports and that no other account has claimed, or 0 when none of
+// the next gatewayAPIPortTries is. setup gateway refuses a port another
+// account claimed, so suggesting one sent the user in a circle (GAP-1762).
 func freeGatewayAPIPort(host string, from int) int {
-	for port := from + gatewayAPIPortStep; port+2 <= 65535 && port <= from+10*gatewayAPIPortStep; port += gatewayAPIPortStep {
-		if gatewayPortsBindable(host, port, port+1, port+2) {
+	for step := 1; step <= gatewayAPIPortTries; step++ {
+		port := from + step*gatewayAPIPortStep
+		if port+2 > 65535 {
+			break
+		}
+		if !gatewayPortClaimedByOtherAccount(port) && gatewayPortsBindable(host, port, port+1, port+2) {
 			return port
 		}
 	}

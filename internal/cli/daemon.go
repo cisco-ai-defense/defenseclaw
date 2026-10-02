@@ -356,6 +356,13 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 
 	// Pass through relevant flags to the daemon process
 	args := collectDaemonArgs(cmd)
+	// One printer for the PID registration wait and the readiness wait, so
+	// a slow start reports progress from the first 30 s on (GAP-1858).
+	var progress *startProgressPrinter
+	if !coldStart && !rotationTransaction {
+		progress = newStartProgressPrinter()
+		d.SetStartProgress(progress.report)
+	}
 	startAttemptedAt := time.Now()
 	pid, err = d.Start(args)
 	if err != nil {
@@ -394,8 +401,8 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	readinessTimeout := defaultStartReadinessTimeout
 	if coldStart {
 		readinessTimeout = hookColdStartReadinessTimeout
-	} else if !rotationTransaction {
-		requirements.reportProgress = (&startProgressPrinter{}).report
+	} else if progress != nil {
+		requirements.reportProgress = progress.report
 	}
 	snap, _, err := waitForStartedDaemon(
 		d,
@@ -416,6 +423,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if admissionRefused {
 		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
 		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+		printConnectorsNotStarted(snap)
 	} else {
 		printDaemonStartResult(pid, snap)
 	}
@@ -730,6 +738,8 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	fmt.Print("Starting gateway sidecar daemon... ")
 
 	args := collectDaemonArgs(cmd)
+	progress := newStartProgressPrinter()
+	d.SetStartProgress(progress.report)
 	startAttemptedAt := time.Now()
 	pid, err = d.Start(args)
 	if err != nil {
@@ -741,7 +751,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
-	requirements.reportProgress = (&startProgressPrinter{}).report
+	requirements.reportProgress = progress.report
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -941,10 +951,21 @@ func connectorSetupStep(guardrail gateway.SubsystemHealth) string {
 }
 
 // startProgressPrinter prints a slow start's progress under the
-// "Starting gateway sidecar daemon... " line.
-type startProgressPrinter struct{ printed bool }
+// "Starting gateway sidecar daemon... " line. With started set it counts
+// from there, so the PID registration and readiness waits share one clock.
+type startProgressPrinter struct {
+	printed bool
+	started time.Time
+}
+
+func newStartProgressPrinter() *startProgressPrinter {
+	return &startProgressPrinter{started: time.Now()}
+}
 
 func (p *startProgressPrinter) report(elapsed time.Duration, step string) {
+	if !p.started.IsZero() {
+		elapsed = time.Since(p.started)
+	}
 	if !p.printed {
 		fmt.Println()
 		p.printed = true
@@ -2520,6 +2541,18 @@ func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool)
 func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
 	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
 	fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+	printConnectorsNotStarted(snap)
+}
+
+// printConnectorsNotStarted names each configured connector whose setup
+// failed during this start. The gateway runs without it, so "OK" alone hid
+// that the connector is not enforced (GAP-1860).
+func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
+	for _, name := range guardrailConnectorsNotStarted(snap.Guardrail.Details) {
+		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+
+			"See gateway.log for the reason, then run: defenseclaw-gateway restart\n",
+			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name)
+	}
 }
 
 func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
