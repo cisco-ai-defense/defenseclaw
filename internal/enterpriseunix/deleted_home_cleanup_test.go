@@ -54,3 +54,28 @@ func TestGuardianCleanupOfADeletedHomeSaysTheAccountWasDeleted(t *testing.T) {
 		t.Fatalf("the cleanup in an existing home lost its message: %s", got)
 	}
 }
+
+// GAP-1867: while targets.yaml still enrolls a deleted account (until the
+// enumerator's next pass), status and verify name the account as deleted
+// with its connectors; an account whose home exists is not named.
+func TestStatusNamesAnEnrolledAccountWhoseHomeWasDeleted(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if err := os.MkdirAll(h.env.P("/Users/kept"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+		"  - user: gone\n    uid: 506\n    user_home: /Users/gone\n    connector: kiro\n"+
+		"  - user: gone\n    uid: 506\n    user_home: /Users/gone\n    connector: amp\n"+
+		"  - user: kept\n    uid: 507\n    user_home: /Users/kept\n    connector: amp\n")
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		got := messagesOf(result.Warnings, codeEnrolledAccountDeleted)
+		if !strings.Contains(got, "user gone (home /Users/gone) was deleted") || !strings.Contains(got, "amp, kiro") {
+			t.Fatalf("%s does not name the deleted account: %q", action, got)
+		}
+		if strings.Contains(got, "kept") {
+			t.Fatalf("%s names an account whose home exists: %q", action, got)
+		}
+	}
+}
