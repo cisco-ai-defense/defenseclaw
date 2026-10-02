@@ -71,9 +71,24 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     by_norm = {_normalize_alias(name): name for name in configured if name}
     match = active if not requested else by_norm.get(_normalize_alias(requested))
     if match is None:
-        allowed = ", ".join(sorted(configured)) or active
+        wanted = _normalize_alias(requested)
+        setup_name = "claude-code" if wanted == "claudecode" else wanted
+        setup_cmd = (
+            f"defenseclaw setup {setup_name}"
+            if connector_paths.is_known(wanted)
+            else "defenseclaw setup <connector>"
+        )
+        names = sorted(name for name in configured if name)
+        if not names:
+            # GAP-1690: with nothing configured, don't name the phantom
+            # "openclaw" default; say so and give the next step.
+            raise click.ClickException(
+                f"connector {requested!r} is not configured: no connector is "
+                f"configured yet. Set one up first: {setup_cmd}"
+            )
         raise click.UsageError(
-            f"connector {requested!r} is not configured. Configured connectors: {allowed}."
+            f"connector {requested!r} is not configured. Configured connectors: "
+            f"{', '.join(names)}. To add it: {setup_cmd}"
         )
     return match
 
