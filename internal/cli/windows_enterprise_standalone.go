@@ -674,14 +674,21 @@ const windowsEnterpriseUserRegistrationListMax = 20
 // LocalSystem, and removals that failed. They stay inert (enrollment
 // revoked, hook runtime and binary removed).
 func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed)
 	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {
 		reason := "those accounts were signed out"
-		for _, failure := range windowsEnterpriseReportStrings(report.UserRegistrationsFailed) {
+		// "not LocalSystem" means no removal was attempted: the pending
+		// warning says so and names the remedy, so it is not also reported
+		// as a failed removal (GAP-1568).
+		var attempted []string
+		for _, failure := range failed {
 			if strings.HasPrefix(failure, windowsManagedHooksRegistrationsNotRemovedPrefix) {
 				reason = "this uninstall did not run as LocalSystem"
-				break
+				continue
 			}
+			attempted = append(attempted, failure)
 		}
+		failed = attempted
 		result.AddWarning("user_registrations_pending", fmt.Sprintf(
 			"uninstall could not act as %d user connector registration(s) because %s; DefenseClaw's inert registration stays in that account's agent configuration. To remove them, %s. Accounts: %s",
 			len(pending),
@@ -690,7 +697,7 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 			windowsEnterpriseBoundedLabels(windowsEnterpriseRegistrationsByAccount(pending)),
 		))
 	}
-	if failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed); len(failed) > 0 {
+	if len(failed) > 0 {
 		result.AddWarning("user_registrations_failed", fmt.Sprintf(
 			"removing DefenseClaw per-user registrations failed: %s",
 			windowsEnterpriseBoundedLabels(failed),

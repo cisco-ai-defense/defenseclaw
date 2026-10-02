@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -434,6 +435,18 @@ func enterprisePolicyAuditDBPath() string {
 	return strings.TrimSpace(cfg.AuditDB)
 }
 
+// enterprisePolicyRowUnguarded reports whether state is a per-user agent
+// that no foreign-hook guard covers (OpenHands, Antigravity, OmniGent, Kiro,
+// Hermes on Windows): its foreign_hooks setting is not enforced and its
+// foreign entries are not counted.
+func enterprisePolicyRowUnguarded(report enterprisePolicyReport, state enterprisepolicy.State) bool {
+	if state.Route != enterprisepolicy.RoutePerUser || state.ForeignHooks == config.ForeignHooksAllow {
+		return false
+	}
+	guard, ok := report.Guard[state.Connector]
+	return ok && !guard.Guard
+}
+
 func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) error {
 	if enterprisePolicyJSON {
 		encoder := json.NewEncoder(out)
@@ -462,9 +475,25 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		if lock == "" {
 			lock = "-"
 		}
-		fmt.Fprintf(out, "%-12s %-15s %-12s lock=%-8s foreign_hooks=%-7s owned=%d foreign=%d\n",
-			state.Connector, state.Route, status, lock, dashIfEmpty(state.ForeignHooks), state.OwnedEntries, state.ForeignEntries)
+		foreignHooks, foreign := dashIfEmpty(state.ForeignHooks), strconv.Itoa(state.ForeignEntries)
+		unguarded := enterprisePolicyRowUnguarded(report, state)
+		if unguarded {
+			// Nothing checks or removes other hooks for this agent, so
+			// "foreign_hooks=remove foreign=0" would claim an enforcement
+			// and a count that do not exist (GAP-1472).
+			foreignHooks, foreign = "n/a", "-"
+		}
+		fmt.Fprintf(out, "%-12s %-15s %-12s lock=%-8s foreign_hooks=%-7s owned=%d foreign=%s\n",
+			state.Connector, state.Route, status, lock, foreignHooks, state.OwnedEntries, foreign)
 		for _, path := range state.Paths {
+			// A source the agent would read but that does not exist, such
+			// as Claude Code's base managed-settings.json next to
+			// DefenseClaw's drop-in, is not part of the policy in force
+			// (GAP-1445).
+			if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(out, "    file:      %s (not present)\n", path)
+				continue
+			}
 			fmt.Fprintf(out, "    file:      %s\n", path)
 		}
 		if state.VersionFloor != nil {
@@ -481,6 +510,8 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		}
 		if guard, ok := report.Guard[state.Connector]; ok && guard.Guard {
 			fmt.Fprintf(out, "    guard:     foreign hooks %s (%d allowlisted)\n", guard.ForeignHooks, len(guard.AllowedHooks))
+		} else if unguarded {
+			fmt.Fprintf(out, "    note:      no foreign-hook guard for %s: hooks a user or project adds run next to DefenseClaw's and are not counted or removed (see the foreign-hook guard guide)\n", state.Connector)
 		}
 	}
 	if len(report.Unprotected) != 0 {

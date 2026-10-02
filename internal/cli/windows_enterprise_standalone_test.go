@@ -1246,16 +1246,24 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 
 	got := warnings(base + `,"user_registrations_removed":1,"user_registrations_pending":["devin/` + sid + `","hermes/` + sid +
 		`"],"user_registrations_failed":["per-user registrations were not removed: requires the LocalSystem guardian service"]}`)
-	if len(got) != 2 || got[0].Code != "user_registrations_pending" || got[1].Code != "user_registrations_failed" {
+	// GAP-1568: no removal was attempted, so there is one warning, not a
+	// second "removing ... failed" that repeats it.
+	if len(got) != 1 || got[0].Code != "user_registrations_pending" {
 		t.Fatalf("warnings = %+v", got)
 	}
 	// GAP-1074: the warning groups the registrations by account, says the
 	// run was not LocalSystem, and names the next step.
 	if !strings.Contains(got[0].Message, "2 user connector registration(s) because this uninstall did not run as LocalSystem") ||
 		!strings.Contains(got[0].Message, sid+": devin, hermes") ||
-		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") ||
-		!strings.Contains(got[1].Message, "requires the LocalSystem guardian service") {
+		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") {
 		t.Fatalf("warnings = %+v", got)
+	}
+	// A removal that was attempted and failed is still reported.
+	attempted := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":["kiro/` + sid +
+		`: C:\\Users\\alice\\.kiro\\hooks\\defenseclaw.json still holds DefenseClaw's hook"]}`)
+	if len(attempted) != 2 || attempted[1].Code != "user_registrations_failed" ||
+		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) {
+		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
 	signedOut := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":[]}`)
 	if len(signedOut) != 1 || !strings.Contains(signedOut[0].Message, "because those accounts were signed out") {

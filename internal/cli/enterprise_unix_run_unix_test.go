@@ -178,3 +178,30 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 		t.Fatalf("not installed: %q, want no repair advice", err)
 	}
 }
+
+// A verify that found another lifecycle run holding the lock printed an
+// all-false readiness line ("installed=false version= ...") under its
+// lifecycle_busy error, which read as if nothing were installed (GAP-1542).
+func TestLifecycleBusyVerifyOmitsTheReadinessLine(t *testing.T) {
+	busy := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress; wait for it to finish, then rerun verify")
+	busy.Finish("linux", 75)
+	var out bytes.Buffer
+	if err := printLifecycleResult(&out, busy, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "installed=") || !strings.Contains(out.String(), "lifecycle_busy: another DefenseClaw") {
+		t.Fatalf("busy verify output:\n%s", out.String())
+	}
+
+	checked := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	checked.AddError("verify_failed", "defenseclaw-sensor-helper.service is not active")
+	checked.Finish("linux", 0)
+	out.Reset()
+	if err := printLifecycleResult(&out, checked, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "installed=false") {
+		t.Fatalf("a checked verify lost its readiness line:\n%s", out.String())
+	}
+}

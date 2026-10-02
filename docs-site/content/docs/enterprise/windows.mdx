@@ -657,6 +657,8 @@ result names what stays: the `user_registrations_pending` warning lists each
 account and its connectors it could not act as, and `user_registrations_failed`
 lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
+An uninstall that did not run as LocalSystem attempts no removal, so it
+reports only `user_registrations_pending`.
 To clean every user, run the uninstall as LocalSystem while they are signed
 in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 

@@ -186,7 +186,10 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	if result.Action == enterpriseunix.ActionRepair && result.OK && len(result.Changes) == 0 {
 		fmt.Fprintln(w, "  nothing to repair")
 	}
-	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) && !lifecycleResultHasError(result, "not_root") {
+	// A verify that found the lifecycle lock held checked nothing either:
+	// its all-false readiness line read as "not installed" (GAP-1542).
+	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) &&
+		!lifecycleResultHasError(result, "not_root") && !lifecycleResultHasError(result, "lifecycle_busy") {
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,
 			result.Readiness.Enumerator, result.Readiness.SensorHelper)
@@ -201,8 +204,8 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 }
 
 // lifecycleResultHasError reports whether result carries an error with code.
-// A not_root status knows nothing about the deployment, so its readiness
-// line (installed=false ...) is left out.
+// A not_root status and a lifecycle_busy verify know nothing about the
+// deployment, so their readiness line (installed=false ...) is left out.
 func lifecycleResultHasError(result *enterprisestatus.Result, code string) bool {
 	for _, e := range result.Errors {
 		if e.Code == code {
