@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -143,6 +144,13 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 		}
 		return "DefenseClaw policy blocked this action (" + subject + "). " + agentBlockNoRetry
 	}
+	if subject := agentJudgeSubject(sourceReason); action == "block" && subject != "" {
+		if standaloneEnterpriseActive.Load() {
+			return "DefenseClaw blocked this action under your organization's policy (" + subject + "). " +
+				agentBlockNoRetry + " Contact your administrator if you need it allowed."
+		}
+		return "DefenseClaw policy blocked this action (" + subject + "). " + agentBlockNoRetry
+	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
 	}
@@ -197,6 +205,37 @@ func agentObservedReason(action, sourceReason, displayReason string, policy reda
 // itself called; any other text fails the match and stays redacted.
 var agentBlockListReasonPattern = regexp.MustCompile(
 	`^(tool|mcp server) "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" (?:is on the static block list|is blocked)$`)
+
+// agentJudgeKinds words the LLM judge reasons (llm_judge.go) for the agent.
+// The judge's own text can quote the prompt, so only its kind is named.
+var agentJudgeKinds = []struct{ prefix, words string }{
+	{"judge-pii: ", "personal data or credentials"},
+	{"judge-exfil: ", "possible data exfiltration"},
+	{"judge-injection: ", "prompt injection"},
+	{"judge-tool-injection: ", "tool-call injection"},
+}
+
+// agentJudgeSubject words a reason that starts with an LLM judge verdict
+// ("LLM judge: personal data or credentials, possible data exfiltration"),
+// or returns "" for any other reason. The redacted judge text read like a
+// broken hook ("judge-pii: Password: <redacted len=22 sha=...>") (GAP-1564).
+func agentJudgeSubject(reason string) string {
+	if !strings.HasPrefix(reason, "judge-") {
+		return ""
+	}
+	var kinds []string
+	for _, part := range strings.Split(reason, "; ") {
+		for _, kind := range agentJudgeKinds {
+			if strings.HasPrefix(part, kind.prefix) && !slices.Contains(kinds, kind.words) {
+				kinds = append(kinds, kind.words)
+			}
+		}
+	}
+	if len(kinds) == 0 {
+		return ""
+	}
+	return "LLM judge: " + strings.Join(kinds, ", ")
+}
 
 // agentBlockListSubject words a block-list reason for the agent ("tool Write
 // is on the block list"), or returns "" for any other reason. The redacted
