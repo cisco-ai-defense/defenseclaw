@@ -87,6 +87,9 @@ func newHookCmd() *cobra.Command {
 			if enterpriseManaged && enterpriseManagedHookRuntimeNoop(connector) {
 				return nil
 			}
+			if copilotCLIRunsVSCodeLocalHook(connector, hookSurface, enterpriseManaged) {
+				return nil
+			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
 			opts.HookContractID = hookContractID
 			opts.HookSurface = strings.TrimSpace(hookSurface)
