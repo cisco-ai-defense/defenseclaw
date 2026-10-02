@@ -308,6 +308,7 @@ func runEnterpriseHooksEnumerateCycle(
 		DiscoverStaticSurfaces:  enterpriseHooksEnumerateDiscoverStaticSurfaces,
 		PreviousRefusedSurfaces: readEnterpriseHookRefusedSurfaces(current.DataDir, stderr),
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
+		OutsideDiscovery:        enterprisehooks.UnixAgentOutsideDiscovery,
 		State:                   state,
 		Logger: func(subject, reason string) {
 			fmt.Fprintf(stderr, "[hook-enumerator] %s: %s\n", subject, reason)

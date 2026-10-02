@@ -370,6 +370,39 @@ func unixAgentExecutablePresent(candidate string) bool {
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
+// unixAdminPrefixRoots hold administrator install prefixes
+// (<root>/<name>/bin/<cli>) that discovery searches only when
+// enrollment.agent_prefixes names them; tests replace it.
+var unixAdminPrefixRoots = []string{"/opt"}
+
+// UnixAgentOutsideDiscovery returns connector's CLI when it is installed in
+// an administrator prefix under /opt that discovery does not search, and
+// that prefix. The enumerator reports such an agent as unprotected and names
+// the setting that adds the prefix, instead of saying nothing while users
+// run it without DefenseClaw hooks. Nothing is executed. Safe as root.
+func UnixAgentOutsideDiscovery(connector string) (binary, prefix string) {
+	probe, ok := unixAgentProbes[strings.ToLower(strings.TrimSpace(connector))]
+	if !ok || len(probe.binaries) == 0 {
+		return "", ""
+	}
+	searched := map[string]bool{}
+	for _, known := range machinePrefixes() {
+		searched[filepath.Clean(known)] = true
+	}
+	for _, root := range unixAdminPrefixRoots {
+		matches, _ := filepath.Glob(filepath.Join(root, "*", "bin", probe.binaries[0]))
+		sort.Strings(matches)
+		for _, match := range matches {
+			candidatePrefix := filepath.Dir(filepath.Dir(match))
+			if searched[candidatePrefix] || !unixAgentExecutablePresent(match) {
+				continue
+			}
+			return match, candidatePrefix
+		}
+	}
+	return "", ""
+}
+
 // DiscoverUnixMachineAgentVersion reads only root-owned, non-writable
 // machine-scoped package metadata. Safe to call as root.
 func DiscoverUnixMachineAgentVersion(connector string) string {
