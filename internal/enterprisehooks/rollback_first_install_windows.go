@@ -79,6 +79,27 @@ func RestoreWindowsStandaloneUserAgentConfigs(userHome, ownerSID, dataDir string
 	return restored, kept, errors.Join(append(relaxErrs, err)...)
 }
 
+// RemoveWindowsStandaloneCopilotVSCodeUserFiles removes, as the account,
+// DefenseClaw's VS Code Local hook file and Copilot plugin that the guardian
+// placed in the account's home, from an S4U logon when the account has no
+// session (as RestoreWindowsStandaloneUserAgentConfigs does).
+func RemoveWindowsStandaloneCopilotVSCodeUserFiles(userHome, ownerSID string) error {
+	home, sid, err := validateWindowsEnterpriseHome(userHome, ownerSID)
+	if err != nil {
+		return err
+	}
+	remove := func() error { return applyWindowsCopilotVSCodeUser("copilot", home, false, true) }
+	err = windowsEnterpriseTargetImpersonation(sid, home, remove)
+	if IsWindowsTargetSessionUnavailable(err) && windowsStandaloneSignedOutRollbackEnabled() {
+		if s4uErr := windowsEnterpriseS4UTargetImpersonation(sid, home, remove); s4uErr != nil {
+			err = errors.Join(err, s4uErr)
+		} else {
+			err = nil
+		}
+	}
+	return err
+}
+
 // windowsStandaloneSignedOutRollbackSwitch turns off, with "0", the rollback's
 // S4U restore of a signed-out account's agent files.
 const windowsStandaloneSignedOutRollbackSwitch = "DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS"

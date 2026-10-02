@@ -117,3 +117,13 @@ def test_logs_without_a_log_file_says_what_to_do(tmp_path) -> None:
     assert result.exit_code == 1
     assert "no watchdog log yet" in result.output
     assert "Traceback" not in result.output
+
+
+def test_logs_grep_without_a_match_says_so(tmp_path) -> None:
+    # GAP-1494: a --grep with no match must not be silent.
+    (tmp_path / "gateway.log").write_text("line 1\nline 2\n", encoding="utf-8")
+    result = CliRunner().invoke(
+        cmd_audit.audit, ["logs", "--grep", "nosuchtext-zz"], obj=_logs_app(tmp_path)
+    )
+    assert result.exit_code == 0, result.output
+    assert "No gateway log lines match 'nosuchtext-zz'" in result.output

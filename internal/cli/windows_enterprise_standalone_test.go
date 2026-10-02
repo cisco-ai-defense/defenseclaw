@@ -1551,3 +1551,38 @@ func TestWindowsEnterpriseEnsureFailsWhenInstallLeavesNothingInstalled(t *testin
 		t.Fatalf("result %+v", result)
 	}
 }
+
+// The guardian writes DefenseClaw's Copilot VS Code Local hook file without
+// a connector backup, so a failed first install's rollback left it in every
+// profile, pointing at a removed hook (GAP-1287). It is removed for an
+// account with a Copilot row, and a failure is a named leftover.
+func TestRollbackWindowsFirstInstallAccountRemovesCopilotVSCodeHooks(t *testing.T) {
+	originalRestorer := windowsFirstInstallRollbackUserConfigRestorer
+	originalCopilot := windowsFirstInstallRollbackCopilotVSCodeRemover
+	t.Cleanup(func() {
+		windowsFirstInstallRollbackUserConfigRestorer = originalRestorer
+		windowsFirstInstallRollbackCopilotVSCodeRemover = originalCopilot
+	})
+	windowsFirstInstallRollbackUserConfigRestorer = func(string, string, string) ([]string, []string, error) {
+		return nil, nil, nil
+	}
+	var removed []string
+	removeErr := error(nil)
+	windowsFirstInstallRollbackCopilotVSCodeRemover = func(home, sid string) error {
+		removed = append(removed, home+"|"+sid)
+		return removeErr
+	}
+	home, sid := `C:\Users\dcw-std1`, "S-1-5-21-1-2-3-1017"
+	if got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"codex", "kiro"}); len(got) != 0 || len(removed) != 0 {
+		t.Fatalf("no Copilot row: leftovers=%v removed=%v", got, removed)
+	}
+	if got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"copilot"}); len(got) != 0 ||
+		len(removed) != 1 || removed[0] != home+"|"+sid {
+		t.Fatalf("Copilot row: leftovers=%v removed=%v", got, removed)
+	}
+	removeErr = errors.New("access denied")
+	got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"copilot"})
+	if len(got) != 1 || !strings.Contains(got[0], "Copilot VS Code hooks") || !strings.Contains(got[0], "access denied") {
+		t.Fatalf("failed Copilot removal leftovers = %v", got)
+	}
+}

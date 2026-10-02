@@ -58,8 +58,47 @@ class TestPolicyRegoToolsWithoutOPA(PolicyCommandTestBase):
             f.write("package defenseclaw.guardrail\n")
         result, calls = self._run(["test", "--rego-dir", rd])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(calls, [])
+        # GAP-1392: the modules are still compiled before "nothing to run".
+        self.assertEqual(calls, [[GATEWAY, "policy", "validate", "--rego-dir", rd]])
         self.assertIn("nothing to run", result.output)
+
+    def test_test_without_test_files_fails_when_modules_do_not_compile(self):
+        # GAP-1392: a broken policy dir with no tests must not pass.
+        rd = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, rd, ignore_errors=True)
+        with open(os.path.join(rd, "guardrail.rego"), "w") as f:
+            f.write("package defenseclaw.guardrail\nallow_broken if { input.x ==\n")
+
+        def failing_run(cmd, **_kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="rego_parse_error\n")
+
+        with (
+            patch("shutil.which", return_value=None),
+            patch("defenseclaw.gateway.resolve_gateway_binary", return_value=GATEWAY),
+            patch("defenseclaw.commands.cmd_policy.subprocess.run", side_effect=failing_run),
+        ):
+            result = self.invoke(["test", "--rego-dir", rd])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("rego_parse_error", result.output)
+        self.assertNotIn("nothing to run", result.output)
+
+    def test_test_defaults_to_the_user_policy_dir(self):
+        # GAP-1459: without --rego-dir, test the policies the gateway loads
+        # (<policy_dir>/rego), not the bundled copy inside the package.
+        user_rego = os.path.join(self.app.cfg.policy_dir, "rego")
+        os.makedirs(user_rego, exist_ok=True)
+        with open(os.path.join(user_rego, "guardrail.rego"), "w") as f:
+            f.write("package defenseclaw.guardrail\n")
+        result, _calls = self._run(["test"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(user_rego, result.output)
+        self.assertNotIn("site-packages", result.output)
+
+    def test_delete_help_has_no_internal_tags(self):
+        result = self.invoke(["delete", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("(N1)", result.output)
+        self.assertNotIn("data.json", result.output)
 
     def test_validate_fails_closed_without_any_checker(self):
         with (

@@ -1544,6 +1544,10 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
     return [single] if single else None
 
 
+# `defenseclaw-gateway start` waits up to 60 s for readiness; wait past that.
+_GATEWAY_START_TIMEOUT = 90
+
+
 def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
@@ -1638,9 +1642,22 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
             )
         return StepResult("Sidecar", "pass", "already running")
     try:
-        result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return StepResult("Sidecar", "warn", "start timed out", "defenseclaw-gateway status")
+        # GAP-1382: a slow first start (Windows) comes up after init stops waiting.
+        if _pid_file_running(pid_file):
+            return StepResult(
+                "Sidecar",
+                "warn",
+                f"still starting after {_GATEWAY_START_TIMEOUT} s; check it with defenseclaw-gateway status",
+                "defenseclaw-gateway status",
+            )
+        return StepResult(
+            "Sidecar",
+            "warn",
+            f"did not start within {_GATEWAY_START_TIMEOUT} s",
+            "defenseclaw-gateway start",
+        )
     except OSError as exc:
         return StepResult("Sidecar", "warn", str(exc), "defenseclaw-gateway status")
     if result.returncode == 0:
@@ -1941,7 +1958,11 @@ def _defer_hooks_to_gateway_start(setup: list[StepResult], readiness: list[StepR
     hint asks for more than the plain setup command (a workspace, a mode
     fix) keep it.
     """
-    if not any(step.name == "Sidecar" and step.status in ("warn", "fail") for step in setup):
+    failed = any(step.name == "Sidecar" and step.status in ("warn", "fail") for step in setup)
+    # GAP-1491: a gateway not started on purpose (--no-start-gateway, or "no"
+    # at the prompt) leaves them pending, not broken.
+    skipped = any(step.name == "Sidecar" and step.status == "skip" for step in setup)
+    if not (failed or skipped):
         return
     for step in readiness:
         if (
@@ -1951,6 +1972,8 @@ def _defer_hooks_to_gateway_start(setup: list[StepResult], readiness: list[StepR
         ):
             step.detail += " — written when the gateway starts"
             step.next_command = "defenseclaw-gateway start"
+            if skipped and not failed:
+                step.status = "skip"
 
 
 def _next_commands(
@@ -1965,6 +1988,10 @@ def _next_commands(
         if step.next_command and step.next_command not in seen:
             commands.append(step.next_command)
             seen.add(step.next_command)
+    # "setup hermes --mode action" already covers a plain "setup hermes"
+    # (GAP-1372); the plain one prompts with observe as the default.
+    commands = [cmd for cmd in commands if not any(other.startswith(cmd + " --mode ") for other in commands)]
+    seen = set(commands)
     if "defenseclaw doctor" not in seen:
         commands.append("defenseclaw doctor")
     if getattr(cfg, "data_dir", "") and "defenseclaw keys list" not in seen:

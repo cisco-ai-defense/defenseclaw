@@ -2138,5 +2138,25 @@ class TestAttachErrorHandler(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
 
 
+    def test_remote_scan_failure_does_not_print_sdk_log_line(self):
+        # GAP-1484: the SDK's own "... - mcpscanner.core.scanner - ERROR - ..."
+        # line was printed before DefenseClaw's one error line.
+        import contextlib
+        import io
+        import logging
+        from types import SimpleNamespace
+
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
+
+        def _fail(*_args):
+            logging.getLogger("mcpscanner.core.scanner").error("Error scanning server http://x/mcp")
+            raise RuntimeError("Connection to MCP server was cancelled")
+
+        fake = SimpleNamespace(_llm=None, _scan_remote_uncaptured=_fail)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(RuntimeError):
+            MCPScannerWrapper._scan_remote(fake, object(), "http://x/mcp", None)
+        self.assertEqual(stderr.getvalue(), "")
+
 if __name__ == "__main__":
     unittest.main()

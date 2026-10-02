@@ -43,3 +43,28 @@ func TestEnsureRefusesAConfigOtherAccountsCanWrite(t *testing.T) {
 	}
 	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
 }
+
+// GAP-1410, GAP-1426, GAP-1434: a symlinked or missing --config is refused
+// with the reason and the next step, not "is a symlink" or raw lstat text.
+func TestEnsureExplainsASymlinkedOrMissingConfig(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	link := filepath.Join(t.TempDir(), "link.yaml")
+	if err := os.Symlink(writeChangedConfig(t, h, "mode: observe", "mode: action"), link); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
+	for path, want := range map[string]string{
+		link:    "is a symlink, so its target could be swapped after the check; pass the real file path",
+		missing: "does not exist; check the path given to --config",
+	} {
+		r := h.run(Options{Action: ActionEnsure, ConfigFile: path})
+		requireError(t, r, codeConfig)
+		if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, want) || strings.Contains(msg, "lstat") || !strings.HasSuffix(msg, "then rerun") {
+			t.Fatalf("--config %s: %q, want %q and a next step", path, msg, want)
+		}
+	}
+	if strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
+		t.Fatal("the symlinked config was installed")
+	}
+}

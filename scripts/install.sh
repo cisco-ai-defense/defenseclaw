@@ -457,11 +457,12 @@ if [[ "${ROLLBACK}" == true ]]; then
     # Run again after a rollback, this goes forward to the newer install.
     if [[ -n "${current}" ]] && version_lt "${current}" "${back_to}"; then
         step "Rolling forward to DefenseClaw ${back_to}"
+        question="Replace DefenseClaw ${current} with DefenseClaw ${back_to} (the install you rolled back from)?"
     else
         step "Rolling back to DefenseClaw ${back_to}"
+        question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
-    ask_yes_no "Replace DefenseClaw ${current:-?} with the previous install (${back_to})?" \
-        || die "Rollback cancelled; nothing was changed"
+    ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
@@ -487,7 +488,8 @@ if [[ "${ROLLBACK}" == true ]]; then
     if [[ ${rollback_rc} -eq 1 ]]; then
         # The swap is done, but the hooks are unguarded: say so, and exit 1.
         warn "Now running DefenseClaw ${back_to}, but its gateway is not up, so agent hooks are not guarded until it is"
-        info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
+        # A start that said why it failed already printed the command that fixes it.
+        [[ -n "${START_EXPLAINED:-}" ]] || info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
     else
         ok "Now running DefenseClaw ${back_to}."
     fi
@@ -663,8 +665,8 @@ if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
 elif [[ -n "${PREV_VERSION}" ]]; then
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
         # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
-        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded are deleted when DefenseClaw ${VERSION} first opens its audit database"
-        info "A copy is kept in ${PREVIOUS}/data/audit.db until the next upgrade; 'defenseclaw rollback' brings it back"
+        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded (${DEFENSECLAW_HOME}/audit.db, $(du -sh "${DEFENSECLAW_HOME}/audit.db" 2>/dev/null | awk '{print $1}')) are deleted when DefenseClaw ${VERSION} first opens its audit database"
+        info "A copy is kept in ${PREVIOUS}/data/audit.db; 'defenseclaw rollback' brings it back, and later upgrades keep it in ${DEFENSECLAW_HOME}/backups"
     fi
     ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
 fi
@@ -673,6 +675,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
 fi
 
 WAS_RUNNING=false
+RESTORED_NOTE="Your previous install is back."
 [[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
 if [[ "${WAS_RUNNING}" == true ]]; then
     info "Stopping the gateway"
@@ -691,7 +694,7 @@ snapshot || { undo_snapshot; restart_old; die "Could not save the current instal
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
     restore_snapshot
-    die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
+    die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
 fi
 START_RC=0
 if [[ "${WAS_RUNNING}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
@@ -708,7 +711,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         err "The ${VERSION} gateway did not become healthy; restoring ${PREV_VERSION:-the previous state}"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         restore_snapshot
-        die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
+        die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
 fi
 finish_swap
@@ -744,6 +747,12 @@ if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
     fi
+fi
+if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
+    && [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # GAP-1496: it was not running before the upgrade, so it was not started.
+    warn "The gateway is not running, so agent hooks are not guarded until it is"
+    printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
     # An earlier install that was never initialized: say how to start, as a
@@ -1065,7 +1074,11 @@ restore_snapshot() {
 
 restart_old() {
     if [[ "${WAS_RUNNING}" == true ]]; then
-        start_gateway >/dev/null 2>&1 || warn "The gateway did not restart; run 'defenseclaw-gateway start'"
+        start_gateway >/dev/null 2>&1 && return 0
+        # Say plainly that the gateway that ran before is down now (GAP-1349).
+        RESTORED_NOTE="Your previous install is back, but its gateway is not running (see above)."
+        warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
+        info "Start it with: defenseclaw-gateway start (log: ${DEFENSECLAW_HOME}/gateway.log). On a large audit database its first start can take several minutes"
     fi
 }
 
@@ -1139,7 +1152,9 @@ explain_start_failure() {
         after="$(printf '%s' "${reason}" | sed -nE 's/.*current version="([^"]*)".*/\1/p')"
         warn "The gateway refused to start: ${conn:-a connector}'s agent changed (${before:-?} -> ${after:-?}) after this DefenseClaw recorded its hook contract lock"
         if [[ "${reason}" == *DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1* ]]; then
-            info "To accept the new agent version and refresh the lock, start it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start"
+            # restart, not start: a gateway that refused its connector can
+            # still be running, and start then only says it is (GAP-0012).
+            info "To accept the new agent version and refresh the lock, restart it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
         else
             info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
         fi
@@ -1179,14 +1194,23 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
-# A rollback parks the data written since the upgrade in previous/. Keep it
-# when a later upgrade reuses the slot: it can hold audit history.
+# A rollback parks the data written since the upgrade in previous/, and a 0.x
+# install kept there holds the only copy of the audit history 1.0 does not
+# carry over (GAP-1360). Keep either when a later upgrade reuses the slot.
 keep_rolled_back_data() {
-    [[ -f "${PREVIOUS}/ROLLED_BACK" && -d "${PREVIOUS}/data" ]] || return 0
-    local kept
-    kept="${DEFENSECLAW_HOME}/backups/rolled-back-$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S)"
+    [[ -d "${PREVIOUS}/data" ]] || return 0
+    local kept version label what
+    version="$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)"
+    if [[ -f "${PREVIOUS}/ROLLED_BACK" ]]; then
+        label=rolled-back what="the data from before the last rollback"
+    elif is_version "${version}" && version_lt "${version}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
+        label=audit-history what="the audit history DefenseClaw ${version} recorded"
+    else
+        return 0
+    fi
+    kept="${DEFENSECLAW_HOME}/backups/${label}-${version}-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" || return 1
-    info "Kept the data from before the last rollback in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
+    info "Kept ${what} in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
     info "It is not used again; once you no longer need its audit history, remove it with: rm -rf '${kept}'"
 }
 

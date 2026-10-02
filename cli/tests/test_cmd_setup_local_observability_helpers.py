@@ -411,6 +411,17 @@ class TestStatusAndDownSayWhatHappened(unittest.TestCase):
         controller.status_ready = True
         self.assertEqual(self._invoke(controller, ["status"]).exit_code, 0)
 
+    def test_status_with_another_copys_containers_does_not_just_say_start_it(self):
+        # GAP-1461: `up` refuses on the collision too, so name the cause.
+        controller = MagicMock()
+        controller.status.return_value = "Note: container name collision: ... belongs to another copy ...\n"
+        controller.status_ready = False
+        controller.status_foreign = True
+        result = self._invoke(controller, ["status"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("belong to another copy of the stack", result.output)
+        self.assertNotIn("is not ready. Start it with", result.output)
+
     def test_down_confirms_the_stop_and_names_the_still_enabled_destination(self):
         result = self._invoke(MagicMock(), ["down"], [{"name": "local-observability", "enabled": True}])
         self.assertEqual(result.exit_code, 0, result.output)

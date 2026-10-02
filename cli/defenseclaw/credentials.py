@@ -157,6 +157,12 @@ def _openclaw_gateway_token(cfg: Config) -> Requirement:
         if openclaw_implied_but_not_installed(cfg):
             return Requirement.NOT_USED
         return Requirement.REQUIRED
+    fleet_mode = str(getattr(getattr(cfg, "gateway", None), "fleet_mode", "") or "").strip().lower()
+    if claw is not None and fleet_mode != "enabled":
+        # An explicit empty claw.mode (init --connector none) runs no OpenClaw
+        # fleet: the gateway reports "standalone mode" and never uses the
+        # token (GAP-1385). A config without claw.mode loads as "openclaw".
+        return Requirement.NOT_USED
 
     # Old configs defaulted to OpenClaw when no connector was specified.
     # We auto-detect it from ~/.openclaw/openclaw.json when available,
@@ -186,7 +192,10 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
 
     gc = getattr(cfg, "guardrail", None)
     if gc is not None and getattr(gc, "enabled", False):
-        if _guardrail_proxy_uses_llm(cfg) and needs_key("guardrail"):
+        # A proxy connector with no guardrail model passes the agent's own
+        # provider credentials through (GAP-1453).
+        guardrail_model = cfg.resolve_llm("guardrail").model or getattr(gc, "model", "") or ""
+        if _guardrail_proxy_uses_llm(cfg) and str(guardrail_model).strip() and needs_key("guardrail"):
             return True
         judge = getattr(gc, "judge", None)
         if judge is not None and getattr(judge, "enabled", False) and needs_key("guardrail.judge"):

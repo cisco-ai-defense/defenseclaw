@@ -138,7 +138,11 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
 	if repairCommand != "" && result.Installed &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
-		message += ". Run `" + repairCommand + "` as root to fix them"
+		target := "them"
+		if len(result.Errors) == 1 {
+			target = "it"
+		}
+		message += ". Run `" + repairCommand + "` as root to fix " + target
 	}
 	return withExitCode(errors.New(message), result.ExitCode)
 }

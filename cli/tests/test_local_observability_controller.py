@@ -1012,6 +1012,20 @@ def test_owned_container_requires_exact_project_service_and_paths(controller) ->
     with patch.object(subject, "probe_all", return_value=[ProbeResult("all", "local", True)]):
         status = subject.status()
     assert subject.status_ready is False and "Note: container name collision" in status
+    assert subject.status_foreign is True
+
+
+def test_missing_docker_on_windows_server_does_not_say_install_docker_desktop() -> None:
+    # GAP-1368: Docker Desktop does not run on Windows Server.
+    from defenseclaw.observability import local_stack
+
+    with patch.object(local_stack.platform, "win32_edition", create=True, return_value="ServerDatacenter"):
+        server = local_stack.docker_cli_missing_message("windows")
+    with patch.object(local_stack.platform, "win32_edition", create=True, return_value="Professional"):
+        desktop = local_stack.docker_cli_missing_message("windows")
+    assert "Docker Desktop and retry" not in server
+    assert "Linux containers" in server and "defenseclaw setup observability add otlp" in server
+    assert desktop.endswith("Install Docker Desktop and retry.")
 
 
 def test_reset_rejects_foreign_volume_and_requires_confirmation(controller) -> None:

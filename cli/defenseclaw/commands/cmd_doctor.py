@@ -2115,8 +2115,18 @@ def _check_component_connector_compatibility(
             steps = [_health_remediation_text((choice,)) for choice in finding.remediations[:2]]
             steps = [step for step in steps if step]
             if steps:
+                # Plain `setup <connector>` prompts with observe as the default,
+                # so name the mode that restores enforcement (GAP-1372).
+                steps = [
+                    f"{step} --mode action"
+                    if step.startswith("defenseclaw setup ") and " --mode " not in step
+                    else step
+                    for step in steps
+                ]
                 remediation = "run " + ", then ".join(f"'{step}'" for step in steps)
-                remediation += " to verify the version and restore the requested mode"
+                remediation += (
+                    " to verify the version and turn action mode back on (or --mode observe to keep observing)"
+                )
         _emit(
             tag,
             f"Connector compatibility: {finding.connector}",
@@ -3559,6 +3569,9 @@ def _read_process_env_var(pid: int, var_name: str) -> str | None:
     return ""
 
 
+_NEEDS_RUNNING_GATEWAY = "needs the gateway, which is not running (see Sidecar API)"
+
+
 def _check_windows_gateway_diagnostics(
     cfg,
     r: _DoctorResult,
@@ -3578,6 +3591,13 @@ def _check_windows_gateway_diagnostics(
     data_dir = _configured_gateway_data_dir(cfg)
     if not data_dir:
         _emit("fail", "Gateway PID identity", "gateway data directory is unavailable", r=r)
+        return True
+    if r.gateway_down == "stopped":
+        # The Sidecar API row already names the one cause and its fix; these
+        # rows inspect the running gateway, so they would only repeat it
+        # (GAP-1389).
+        for label in ("Gateway PID identity", "Gateway listener owner", "Gateway token drift", "Gateway home"):
+            _emit("skip", label, _NEEDS_RUNNING_GATEWAY, r=r)
         return True
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
     pid_path = os.path.join(data_dir, "gateway.pid")
@@ -3850,6 +3870,17 @@ def _check_windows_watchdog_diagnostics(
 
     if posture == "running":
         _emit("pass", "Watchdog runtime", detail, r=r)
+    elif posture == "stopped" and r.gateway_down == "stopped":
+        # `defenseclaw-gateway stop` stops the watchdog too, and start starts
+        # both, so this is the Sidecar API failure again (GAP-1389).
+        _emit(
+            "skip",
+            "Watchdog runtime",
+            "stopped with the gateway; 'defenseclaw-gateway start' starts both",
+            r=r,
+        )
+        _emit("skip", "Watchdog last-known state", "watchdog is not running", r=r)
+        return True
     elif posture in {"stopped", "invalid", "stale"}:
         _emit("fail", "Watchdog runtime", f"enabled but not running: {detail}", r=r)
         _emit("skip", "Watchdog last-known state", "watchdog is not running", r=r)
@@ -3875,6 +3906,18 @@ def _check_windows_watchdog_diagnostics(
             "Watchdog last-known state",
             "degraded: a required downstream connector or protection subsystem did not converge; "
             "repair that subsystem (restarting the watchdog is not a repair)",
+            r=r,
+        )
+    elif any(
+        repair.get("state") == "applied"
+        and repair.get("repair_id") in {"doctor.gateway.service.reconcile", "doctor.gateway.watchdog.reconcile"}
+        for repair in r.repairs
+    ):
+        _emit(
+            "warn",
+            "Watchdog last-known state",
+            "down when last recorded, before this run started the gateway; "
+            "run 'defenseclaw doctor' again in a minute to confirm it is healthy",
             r=r,
         )
     else:
@@ -3907,7 +3950,15 @@ def _connector_hook_credential_problems(cfg, trust: _GatewayTrust | None) -> lis
         if not _HOOK_CREDENTIAL_NAME_RE.fullmatch(scope):
             continue
         path = os.path.join(hooks_dir, f".hook-{scope}.token")
-        if os.path.islink(path) or not os.path.isfile(path):
+        if os.path.islink(path):
+            continue
+        if not os.path.isfile(path):
+            # A gateway restart mints a missing credential as it replaces a
+            # damaged one, so both get the same repair (GAP-1436).
+            from defenseclaw.hook_integrity import hook_runtime_problems
+
+            if any(problem.startswith("hook token ") for problem in hook_runtime_problems(cfg, scope)):
+                problems.append(scope)
             continue
         try:
             with open(path, "rb") as stream:
@@ -3948,8 +3999,8 @@ def _check_connector_hook_credentials(cfg, r: _DoctorResult) -> None:
     _emit(
         "fail",
         "Connector hook credential",
-        f"the {names} hook credential does not match the gateway, so its hooks are refused; "
-        "run `defenseclaw doctor --fix` (or `defenseclaw-gateway restart`) to re-issue it",
+        f"the {names} hook credential is missing, damaged or not the one the gateway issued, "
+        "so its hooks are refused; run `defenseclaw doctor --fix` (or `defenseclaw-gateway restart`) to re-issue it",
         r=r,
     )
 
@@ -4516,6 +4567,20 @@ def _check_claudecode_hooks(
         )
 
 
+# The marker line of the placeholder a connector teardown writes over its
+# hook script (disabledHookTombstone in internal/gateway/connector).
+_DISABLED_HOOK_TOMBSTONE_MARKER = "# defenseclaw-managed-hook v0 (disabled tombstone)"
+
+
+def _is_disabled_hook_tombstone(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(512)
+    except OSError:
+        return False
+    return _DISABLED_HOOK_TOMBSTONE_MARKER in head
+
+
 def _check_codex_hooks(
     cfg,
     r: _DoctorResult,
@@ -4540,7 +4605,17 @@ def _check_codex_hooks(
         return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
-    if os.path.isfile(hook_script):
+    if _is_disabled_hook_tombstone(hook_script):
+        # Teardown leaves this placeholder for running Codex sessions and
+        # removes the registration, so nothing is guarded (GAP-1312).
+        _emit(
+            "fail",
+            "Codex hooks",
+            f"connector torn down: {hook_script} is the disabled placeholder teardown leaves",
+            r=r,
+            remediation="re-register the hooks: defenseclaw setup codex --yes",
+        )
+    elif os.path.isfile(hook_script):
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     else:
@@ -5999,7 +6074,8 @@ def _omnigent_local_server_pid() -> tuple[int, str]:
         root=data_dir,
     )
     if status == "missing":
-        return 0, f"no trustworthy OmniGent server record ({_omnigent_path_ref('omnigent-server-record', pid_path)})"
+        # Plain words, no path hash, as for a stale record (GAP-1067).
+        return 0, "OmniGent server has not started yet (no server record)"
     if status != "ok" or body is None:
         return 0, detail
     try:
@@ -6107,6 +6183,42 @@ def _hermes_host_running() -> bool | None:
     return None if wrapped else False
 
 
+_WINDOWS_PROCESS_LISTING_PS = (
+    # USERDOMAIN reads WORKGROUP in an SSH session; the token name does not.
+    "$u = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+    "try { $p = Get-Process -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $u } } "
+    "catch { $p = Get-Process }; "
+    "$q = [char]34; $p | ForEach-Object { $q + $_.ProcessName + $q + ',' + $q + $_.Id + $q }"
+)
+
+
+def _windows_process_listing_powershell() -> str | None:
+    """List this account's processes as tasklist-style CSV through PowerShell.
+
+    Falls back to every process (names only) when -IncludeUserName is refused;
+    a Hermes or Python process of another account then reads as "maybe a
+    host", which keeps the pending-reload state rather than hiding one.
+    """
+    import shutil
+
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        return None
+    try:
+        proc = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_PROCESS_LISTING_PS],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
 def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | None:
     """Windows form of :func:`_hermes_host_running` (GAP-1298).
 
@@ -6129,10 +6241,16 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
                 check=False,
             )
         except (FileNotFoundError, subprocess.SubprocessError, OSError):
-            return None
-        if proc.returncode != 0:
-            return None
-        tasklist_output = proc.stdout
+            proc = None
+        if proc is not None and proc.returncode == 0 and '","' in proc.stdout:
+            tasklist_output = proc.stdout
+        else:
+            # tasklist prints "ERROR: Access denied" for a standard user in an
+            # SSH session, where USERDOMAIN also reads WORKGROUP so the filter
+            # matches nothing; Get-Process works there (GAP-1298).
+            tasklist_output = _windows_process_listing_powershell()
+            if tasklist_output is None:
+                return None
     import csv
 
     own = {str(os.getpid()), str(os.getppid())}
@@ -7449,6 +7567,17 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     if not api_key:
         api_key = _resolve_api_key(env_name, dotenv_path)
 
+    if not api_key and not model.strip() and not bool(getattr(judge, "enabled", False)):
+        # A proxy connector (OpenClaw) with no guardrail model passes the
+        # agent's own provider credentials through; nothing uses this key
+        # (GAP-1453).
+        _emit(
+            "skip",
+            "LLM API key",
+            "not required: no guardrail LLM model is configured and the LLM judge is disabled",
+            r=r,
+        )
+        return
     if not api_key:
         _emit(
             "fail",
@@ -8298,15 +8427,18 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
 
         tag = "pass"
         conditions: list[str] = []
+        setup_name = "claude-code" if item.connector == "claudecode" else item.connector
         if item.managed_config_state == "drifted":
             # The file changed after setup: agents such as Codex write their
             # own settings to it. Teardown then removes only DefenseClaw's
-            # entries, so this is not a failure; setup re-applies and
-            # records the new contents.
+            # entries, so this is not a failure; setup re-applies them. That
+            # run keeps no exact record of a file changed outside DefenseClaw
+            # (it would bless the change for exact restore); the next setup
+            # records one (GAP-1448).
             tag = "warn"
             conditions.append(
                 "managed-exporter drift detected (the file changed after setup); "
-                f"run 'defenseclaw setup {item.connector}' to re-apply"
+                f"run 'defenseclaw setup {setup_name}' to re-apply"
             )
         elif item.managed_config_state == "unverifiable":
             tag = "warn"
@@ -8314,7 +8446,11 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
         elif item.managed_config_state == "verified":
             conditions.append(f"managed-exporter verified ({item.managed_config_files} files)")
         elif item.managed_config_state == "untracked":
-            conditions.append("no exporter setup record to compare, so drift is not checked")
+            conditions.append(
+                "no exporter setup record to compare, so drift is not checked; "
+                f"run 'defenseclaw setup {setup_name}' once more to record one "
+                "(setup keeps none right after the file changed outside DefenseClaw)"
+            )
         else:
             conditions.append(f"managed-exporter={item.managed_config_state}")
 
@@ -8412,6 +8548,9 @@ def _check_galileo_trace_canaries(
                 f"passive mode suppresses synthetic trace export; configured={len(destinations)}",
                 r=r,
             )
+        return
+    if destinations and r.gateway_down == "stopped":
+        _emit("skip", "Galileo canaries", _NEEDS_RUNNING_GATEWAY, r=r)
         return
     for destination in destinations[:_DOCTOR_GALILEO_CANARY_LIMIT]:
         label = f"Galileo canary: {destination.name}"
@@ -8525,6 +8664,9 @@ def _check_observability_v8_status(
                     "or explicitly disable this optional route with "
                     f"`defenseclaw setup observability disable {destination_arg}`"
                 )
+        elif destination.enabled and destination.kind != "sqlite" and r.gateway_down == "stopped":
+            tag = "skip"
+            detail += "; live health " + _NEEDS_RUNNING_GATEWAY
         elif destination.enabled and destination.kind != "sqlite":
             tag = "warn"
             detail += "; health=unavailable; queue=unavailable; last=unavailable"
@@ -10188,29 +10330,6 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             effects=("review vendor version changes and rerun connector setup interactively",),
             explicit_selection_required=True,
         ),
-        RepairSpec(
-            repair_id="doctor.gateway.watchdog.reconcile",
-            label="watchdog runtime",
-            risk="disruptive",
-            plan=_plan_watchdog_runtime,
-            apply=_fix_watchdog_runtime,
-            dependencies=(
-                _CONFIG_PREFLIGHT_REPAIR_ID,
-                "doctor.state.audit-db.initialize",
-                "doctor.identity.device-key.initialize",
-                "doctor.gateway.pid.remove-stale",
-                "doctor.gateway.token.ensure",
-                "doctor.gateway.token-env.canonicalize",
-                "doctor.gateway.token.reconcile-runtime",
-                "doctor.component.compatibility.gate",
-                "doctor.connector.compatibility.gate",
-            ),
-            effects=_WATCHDOG_REPAIR_EFFECTS,
-            may_restart=True,
-            # Listed on every platform: outside Windows the planner reports
-            # it not applicable (noop). As a Windows-only spec it warned
-            # "repair is unavailable on platform" on every Linux and macOS run.
-        ),
     ]
     for (
         repair_id,
@@ -10243,6 +10362,35 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
                 explicit_selection_required=explicit_selection_required,
             )
         )
+    # Declared after the gateway service repair: a watchdog started while the
+    # gateway is still down records "down" and failed the same run (GAP-1401).
+    # Starting the gateway also starts an enabled watchdog, so this then
+    # usually has nothing left to do.
+    specs.append(
+        RepairSpec(
+            repair_id="doctor.gateway.watchdog.reconcile",
+            label="watchdog runtime",
+            risk="disruptive",
+            plan=_plan_watchdog_runtime,
+            apply=_fix_watchdog_runtime,
+            dependencies=(
+                _CONFIG_PREFLIGHT_REPAIR_ID,
+                "doctor.state.audit-db.initialize",
+                "doctor.identity.device-key.initialize",
+                "doctor.gateway.pid.remove-stale",
+                "doctor.gateway.token.ensure",
+                "doctor.gateway.token-env.canonicalize",
+                "doctor.gateway.token.reconcile-runtime",
+                "doctor.component.compatibility.gate",
+                "doctor.connector.compatibility.gate",
+            ),
+            effects=_WATCHDOG_REPAIR_EFFECTS,
+            may_restart=True,
+            # Listed on every platform: outside Windows the planner reports
+            # it not applicable (noop). As a Windows-only spec it warned
+            # "repair is unavailable on platform" on every Linux and macOS run.
+        )
+    )
     return tuple(specs)
 
 
@@ -11454,7 +11602,9 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     """
     from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
 
-    problems = hook_runtime_problems(cfg, connector)
+    # Token problems are reported once, by the Connector hook credential row,
+    # with the repair doctor --fix applies (GAP-1436).
+    problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
     if problems:
         _emit("fail", "Hook runtime files", f"{'; '.join(problems)}; run `{setup_command(connector)}`", r=r)
 

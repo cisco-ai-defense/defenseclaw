@@ -52,7 +52,10 @@ def aibom() -> None:
     "--only",
     "categories",
     default=None,
-    help="Comma-separated categories to scan and show: skills,plugins,mcp,agents,rules,tools,models,memory",
+    help=(
+        "Comma-separated categories to scan and show: skills,plugins,mcp,agents,rules,tools,models,memory. "
+        "The others are not collected (JSON marks them \"collected\": false)."
+    ),
 )
 @click.option(
     "--connector", "connector_flag", default="",

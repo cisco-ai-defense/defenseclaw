@@ -416,6 +416,16 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         payload = json.loads(result.output)
         self.assertTrue(payload["verdict"]["rejected"])
 
+    def test_approve_infers_type_from_source_content(self):
+        # GAP-1384: a source with content=skill implies --type skill.
+        result = self.invoke([
+            "approve", "corp-skills", "demo-skill",
+            "--no-repromote", "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["verdict"]["approved"])
+
     def test_approve_unknown_entry_errors(self):
         result = self.runner.invoke(registry, [
             "approve", "corp-skills", "missing",

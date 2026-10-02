@@ -224,6 +224,20 @@ def test_standalone_uninstall_removes_the_ipc_directory_before_retiring_the_tree
     assert helper < removal < retire
 
 
+def test_standalone_default_uninstall_removes_the_machine_state() -> None:
+    # GAP-1277 (owner decision 2026-10-01): a standalone uninstall removes the
+    # machine state; -Purge adds the per-user data. The user-state flag reads
+    # the caller's -Purge first, and the Secure Client profile is unchanged.
+    entry = _function_body(_text(MODULE), "Invoke-DefenseClawEnterpriseLifecycle")
+    user_state = entry.index("$script:DefenseClawUninstallPurgeUserState = (")
+    machine = entry.index(
+        "if ($Action -eq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)) {\n        $Purge = [switch]$true\n    }"
+    )
+    first_use = min(entry.index(":$Purge"), entry.index("if ($Purge -and $Action -ne 'Uninstall')"))
+    assert user_state < machine < first_use
+    assert entry.count("$Purge = ") == 1
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).

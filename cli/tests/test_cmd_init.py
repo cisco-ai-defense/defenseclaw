@@ -4102,6 +4102,25 @@ class TestMultiConnectorInit(unittest.TestCase):
         selector.assert_called_once()
         self.assertEqual(selector.call_args.kwargs["default_selected"], ["codex", "claudecode"])
 
+    def test_connector_selection_on_a_configured_install_keeps_the_active_set(self):
+        # GAP-1433: re-running init pre-selected every detected connector, so
+        # Enter enrolled ones that were installed but never made active.
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "claudecode", "cursor"})
+
+        def configured(found, _data_dir):
+            found.agents["claudecode"].active = True
+            return found
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init, "_with_config_state", side_effect=configured), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["claudecode"]) as selector:
+            cmd_init._prompt_connector_selection(None, False)
+        self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode"])
+        self.assertIn("Active connectors are pre-selected", selector.call_args.kwargs["title"])
+
     def test_connector_selection_can_trust_untrusted_binary_dirs_and_rescan(self):
         from defenseclaw.commands import cmd_init
         from defenseclaw.inventory import agent_discovery as ad

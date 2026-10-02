@@ -200,3 +200,16 @@ def test_status_commands_offer_json() -> None:
         for name in path:
             command = command.commands[name]
         assert any("--json" in p.opts for p in command.params), path
+
+
+def test_status_disabled_app_protect_names_the_way_forward(capsys) -> None:
+    # GAP-1498: no "disabled (disabled)" and no "(awaiting discovery scan)"
+    # when the feature is off; say how to turn it on.
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(data_dir="", application_protection=ApplicationProtectionConfig(enabled=False))
+    cmd_status._print_application_protection(cfg, health={"health_state": "disabled"})
+    out = capsys.readouterr().out
+    assert "disabled (disabled)" not in out
+    assert "awaiting discovery scan" not in out
+    assert "application_protection.enabled: true" in out

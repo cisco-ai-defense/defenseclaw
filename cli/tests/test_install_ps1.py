@@ -248,3 +248,41 @@ def test_the_locked_package_install_is_retried_once() -> None:
     body = _text()[_text().index("function New-Venv") :][:1600]
     assert body.count("(Invoke-Native $Uv $lockArgs) -ne 0") == 2
     assert "Retrying the Python package install once" in body
+
+
+def _ps1_function(name: str) -> str:
+    text = _text()
+    start = text.index(f"function {name} ")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
+    # GAP-1348: a 1.x gateway over a large audit database outlasted start's
+    # 60-second readiness wait, and the upgrade rolled back while it was
+    # still starting.
+    body = _ps1_function("Start-Gateway")
+    assert "if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }" in body
+    assert "$deadline = (Get-Date).AddMinutes(3)" in body
+    assert 'Invoke-Native $gateway @("status") -Quiet' in body
+    assert 'Write-Ok "The gateway finished starting"; return 0' in body
+
+
+def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
+    # GAP-1349: "Your previous install is back" while the gateway that ran
+    # before stayed down and fail-closed connectors blocked every tool call.
+    body = _ps1_function("Restart-Old")
+    assert "$Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)" in body
+    assert "did not start again, so agent hooks are not guarded" in body
+    assert "but its gateway is not running" in _ps1_function("Get-RestoredNote")
+    text = _text()
+    assert text.count("$(Get-RestoredNote) Log: $($Run.Log)") == 2
+    assert "Your previous install is back. Log:" not in text
+
+
+def test_a_later_upgrade_keeps_the_0_x_audit_history() -> None:
+    # GAP-1360: previous\ held the only copy of the 0.x audit history, and the
+    # next upgrade replaced it.
+    body = _ps1_function("Save-RolledBackData")
+    assert '$label = "audit-history"' in body
+    assert '[version]$version -lt [version]"1.0.0"' in body
+    assert "backups\\$label-$version-" in body

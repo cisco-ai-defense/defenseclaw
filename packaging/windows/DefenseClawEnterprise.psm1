@@ -24043,6 +24043,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
     )
+    # A standalone uninstall also removes the machine state under StateRoot
+    # (owner decision 2026-10-01, GAP-1277); -Purge adds each enrolled
+    # account's per-user data and binaries (the flag above). The Secure
+    # Client profile keeps its state unless -Purge.
+    if ($Action -eq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)) {
+        $Purge = [switch]$true
+    }
     $entryProfileRoots = Get-DefenseClawProfileRoots
     if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
         $InstallRoot = [string]$entryProfileRoots.InstallRoot

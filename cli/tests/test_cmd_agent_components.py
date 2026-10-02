@@ -300,7 +300,7 @@ class ResolveComponentTests(unittest.TestCase):
         comp, err = cmd_agent._resolve_component(
             client, name="anything", ecosystem=None)
         self.assertEqual(comp, {})
-        self.assertIn("sidecar unavailable", err)
+        self.assertIn("gateway is not running", err)
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +516,7 @@ class ComponentsListingTests(unittest.TestCase):
         # Non-zero exit is the contract — operator scripts can pipeline
         # `defenseclaw agent components || alert ...`.
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("sidecar unavailable", result.output)
+        self.assertIn("gateway is not running", result.output)
 
 
 class ComponentsShowTests(unittest.TestCase):

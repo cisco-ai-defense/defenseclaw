@@ -36,7 +36,7 @@ def _install(tmp_path):
     hooks.mkdir()
     script = hooks / "codex-hook.sh"
     script.write_text('#!/bin/bash\n[ -f "${HOOK_DIR}/.hook-codex.token" ] || exit 2\n')
-    (hooks / ".hook-codex.token").write_text("t\n")
+    (hooks / ".hook-codex.token").write_text("ab" * 32 + "\n")
     digest = "sha256:" + hashlib.sha256(script.read_bytes()).hexdigest()
     lock = {
         "version": 2,
@@ -84,6 +84,27 @@ def test_missing_scoped_token_is_reported_even_with_gateway_token_env(tmp_path, 
     os.remove(tmp_path / "hooks" / ".hook-codex.token")
     problems = hook_runtime_problems(cfg, "codex")
     assert len(problems) == 1 and ".hook-codex.token is missing" in problems[0]
+
+
+def test_empty_token_is_a_problem_like_a_missing_one(tmp_path, monkeypatch):
+    # GAP-1436: status shows DEGRADED and doctor --fix re-issues both.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, _ = _install(tmp_path)
+    (tmp_path / "hooks" / ".hook-codex.token").write_text("")
+    problems = hook_runtime_problems(cfg, "codex")
+    assert len(problems) == 1 and "is empty or damaged" in problems[0]
+
+    from defenseclaw.commands import cmd_doctor
+
+    cfg.guardrail = SimpleNamespace(connectors={}, connector="codex")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+        assert cmd_doctor._connector_hook_credential_problems(cfg, None) == ["codex"]
+        os.remove(tmp_path / "hooks" / ".hook-codex.token")
+        assert cmd_doctor._connector_hook_credential_problems(cfg, None) == ["codex"]
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", r)
+    assert not [row for row in r.checks if row.get("label") == "Hook runtime files"]
 
 
 def test_removed_hook_registration_is_reported(tmp_path):

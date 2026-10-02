@@ -425,3 +425,152 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     row = next(c for c in r.checks if c["label"] == "Audit storage capacity")
     assert row["status"] == "fail" and "is full" in row["detail"]
     assert "free space" in row["remediation"]
+
+
+def test_omnigent_without_a_server_record_reads_plainly(tmp_path, monkeypatch) -> None:
+    # GAP-1067: no internal path hash as the main text.
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    pid, detail = cmd_doctor._omnigent_local_server_pid()
+    assert pid == 0 and detail == "OmniGent server has not started yet (no server record)"
+
+
+def test_windows_hermes_check_falls_back_to_get_process(monkeypatch) -> None:
+    # GAP-1298: tasklist prints "ERROR: Access denied" for a standard user over SSH.
+    import subprocess
+
+    monkeypatch.setenv("USERNAME", "dcw-fc3")
+    denied = subprocess.CompletedProcess(["tasklist"], 1, stdout="", stderr="ERROR: Access denied")
+    with (
+        mock.patch.object(cmd_doctor.subprocess, "run", return_value=denied),
+        mock.patch.object(cmd_doctor, "_windows_process_listing_powershell", return_value='"pwsh","4100"\n'),
+    ):
+        assert cmd_doctor._hermes_host_running_windows() is False
+    with (
+        mock.patch.object(cmd_doctor.subprocess, "run", return_value=denied),
+        mock.patch.object(cmd_doctor, "_windows_process_listing_powershell", return_value=None),
+    ):
+        assert cmd_doctor._hermes_host_running_windows() is None
+
+
+def test_llm_ping_sends_the_bedrock_region_and_plain_errors() -> None:
+    # GAP-1365: a Bedrock API key is bound to its region; GAP-1489: no LiteLLM banner or prefixes.
+    import litellm
+    from defenseclaw import llm as llm_mod
+    from defenseclaw.config import BedrockKeyConfig, LLMConfig
+
+    cfg = LLMConfig(
+        provider="bedrock",
+        model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        api_key="bedrock-api-key-x",
+        bedrock=BedrockKeyConfig(region="us-east-1"),
+    )
+    err = RuntimeError(
+        'litellm.BadRequestError: BedrockException - {"message":"The provided model identifier is invalid."}'
+    )
+    with mock.patch("litellm.completion", side_effect=err) as completion:
+        ok, msg = llm_mod.ping(cfg)
+    assert completion.call_args.kwargs["aws_region_name"] == "us-east-1"
+    assert litellm.suppress_debug_info is True
+    assert not ok and msg == "internal: The provided model identifier is invalid."
+
+
+def test_unverified_version_hint_names_action_mode() -> None:
+    # GAP-1372: plain `setup hermes` prompts with observe as the default.
+    from types import SimpleNamespace
+
+    from defenseclaw import doctor_health
+
+    finding = doctor_health.ConnectorHealthFinding(
+        connector="hermes",
+        status=doctor_health.HealthStatus.UNTESTED,
+        reason_code="connector-version-not-observed",
+        summary="hermes is installed, but its version was not observed",
+        remediations=doctor_health._untested_connector_remediations("hermes"),
+    )
+    report = SimpleNamespace(components=(), connectors=(finding,))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=None),
+        mock.patch("defenseclaw.doctor_health.build_health_report", return_value=report),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["hermes"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: hermes")
+    assert "'defenseclaw setup hermes --mode action'" in row["remediation"]
+
+
+def test_init_next_steps_drop_a_plain_setup_covered_by_mode_action() -> None:
+    # GAP-1372: init printed "setup hermes --mode action" and then a plain "setup hermes".
+    from types import SimpleNamespace
+
+    from defenseclaw.bootstrap import _next_commands
+
+    steps = [
+        SimpleNamespace(next_command="defenseclaw setup hermes --mode action"),
+        SimpleNamespace(next_command="defenseclaw setup hermes"),
+    ]
+    commands = _next_commands(steps, [], SimpleNamespace(data_dir=""), "observe")
+    assert commands == ["defenseclaw setup hermes --mode action", "defenseclaw doctor"]
+
+
+def test_stopped_gateway_is_one_failure_on_windows(tmp_path) -> None:
+    # GAP-1389: rows that inspect the running gateway are skipped, not failed.
+    from types import SimpleNamespace
+
+    from defenseclaw.doctor_gateway import PIDRecord, WatchdogOwnershipEvidence
+
+    r = _DoctorResult()
+    r.gateway_down = "stopped"
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(watchdog=SimpleNamespace(enabled=True)))
+    with mock.patch.object(cmd_doctor, "_configured_gateway_data_dir", return_value=str(tmp_path)):
+        cmd_doctor._check_windows_gateway_diagnostics(cfg, r, evidence=object(), platform_name="win32")
+    evidence = SimpleNamespace(
+        watchdog_pid_record=lambda _p: PIDRecord("missing"),
+        watchdog_ownership=lambda *_a: WatchdogOwnershipEvidence("unlocked", source="stable"),
+    )
+    cmd_doctor._check_windows_watchdog_diagnostics(cfg, r, evidence=evidence, platform_name="win32")
+    assert r.failed == 0
+    rows = {c["label"]: c for c in r.checks}
+    assert rows["Gateway token drift"]["detail"] == cmd_doctor._NEEDS_RUNNING_GATEWAY
+    assert rows["Watchdog runtime"]["status"] == "skip"
+    assert "defenseclaw-gateway start" in rows["Watchdog runtime"]["detail"]
+
+
+def test_fix_starts_the_gateway_before_the_watchdog() -> None:
+    # GAP-1401: a watchdog started first recorded "down" and failed the run.
+    from types import SimpleNamespace
+
+    from defenseclaw.doctor_gateway import WatchdogStateEvidence
+
+    ids = [spec.repair_id for spec in cmd_doctor._doctor_repair_specs()]
+    assert ids.index("doctor.gateway.service.reconcile") < ids.index("doctor.gateway.watchdog.reconcile")
+
+    r = _DoctorResult(mode="repair")
+    r.repairs.append({"repair_id": "doctor.gateway.service.reconcile", "state": "applied"})
+    state = WatchdogStateEvidence("ok", state="down")
+    with mock.patch.object(cmd_doctor, "_inspect_windows_watchdog_runtime", return_value=("running", "ok", state)):
+        cmd_doctor._check_windows_watchdog_diagnostics(
+            SimpleNamespace(data_dir="", gateway=SimpleNamespace(watchdog=SimpleNamespace(enabled=True))),
+            r,
+            evidence=object(),
+            platform_name="win32",
+        )
+    row = r.checks[-1]
+    assert row["label"] == "Watchdog last-known state" and row["status"] == "warn"
+
+
+def test_proxy_connector_without_a_guardrail_model_needs_no_llm_key(tmp_path, monkeypatch) -> None:
+    # GAP-1453: OpenClaw passes the agent's own provider credentials through.
+    from defenseclaw import credentials
+
+    monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_LLM_MODEL", raising=False)
+    cfg = _bedrock_judge_cfg(tmp_path, "api_key")
+    cfg.guardrail.connector = "openclaw"
+    cfg.claw.mode = "openclaw"
+    cfg.guardrail.judge.enabled = False
+    r = _DoctorResult()
+    cmd_doctor._check_llm_api_key(cfg, r)
+    assert r.checks[-1]["status"] == "skip" and "no guardrail LLM model" in r.checks[-1]["detail"]
+    assert not credentials._any_llm_component_uses_default_key(cfg)

@@ -635,6 +635,21 @@ class TestCategoryFilter(unittest.TestCase):
         self.assertEqual(inv["memory"], [])
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_only_marks_uncollected_categories(self, _):
+        # GAP-1483: a partial BOM must not read (or store) as empty.
+        from defenseclaw.inventory.claw_inventory import claw_aibom_to_scan_result
+
+        inv = build_claw_aibom(self.cfg, live=True, categories={"skills", "mcp"})
+        self.assertEqual(inv["categories_collected"], ["mcp", "skills"])
+        self.assertIs(inv["summary"]["plugins"]["collected"], False)
+        self.assertIs(inv["summary"]["model_providers"]["collected"], False)
+        self.assertNotIn("collected", inv["summary"]["skills"])
+        ids = {f.id for f in claw_aibom_to_scan_result(inv, self.cfg).findings}
+        self.assertEqual(ids, {"claw-aibom-skills", "claw-aibom-mcp"})
+        full = build_claw_aibom(self.cfg, live=True)
+        self.assertNotIn("categories_collected", full)
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
     def test_only_tools_fetches_plugins_list(self, mock_sub):
         """tools category depends on plugins_list command."""
         inv = build_claw_aibom(self.cfg, live=True, categories={"tools"})
@@ -1803,6 +1818,20 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(by_id["weather"]["policy_verdict"], "clean")
         self.assertEqual(by_id["new-skill"]["policy_verdict"], "unscanned")
         self.assertEqual(by_id["peekaboo"]["policy_verdict"], "rejected")
+
+    def test_disabled_skill_is_not_enabled(self):
+        # GAP-1383: Inventory said "Enabled yes" for a skill DefenseClaw
+        # had blocked and disabled.
+        self._seed_store()
+        self.store.set_action_field("skill", "discord", "runtime", "disable", "auto")
+        inv = self._make_inventory()
+        for s in inv["skills"]:
+            s["enabled"] = True
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        by_id = {s["id"]: s for s in inv["skills"]}
+        self.assertIs(by_id["discord"]["enabled"], False)
+        self.assertIs(by_id["github"]["enabled"], True)
 
     def test_scan_data_attached_to_items(self):
         self._seed_store()

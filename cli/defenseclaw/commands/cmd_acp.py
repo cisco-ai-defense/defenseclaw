@@ -738,8 +738,9 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     type=click.Path(file_okay=False, path_type=Path),
     help="Per-user ACP runtime directory of a managed enrollment.",
 )
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
-def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
+def status_cmd(app: AppContext, runtime_data_dir: Path | None, json_output: bool = False) -> None:
     """Show configured ACP posture and editor paths."""
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
@@ -763,21 +764,43 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
                 else "inherited"
             ),
         }
-    click.echo(
-        json.dumps(
-            {
-                "enabled": app.cfg.acp.enabled,
-                "mode": app.cfg.acp.mode,
-                "default_profile": app.cfg.acp.default_profile,
-                "clients": {name: str(_client_path(name)) for name in sorted(_CLIENTS)},
-                "configured_clients": sorted(app.cfg.acp.clients),
-                "configured_agents": sorted(app.cfg.acp.agents),
-                "bindings": bindings,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    payload = {
+        "enabled": app.cfg.acp.enabled,
+        "mode": app.cfg.acp.mode,
+        "default_profile": app.cfg.acp.default_profile,
+        "clients": {name: str(_client_path(name)) for name in sorted(_CLIENTS)},
+        "configured_clients": sorted(app.cfg.acp.clients),
+        "configured_agents": sorted(app.cfg.acp.agents),
+        "bindings": bindings,
+    }
+    if json_output:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    _print_acp_status(payload)
+
+
+def _print_acp_status(payload: dict) -> None:
+    """Readable ACP posture for 'acp status' (GAP-1501); --json keeps the document."""
+    state = "on" if payload["enabled"] else "off"
+    click.echo(f"ACP guard: {state} (mode {payload['mode']}, default profile {payload['default_profile']})")
+    bindings = payload["bindings"]
+    if not bindings:
+        click.echo("  No guarded editor/agent pairs yet.")
+        ux.subhead("Add one with: defenseclaw acp setup --client <editor> --agent <agent>", indent="  ")
+        return
+    click.echo("  Bindings:")
+    for pair, info in sorted(bindings.items()):
+        health = "healthy" if info["healthy"] else "NEEDS ATTENTION"
+        source = "" if info["profile_source"] == "binding" else ", inherited"
+        click.echo(f"    {pair:<20} {health:<16} profile {info['profile']} ({info['mode']}{source})")
+        for problem in info["problems"]:
+            ux.warn(str(problem), indent="      ")
+    if any(not info["healthy"] for info in bindings.values()):
+        ux.subhead("Fix with: defenseclaw acp verify, then re-run defenseclaw acp setup for that pair", indent="  ")
+    clients = payload["configured_clients"]
+    for name in clients:
+        click.echo(f"  {name} config: {payload['clients'].get(name, '')}")
+    ux.subhead("Machine-readable output: defenseclaw acp status --json", indent="  ")
 
 
 @acp_cmd.command("verify")

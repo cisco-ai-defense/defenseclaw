@@ -854,6 +854,8 @@ _SPECS: dict[str, _AgentSpec] = {
     "devin": _AgentSpec((), "devin", ("--version",)),
     "copilot": _AgentSpec(
         (
+            # GAP-1481: the user-level hooks file DefenseClaw writes.
+            "~/.copilot/hooks/defenseclaw.json",
             "~/.copilot/mcp-config.json",
             ".github/hooks/defenseclaw.json",
             ".github/mcp.json",

@@ -212,3 +212,26 @@ func TestRulePackValidateFailsWhenTheGatewayCannotLoadThePack(t *testing.T) {
 		t.Fatalf("json mode err = %v", err)
 	}
 }
+
+// GAP-1405: a missing --dir is named in the text output and the error, not
+// reported "at .".
+func TestRulePackValidateMissingDirNamesTheDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nonexistent-rs3")
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput := rulePackValidateCmd.OutOrStdout()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+	})
+	rulePackValidateDir = missing
+	rulePackValidateJSON = false
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %v, want it to name %s", err, missing)
+	}
+	if !strings.Contains(output.String(), "at "+missing+":") {
+		t.Fatalf("text output does not name the directory:\n%s", output)
+	}
+}

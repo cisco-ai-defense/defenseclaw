@@ -140,6 +140,14 @@ def audit_logs(app: AppContext, source: str, line_count: int, pattern: str | Non
     if pattern:
         needle = pattern.lower()
         lines = [line for line in lines if needle in line.lower()]
+        if not lines:
+            # GAP-1494: an empty match used to print nothing at all.
+            click.echo(
+                f"No {source} log lines match {pattern!r} in {path} "
+                "(searched the newest 1 MiB).",
+                err=True,
+            )
+            return
     for line in lines[-line_count:]:
         click.echo(line)
 

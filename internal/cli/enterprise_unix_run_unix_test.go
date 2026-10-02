@@ -165,6 +165,14 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(result, true, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("--json error line = %q, want the problems only", err)
 	}
+	// One problem reads "fix it" (GAP-1435).
+	single := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	single.Installed = true
+	single.AddError("verify_failed", "defenseclaw-sensor-helper.service is not active")
+	single.Finish("linux", 0)
+	if want := "verify failed; see the 1 problem listed above. Run `" + repair + "` as root to fix it"; lifecycleFailure(single, false, repair).Error() != want {
+		t.Fatalf("one problem: %q, want %q", lifecycleFailure(single, false, repair), want)
+	}
 	result.Installed = false
 	if err := lifecycleFailure(result, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("not installed: %q, want no repair advice", err)

@@ -165,7 +165,7 @@ def discover(
         if otel_result["emitted"]:
             click.echo("  OTel: emitted agent discovery telemetry")
         elif otel_result["error"]:
-            click.echo(f"  OTel: not emitted ({otel_result['error']})", err=True)
+            click.echo(f"  OTel: not emitted - {otel_result['error']}", err=True)
 
 
 _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
@@ -299,7 +299,7 @@ def usage(
     try:
         payload = client.scan_ai_usage() if refresh else client.ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
@@ -394,7 +394,7 @@ def processes(
     try:
         payload = client.scan_ai_usage() if refresh else client.ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
@@ -556,7 +556,7 @@ def components_cmd(
             client.scan_ai_usage()
         payload = client.ai_usage_components()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -626,7 +626,7 @@ def components_show(
     try:
         loc_payload = client.ai_usage_component_locations(eco, cname)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -686,7 +686,7 @@ def components_history(
     try:
         hist_payload = client.ai_usage_component_history(eco, cname)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -813,7 +813,7 @@ def confidence_policy_show(
     try:
         payload = client.ai_usage_confidence_policy(source=source)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -858,7 +858,7 @@ def confidence_policy_default(
     try:
         payload = client.ai_usage_confidence_policy(source="default")
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -912,7 +912,7 @@ def confidence_policy_validate(
     try:
         payload = client.ai_usage_validate_confidence_policy(yaml_text)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -1424,7 +1424,7 @@ def discovery_status(
                 )
             live["summary"] = payload.get("summary") or {}
         except requests.ConnectionError as exc:
-            live["error"] = f"sidecar unavailable: {exc}"
+            live["error"] = _sidecar_unavailable(exc)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             live["error"] = f"sidecar rejected request: HTTP {status}"
@@ -1489,7 +1489,11 @@ def discovery_status(
         else:
             ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
         summary = live["summary"] or {}
-        ux.kv("Last scan", str(summary.get("scanned_at") or "-"), indent="  ")
+        last = str(summary.get("scanned_at") or "-")
+        if _is_process_refresh(summary):
+            # GAP-1482: the 60 s process tick is not the full scan.
+            last += f" (process refresh; full scan every {on_disk['scan_interval_min']} min)"
+        ux.kv("Last scan", last, indent="  ")
         ux.kv("Active signals", str(summary.get("active_signals", 0)), indent="  ")
         ux.kv("New signals", str(summary.get("new_signals", 0)), indent="  ")
         if live["lookup_model_provenance_online"] is None:
@@ -1832,7 +1836,7 @@ def discovery_scan(
     try:
         payload = client.scan_ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -1966,7 +1970,7 @@ def _runtime_snapshot(
     try:
         return client.scan_ai_runtime() if refresh else client.ai_runtime()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -3314,7 +3318,7 @@ def _trigger_post_enable_scan(
             )
             return
         except (requests.ConnectionError, requests.Timeout) as exc:
-            last_err = f"sidecar unavailable: {exc}"
+            last_err = _sidecar_unavailable(exc)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             last_err = f"sidecar rejected scan: HTTP {status}"
@@ -3592,13 +3596,27 @@ def _emit_discovery_report(
         client.emit_agent_discovery(report)
         result["emitted"] = True
     except (requests.ConnectionError, requests.Timeout) as exc:
-        result["error"] = f"sidecar unavailable: {exc}"
+        result["error"] = _sidecar_unavailable(exc, host, port)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         result["error"] = f"sidecar rejected discovery telemetry: HTTP {status}"
     except requests.RequestException as exc:
         result["error"] = f"sidecar request failed: {exc}"
     return result
+
+
+def _sidecar_unavailable(exc: Exception, host: str | None = None, port: int | None = None) -> str:
+    """A plain hint for an unreachable gateway instead of urllib3's text (GAP-1471)."""
+    target = f"{host}:{port}" if host and port else ""
+    if not target:
+        url = getattr(getattr(exc, "request", None), "url", "") or ""
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        target = urlparse(url).netloc if url else ""
+    where = f" on {target}" if target else ""
+    if isinstance(exc, requests.Timeout) and not isinstance(exc, requests.ConnectTimeout):
+        return f"the gateway{where} did not answer in time; check it with 'defenseclaw-gateway status'"
+    return f"the gateway is not running{where}; start it with 'defenseclaw-gateway start'"
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -4083,6 +4101,23 @@ def _humanize_seconds(seconds: int) -> str:
     return "".join(f"{v}{u}" for v, u in chosen)
 
 
+def _is_process_refresh(summary: dict[str, Any]) -> bool:
+    """True when the report came from the process-only tick, not a full scan."""
+    return str(summary.get("source") or "").strip().lower() == "process"
+
+
+def _discovery_scan_clause(summary: dict[str, Any]) -> str:
+    """'scanned <time>, files=N', or say it was a process refresh (GAP-1482).
+
+    The process-only tick reads no files, so its files=0 is not the count of
+    the last full scan.
+    """
+    when = summary.get("scanned_at", "-") or "-"
+    if _is_process_refresh(summary):
+        return f"process refresh {when}; files are read on full scans"
+    return f"scanned {when}, files={summary.get('files_scanned', 0)}"
+
+
 def _format_relative_time(value: Any) -> str:
     """Render an ISO-8601 timestamp as ``Nm ago`` / ``Nh ago``.
 
@@ -4390,11 +4425,7 @@ def _render_ai_usage_table(
             shown_clause = f"{len(displayed)} of {len(rows)} {signal_word} shown"
         else:
             shown_clause = f"{len(rows)} {signal_word} shown"
-        footer = (
-            f"{shown_clause} "
-            f"(scanned {summary.get('scanned_at', '-')}, "
-            f"files={summary.get('files_scanned', 0)})."
-        )
+        footer = f"{shown_clause} ({_discovery_scan_clause(summary)})."
         if hidden > 0:
             footer += f" {hidden} more hidden by --limit; raise it or use --json for the full list."
         footer += _format_ai_usage_scan_diagnostics(summary)
@@ -4495,8 +4526,7 @@ def _render_ai_usage_table(
     signal_word = _pluralize(total_signals, "signal", "signals")
     footer = (
         f"{len(full_groups)} {group_word}, {total_signals} {signal_word} "
-        f"(scanned {summary.get('scanned_at', '-')}, "
-        f"files={summary.get('files_scanned', 0)})."
+        f"({_discovery_scan_clause(summary)})."
     )
     hidden = len(full_groups) - len(displayed_full)
     if hidden > 0:
@@ -4994,7 +5024,7 @@ def _resolve_component(
     try:
         payload = client.ai_usage_components()
     except requests.ConnectionError as exc:
-        return {}, f"sidecar unavailable: {exc}"
+        return {}, _sidecar_unavailable(exc)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         return {}, f"sidecar rejected components request: HTTP {status}"

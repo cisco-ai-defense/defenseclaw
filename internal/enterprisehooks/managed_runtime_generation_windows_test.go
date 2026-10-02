@@ -876,3 +876,59 @@ func TestWindowsManagedRuntimeValidContractRequiresRegisteredKiroContract(t *tes
 		t.Fatal("codex with its known contract ID was refused")
 	}
 }
+
+// 1.0.1 wrote managed Kiro bundles with no hook contract ID, which this build
+// no longer publishes. Every upgrade, repair and uninstall retires the
+// unselected bundles, and it refused that legacy one ("refusing to collect
+// an invalid managed runtime bundle"), so no lifecycle action could finish
+// (GAP-1322). Its identity matches, so it is collected.
+func TestWindowsManagedRuntimeGenerationGCCollectsLegacyContractlessBundle(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	fixture.options.Connector = "kiro"
+	home := filepath.Dir(fixture.options.DataDir)
+	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, fixture.target); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     "kiro",
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+	generationID, err := newWindowsManagedRuntimeGenerationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := marshalWindowsManagedRuntimeBundle(windowsManagedRuntimeBundle{
+		SchemaVersion:      windowsManagedRuntimeGenerationSchema,
+		GenerationID:       generationID,
+		Connector:          "kiro",
+		TargetSID:          fixture.options.TargetSID,
+		DataDir:            fixture.options.DataDir,
+		HookExecutable:     fixture.options.HookExecutable,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGateway",
+		FailMode:           "closed",
+		ScopedToken:        "legacy-scoped-test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := windowsManagedRuntimeBundlePath(fixture.options.DataDir, "kiro", generationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+		t.Fatalf("publish legacy bundle: %v", err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err != nil || removed != 1 {
+		t.Fatalf("collect legacy contractless bundle: removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy bundle survived GC: %v", err)
+	}
+}

@@ -272,7 +272,8 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
     done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--yes", "--json"])
     assert done.exit_code == 0, done.output
     payload = json.loads(done.stdout)
-    assert "0.x import 0.8.5" in done.stderr
+    assert "→ step 0.8.5" in done.stderr
+    assert payload["applied"] == ["0.x import 0.8.5: step 0.8.5"]
     assert payload["from_config_version"] == 7
     assert payload["changed"] is True
     assert recorded == ["0.8.5"]
@@ -442,7 +443,9 @@ def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list
     text = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--check"])
     assert text.exit_code == 0, text.output
     assert "1 migration step(s) pending (config_version 7 -> 8)" in text.stdout
-    assert "→ 0.x import 0.8.5: step 0.8.5" in text.stdout
+    # GAP-1500: human output shows the step in user terms, no "0.x import" id.
+    assert "→ step 0.8.5" in text.stdout
+    assert "0.x import" not in text.stdout
     assert "✓" not in text.stdout
 
     js = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--check", "--json"])
@@ -451,3 +454,13 @@ def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list
     assert payload["pending"] == ["0.x import 0.8.5: step 0.8.5"]
     assert payload["applied"] == []
     assert config.read_text(encoding="utf-8") == "config_version: 7\n"
+
+
+def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path) -> None:
+    # GAP-1449: --from-version banana is a usage error, not "current", rc 0.
+    _write_config(data_dir, "config_version: 8\n")
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "banana"])
+    assert result.exit_code == 2
+    assert "not a release version" in result.output
+    ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
+    assert ok.exit_code == 0, ok.output

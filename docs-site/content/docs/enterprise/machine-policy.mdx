@@ -558,10 +558,11 @@ the vendor's own managed settings.
 
 These come from the agents themselves:
 
-- **Claude Code.** `claude --bare` and `CLAUDE_CODE_SIMPLE=1` skip managed
-  `SessionStart` and `UserPromptSubmit` hooks. `PreToolUse` and later tool
-  hooks still run, so tool calls stay inspected; prompt inspection is best
-  effort.
+- **Claude Code.** `claude --bare` and `CLAUDE_CODE_SIMPLE=1` skip the
+  managed `SessionStart` hook. Claude Code 2.1.287 still runs the managed
+  `UserPromptSubmit`, `PreToolUse` and later tool hooks in both modes; other
+  releases may skip `UserPromptSubmit` too, so tool calls stay inspected and
+  prompt inspection is best effort.
 - **Claude Code before 2.1.163.** These builds do not read
   `requiredMinimumVersion`, so no floor stops them, DefenseClaw's or yours.
   Those that read `managed-settings.d`, such as 2.1.153, still run

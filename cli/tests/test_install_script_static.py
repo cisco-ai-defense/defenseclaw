@@ -405,7 +405,8 @@ def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     out = completed.stdout
     assert "rc=1" in out, out + completed.stderr
     assert "claudecode's agent changed (2.1.276 (Claude Code) -> 2.1.286 (Claude Code))" in out
-    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start" in out
+    # GAP-0012: start only says a degraded gateway is running; restart fixes it.
+    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart" in out
     assert "an older failure" not in out
 
     # MAC-U3-02: with a large audit database the restored gateway was still
@@ -505,6 +506,48 @@ def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: P
     assert forward.returncode == 0, forward.stdout + forward.stderr
     assert "Rolling forward to DefenseClaw 1.0.1" in forward.stdout
     assert "Now running DefenseClaw 1.0.1." in forward.stdout
+    # GAP-1497: rolling forward asked to replace 0.8.10 "with the previous
+    # install (1.0.1)", though 1.0.1 is the newer one.
+    for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
+        assert "(the install you rolled back from)?" in path.read_text(encoding="utf-8"), path
+
+
+def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_path: Path) -> None:
+    # GAP-0012: after naming the drift and its restart fix, the rollback also
+    # said "Start it with: defenseclaw-gateway start", which does nothing then.
+    home = tmp_path / "home"
+    dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+    (dc_home / "previous" / "bin").mkdir(parents=True)
+    bin_dir.mkdir(parents=True)
+    drift = (
+        "echo 'Error: connector claudecode hook contract drift detected: previous version=\"2.1.276\" contract=v1 "
+        "current version=\"2.1.286\" contract=v1 (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory "
+        f"testing)' >> '{dc_home}/gateway.log'; exit 1"
+    )
+    for folder, version, start in ((bin_dir, "1.0.1", "exit 0"), (dc_home / "previous" / "bin", "0.8.10", drift)):
+        gateway = folder / "defenseclaw-gateway"
+        gateway.write_text(
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
+
+    back = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+
+    assert back.returncode == 1, back.stdout + back.stderr
+    out = back.stdout + back.stderr
+    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart" in out
+    assert "Start it with: defenseclaw-gateway start" not in out
+
+
+def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> None:
+    # GAP-1496: an upgrade over a stopped gateway ended with a green
+    # "installed" and nothing about the unguarded hooks.
+    for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
+        text = path.read_text(encoding="utf-8")
+        assert "The gateway is not running, so agent hooks are not guarded until it is" in text, path
 
 
 def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:
@@ -681,3 +724,55 @@ def test_a_failed_python_build_removes_what_it_wrote() -> None:
     failure = text[text.index('if ! make_venv "${STAGING}/venv"; then') :][:400]
     assert 'rm -rf "${STAGING}"' in failure
     assert '[[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"' in failure
+
+
+def _install_sh_functions(*names: str) -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    helpers = text[text.index("version_key() {") : text.index("sha256_of() {")]
+    bodies = []
+    for name in names:
+        start = text.index(f"{name}() {{")
+        bodies.append(text[start : text.index("\n}\n", start) + 3])
+    return helpers + "".join(bodies)
+
+
+def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
+    # GAP-1360: previous/ held the only copy of the 0.x audit history, and the
+    # next upgrade replaced it.
+    dc_home = tmp_path / "dc"
+    (dc_home / "previous" / "data").mkdir(parents=True)
+    (dc_home / "previous" / "data" / "audit.db").write_text("0.x history", encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    script = tmp_path / "keep.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\n'
+        + _install_sh_functions("keep_rolled_back_data")
+        + f'DEFENSECLAW_HOME="{dc_home}" PREVIOUS="{dc_home}/previous"\nkeep_rolled_back_data\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    kept = list((dc_home / "backups").glob("audit-history-0.8.10-*/audit.db"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "0.x history", out
+    assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
+
+
+def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> None:
+    # GAP-1349: the restore said "Your previous install is back" while the
+    # gateway that ran before stayed down.
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + "start_gateway() { return 1; }\n"
+        + _install_sh_functions("restart_old")
+        + f'DEFENSECLAW_HOME="{tmp_path}" WAS_RUNNING=true RESTORED_NOTE="Your previous install is back."\n'
+        + 'restart_old; echo "note: ${RESTORED_NOTE}"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "warn: The gateway that was running before did not start again" in out, out
+    assert "info: Start it with: defenseclaw-gateway start" in out
+    assert "note: Your previous install is back, but its gateway is not running (see above)." in out
