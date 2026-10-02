@@ -1254,6 +1254,10 @@ def _skill_policy_verdicts(
     out: dict[str, tuple[str, str, str]] = {}
     for s in skills:
         name = s.get("name", "")
+        if s.get("bundled") and name not in scan_map and name not in actions_map:
+            # Vendor-bundled skills are discovery-only: no policy verdict.
+            out[name] = ("-", "", "")
+            continue
         out[name] = _skill_policy_verdict(
             app, name, skill=s, scan_entry=scan_map.get(name),
             action_entry=actions_map.get(name), connector=connector, pe=pe,
