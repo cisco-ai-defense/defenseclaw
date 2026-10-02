@@ -82,11 +82,11 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	// a retried removal restores from).
 	previousPurger, previousStop := enterpriseHookWorkerPurger, enterpriseHookWorkerStopPerUser
 	t.Cleanup(func() { enterpriseHookWorkerPurger, enterpriseHookWorkerStopPerUser = previousPurger, previousStop })
-	enterpriseHookWorkerStopPerUser = func(enterprisehooks.InstallOptions) error { return nil }
+	enterpriseHookWorkerStopPerUser = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
 	var purged []string
-	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.PurgeSummary, error) {
 		purged = append(purged, opts.DataDir)
-		return nil
+		return enterprisehooks.PurgeSummary{}, nil
 	}
 	purgeRequest := enterpriseHookWorkerRequest{
 		Home: "/home/alice", UID: 1001, GID: 1001,

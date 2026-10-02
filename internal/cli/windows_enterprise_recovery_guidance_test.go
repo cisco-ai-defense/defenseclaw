@@ -78,3 +78,40 @@ func TestWindowsEnterpriseEnumeratorFailureTextUnwrapsTheCause(t *testing.T) {
 		t.Fatal("an unrelated message was rewritten")
 	}
 }
+
+// GAP-1419: a refused managed runtime bundle names the file and the reason
+// and gives a next step; other errors get nothing added.
+func TestWindowsEnterpriseInvalidRuntimeBundleNextStep(t *testing.T) {
+	failure := `managed-hook lifecycle snapshot retire failed: retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017 (HOST\alice): ` +
+		`enterprise hooks: refusing to collect an invalid managed runtime bundle: C:\Users\alice\.defenseclaw\hooks\kiro-1.json: ` +
+		`managed runtime gateway address is not canonical`
+	next := windowsEnterpriseInvalidRuntimeBundleNextStep(failure)
+	for _, want := range []string{`leave C:\Users\alice\.defenseclaw\hooks\kiro-1.json in place`, `enterprise-lifecycle.log`, "Next step:"} {
+		if !strings.Contains(next, want) {
+			t.Fatalf("next step %q does not contain %q", next, want)
+		}
+	}
+	if got := windowsEnterpriseInvalidRuntimeBundleNextStep("gateway did not become ready"); got != "" {
+		t.Fatalf("an unrelated error got %q", got)
+	}
+}
+
+// GAP-1658: a CLI from another build than the installed DefenseClaw says so
+// and names the installed CLI, instead of the module digest alone.
+func TestWindowsEnterpriseInstallerBuildMismatchText(t *testing.T) {
+	failure := `DefenseClaw enterprise installer rejected its module before import: DefenseClaw enterprise installer module SHA-256 ` +
+		`does not match the pinned payload manifest: C:\ProgramData\DefenseClaw-Installer-0f\DefenseClawEnterprise.psm1`
+	text, ok := windowsEnterpriseInstallerBuildMismatchText(failure, "uninstall", true)
+	if !ok {
+		t.Fatal("the module pin refusal was not recognized")
+	}
+	for _, want := range []string{"does not match the installed DefenseClaw", "stopped before it changed anything",
+		`\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows uninstall --purge --profile standalone`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text %q does not contain %q", text, want)
+		}
+	}
+	if _, ok := windowsEnterpriseInstallerBuildMismatchText("gateway did not become ready", "uninstall", false); ok {
+		t.Fatal("an unrelated error was rewritten")
+	}
+}

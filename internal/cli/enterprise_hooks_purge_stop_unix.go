@@ -30,25 +30,26 @@ import (
 // managed deployment). The per-user worker runs it as the account, before
 // the purge. An error means one may still run, so the purge keeps the
 // account's state rather than leave an orphan gateway without its files.
-func stopPerUserGatewayForPurge(opts enterprisehooks.InstallOptions) error {
+// stopped reports that a per-user gateway was running and is stopped now.
+func stopPerUserGatewayForPurge(opts enterprisehooks.InstallOptions) (stopped bool, err error) {
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
 		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
 	}
 	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	// The watchdog first: it would restart the gateway.
 	if err := stopWatchdogAt(dataDir, io.Discard); err != nil {
-		return fmt.Errorf("its per-user watchdog could not be stopped: %w", err)
+		return false, fmt.Errorf("its per-user watchdog could not be stopped: %w", err)
 	}
 	gateway := daemon.New(dataDir)
 	running, pid := gateway.IsRunning()
 	if !running {
-		return nil
+		return false, nil
 	}
 	if err := gateway.Stop(defaultStopTimeout); err != nil && !errors.Is(err, daemon.ErrNotRunning) {
-		return fmt.Errorf("its per-user gateway (PID %d) could not be stopped: %w", pid, err)
+		return false, fmt.Errorf("its per-user gateway (PID %d) could not be stopped: %w", pid, err)
 	}
-	return nil
+	return true, nil
 }
