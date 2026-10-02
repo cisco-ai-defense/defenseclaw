@@ -195,11 +195,15 @@ func canonicalLogSeverityNumber(level string) logspb.SeverityNumber {
 		return logspb.SeverityNumber_SEVERITY_NUMBER_DEBUG
 	case "INFO":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_INFO
-	case "WARN", "WARNING":
+	// Security severities (records without a log level, such as scan
+	// findings and hook decisions) map onto the nearest OTel band.
+	case "LOW":
+		return logspb.SeverityNumber_SEVERITY_NUMBER_INFO2
+	case "WARN", "WARNING", "MEDIUM":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_WARN
-	case "ERROR":
+	case "ERROR", "HIGH":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_ERROR
-	case "FATAL":
+	case "FATAL", "CRITICAL":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_FATAL
 	default:
 		return logspb.SeverityNumber_SEVERITY_NUMBER_UNSPECIFIED
