@@ -30,7 +30,7 @@ from defenseclaw.alert_semantics import (
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
-from defenseclaw.hook_metrics import aggregate_connector_hook_decision
+from defenseclaw.hook_metrics import aggregate_connector_hook_decision, hook_decision_may_block_sql
 from defenseclaw.tui.services.event_models import EgressEvent, parse_timestamp
 
 _REQUIRED_COLUMNS = frozenset(
@@ -179,7 +179,7 @@ _V8_ALERT_WHERE_SQL_TEMPLATE = """
                 )
                 OR LOWER(COALESCE(action, '')) LIKE '%-failure'
                 OR LOWER(COALESCE(action, '')) LIKE '%-failed'
-                OR dc_hook_decision(
+                OR {hook_may_block} AND dc_hook_decision(
                     COALESCE(details, ''),
                     {structured_json},
                     {enforced}
@@ -200,6 +200,11 @@ def _v8_alert_where_sql(columns: frozenset[str]) -> str:
         actionable_severities=_sql_string_values(ALERT_ACTIONABLE_SEVERITIES),
         non_allow_outcomes=_sql_string_values(ALERT_NON_ALLOW_OUTCOMES),
         legacy_finding_actions=_sql_string_values(ALERT_LEGACY_FINDING_ACTIONS),
+        hook_may_block=hook_decision_may_block_sql(
+            "COALESCE(details, '')",
+            "structured_json" if "structured_json" in columns else "NULL",
+            "enforced" if "enforced" in columns else "NULL",
+        ),
     )
 
 

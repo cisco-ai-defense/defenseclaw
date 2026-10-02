@@ -4335,6 +4335,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.command_running = False
             self.command_label = ""
             self._command_started_at = 0.0
+            # The history entry kept "running" after a crash (GAP-1552).
+            entries = self.activity_model.entries
+            if entries and not entries[-1].done:
+                self.activity_model.finish_entry(1, datetime.now(timezone.utc) - entries[-1].started_at)
             # Exception messages routinely include argv fragments; escape.
             self._write_activity(
                 f"[#F87171]command crashed: {rich_escape(str(exc))}[/]"
@@ -8397,7 +8401,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # cramped 1-row layouts) and shows a check/cross afterwards.
         self.query_one("#command-progress-icon", Static).update(f"[{icon_color} bold]{icon}[/]")
         self.query_one("#command-progress-label", Static).update(
-            f"[{header_color} bold]{self._strip_label}[/]"
+            Text(self._strip_label, style=f"{header_color} bold")
         )
 
         # Elapsed-time tracker replaces the fake progress bar. The bar
@@ -8437,11 +8441,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             snippet_color = TOKENS.accent_red
         truncated = _truncate_for_strip(snippet, panel.size.width or 120)
         # ``truncated`` is live subprocess tail (``Selection [3]:`` etc.).
-        # Without escaping, a single bracketed token in stdout takes the
-        # whole TUI frame down. Escape before letting Rich parse markup.
-        self.query_one("#command-progress-snippet", Static).update(
-            f"[{snippet_color}]{rich_escape(truncated)}[/]"
-        )
+        # Render it as plain Text: rich_escape leaves ``[90m... a=b-c`` (an
+        # SGR code whose ESC was lost) unescaped and Textual's markup parser
+        # crashed the doctor run on it (GAP-1543).
+        self.query_one("#command-progress-snippet", Static).update(Text(truncated, style=snippet_color))
 
         hint = {
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
@@ -14997,6 +15000,7 @@ def _catalog_panel_invalidated_by_command(args: tuple[str, ...]) -> str | None:
                 "remove",
                 "restore",
                 "scan",
+                "unblock",
             },
         ),
         "tool": (

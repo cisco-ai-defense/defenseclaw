@@ -400,10 +400,10 @@ def test_plugin_parse_connector_gate_actions_and_intents() -> None:
     # F-0521: action-menu intents must target the stable plugin id, not the
     # spoofable display name (which previously let actions hit the wrong row).
     assert panel.action_intent("s").args == ("plugin", "scan", "plug_tutor")
-    assert panel.action_intent("u").args == ("plugin", "allow", "plug_tutor")
+    assert panel.action_intent("u").args == ("plugin", "unblock", "plug_tutor")
 
     panel.apply_loaded([PluginRow(id="plug_tutor", name="tutor", verdict="blocked", status="installed")])
-    assert panel.handle_key("u").intent.args == ("plugin", "allow", "plug_tutor")
+    assert panel.handle_key("u").intent.args == ("plugin", "unblock", "plug_tutor")
 
 
 def test_plugin_actions_state_matrix_matches_go() -> None:
@@ -1010,7 +1010,7 @@ def test_mcp_and_plugin_mutation_intents_thread_focus() -> None:
     assert plugin.action_intent("i").args == ("plugin", "info", "pg", "--connector", "codex")
     assert plugin.action_intent("b").args == ("plugin", "block", "pg", "--connector", "codex")
     assert plugin.action_intent("a").args == ("plugin", "allow", "pg", "--connector", "codex")
-    assert plugin.action_intent("u").args == ("plugin", "allow", "pg", "--connector", "codex")
+    assert plugin.action_intent("u").args == ("plugin", "unblock", "pg", "--connector", "codex")
     # Direct-scan ('s' in handle_key) also follows focus.
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg", "--connector", "codex")
 
@@ -1068,7 +1068,7 @@ def test_action_intents_target_selected_row_owner_under_all() -> None:
     plugin.select_row(1)
     assert plugin.action_intent("s").args == ("plugin", "scan", "pg-b", "--connector", "codex")
     assert plugin.action_intent("b").args == ("plugin", "block", "pg-b", "--connector", "codex")
-    assert plugin.action_intent("u").args == ("plugin", "allow", "pg-b", "--connector", "codex")
+    assert plugin.action_intent("u").args == ("plugin", "unblock", "pg-b", "--connector", "codex")
     # Direct-scan ('s' in handle_key) follows the row owner too.
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg-b", "--connector", "codex")
 

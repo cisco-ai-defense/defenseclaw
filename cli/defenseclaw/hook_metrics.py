@@ -168,6 +168,22 @@ def connector_hook_decision(
     return "allow"
 
 
+def hook_decision_may_block_sql(details: str, structured: str, enforced: str) -> str:
+    """SQL pre-check to put before ``dc_hook_decision(...) = 'block'``.
+
+    A block needs an enforced flag or an ``action`` field. Checking for them
+    in SQLite first keeps the per-row Python classifier off rows that can't
+    block: on a 1.27 GB audit.db of legacy rows it ran for minutes (GAP-1487).
+    """
+
+    return (
+        f"(CAST(COALESCE({enforced}, 0) AS TEXT) NOT IN ('0', '')"
+        f" OR instr({details}, 'action') > 0"
+        f" OR instr(COALESCE({structured}, ''), 'action') > 0"
+        f" OR instr(COALESCE({structured}, ''), 'enforced') > 0)"
+    )
+
+
 def aggregate_connector_hook_decision(
     details: str,
     structured: Any = None,

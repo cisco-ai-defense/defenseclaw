@@ -43,6 +43,7 @@ from defenseclaw.alert_semantics import (
 from defenseclaw.hook_metrics import (
     aggregate_connector_hook_decision,
     connector_hook_connector,
+    hook_decision_may_block_sql,
 )
 from defenseclaw.models import (
     ActionEntry,
@@ -911,11 +912,12 @@ class Store:
         enforced = "enforced" if "enforced" in columns else "NULL"
         details = "COALESCE(details, '')" if "details" in columns else "''"
         legacy_decision = f"dc_hook_decision({details}, {structured}, {enforced})"
+        may_block = hook_decision_may_block_sql(details, structured, enforced)
         return f"""(
             LOWER(COALESCE(action, '')) IN ({outcome_values})
             OR LOWER(COALESCE(action, '')) LIKE '%-failure'
             OR LOWER(COALESCE(action, '')) LIKE '%-failed'
-            OR {legacy_decision} = 'block'
+            OR ({may_block} AND {legacy_decision} = 'block')
         )"""
 
     def _connector_hook_alert_clause(self, columns: frozenset[str]) -> str:
