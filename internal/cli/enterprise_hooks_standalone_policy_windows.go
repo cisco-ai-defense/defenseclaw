@@ -119,6 +119,7 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 	if err != nil {
 		return enterprisepolicy.Options{}, nil, true, err
 	}
+	opts.ClaudeMachineHookContract = standaloneClaudeMachineHookContract(layout)
 	return opts, enterprisepolicy.StandaloneConnectors(cfg), true, nil
 }
 

@@ -38,6 +38,10 @@ func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, strin
 	return layout, "", "", err
 }
 
+// standaloneClaudeMachineHookContract is empty off Windows: the Unix
+// lifecycle renders the Claude Code hook drop-in itself.
+func standaloneClaudeMachineHookContract(managed.StandaloneLayout) string { return "" }
+
 // standaloneEnrolledHomes are the enrolled accounts' homes from the
 // enumerator's root-only record, which the lifecycle's machine-policy
 // publisher reads too. The Copilot VS Code lock gate checks each one;

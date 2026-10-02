@@ -43,6 +43,29 @@ func pinStandaloneManagedEnv() error {
 // not written there.
 func standaloneEnrolledHomes(managed.StandaloneLayout) []string { return nil }
 
+// standaloneClaudeMachineHookContract is the hook contract the guardian
+// renders the one machine-wide Claude Code drop-in from (the oldest enrolled
+// contract in targets.yaml), so the version floor rises with it (GAP-1555).
+// Empty while the manifest is missing, untrusted or unreadable: the floor
+// then stays at the lowest verified contract.
+func standaloneClaudeMachineHookContract(layout managed.StandaloneLayout) string {
+	path := strings.TrimSpace(layout.ManifestPath)
+	if path == "" {
+		return ""
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return ""
+	}
+	if err := enterpriseHookManifestFileTrustCheck(path); err != nil {
+		return ""
+	}
+	manifest, err := enterprisehooks.LoadManifest(path)
+	if err != nil {
+		return ""
+	}
+	return enterpriseHookMachinePolicyContract(manifest)
+}
+
 // standaloneEnterprisePolicyLayout resolves the layout from the protected
 // HKLM machine roots, never from the caller's environment.
 func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {

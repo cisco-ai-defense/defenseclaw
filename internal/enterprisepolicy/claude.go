@@ -115,7 +115,7 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 	if err != nil || opts.claudeVersionFloorMode() != config.ClaudeVersionFloorEnforce {
 		return rendered, err
 	}
-	floor := ClaudeVersionFloor()
+	floor := claudeVersionFloorFor(opts)
 	if floor == "" {
 		return rendered, nil
 	}
