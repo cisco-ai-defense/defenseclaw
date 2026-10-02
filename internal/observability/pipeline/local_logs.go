@@ -253,7 +253,7 @@ func (pipeline *LocalLogPipeline) Process(
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (LocalLogOutcome, error) {
-	return pipeline.process(ctx, metadata, builder, false, "")
+	return pipeline.process(ctx, metadata, builder, false, "", true)
 }
 
 // ProcessLocalOnly applies the same collection, mandatory-floor, generated
@@ -265,7 +265,7 @@ func (pipeline *LocalLogPipeline) ProcessLocalOnly(
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (LocalLogOutcome, error) {
-	return pipeline.process(ctx, metadata, builder, true, "")
+	return pipeline.process(ctx, metadata, builder, true, "", false)
 }
 
 // ProcessImported applies the ordinary collection, construction, local
@@ -285,7 +285,7 @@ func (pipeline *LocalLogPipeline) ProcessImported(
 		(suppressAll && originDestination != "") {
 		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
 	}
-	return pipeline.process(ctx, metadata, builder, suppressAll, originDestination)
+	return pipeline.process(ctx, metadata, builder, suppressAll, originDestination, false)
 }
 
 // ProcessManagedLogFallback projects a locally produced canonical log only to
@@ -371,6 +371,7 @@ func (pipeline *LocalLogPipeline) process(
 	builder router.RecordBuilder,
 	localOnly bool,
 	originDestination string,
+	exportOnWriteFailure bool,
 ) (LocalLogOutcome, error) {
 	if pipeline == nil || pipeline.evaluator == nil || pipeline.projector == nil ||
 		pipeline.appender == nil || pipeline.failures == nil {
@@ -435,13 +436,34 @@ func (pipeline *LocalLogPipeline) process(
 		return LocalLogOutcome{}, &Error{code: ErrorLocalProjection}
 	}
 	if err := pipeline.appender.AppendContext(ctx, record.Clone(), localProjection); err != nil {
-		return LocalLogOutcome{}, boundedPipelineError(ErrorLocalWrite, err)
+		writeErr := boundedPipelineError(ErrorLocalWrite, err)
+		if !exportOnWriteFailure || writeErr.contextCause != nil {
+			return LocalLogOutcome{}, writeErr
+		}
+		// The local store failed (disk full, read-only): still hand back the
+		// remote projections of this gateway's own record with the error, so
+		// the caller can export them and the decision and the outage stay
+		// visible remotely (GAP-1536). Imported records stay SQLite-first.
+		pipeline.projectOptional(&outcome, record, optional, sinkPolicy, originDestination)
+		return outcome, writeErr
 	}
 	outcome.localPersisted = true
 	if localOnly {
 		return outcome, nil
 	}
+	pipeline.projectOptional(&outcome, record, optional, sinkPolicy, originDestination)
+	return outcome, nil
+}
 
+// projectOptional projects record for each optional destination, collecting
+// work items and bounded per-destination failures on outcome.
+func (pipeline *LocalLogPipeline) projectOptional(
+	outcome *LocalLogOutcome,
+	record observability.Record,
+	optional []router.Delivery,
+	sinkPolicy legacyredaction.SinkPolicy,
+	originDestination string,
+) {
 	for _, delivery := range optional {
 		profile, found := pipeline.resolveProjectionProfile(
 			v8redaction.ProfileName(delivery.RedactionProfile), sinkPolicy,
@@ -467,7 +489,6 @@ func (pipeline *LocalLogPipeline) process(
 			},
 		})
 	}
-	return outcome, nil
 }
 
 // resolveProjectionProfile applies the request-scoped managed inspection
