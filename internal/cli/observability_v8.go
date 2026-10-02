@@ -118,7 +118,7 @@ var (
 
 // observabilityV8ForeignListenerError means the API port is held by a
 // process that is not this account's gateway, so the bearer was not sent.
-type observabilityV8ForeignListenerError struct{ problem string }
+type observabilityV8ForeignListenerError struct{ problem, fix string }
 
 func (e *observabilityV8ForeignListenerError) Error() string { return e.problem }
 
@@ -388,7 +388,9 @@ func observabilityV8GatewayAccessForConfig(loaded *loadedConfigV8File) (observab
 	// process on the API port would collect it (GAP-1563, as GAP-1260 for
 	// the Python client and the hooks).
 	if problem := foreignGatewayListenerAt(loaded.runtime, dialHost, loaded.gatewayAPIPort); problem != "" {
-		return observabilityV8GatewayAccess{}, &observabilityV8ForeignListenerError{problem: problem}
+		return observabilityV8GatewayAccess{}, &observabilityV8ForeignListenerError{
+			problem: problem, fix: foreignGatewayListenerFixAt(dialHost, loaded.gatewayAPIPort),
+		}
 	}
 	return observabilityV8GatewayAccess{host: dialHost, port: loaded.gatewayAPIPort, token: token}, nil
 }
@@ -427,7 +429,8 @@ func destinationTestAccess(loaded *loadedConfigV8File) (observabilityV8GatewayAc
 	var foreign *observabilityV8ForeignListenerError
 	if errors.As(err, &foreign) {
 		return observabilityV8GatewayAccess{}, errors.New(
-			"destination-test compliance recorder is unavailable: " + foreign.problem + "; the gateway token was not sent",
+			"destination-test compliance recorder is unavailable: " + foreign.problem +
+				"; the gateway token was not sent. " + foreign.fix,
 		)
 	}
 	if errors.Is(err, errObservabilityV8GatewayAccessAuth) {

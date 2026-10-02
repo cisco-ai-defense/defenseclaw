@@ -392,7 +392,9 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 			pending = false
 			pendingTrigger = ""
-			if err := m.Reload(ctx, reason); err != nil {
+			// A reload the gateway's own stop or restart cancelled is not a
+			// failure; the restart applies the new config (GAP-1698).
+			if err := m.Reload(ctx, reason); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
 			// Piggyback on the reload path — the AVC packaging pipeline

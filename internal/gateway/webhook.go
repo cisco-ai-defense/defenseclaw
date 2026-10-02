@@ -123,7 +123,9 @@ var (
 // endpoints — a global-empty install that routes a connector to its own
 // webhook still yields a live dispatcher.
 func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.ObservabilityConfig) *WebhookDispatcher {
-	logger := log.New(os.Stderr, "[webhook] ", 0)
+	// currentStderrWriter keeps the line on the time-stamped log even when
+	// os.Stderr is replaced after the dispatcher is built (GAP-1696).
+	logger := log.New(currentStderrWriter{}, "[webhook] ", 0)
 	endpoints := buildWebhookEndpoints(cfgs, logger)
 
 	var connectorEndpoints map[string][]webhookEndpoint

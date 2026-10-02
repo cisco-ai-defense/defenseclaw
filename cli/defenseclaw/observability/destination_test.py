@@ -204,7 +204,7 @@ class GatewayLocalComplianceRecorder:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise _audit_unavailable() from exc
         if completed.returncode != 0:
-            raise _audit_unavailable()
+            raise _audit_unavailable(_foreign_listener_detail(completed.stderr))
         try:
             response = json.loads(completed.stdout)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -213,11 +213,41 @@ class GatewayLocalComplianceRecorder:
             raise _audit_unavailable()
 
 
-def _audit_unavailable() -> DestinationTestError:
+_FOREIGN_LISTENER_PREFIX: Final = "destination-test compliance recorder is unavailable: "
+_FOREIGN_LISTENER_MARK: Final = "the gateway token was not sent"
+
+
+def _foreign_listener_detail(stderr: object) -> str | None:
+    """Return the helper's "port held by another process" text, if that is the cause.
+
+    Only that one line is shown: it names the API port holder and the fix
+    and carries no destination data (GAP-1670). Any other helper output
+    stays hidden.
+    """
+    if not isinstance(stderr, str):
+        return None
+    for raw in stderr.splitlines():
+        line = raw.strip().removeprefix("Error:").strip()
+        if (
+            line.startswith(_FOREIGN_LISTENER_PREFIX)
+            and _FOREIGN_LISTENER_MARK in line
+            and len(line) <= 1024
+            and line.isprintable()
+        ):
+            return line[len(_FOREIGN_LISTENER_PREFIX) :]
+    return None
+
+
+def _audit_unavailable(detail: str | None = None) -> DestinationTestError:
+    if detail:
+        return DestinationTestError(
+            "audit_unavailable",
+            "the destination-test activity could not be recorded: " + detail,
+        )
     return DestinationTestError(
         "audit_unavailable",
-        "the gateway local-only destination-test compliance recorder is unavailable; "
-        "ensure the v8 gateway is running and retry",
+        "the destination-test activity could not be recorded by this account's gateway; "
+        "start it with defenseclaw-gateway start (check it with defenseclaw-gateway status) and retry",
     )
 
 

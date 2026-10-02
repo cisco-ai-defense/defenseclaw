@@ -90,16 +90,21 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 // the same command; another account's process is not this account's to stop
 // (GAP-1706).
 func foreignGatewayListenerFix(cfg *config.Config) string {
-	host := gatewayClientHost(cfg)
+	return foreignGatewayListenerFixAt(gatewayClientHost(cfg), cfg.Gateway.APIPort)
+}
+
+// foreignGatewayListenerFixAt is foreignGatewayListenerFix for the API
+// listener at host:apiPort (the observability-v8 helpers, GAP-1670).
+func foreignGatewayListenerFixAt(host string, apiPort int) string {
 	port := "<free port>"
-	if free := freeGatewayAPIPort(host, cfg.Gateway.APIPort); free > 0 {
+	if free := freeGatewayAPIPort(host, apiPort); free > 0 {
 		port = strconv.Itoa(free)
 	}
 	move := fmt.Sprintf(
 		"move this account's gateway to a free port with: defenseclaw setup gateway --api-port %s --non-interactive, then run: defenseclaw-gateway start",
 		port,
 	)
-	if gatewayPortHeldByOtherAccount(host, cfg.Gateway.APIPort) {
+	if gatewayPortHeldByOtherAccount(host, apiPort) {
 		return "That process belongs to another account, so " + move
 	}
 	return "Stop that process, or " + move

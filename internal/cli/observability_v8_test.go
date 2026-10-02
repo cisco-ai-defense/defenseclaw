@@ -53,7 +53,8 @@ func TestObservabilityV8HelpersSendNoTokenToAnotherListener(t *testing.T) {
 	}
 	activity := `{"phase":"attempt","destination":"soc","probe_id":"probe-1","mode":"handshake","result":"attempted"}`
 	err = recordDestinationTestActivity(t.Context(), strings.NewReader(activity), configPath, dataDir)
-	if err == nil || !strings.Contains(err.Error(), "the gateway token was not sent") {
+	if err == nil || !strings.Contains(err.Error(), "the gateway token was not sent") ||
+		!strings.Contains(err.Error(), "defenseclaw setup gateway --api-port") {
 		t.Fatalf("destination test = %v", err)
 	}
 	if n := requests.Load(); n != 0 {
