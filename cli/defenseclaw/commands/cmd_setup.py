@@ -3719,6 +3719,43 @@ def _rotate_token_connector_state(
     return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+_ROTATE_TOKEN_CAUSE_MAX = 300
+_ROTATE_TOKEN_CREDENTIAL_RUN = re.compile(r"[A-Za-z0-9+_=-]{24,}")
+
+
+def _rotate_token_child_cause(stderr: str | None, secrets_in_play: tuple[str, ...]) -> str:
+    """Return the gateway CLI's own one-line error, credential-shaped runs masked.
+
+    Only a line the gateway CLI printed as ``Error: ...`` is used; any
+    other output is dropped, and every long token-like run is masked, so a
+    credential can never reach the operator's terminal.
+    """
+
+    lines = [line.strip() for line in (stderr or "").splitlines()]
+    errors = [line[len("Error:"):].strip() for line in lines if line.startswith("Error:")]
+    if not errors or not errors[-1]:
+        return ""
+    cause = errors[-1]
+    for value in secrets_in_play:
+        if value:
+            cause = cause.replace(value, "<redacted>")
+    cause = _ROTATE_TOKEN_CREDENTIAL_RUN.sub("<redacted>", cause)
+    if len(cause) > _ROTATE_TOKEN_CAUSE_MAX:
+        cause = cause[: _ROTATE_TOKEN_CAUSE_MAX - 3] + "..."
+    return cause
+
+
+def _rotate_token_error_text(error: BaseException) -> str:
+    message = getattr(error, "message", "") or str(error) or type(error).__name__
+    return message.rstrip(".")
+
+
+_ROTATE_TOKEN_START_AGAIN = (
+    "The gateway is stopped now, so agent hooks cannot reach it. Start it again with: "
+    "defenseclaw-gateway start (run defenseclaw doctor if it does not come up)."
+)
+
+
 class _RotateTokenLifecycleError(click.ClickException):
     """Secret-free retry sentinel for one bounded gateway lifecycle phase."""
 
@@ -3768,15 +3805,17 @@ def _run_rotate_token_lifecycle(
         lifecycle_error = f"Gateway {action} could not be executed during the token-rotation transaction."
     else:
         returncode = result.returncode
+        cause = _rotate_token_child_cause(result.stderr, (token,)) if returncode != 0 else ""
         # Do not retain captured child output in the retry sentinel's
         # traceback. Lifecycle diagnostics are not a trusted redaction
         # boundary, even when the child failed before producing a result.
         del result
         if returncode != 0:
-            lifecycle_error = f"Gateway {action} failed during the token-rotation transaction."
+            lifecycle_error = f"Gateway {action} failed during the token-rotation transaction"
+            lifecycle_error += f": {cause}" if cause else "."
     if lifecycle_error is not None:
-        # The child output is deliberately not replayed: lifecycle diagnostics
-        # are not a trusted secret-redaction boundary.
+        # Raw child output is never replayed (it is not a trusted redaction
+        # boundary); only its masked one-line Error: cause is (GAP-1514).
         raise _RotateTokenLifecycleError(lifecycle_error) from None
 
     try:
@@ -3896,9 +3935,10 @@ def _rotate_token_transaction(
                             connector_state=connector_state_a,
                         )
                     except BaseException:
+                        cause = _rotate_token_error_text(stop_error)
                         raise click.ClickException(
-                            "Token rotation stopped gateway A before the transaction could commit; "
-                            "gateway A did not return to verified readiness."
+                            f"Token rotation failed while stopping the gateway ({cause}); nothing was "
+                            f"changed, but the gateway could not be started again. {_ROTATE_TOKEN_START_AGAIN}"
                         ) from stop_error
                 raise
             old_stopped = True
@@ -3957,8 +3997,9 @@ def _rotate_token_transaction(
                     )
                 except BaseException:
                     raise click.ClickException(
-                        "Token rotation failed and the replacement gateway could not be "
-                        "safely stopped; token B was preserved on disk."
+                        f"Token rotation failed ({_rotate_token_error_text(primary_error)}) and the replacement "
+                        "gateway could not be safely stopped; the new token was kept on disk. Run "
+                        "defenseclaw-gateway restart, then defenseclaw doctor."
                     ) from primary_error
 
             restore_error: BaseException | None = None
@@ -3974,8 +4015,9 @@ def _rotate_token_transaction(
                     restore_error = exc
             if restore_error is not None:
                 raise click.ClickException(
-                    "Token rotation failed and the exact prior credential snapshots could not "
-                    "all be restored; the gateway remains stopped."
+                    f"Token rotation failed ({_rotate_token_error_text(primary_error)}) and the exact prior "
+                    "credential snapshots could not all be restored; the gateway remains stopped. Run "
+                    "defenseclaw doctor --fix to re-issue the credentials."
                 ) from restore_error
 
             try:
@@ -4005,8 +4047,9 @@ def _rotate_token_transaction(
                     )
                 except BaseException:
                     raise click.ClickException(
-                        "Token rotation failed; the exact prior credential snapshots were restored, "
-                        "but gateway A did not return to verified readiness."
+                        f"Token rotation failed ({_rotate_token_error_text(primary_error)}). The previous "
+                        f"credentials were restored, but the gateway could not be started with them. "
+                        f"{_ROTATE_TOKEN_START_AGAIN}"
                     ) from primary_error
             raise
         finally:
@@ -4147,13 +4190,19 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
                 scoped_connectors=tuple(scoped_actives),
                 require_complete_scoped_roster=True,
             )
-        except _RotateTokenLifecycleError:
+        except _RotateTokenLifecycleError as exc:
             if attempt != 0:
-                raise
+                raise click.ClickException(
+                    f"Token rotation failed: {_rotate_token_error_text(exc)}. The previous credentials are "
+                    "still in place, so nothing changed."
+                ) from exc
             continue
         break
 
-    ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600); gateway B is verified ready.")
+    ux.ok(
+        f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600); "
+        "the gateway restarted with it and is ready."
+    )
     if scoped_actives:
         ux.ok(
             f"Rotated {len(scoped_actives)} connector-scoped hook credential(s); "
