@@ -2290,6 +2290,11 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	failure, failureOK := details["event_history_failure"].(string)
 	class, classOK := details["event_history_last_sqlite_class"].(string)
 	primary, primaryOK := details["event_history_last_sqlite_primary_code"].(float64)
+	if _, present := details["event_history_last_sqlite_primary_code"]; !present && class == "deadline" {
+		// Health omits a zero primary code, and a deadline is usually primary
+		// 0, so a missing code means 0 here (GAP-1796).
+		primary, primaryOK = 0, true
+	}
 	if !failureOK || failure != "sqlite_write_failed" || !classOK || !primaryOK ||
 		primary != float64(uint8(primary)) {
 		return false
