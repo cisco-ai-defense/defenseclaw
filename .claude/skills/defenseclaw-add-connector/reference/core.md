@@ -262,7 +262,7 @@ Claude, Codex and Amp treat a missing or invalid `action` as a response failure.
 
 ## 6. Windows commands
 
-`defenseclaw-hook.exe` is built with `-H=windowsgui` (`.goreleaser.yaml`, `Makefile`). A PowerShell call operator therefore doesn't wait for it and loses the exit code. Most connectors use the encoded bridge, `windowsNativePowerShellHookCommandForBoundEvent` (`helpers.go`: `Start-Process -NoNewWindow -Wait -PassThru; exit $p.ExitCode`).
+`defenseclaw-hook.exe` is built with `-H=windowsgui` (`.goreleaser.yaml`, `Makefile`). A PowerShell call operator therefore doesn't wait for it and loses the exit code. Most connectors use the encoded bridge, `windowsNativePowerShellHookCommandForBoundEvent` (`helpers.go`, `windowsAwaitedHookStatements`: `[System.Diagnostics.Process]::Start`, `WaitForExit()`, `exit $hookProcess.ExitCode`). Don't use `Start-Process -Wait -PassThru`: Windows PowerShell 5.1 opens the process again by ID, so a hook that exits at once comes back as 1.
 
 Add a branch to `hookInvocationCommandFor` (`helpers.go`). The default fall-through is Claude Code's `& '<exe>' hook --connector <id>`, which is wrong for almost every other host.
 

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -161,24 +160,26 @@ func TestStableRuntimeDisableAllowsHeldLauncherImage(t *testing.T) {
 	if err := process.Start(); err != nil {
 		t.Fatalf("start held launcher: %v", err)
 	}
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- process.Wait() }()
-	running := true
-	defer func() {
-		if running {
-			_ = process.Process.Kill()
-			<-waitDone
-		}
-	}()
-	select {
-	case err := <-waitDone:
-		running = false
-		t.Fatalf("held launcher exited before disable: %v", err)
-	case <-time.After(200 * time.Millisecond):
+	held, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(process.Process.Pid))
+	if err != nil {
+		_ = process.Process.Kill()
+		_ = process.Wait()
+		t.Fatalf("open held launcher: %v", err)
 	}
+	defer windows.CloseHandle(held)
+	defer func() {
+		_ = process.Process.Kill()
+		_ = process.Wait()
+	}()
 
+	// Process creation maps the launcher image, so it is held from Start on;
+	// cmd.exe then blocks on the unwritten stdin pipe.
 	if err := disableAt(paths, stableRuntimeTransactionTwo); err != nil {
 		t.Fatalf("disable held launcher: %v", err)
+	}
+	// Still running after disable proves the image was held throughout.
+	if result, err := windows.WaitForSingleObject(held, 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {
+		t.Fatalf("held launcher exited before disable completed: wait=%#x err=%v", result, err)
 	}
 	disabled, recognized, err := readTrustedAt(paths, paths.Launcher)
 	if err != nil || !recognized || disabled.Active() || disabled.Status != StatusDisabled {
@@ -465,5 +466,30 @@ func TestLockVerifiedGatewayPinsDigestAndReplacement(t *testing.T) {
 	if locked, err := LockVerifiedGateway(state); err == nil {
 		_ = locked.Close()
 		t.Fatal("tampered gateway matched installer-recorded digest")
+	}
+}
+
+// A hook cold start holds the installed gateway with read-only sharing, and a
+// running gateway maps its image. Reinstalling over either must still protect
+// and record the gateway instead of failing on a sharing violation.
+func TestStableRuntimeRepublishWhileGatewayHeld(t *testing.T) {
+	paths := testRuntimePaths(t)
+	gateway := writeRuntimeGateway(t, "MZ-held-gateway")
+	source := writeRuntimeSource(t, "MZ-hook")
+	dataRoot := filepath.Join(t.TempDir(), "data")
+	if err := publishAt(paths, source, source, gateway, dataRoot, stableRuntimeTransactionOne); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := readTrustedAt(paths, paths.Launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := LockVerifiedGateway(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locked.Close()
+	if err := publishAt(paths, source, source, gateway, dataRoot, stableRuntimeTransactionTwo); err != nil {
+		t.Fatalf("republish while gateway held: %v", err)
 	}
 }

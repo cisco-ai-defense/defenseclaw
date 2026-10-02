@@ -223,6 +223,13 @@ func atomicFilePublishPrivateBound(
 	return nil
 }
 
+// FileBusyError reports whether err is the transient Windows condition in
+// which another process (an editor, an indexer, or an antivirus scan) holds a
+// connector file open without delete sharing, so publishing a replacement
+// failed even after the bounded rename wait. Callers that own a long-lived
+// repair loop use it to re-arm instead of waiting for an unrelated file event.
+func FileBusyError(err error) bool { return atomicFileRenameBusy(err) }
+
 func atomicFileRenameBusy(err error) bool {
 	return errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
 		errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||

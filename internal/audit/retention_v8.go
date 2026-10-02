@@ -1981,10 +1981,7 @@ func passiveRetentionCheckpoint(ctx context.Context, store *Store, judge *JudgeB
 	if err != nil {
 		return err
 	}
-	var busy, logFrames, checkpointed int
-	err = store.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(
-		&busy, &logFrames, &checkpointed,
-	)
+	_, err = store.passiveCheckpoint(ctx)
 	release()
 	if err != nil {
 		return err
@@ -1996,6 +1993,7 @@ func passiveRetentionCheckpoint(ctx context.Context, store *Store, judge *JudgeB
 	if err != nil {
 		return err
 	}
+	var busy, logFrames, checkpointed int
 	err = judge.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(
 		&busy, &logFrames, &checkpointed,
 	)
