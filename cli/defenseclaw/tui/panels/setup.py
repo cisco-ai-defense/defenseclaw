@@ -252,6 +252,8 @@ NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
     ("sources.asset_policy", "Source: Asset Policy", "yes"),
 )
 
+_MISSING_FIELDS_PREFIX = "Missing required field(s): "
+
 WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Add, switch or remove the agents DefenseClaw protects.",
     "See which API keys are missing and set them.",
@@ -1425,6 +1427,20 @@ class SetupPanelModel:
     def missing_required_fields(self) -> tuple[str, ...]:
         return missing_required_fields(self.active_wizard, self.form_fields)
 
+    def current_form_error(self) -> str:
+        """``form_error``, minus a "Missing required field(s)" the user has since filled.
+
+        The message stayed on screen after Env Name was filled, until Run
+        (GAP-1395)."""
+
+        if self.form_error.startswith(_MISSING_FIELDS_PREFIX):
+            missing = self.missing_required_fields()
+            if not missing:
+                self.form_error = ""
+            else:
+                self.form_error = _MISSING_FIELDS_PREFIX + ", ".join(missing)
+        return self.form_error
+
     def wizard_command_preview(self) -> str:
         """Return the shell command the wizard will execute with current values.
 
@@ -1507,6 +1523,10 @@ class SetupPanelModel:
         if best is None:
             return
         if cancelled:
+            if self.wizard_status.get(best) != "running...":
+                # Nothing of this task was running (a palette command was
+                # cancelled): keep the row as it is.
+                return
             before = self._status_before_check.pop(best, "")
             if before and before != "running...":
                 self.wizard_status[best] = before
@@ -1532,7 +1552,7 @@ class SetupPanelModel:
     def submit_wizard_form(self) -> SetupPanelAction:
         missing = self.missing_required_fields()
         if missing:
-            self.form_error = "Missing required field(s): " + ", ".join(missing)
+            self.form_error = _MISSING_FIELDS_PREFIX + ", ".join(missing)
             return SetupPanelAction(True)
         if self.active_wizard == SetupWizard.CREDENTIALS and wizard_field_value(self.form_fields, "Action") == "set":
             env_name = wizard_field_value(self.form_fields, "Env Name")
@@ -2836,11 +2856,18 @@ def wizard_form_defs(
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
     if wizard == SetupWizard.GATEWAY:
+        # Start from the configured gateway: the form showed localhost /
+        # 9090 / 9099 on a gateway at 127.0.0.1:19020, so an edit of one
+        # field looked like it would move the others (GAP-1473). A field
+        # left at its current value emits no flag.
+        host = _cfg_str(cfg, "gateway.host", "localhost")
+        port = _cfg_port(cfg, "gateway.port")
+        api_port = _cfg_port(cfg, "gateway.api_port")
         return (
             WizardFormField("Remote Mode", "bool", "--remote", value="no", default="no"),
-            WizardFormField("Host", "string", "--host", value="localhost", default="localhost"),
-            WizardFormField("Port", "int", "--port", value="9090", default="9090"),
-            WizardFormField("API Port", "int", "--api-port", value="9099", default="9099"),
+            WizardFormField("Host", "string", "--host", value=host, default=host),
+            WizardFormField("Port", "int", "--port", value=port, default=port),
+            WizardFormField("API Port", "int", "--api-port", value=api_port, default=api_port),
             WizardFormField("Auth Token", "password", "--token"),
             WizardFormField("SSM Param", "string", "--ssm-param"),
             WizardFormField("SSM Region", "string", "--ssm-region"),
@@ -2942,6 +2969,13 @@ _GUARDRAIL_JUDGE_SECTIONS: tuple[str, ...] = (
 
 def _cfg_str(cfg: object | Mapping[str, Any] | None, path: str, default: str = "") -> str:
     return str(get_config_value(cfg, path, default) or default).strip()
+
+
+def _cfg_port(cfg: object | Mapping[str, Any] | None, path: str) -> str:
+    """A configured port as text, or "" when unset (0 means unset)."""
+
+    value = _cfg_str(cfg, path)
+    return "" if value in {"", "0"} else value
 
 
 def _active_connector(cfg: object | Mapping[str, Any] | None) -> str:

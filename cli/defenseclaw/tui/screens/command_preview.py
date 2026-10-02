@@ -67,7 +67,7 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
         risk=risk,
         origin=command.category,
         restart=_restart_effect(risk, command.args),
-        summary=_risk_summary(risk, command.category),
+        summary=_upgrade_summary(command.args) or _risk_summary(risk, command.category),
         hidden_inputs=hidden_input_lines(command),
         consequence=command.consequence,
     )
@@ -149,6 +149,17 @@ def _redact_env_pair(pair: str) -> str:
         key, _value = pair.split("=", 1)
         return f"{key}=<redacted>"
     return "<redacted>"
+
+
+def _upgrade_summary(args: tuple[str, ...]) -> str:
+    """What ``upgrade``/``rollback`` change, which the generic summaries miss (GAP-1422)."""
+
+    verb = args[0].lower() if args else ""
+    if verb == "upgrade":
+        return "Upgrade command. Installs the new release, replaces the DefenseClaw binaries and restarts the gateway."
+    if verb == "rollback":
+        return "Rollback command. Restores the previous release's binaries and restarts the gateway."
+    return ""
 
 
 def _risk_summary(risk: str, category: str) -> str:

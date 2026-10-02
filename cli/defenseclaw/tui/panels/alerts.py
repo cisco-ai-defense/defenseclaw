@@ -277,6 +277,9 @@ def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
     return decisions
 
 
+_POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
+
+
 def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
     payload = row.payload
     action = (
@@ -343,6 +346,11 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     decision = payload_text(payload, *_DECISION_KEYS)
     if not decision and decisions:
         decision = decisions.get(payload_text(payload, "defenseclaw.evaluation.id"), "")
+    if decision and row.bucket == "security.finding" and decision.strip().lower() == "allow":
+        if is_post_tool_hook_event(target):
+            # Same wording as "defenseclaw alerts": a post-tool finding is
+            # reported after the call ran, so "allow" is not a choice (GAP-1423).
+            decision = _POST_TOOL_DECISION
     if decision:
         facts.append(("Decision", decision))
     severity = (row.severity or "INFO").upper()
@@ -1639,7 +1647,7 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
         observed_block = action == "allow" and raw_action == "block"
         if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
             decision = (
-                "detected after the tool ran (cannot block)"
+                _POST_TOOL_DECISION
                 if is_post_tool_hook_event(hook_target)
                 else "would block (observe mode, allowed)"
             )

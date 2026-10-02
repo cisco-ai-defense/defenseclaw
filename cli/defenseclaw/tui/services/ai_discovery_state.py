@@ -996,7 +996,10 @@ class AIDiscoveryPanelModel:
             parts.append(f"changed={summary.changed_signals}")
         if summary.gone_signals:
             parts.append(f"gone={summary.gone_signals}")
-        parts.append(f"files={summary.files_scanned}")
+        if summary.files_scanned:
+            # The daemon's stored summary has no file count until a scan runs
+            # in this session; "files=0" contradicted the CLI's 942 (GAP-1402).
+            parts.append(f"files={summary.files_scanned}")
         result = summary.result.strip().lower()
         if result and result not in {"ok", "success", "complete"}:
             parts.append(f"scan={result}")
