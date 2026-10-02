@@ -222,7 +222,8 @@ def test_invalid_config_guidance_does_not_claim_doctor_can_repair_it() -> None:
         ),
         patch("defenseclaw.db.Store") as store,
     ):
-        result = CliRunner().invoke(cli, ["status"])
+        # status now reports past a bad config (GAP-1788); alerts still stops.
+        result = CliRunner().invoke(cli, ["alerts"])
 
     assert result.exit_code == 1, result.output
     assert "defenseclaw config validate" in result.output
