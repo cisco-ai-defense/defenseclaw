@@ -164,6 +164,29 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
 
+    def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
+        # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
+        # connector patch") while Readiness passed on the openclaw.json the
+        # gateway writes at start, also when OpenClaw was not installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])) as setup:
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        setup.assert_called_once()
+        self.assertEqual(step.status, "pass", step.detail)
+
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        with patch.object(bootstrap.shutil, "which", return_value=None):
+            missing = _connector_readiness(cfg, "openclaw")
+        with patch.object(bootstrap.shutil, "which", return_value="/home/u/.local/bin/openclaw"):
+            found = _connector_readiness(cfg, "openclaw")
+        self.assertEqual((missing.status, missing.detail), ("warn", "OpenClaw is not installed (openclaw is not on PATH)"))
+        self.assertEqual(found.status, "pass")
+
     def test_opencode_readiness_honors_custom_config_dir(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "opencode-config")

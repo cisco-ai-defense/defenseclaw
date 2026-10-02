@@ -160,6 +160,7 @@ RUN_QUICKSTART=false
 QUICKSTART_MODE=""
 QUICKSTART_RC=0
 OPENCLAW_MISSING=false
+OPENCLAW_INSTALLED=false
 QUICKSTART_RERUN=""
 INSTALL_SANDBOX=false
 PASSTHROUGH=()
@@ -785,6 +786,10 @@ if [[ "${OPENCLAW_MISSING}" == true ]]; then
     # GAP-1523: OpenClaw is the connector asked for and is not installed.
     warn "OpenClaw is not installed, so it is not guarded yet. Install it as shown above, then run: defenseclaw setup openclaw"
     exit 3
+fi
+if [[ "${OPENCLAW_INSTALLED}" == true ]]; then
+    # A new OpenClaw has no model or gateway yet (GAP-1523).
+    printf "  Next: set up OpenClaw itself with: ${CYAN}openclaw onboard${NC}\n\n"
 fi
 exit ${START_RC}
 
@@ -1463,7 +1468,9 @@ ensure_openclaw() {
     local cmd=(npm install -g)
     npm_global_prefix_writable || cmd+=(--prefix "${HOME}/.local")
     cmd+=("openclaw@${OPENCLAW_VERSION}")
-    if ! "${cmd[@]}" --loglevel=error; then
+    if "${cmd[@]}" --loglevel=error; then
+        OPENCLAW_INSTALLED=true
+    else
         warn "Could not install OpenClaw; run: ${cmd[*]}"
         PATH="${BIN_DIR}:${PATH}" has openclaw || OPENCLAW_MISSING=true
     fi

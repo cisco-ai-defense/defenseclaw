@@ -357,9 +357,9 @@ def _openclaw_install_run(tmp_path: Path, npm_rc: int) -> subprocess.CompletedPr
         "set -euo pipefail\n"
         'has() { command -v "$1" >/dev/null 2>&1; }\nask_yes_no() { return 0; }\n'
         'warn() { echo "WARN $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
-        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
+        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
         + funcs
-        + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING}"\n',
+        + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING} installed=${OPENCLAW_INSTALLED}"\n',
         encoding="utf-8",
     )
     try:
@@ -379,16 +379,18 @@ def test_openclaw_installs_into_the_user_prefix_when_the_node_prefix_is_read_onl
     assert (tmp_path / "npm.log").read_text().split() == [
         "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24", "--loglevel=error"
     ]
-    assert "missing=false" in done.stdout
+    assert "missing=false installed=true" in done.stdout
 
     failed_dir = tmp_path / "f"
     failed_dir.mkdir()
     failed = _openclaw_install_run(failed_dir, 1)
     assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.3.24" in failed.stdout
-    assert "missing=true" in failed.stdout
+    assert "missing=true installed=false" in failed.stdout
     summary = INSTALL_SH.read_text(encoding="utf-8")
     tail = summary[summary.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
     assert tail.index("exit 3") < tail.index("exit ${START_RC}")
+    # A fresh OpenClaw still needs its own setup; say so before the exit.
+    assert tail.index("openclaw onboard") < tail.index("exit ${START_RC}")
 
 
 def test_a_carriage_return_answer_takes_the_default(tmp_path: Path) -> None:

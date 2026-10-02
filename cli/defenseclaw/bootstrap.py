@@ -1446,20 +1446,9 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
 def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
-    if connector == "openclaw":
-        oc_path = os.path.expanduser(app.cfg.claw.config_file)
-        if not os.path.isfile(oc_path):
-            try:
-                app.cfg.save()
-            except OSError:
-                pass
-            return StepResult(
-                "Guardrail",
-                "warn",
-                f"OpenClaw config not found at {app.cfg.claw.config_file}; saved config but skipped connector patch",
-                "defenseclaw setup guardrail",
-            )
-
+    # OpenClaw needs no openclaw.json yet: the gateway registers its plugin
+    # there (creating the file) when it starts, as for every connector. This
+    # step used to skip with a warning that Readiness then contradicted (GAP-1523).
     buf = io.StringIO()
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(buf)
     try:
@@ -1766,6 +1755,14 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
+        if not shutil.which("openclaw"):
+            # The gateway writes openclaw.json even without OpenClaw (GAP-1523).
+            return StepResult(
+                "Connector",
+                "warn",
+                "OpenClaw is not installed (openclaw is not on PATH)",
+                "defenseclaw setup openclaw",
+            )
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):
             return StepResult("Connector", "pass", f"OpenClaw config found: {cfg.claw.config_file}")
