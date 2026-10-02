@@ -275,6 +275,35 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     raise OSError(f"cannot select {connector} executable: {rejection}")
 
 
+def untrusted_setup_executable(data_dir: str | os.PathLike[str], connector: str) -> str:
+    """Return the real path of an installed agent that setup would refuse as untrusted.
+
+    Empty when a candidate is already trusted or none is installed. Only the
+    macOS OpenHands selection is covered (a ``uv tool`` install puts an
+    untrusted symlink on PATH); interactive init uses this to offer its
+    trusted-paths prompt before the selection skips the agent.
+    """
+
+    if connector != "openhands":
+        return ""
+    spec = agent_discovery._SPECS.get(connector)
+    if spec is None:
+        return ""
+    target_dir = os.path.abspath(os.fspath(data_dir))
+    untrusted = ""
+    for candidate in _setup_agent_candidates(connector, spec, target_dir):
+        if _stable_selection_identity(candidate) is None:
+            target = os.path.realpath(os.path.abspath(candidate))
+            if not untrusted and os.path.isfile(target):
+                untrusted = target
+            continue
+        if is_setup_trusted_binary(candidate, target_dir, connector=connector):
+            return ""
+        if not untrusted:
+            untrusted = os.path.realpath(os.path.abspath(candidate))
+    return untrusted
+
+
 def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
     """Admit only built-in or protected-config prefixes, never env extras."""
 

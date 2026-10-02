@@ -591,6 +591,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir)
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
+    llm_provider_typed: dict[str, str] = {}
     interactive_wizard = False
     # --start-gateway/--no-start-gateway as typed (None: neither); the wizard
     # replaces start_gateway with its answer.
@@ -641,6 +642,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
                 llm_api_key,
                 llm_api_key_env,
                 llm_base_url,
+                llm_provider_typed,
             ) = _prompt_first_run_judge_llm_config(
                 data_dir=data_dir,
                 llm_provider=llm_provider,
@@ -700,6 +702,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         llm_api_key=llm_api_key,
         llm_api_key_env=llm_api_key_env,
         llm_base_url=llm_base_url,
+        llm_provider_typed=llm_provider_typed,
         cisco_endpoint=cisco_endpoint,
         cisco_api_key=cisco_api_key,
         cisco_api_key_env=cisco_api_key_env,
@@ -972,10 +975,67 @@ def _prompt_trust_discovery_prefixes(
     if not rows:
         return disc
 
-    ux.section("Trusted binary paths")
-    ux.subhead(
-        "Some connector binaries are outside DefenseClaw's trusted prefixes, so their versions were not probed.",
+    trusted_any, target_data_dir = _confirm_trusted_prefix_rows(
+        rows,
+        data_dir=data_dir,
+        trusted_prompt_cache=trusted_prompt_cache,
+        reason="Some connector binaries are outside DefenseClaw's trusted prefixes, so their versions were not probed.",
     )
+    if not trusted_any:
+        return disc
+
+    ux.subhead("  Re-scanning connector versions with updated trusted prefixes...")
+    return agent_discovery.discover_agents(
+        use_cache=False,
+        refresh=rescan_agents,
+        data_dir=target_data_dir,
+    )
+
+
+def _prompt_trust_protected_executables(
+    connectors: list[str],
+    *,
+    data_dir: str | os.PathLike[str] | None,
+    trusted_prompt_cache: dict[str, bool] | None = None,
+) -> None:
+    """Offer the trust prompt for an agent that protected setup would skip.
+
+    macOS OpenHands setup runs only an executable in a trusted directory. A
+    ``uv tool`` install puts a symlink on PATH whose target is not trusted,
+    so the selection skipped OpenHands with a copy-paste command (GAP-1058).
+    Ask here instead, the same way as for untrusted discovery binaries.
+    """
+    if platform_support.host_os() != "darwin":
+        return
+    if "openhands" not in {connector_paths.normalize(name) for name in connectors}:
+        return
+    from defenseclaw.agent_selection import untrusted_setup_executable
+    from defenseclaw.config import default_data_path
+
+    path = untrusted_setup_executable(os.fspath(data_dir or default_data_path()), "openhands")
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if trusted_prompt_cache is not None and parent in trusted_prompt_cache:
+        return
+    _confirm_trusted_prefix_rows(
+        [("openhands", path, parent)],
+        data_dir=data_dir,
+        trusted_prompt_cache=trusted_prompt_cache,
+        reason="Setup runs an agent only from a trusted directory; without it, init skips this agent.",
+    )
+
+
+def _confirm_trusted_prefix_rows(
+    rows: list[tuple[str, str, str]],
+    *,
+    data_dir: str | os.PathLike[str] | None,
+    trusted_prompt_cache: dict[str, bool] | None,
+    reason: str,
+) -> tuple[bool, str]:
+    """Ask once to trust each row's directory; return (trusted_any, data_dir)."""
+    ux.section("Trusted binary paths")
+    ux.subhead(reason)
     for name, resolved_bin, parent in rows:
         click.echo(f"  - {name}: {parent}")
         click.echo(f"    {ux.dim('binary: ' + resolved_bin)}")
@@ -987,7 +1047,7 @@ def _prompt_trust_discovery_prefixes(
             if trusted_prompt_cache is not None:
                 trusted_prompt_cache[parent] = False
             ux.subhead(f"  Trust later with: defenseclaw setup trusted-paths add {parent}")
-        return disc
+        return False, ""
 
     from defenseclaw.commands.cmd_setup import _add_trusted_bin_prefix
     from defenseclaw.config import default_data_path
@@ -1009,16 +1069,7 @@ def _prompt_trust_discovery_prefixes(
         trusted_any = True
         verb = "trusted" if added else "already trusted"
         ux.subhead(f"  {verb}: {resolved}")
-
-    if not trusted_any:
-        return disc
-
-    ux.subhead("  Re-scanning connector versions with updated trusted prefixes...")
-    return agent_discovery.discover_agents(
-        use_cache=False,
-        refresh=rescan_agents,
-        data_dir=target_data_dir,
-    )
+    return trusted_any, target_data_dir
 
 
 def _prompt_connector_selection(
@@ -1167,7 +1218,6 @@ def _prompt_action_connectors(
     The reply is intersected with the selected active list so a typo can't
     enable a connector that isn't being set up."""
     ux.section("Action enforcement")
-    ux.subhead("Rule/regex scanning applies to every selected connector.")
     ux.subhead("Checked connectors run in action mode and can block.")
     ux.subhead("Unchecked connectors stay in observe mode and only report findings.")
     requested = _prompt_checkbox_selection(
@@ -1628,6 +1678,11 @@ def _prompt_first_run(
         data_dir=data_dir,
         trusted_prompt_cache=trusted_prompt_cache,
     )
+    _prompt_trust_protected_executables(
+        connectors,
+        data_dir=data_dir,
+        trusted_prompt_cache=trusted_prompt_cache,
+    )
     terminal_checkbox.restore_line_prompt_mode()
 
     # Scanner mode is process-wide guardrail config, so it is asked once
@@ -1713,10 +1768,14 @@ def _prompt_first_run(
             }
         )
 
-    start_gateway = click.confirm(
-        "  " + ux.bold("Start gateway after setup?"),
-        default=bool(start_gateway),
-    )
+    if start_gateway is None:
+        # Hooks need a running gateway (with it down they fail open), so the
+        # wizard defaults to starting it. --start-gateway/--no-start-gateway
+        # already answered the question.
+        start_gateway = click.confirm(
+            "  " + ux.bold("Start gateway after setup?"),
+            default=True,
+        )
     verify = click.confirm(
         "  " + ux.bold("Run targeted readiness checks?"),
         default=True if verify is None else bool(verify),
@@ -1752,17 +1811,28 @@ def _prompt_first_run_judge_llm_config(
     llm_api_key: str,
     llm_api_key_env: str,
     llm_base_url: str,
-) -> tuple[str, str, str, str, str]:
-    """Prompt for unified LLM settings when init enables the judge."""
+) -> tuple[str, str, str, str, str, dict[str, str]]:
+    """Prompt for unified LLM settings when init enables the judge.
+
+    The last item holds provider-typed settings (Bedrock/Vertex region and
+    auth mode) for ``cmd_setup._apply_llm_provider_typed_flags``.
+    """
     ux.section("LLM judge configuration")
     ux.subhead("These settings are saved to the unified llm block and used by the guardrail judge.")
     if not click.confirm(
         "  Configure LLM judge provider/model/API settings now?",
         default=True,
     ):
-        return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url
+        return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url, {}
 
-    from defenseclaw.commands._llm_picker import pick_key_env, pick_local_runtime, pick_model, pick_provider
+    from defenseclaw.commands._llm_picker import (
+        pick_auth_mode,
+        pick_key_env,
+        pick_local_runtime,
+        pick_model,
+        pick_provider,
+        pick_region,
+    )
     from defenseclaw.commands.cmd_setup import (
         _LOCAL_LLM_DEFAULT_BASE_URL,
         _LOCAL_LLM_WIZARD_PROVIDERS,
@@ -1785,7 +1855,7 @@ def _prompt_first_run_judge_llm_config(
             flag_base_url=None,
             non_interactive=False,
         )
-        return provider, model, "", "", base_url
+        return provider, model, "", "", base_url, {}
 
     model = pick_model(
         current=llm_model or "",
@@ -1795,19 +1865,40 @@ def _prompt_first_run_judge_llm_config(
         non_interactive=False,
     )
 
-    key_env = pick_key_env(
-        provider=provider,
-        current=llm_api_key_env or DEFENSECLAW_LLM_KEY_ENV,
-        flag_value=None,
-        non_interactive=False,
-    )
-    _prompt_and_save_secret(key_env, llm_api_key, os.fspath(data_dir))
+    # Region and auth mode come before the key, as in `setup llm`: Bedrock
+    # IAM credentials, profile and instance-role auth use no API key.
+    prov = (provider or "").strip().lower()
+    typed: dict[str, str] = {}
+    auth_mode = ""
+    if prov in ("bedrock", "vertex_ai", "vertex", "gemini", "azure", "azure_openai"):
+        region = ""
+        if prov not in ("azure", "azure_openai"):
+            region = pick_region(provider=prov, current="", flag_value=None, non_interactive=False)
+        auth_mode = pick_auth_mode(provider=prov, current="", flag_value=None, non_interactive=False)
+        if prov == "bedrock":
+            typed = {"bedrock_region": region, "bedrock_auth_mode": auth_mode}
+        elif prov in ("azure", "azure_openai"):
+            typed = {"azure_auth_mode": auth_mode}
+        else:
+            typed = {"vertex_region": region, "vertex_auth_mode": auth_mode}
+
+    if prov == "bedrock" and auth_mode and auth_mode != "api_key":
+        key_env = ""
+        ux.subhead(f"  Bedrock {auth_mode} auth uses your AWS credentials, so no API key is needed.")
+    else:
+        key_env = pick_key_env(
+            provider=provider,
+            current=llm_api_key_env or DEFENSECLAW_LLM_KEY_ENV,
+            flag_value=None,
+            non_interactive=False,
+        )
+        _prompt_and_save_secret(key_env, llm_api_key, os.fspath(data_dir))
     base_url = click.prompt(
         "  LLM base URL (leave blank to use provider default)",
         default=llm_base_url or "",
         show_default=bool(llm_base_url),
     )
-    return provider, model, "", key_env, base_url
+    return provider, model, "", key_env, base_url, typed
 
 
 def _activate_additional_connectors(

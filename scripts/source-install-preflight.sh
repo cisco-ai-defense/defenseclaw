@@ -78,8 +78,9 @@ refuse() {
     esac
     echo "Release installs upgrade with: defenseclaw upgrade (or re-run the release install.sh / install.ps1)." >&2
     if [[ "${FOREIGN_INSTALL}" -eq 1 && "${IS_WINDOWS}" -eq 0 ]]; then
-        echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
-        echo "  defenseclaw uninstall --binaries --yes && make all" >&2
+        echo "To develop from this checkout instead, stop the gateway and remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
+        echo "  defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" >&2
+        echo "If the uninstall stops on a connector teardown timeout (older releases with a large audit log), run the same command again." >&2
     elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
         # Windows finishes removing binaries a moment after the CLI exits.
         echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), wait a few seconds, then build again:" >&2

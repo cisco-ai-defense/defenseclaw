@@ -143,6 +143,9 @@ class FirstRunOptions:
     llm_api_key: str = ""
     llm_api_key_env: str = "DEFENSECLAW_LLM_KEY"
     llm_base_url: str = ""
+    # Provider-typed LLM settings (bedrock_region, bedrock_auth_mode, ...),
+    # passed to cmd_setup._apply_llm_provider_typed_flags.
+    llm_provider_typed: dict[str, str] | None = None
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
@@ -1232,6 +1235,10 @@ def _apply_first_run_choices(
         cfg.llm.api_key_env = options.llm_api_key_env.strip()
     if options.llm_base_url:
         cfg.llm.base_url = options.llm_base_url.strip()
+    if options.llm_provider_typed:
+        from defenseclaw.commands.cmd_setup import _apply_llm_provider_typed_flags
+
+        _apply_llm_provider_typed_flags(cfg.llm, **options.llm_provider_typed)
 
     if options.cisco_endpoint:
         cfg.cisco_ai_defense.endpoint = options.cisco_endpoint.strip()
