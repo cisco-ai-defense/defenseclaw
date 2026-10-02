@@ -2550,7 +2550,7 @@ def _read_host_plugin_manifest(plugin_path: str) -> dict[str, Any] | None:
         if not os.path.isfile(manifest_path):
             continue
         try:
-            with open(manifest_path) as fh:
+            with open(manifest_path, encoding="utf-8") as fh:
                 if fname.endswith((".yaml", ".yml")):
                     import yaml as _yaml
 
@@ -4033,7 +4033,7 @@ def _plugin_metadata_from_path(plugin_name: str, candidate: str) -> dict[str, An
     pkg_json = os.path.join(candidate, "package.json")
     if os.path.isfile(pkg_json):
         try:
-            with open(pkg_json) as f:
+            with open(pkg_json, encoding="utf-8") as f:
                 pkg = json.load(f)
             info_map["version"] = pkg.get("version", "")
             info_map["description"] = pkg.get("description", "")

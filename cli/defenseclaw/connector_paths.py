@@ -3608,7 +3608,7 @@ def _read_claude_mcp_state(
     """
 
     try:
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
         return [], []
@@ -4482,7 +4482,7 @@ def _next_jsonc_significant_char(raw: str, index: int) -> str:
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
     try:
-        with open(_expand(config_file)) as f:
+        with open(_expand(config_file), encoding="utf-8") as f:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
@@ -4503,7 +4503,7 @@ def _read_mcp_settings_block(
     invalid JSON, or the block isn't a mapping.
     """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         return []
@@ -4574,7 +4574,7 @@ def _read_dotmcp_json(
     server. Both are accepted.
     """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         return []
@@ -4718,7 +4718,7 @@ def _read_mcp_servers_from_openclaw_json(
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             raw = f.read()
     except FileNotFoundError:
         return []
@@ -5462,7 +5462,7 @@ def _read_opencode_doc_for_write(path: str) -> dict[str, Any]:
     unexpectedly-shaped config is never silently overwritten.
     """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             raw = f.read()
     except FileNotFoundError:
         return {}
@@ -7857,7 +7857,7 @@ def _atomic_json_merge(
     _capture_managed_mcp_backup(path)
     data: dict[str, Any]
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             loaded = json.load(f)
         data = loaded if isinstance(loaded, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
@@ -7883,7 +7883,7 @@ def _atomic_json_delete(
     Missing files / missing keys are no-ops returning False.
     """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             loaded = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return False
@@ -7913,7 +7913,7 @@ def _atomic_yaml_merge(
         os.makedirs(parent, mode=0o700, exist_ok=True)
     _capture_managed_mcp_backup(path)
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             loaded = yaml.safe_load(f) or {}
         data = loaded if isinstance(loaded, dict) else {}
     except (FileNotFoundError, yaml.YAMLError):
@@ -7934,7 +7934,7 @@ def _atomic_yaml_delete(
     keys: tuple[str, ...],
 ) -> bool:
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             loaded = yaml.safe_load(f) or {}
     except (FileNotFoundError, yaml.YAMLError):
         return False

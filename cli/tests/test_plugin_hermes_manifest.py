@@ -14,11 +14,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hermes plugin.yaml manifests (GAP-1334, GAP-1350)."""
+"""Hermes plugin.yaml manifests and UTF-8 connector files (GAP-1334/1350/1375)."""
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
+import yaml
 from defenseclaw.scanner.plugin_scanner.scanner import scan_plugin
+
+_CLI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _rule_ids(result) -> list[str]:
@@ -52,3 +59,20 @@ def test_missing_manifest_has_no_none_location(tmp_path):
     assert "PERM-NONE" not in _rule_ids(result)
     assert not any(str(f.location or "").endswith("/none") for f in result.findings)
 
+
+def test_yaml_connector_merge_reads_utf8_under_a_non_utf8_locale(tmp_path):
+    """GAP-1375: Windows cp1252 broke 'mcp set' for Hermes' UTF-8 config.yaml."""
+    config = tmp_path / "config.yaml"
+    config.write_text("# Hermes — stock comment\nmodel: x\n", encoding="utf-8")
+    code = (
+        "import sys; from defenseclaw import connector_paths as c; "
+        "c._atomic_yaml_merge(sys.argv[1], ('mcp_servers', 'deepwiki'), {'url': 'https://example.invalid/mcp'})"
+    )
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+           "PYTHONPATH": _CLI_ROOT}
+    proc = subprocess.run([sys.executable, "-c", code, str(config)], env=env, capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert data["mcp_servers"]["deepwiki"]["url"] == "https://example.invalid/mcp"
+    assert data["model"] == "x"
