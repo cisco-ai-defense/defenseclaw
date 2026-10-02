@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -716,6 +717,31 @@ func privateUpstreamHint(host string, ip net.IP) string {
 	return fmt.Sprintf("; if it is a private endpoint you trust (for example an AWS VPC endpoint), allow it with: defenseclaw guardrail allow-private-upstream %s", host)
 }
 
+// privateUpstreamRefusal is the dial error for an upstream that resolved to a
+// private address the operator can allow. upstreamErrorMessage turns it into
+// a message that starts with the fix, because agent UIs cut long errors short
+// and the hint at the end of the dial error never reached the user (GAP-1703).
+type privateUpstreamRefusal struct {
+	host string
+	ip   net.IP
+}
+
+func (e *privateUpstreamRefusal) Error() string {
+	return fmt.Sprintf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)%s", e.host, e.ip, privateUpstreamHint(e.host, e.ip))
+}
+
+// upstreamErrorMessage is the client-facing text for a failed upstream call.
+// A refused private upstream names the allow command first and is logged in
+// a fixed format that doctor reads; other errors keep prefix + error.
+func upstreamErrorMessage(prefix string, err error) string {
+	var refusal *privateUpstreamRefusal
+	if errors.As(err, &refusal) {
+		fmt.Fprintf(os.Stderr, "[guardrail] refused private upstream: host=%s ip=%s; allow it with: defenseclaw guardrail allow-private-upstream %s\n", refusal.host, refusal.ip, refusal.host)
+		return fmt.Sprintf("DefenseClaw refused a private LLM endpoint; if you trust it, run: defenseclaw guardrail allow-private-upstream %s (%s resolved to %s)", refusal.host, refusal.host, refusal.ip)
+	}
+	return prefix + err.Error()
+}
+
 func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: timeout}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -732,7 +758,10 @@ func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx conte
 				if allowLoopback && ip.IP.IsLoopback() {
 					continue
 				}
-				return nil, fmt.Errorf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)%s", host, ip.IP, privateUpstreamHint(host, ip.IP))
+				if privateUpstreamHint(host, ip.IP) != "" {
+					return nil, &privateUpstreamRefusal{host: host, ip: ip.IP}
+				}
+				return nil, fmt.Errorf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)", host, ip.IP)
 			}
 		}
 		// Use the first safe IP literal so we don't re-resolve and

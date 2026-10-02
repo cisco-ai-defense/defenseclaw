@@ -167,8 +167,10 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 When `bedrock-runtime.<region>.amazonaws.com` resolves to an AWS PrivateLink
 (VPC interface) endpoint, the guardrail proxy refuses the private address and
-every turn fails. The gateway log names the host. Allow the endpoint, then
-restart the gateway:
+every turn fails. The agent shows `DefenseClaw refused a private LLM endpoint;
+if you trust it, run: defenseclaw guardrail allow-private-upstream <host>`, and
+`defenseclaw doctor` warns with a **Private upstream** row naming the host.
+Allow the endpoint, then restart the gateway:
 
 ```bash
 defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws.com
