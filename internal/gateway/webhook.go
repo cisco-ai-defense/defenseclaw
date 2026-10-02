@@ -852,6 +852,10 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// webhookRuleKey carries the rule label of a hook block ("rule ID: Title")
+// from dispatchHookBlockWebhook to the generic payload (GAP-1351).
+const webhookRuleKey = "defenseclaw.webhook.rule"
+
 func formatGenericPayload(event audit.Event) ([]byte, error) {
 	eventData := map[string]interface{}{
 		"id":        event.ID,
@@ -873,6 +877,9 @@ func formatGenericPayload(event audit.Event) ([]byte, error) {
 	if strings.Contains(strings.ToLower(event.Action), "block") {
 		eventData["defenseclaw_blocked"] = true
 		eventData["defenseclaw_reason"] = event.Details
+		if rule, ok := event.Structured[webhookRuleKey].(string); ok && rule != "" {
+			eventData["defenseclaw_rule"] = rule
+		}
 	}
 	payload := map[string]interface{}{
 		"webhook_type":        "defenseclaw_enforcement",

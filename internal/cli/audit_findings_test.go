@@ -168,3 +168,40 @@ func TestNoteUnmatchedAuditConnectorNamesKnownConnectors(t *testing.T) {
 		t.Fatalf("note = %q", got)
 	}
 }
+
+// GAP-1301: a guardrail scanner gets a stderr note saying audit findings does
+// not track it; the JSON report on stdout is unchanged.
+func TestRunAuditFindingsNotesGuardrailScanner(t *testing.T) {
+	store, err := audit.NewStore(t.TempDir() + "/audit.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	previousStore, previousScanner := auditStore, auditFindingsScanner
+	previousSince, previousNewOnly, previousLimit := auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit
+	t.Cleanup(func() {
+		auditStore, auditFindingsScanner = previousStore, previousScanner
+		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit = previousSince, previousNewOnly, previousLimit
+	})
+	auditStore, auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit = store, "", false, 100
+	for scannerName, wantNote := range map[string]bool{"hook-rules": true, "skill-scanner": false} {
+		auditFindingsScanner = scannerName
+		var stdout, stderr bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		if err := runAuditFindings(cmd, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(stderr.String(), "does not track"); got != wantNote {
+			t.Errorf("--scanner %s: note=%v, stderr=%q", scannerName, got, stderr.String())
+		}
+		var report auditFindingsReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatalf("--scanner %s: stdout is not the JSON report: %v", scannerName, err)
+		}
+	}
+}

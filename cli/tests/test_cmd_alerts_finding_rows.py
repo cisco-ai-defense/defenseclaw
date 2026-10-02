@@ -24,6 +24,14 @@ FINDING = {
     "defenseclaw.scan.scanner": "hook-rules",
 }
 
+SANDBOX_FINDING = {
+    "defenseclaw.finding.category": "sandbox.ocsf_finding",
+    "defenseclaw.finding.rule_id": "SANDBOX-OCSF-FINDING",
+    "defenseclaw.finding.title": "Provider credential used at an unauthorized endpoint",
+    "defenseclaw.guardrail.evidence_summary": 'FINDING:BLOCKED [HIGH] "Provider credential used at an unauthorized endpoint"',
+    "defenseclaw.sandbox.name": "rhs2-sb",
+}
+
 
 class AlertFindingRowsTests(unittest.TestCase):
     def setUp(self):
@@ -94,6 +102,47 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertIn("action=block", show.output)
         self.assertNotIn("details_json", show.output)
         self.assertNotIn("schema", show.output)
+
+    # GAP-1303: sandbox findings name the sandbox, rule and decision; a
+    # post-tool finding is not called observe mode.
+    def test_sandbox_finding_row_names_sandbox_rule_and_decision(self):
+        row = Event(action="sandbox-finding", target="", severity="HIGH", connector="claudecode",
+                    details="finding.observed", structured=dict(SANDBOX_FINDING))
+        self.app.store.log_event(row)
+        # The gateway writes sandbox findings as canonical v8 rows.
+        db = self.app.store.db
+        columns = {r[1] for r in db.execute("PRAGMA table_info(audit_events)")}
+        for column in ("bucket", "event_name"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        db.execute("UPDATE audit_events SET bucket='security.finding', event_name='finding.observed' WHERE id=?",
+                   (row.id,))
+        db.commit()
+        table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertNotIn("finding.observed", table.output)
+        self.assertIn("rhs2-sb", table.output)
+        self.assertIn("decision=blocked connector=claudecode rule=SANDBOX-OCSF-FINDING", table.output)
+        show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertIn("rhs2-sb", show.output)
+        self.assertIn("SANDBOX-OCSF-FINDING: Provider credential used at an unauthorized endpoint", show.output)
+
+    def test_post_tool_finding_is_not_called_observe_mode(self):
+        store = self.app.store
+        at = datetime.now(timezone.utc)
+        hook = Event(action="connector-hook", target="PostToolUse", severity="INFO", connector="claudecode",
+                     details="connector=claudecode result=ok action=alert raw_action=block mode=action "
+                             "would_block=true", timestamp=at)
+        finding = Event(action="scan-finding", target="", severity="CRITICAL", connector="claudecode",
+                        details="finding.observed", timestamp=at,
+                        structured=dict(FINDING, **{"defenseclaw.finding.target_ref": "claudecode:PostToolUse"}))
+        store.log_event(hook)
+        store.log_event(finding)
+        store.db.execute("UPDATE audit_events SET request_id='req-post' WHERE id IN (?, ?)", (hook.id, finding.id))
+        store.db.commit()
+        table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
+        self.assertIn("decision=detected after the tool ran (cannot block)", table.output)
+        self.assertNotIn("observe mode", table.output)
 
 
 def test_redacted_secret_title_uses_the_rule_pack_title():

@@ -348,6 +348,36 @@ class TestScanAllUX(_SkillScanUXBase):
         self.assertIn("blocked=0", result.output)
         self.assertIn("findings=1", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_counts_block_listed_skill_as_blocked(self, mock_cls, _mock_list) -> None:
+        # GAP-1320: a block-listed skill reads BLOCKED and the Summary counts it.
+        from defenseclaw.enforce import PolicyEngine
+
+        root = self._make_skills_dir(["alpha", "beta"])
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        PolicyEngine(self.app.store).block("skill", "beta", "test block")
+        responses = {
+            os.path.join(root, "alpha"): self._clean_result(os.path.join(root, "alpha")),
+            os.path.join(root, "beta"): self._blocked_result(os.path.join(root, "beta")),
+        }
+        mock_scanner = MagicMock()
+        mock_scanner.scan.side_effect = lambda p: responses[p]
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "--all"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED] beta", result.output)
+        self.assertIn("clean=1", result.output)
+        self.assertIn("blocked=1", result.output)
+        self.assertIn("defenseclaw skill unblock beta", result.output)
+
+        single = self.runner.invoke(skill, ["scan", "beta", "--path", os.path.join(root, "beta")], obj=self.app)
+        self.assertEqual(single.exit_code, 2, single.output)
+        self.assertIn("is on the block list", single.output)
+        self.assertIn("skill scan --all", single.output)
+        self.assertIn("defenseclaw skill unblock beta", single.output)
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch(
         "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",

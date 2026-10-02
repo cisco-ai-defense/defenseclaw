@@ -3796,3 +3796,16 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_info_card_eligible_says_defenseclaw_keeps_blocked_skill_off(capsys):
+    # GAP-1320: "Eligible: True" alone read wrong for a blocked skill.
+    from defenseclaw.commands.cmd_skill import _print_skill_info_card
+
+    _print_skill_info_card({"name": "fs1", "eligible": True, "disabled": True, "verdict": "blocked"}, "fs1")
+    out = capsys.readouterr().out
+    assert "True (the connector would load it; DefenseClaw keeps it off)" in out
+    assert "defenseclaw skill unblock fs1" in out
+
+    _print_skill_info_card({"name": "ok", "eligible": True}, "ok")
+    assert "keeps it off" not in capsys.readouterr().out

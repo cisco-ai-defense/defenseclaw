@@ -700,8 +700,12 @@ func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
 // configured webhooks. Only the LLM proxy, watcher and health paths used to
 // dispatch, so blocks on the per-user hook connectors reached no webhook
 // (GAP-1145). Dispatch redacts the reason and applies severity, event and
-// cooldown filters.
-func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string) {
+// cooldown filters. The redacted reason alone did not say which rule fired
+// (GAP-1351), so the details also carry rule=<ids> and the generic payload
+// names the rules the way the agent message does ("rule ID: Title", titles
+// only from the compiled-in catalog or a loaded rule pack). A managed
+// deployment keeps the historical payload.
+func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
 	if a == nil || a.webhookSource == nil {
 		return
 	}
@@ -713,7 +717,7 @@ func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent,
 	if target == "" {
 		target = hookEvent
 	}
-	webhooks.Dispatch(audit.Event{
+	event := audit.Event{
 		Timestamp: time.Now().UTC(),
 		Action:    string(audit.ActionBlock),
 		Target:    target,
@@ -721,7 +725,29 @@ func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent,
 		Details:   fmt.Sprintf("connector=%s event=%s reason=%s", connectorName, hookEvent, reason),
 		Severity:  severity,
 		Connector: connectorName,
-	})
+	}
+	if !managedEnterpriseActive.Load() {
+		if ids := webhookRuleIDs(ruleIDs); ids != "" {
+			event.Details = fmt.Sprintf("connector=%s event=%s rule=%s reason=%s", connectorName, hookEvent, ids, reason)
+		}
+		if rules := agentMatchedRules(reason); rules != "" {
+			event.Structured = map[string]any{webhookRuleKey: rules}
+		}
+	}
+	webhooks.Dispatch(event)
+}
+
+// webhookRuleIDs joins the rule IDs of a hook verdict for the webhook
+// details; anything that is not a plain rule identifier is dropped.
+func webhookRuleIDs(ruleIDs []string) string {
+	var ids []string
+	for _, id := range ruleIDs {
+		id = strings.TrimSpace(id)
+		if agentRuleIDPattern.MatchString(id) && len(ids) < 5 {
+			ids = append(ids, id)
+		}
+	}
+	return strings.Join(ids, ",")
 }
 
 func (a *APIServer) connectorName() string {

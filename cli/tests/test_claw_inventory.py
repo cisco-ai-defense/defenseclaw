@@ -470,6 +470,37 @@ class TestLiveClawInventory(unittest.TestCase):
         inv = build_claw_aibom(self.cfg, live=True)
         format_claw_aibom_human(inv, summary_only=True)
 
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_human_only_shows_requested_categories(self, _):
+        # GAP-1358: --only skills,mcp must not print the other sections as "none".
+        import contextlib
+        import io
+
+        inv = build_claw_aibom(self.cfg, live=True, categories={"skills", "mcp"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, categories={"skills", "mcp"})
+        text = out.getvalue()
+        self.assertIn("MCP servers", text)
+        for absent in ("Plugins", "Agents", "Rules", "Tools", "Model providers", "Memory"):
+            self.assertNotIn(absent, text)
+
+    def test_human_opencode_config_is_opencode_json(self):
+        # GAP-1358: the Config line names opencode.json, not DefenseClaw's bridge plugin.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "opencode",
+            "connector_config_files": ["/h/.config/opencode/plugins/defenseclaw.js"],
+            "connector_mcp_files": ["/h/.config/opencode/opencode.json"],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        self.assertIn("Config:    /h/.config/opencode/opencode.json", out.getvalue())
+        self.assertNotIn("defenseclaw.js", out.getvalue())
+
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_fallback_when_openclaw_missing(self, _):
         inv = build_claw_aibom(self.cfg, live=True)
@@ -1387,7 +1418,7 @@ class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
             pe, "skill", "dangerous", scan, None, self.skill_actions,
         )
         self.assertEqual(verdict, "rejected")
-        self.assertIn("1 findings", detail)
+        self.assertIn("1 finding, max", detail)
         self.assertIn("CRITICAL", detail)
 
     def test_high_rejected_by_policy_defaults(self):

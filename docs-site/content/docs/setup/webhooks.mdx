@@ -105,6 +105,8 @@ defenseclaw setup webhook add generic \
 
 The receiver validates the HMAC by recomputing `HMAC-SHA256(secret, body)` and comparing it to the `X-DefenseClaw-Signature` header.
 
+A connector-hook block names the rule that fired. The event's `details` carry `rule=<id>` next to the redacted reason, and `defenseclaw_rule` gives the same label the agent sees, for example `rule VB2-MARKER-BLOCK: Marker command`. Titles appear only for compiled-in and loaded rule-pack rules; the matched content stays redacted.
+
 </Tab>
 
 </Tabs>

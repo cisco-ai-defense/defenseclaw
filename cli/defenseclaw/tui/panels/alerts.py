@@ -26,7 +26,7 @@ from defenseclaw.alert_semantics import (
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
-from defenseclaw.hook_metrics import connector_hook_decision, parse_detail_tokens
+from defenseclaw.hook_metrics import connector_hook_decision, is_post_tool_hook_event, parse_detail_tokens
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -297,6 +297,8 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
             "defenseclaw.enforcement.target_ref",
             "defenseclaw.network.target_ref",
             "defenseclaw.scan.target_ref",
+            # GAP-1303: a sandbox finding without a destination names its sandbox.
+            "defenseclaw.sandbox.name",
             "defenseclaw.agent.id",
             "defenseclaw.health.subsystem",
         )
@@ -1186,7 +1188,7 @@ class AlertsPanelModel:
             # A hook-rule finding carries the rule, not the outcome; the
             # connector-hook row of the same request says whether the call was
             # blocked or only observed (GAP-1213).
-            if decision := _hook_decision_label(self.store, event.id):
+            if decision := _hook_decision_label(self.store, event.id, event.target):
                 event = replace(event, facts=(*event.facts, ("Decision", decision)))
         return AlertDetailInfo(
             event=event,
@@ -1565,8 +1567,10 @@ def _list_events_by_target(store: object | None, target: str, limit: int) -> tup
         return ()
 
 
-def _hook_decision_label(store: object | None, event_id: str) -> str:
-    """Outcome of the hook call behind a finding: blocked, would block, or allowed."""
+def _hook_decision_label(store: object | None, event_id: str, hook_target: str = "") -> str:
+    """Outcome of the hook call behind a finding: blocked, would block, or allowed.
+
+    A post-tool finding cannot block the call that already ran (GAP-1303)."""
 
     lookup = getattr(store, "hook_details_for_alerts", None)
     if lookup is None or not event_id or event_id.startswith("gw:"):
@@ -1583,7 +1587,11 @@ def _hook_decision_label(store: object | None, event_id: str) -> str:
         if action == "block":
             return f"blocked ({mode} mode)" if mode else "blocked"
         if tokens.get("would_block", "").strip().lower() == "true":
-            decision = "would block (observe mode, allowed)"
+            decision = (
+                "detected after the tool ran (cannot block)"
+                if is_post_tool_hook_event(hook_target)
+                else "would block (observe mode, allowed)"
+            )
         elif not decision and action:
             decision = "allowed" if action == "allow" else action
     return decision
