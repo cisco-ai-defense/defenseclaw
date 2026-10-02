@@ -306,7 +306,11 @@ defenseclaw sandbox image rm kiro opencode --yes
 
 ### `sandbox enable`
 
-Makes typing the harness command run it in a sandbox. It writes a marked block
+Makes typing the harness command run it in a sandbox. It refuses, and changes
+nothing, while sandboxes are off or unavailable (the checks `sandbox run`
+makes), since the command would then fail to start in every new shell: run
+`defenseclaw sandbox setup` first, or `defenseclaw sandbox doctor` to see why
+they are unavailable. Otherwise it writes a marked block
 to your shell's rc file (`~/.bashrc`, `~/.zshrc` or `$ZDOTDIR/.zshrc`, or
 `~/.config/fish/config.fish`, which is `$XDG_CONFIG_HOME/fish/config.fish`
 when `XDG_CONFIG_HOME` is set). The block defines a shell function named after

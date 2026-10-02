@@ -17,11 +17,13 @@
 package sandboxcli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
@@ -62,7 +64,9 @@ func wrapFor(spec *harness.Spec) wrapper.Wrap {
 	return wrapper.Wrap{Command: spec.Command, Harness: spec.Command}
 }
 
-// Enable makes typing the harness command run it in a sandbox.
+// Enable makes typing the harness command run it in a sandbox. It refuses
+// while sandboxes cannot run here: the wrapper runs `sandbox run`, so the
+// plain command would stop starting in every new shell.
 func (a *App) Enable(o WrapperOptions) error {
 	if err := a.CheckSupported(); err != nil {
 		return err
@@ -71,6 +75,35 @@ func (a *App) Enable(o WrapperOptions) error {
 	if err != nil {
 		return err
 	}
+	if err := a.wrapperPreflight(spec); err != nil {
+		return err
+	}
+	return a.enableWrapper(spec, o)
+}
+
+// wrapperPreflight checks what `sandbox run` checks before it starts a run.
+func (a *App) wrapperPreflight(spec *harness.Spec) error {
+	why := func(err error) error {
+		return fmt.Errorf("not wrapping `%s`, which would then fail to start in every new shell: %w", spec.Command, err)
+	}
+	if a.Cfg != nil && !a.Cfg.OpenShell.Enabled {
+		return why(fmt.Errorf("OpenShell sandboxes are off; run `%s setup` to turn them on", CommandName))
+	}
+	api, err := a.api()
+	if err != nil {
+		return why(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := a.preflight(ctx, api); err != nil {
+		return why(err)
+	}
+	return nil
+}
+
+// enableWrapper writes the wrapper; setup calls it directly while it is
+// turning sandboxes on.
+func (a *App) enableWrapper(spec *harness.Spec, o WrapperOptions) error {
 	sh, rc, err := a.wrapperTarget(o)
 	if err != nil {
 		return err
