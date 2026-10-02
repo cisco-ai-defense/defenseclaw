@@ -1455,7 +1455,10 @@ def fail_mode_cmd(
             elif not runtime_states[name].current:
                 click.echo(f"      - {_connector_label(name)} ({name}): reconcile stale runtime")
     elif current == mode:
-        click.echo(f"  {ux.bold('Re-applying hook fail mode:')} {ux.accent(mode)} {ux.dim('(reconcile the installed hooks)')}")
+        click.echo(
+            f"  {ux.bold('Re-applying hook fail mode:')} {ux.accent(mode)} "
+            f"{ux.dim('(reconcile the installed hooks)')}"
+        )
     else:
         click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
