@@ -968,6 +968,17 @@ def _installed_hook_connectors(disc) -> list[str]:
     return names
 
 
+def _active_not_installed(disc) -> list[str]:
+    """Active connectors that discovery reports as not installed."""
+
+    order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
+    return [
+        name
+        for name in order
+        if (sig := disc.agents.get(name)) is not None and getattr(sig, "active", False) and not sig.installed
+    ]
+
+
 def _untrusted_discovery_prefixes(
     disc,
     connectors: list[str] | None = None,
@@ -1167,6 +1178,10 @@ def _prompt_connector_selection(
             )
             return names
     disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+    if disc.cache_hit and _active_not_installed(_with_config_state(disc, data_dir)):
+        # GAP-1869: an agent installed after the cache was written showed as
+        # not installed, was not offered, and init removed its connector.
+        disc = agent_discovery.discover_agents(refresh=True, data_dir=data_dir)
     disc = _prompt_trust_discovery_prefixes(
         disc,
         data_dir=data_dir,
@@ -1188,6 +1203,13 @@ def _prompt_connector_selection(
     later = "'defenseclaw setup <connector>' can add one later"
     if _sandboxes_possible():
         later = "OpenShell sandboxes still work, and " + later
+    missing = _active_not_installed(disc)
+    if missing:
+        ux.warn(
+            f"Active connector(s) not found on this host: {', '.join(missing)}. "
+            "They are not offered, so this setup removes them.",
+            indent="  ",
+        )
     if installed:
         ux.subhead(f"Clear every box to protect no host agent now; {later}.")
         if active:

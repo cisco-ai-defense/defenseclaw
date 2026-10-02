@@ -4175,6 +4175,28 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode"])
         self.assertIn("Active connectors are pre-selected", selector.call_args.kwargs["title"])
 
+    def test_connector_selection_rescans_a_cache_that_misses_an_active_connector(self):
+        # GAP-1869: OpenCode installed after the cache was written showed as
+        # not installed, was not offered, and init silently removed it.
+        from defenseclaw.commands import cmd_init
+
+        cached = self._disc({"claudecode"})
+        cached.cache_hit = True
+        fresh = self._disc({"claudecode", "opencode"})
+
+        def configured(found, _data_dir):
+            for name in ("claudecode", "opencode"):
+                found.agents[name].active = True
+            return found
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[cached, fresh]) as discover, \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init, "_with_config_state", side_effect=configured), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["claudecode"]) as selector:
+            cmd_init._prompt_connector_selection(None, False)
+        self.assertTrue(discover.call_args.kwargs["refresh"])
+        self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode", "opencode"])
+
     def test_connector_selection_can_trust_untrusted_binary_dirs_and_rescan(self):
         from defenseclaw.commands import cmd_init
         from defenseclaw.inventory import agent_discovery as ad
