@@ -106,6 +106,19 @@ def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> No
     assert "exit 1;" in setup_failure
 
 
+def test_make_all_migrates_existing_data_before_setup() -> None:
+    # GAP-1468: make all over a release home must refresh the seeded rule
+    # packs (and the config schema) the way the release upgrade's migrate does.
+    text = MAKEFILE.read_text(encoding="utf-8")
+    all_target = text[text.index("\nall:") : text.index("\n\n", text.index("\nall:"))]
+    assert all_target.index("_source-dev-install") < all_target.index("source-migrate")
+    assert all_target.index("source-migrate") < all_target.index("quickstart")
+    recipe = text[text.index("\nsource-migrate:") : text.index("\npath:")]
+    assert '[ -f "$$data_dir/config.yaml" ]' in recipe
+    assert '"$(INSTALL_DIR)/defenseclaw$(EXE)" migrate' in recipe
+    assert "exit 1;" in recipe
+
+
 def test_make_all_keeps_an_existing_config_instead_of_rerunning_first_run() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]

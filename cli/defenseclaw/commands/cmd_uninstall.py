@@ -1573,6 +1573,7 @@ _WINDOWS_DEVELOPER_FILES = (
     "defenseclaw.exe",
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
+    "defenseclaw-hook.exe",
     "litellm.exe",
     "skill-scanner.exe",
     "skill-scanner-api.exe",

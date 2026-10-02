@@ -3503,7 +3503,9 @@ def migrate(
         )
     _refresh_local_observability_bundle(data_dir, __version__)
     _refresh_guardrail_profiles(data_dir, config_path)
-    if version < _FIRST_V8_CONFIG_VERSION:
+    # A 0.8.x release may already have written config_version 8 (GAP-1390), so
+    # the writer's version decides too: no 0.x release recorded the agents.
+    if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
 
