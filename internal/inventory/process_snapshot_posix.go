@@ -115,7 +115,7 @@ func platformProcessSnapshot() ([]processInfo, error) {
 		info, ok := parseStandardPSProcessLine(line, now)
 		if ok {
 			if runtime.GOOS == "linux" {
-				info.Argv0 = procArgv0("/proc/"+strconv.Itoa(info.PID)+"/cmdline", info.Comm)
+				info.Argv0, info.Argv0Target = procArgv0("/proc/"+strconv.Itoa(info.PID)+"/cmdline", info.Comm)
 			}
 			infos = append(infos, info)
 		}
@@ -125,11 +125,16 @@ func platformProcessSnapshot() ([]processInfo, error) {
 
 // procArgv0 is the lower-cased basename of argv[0] in a /proc/<pid>/cmdline
 // file, or empty when it is unreadable or the same as comm. Only the first
-// 4 KiB are read, and nothing after the first NUL is kept.
-func procArgv0(cmdlinePath, comm string) string {
+// 4 KiB are read, and nothing after the first NUL is kept. When argv[0] is an
+// absolute path to a symlink, target is the lower-cased basename of what it
+// resolves to (empty when it is the same as name or comm): Cursor's installer
+// links both ~/.local/bin/agent and ~/.local/bin/cursor-agent to
+// .../cursor-agent/versions/<v>/cursor-agent, and a bare "agent" would also
+// match ssh-agent and gpg-agent (GAP-1865).
+func procArgv0(cmdlinePath, comm string) (name, target string) {
 	f, err := os.Open(cmdlinePath)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer f.Close()
 	buf := make([]byte, 4096)
@@ -138,15 +143,23 @@ func procArgv0(cmdlinePath, comm string) string {
 	if i := bytes.IndexByte(arg, 0); i >= 0 {
 		arg = arg[:i]
 	}
-	name := strings.TrimSpace(string(arg))
-	if name == "" {
-		return ""
+	raw := strings.TrimSpace(string(arg))
+	if raw == "" {
+		return "", ""
 	}
-	name = strings.ToLower(filepath.Base(name))
+	name = strings.ToLower(filepath.Base(raw))
 	if name == "." || name == "/" || name == comm {
-		return ""
+		name = ""
 	}
-	return name
+	if filepath.IsAbs(raw) {
+		if resolved, err := filepath.EvalSymlinks(raw); err == nil {
+			target = strings.ToLower(filepath.Base(resolved))
+			if target == "." || target == "/" || target == comm || target == strings.ToLower(filepath.Base(raw)) {
+				target = ""
+			}
+		}
+	}
+	return name, target
 }
 
 func parseDarwinPSOutput(

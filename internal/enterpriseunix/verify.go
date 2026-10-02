@@ -525,6 +525,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
+	l.describeDeletedEnrolledAccounts()
 	if record != nil {
 		l.describePerUserGateways(ctx)
 	}

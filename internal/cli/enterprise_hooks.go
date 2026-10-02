@@ -30,6 +30,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -659,6 +660,10 @@ type enterpriseHookEnrollment struct {
 	SID        string                          `json:"sid,omitempty"`
 	UID        int                             `json:"uid,omitempty"`
 	Connectors []enterpriseHookEnrollmentState `json:"connectors"`
+	// AccountDeleted marks an account whose home no longer exists: it was
+	// deleted, and its rows last until the hook enumerator's next pass
+	// (GAP-1867).
+	AccountDeleted bool `json:"account_deleted,omitempty"`
 }
 
 // enterpriseHookEnrollmentState is one connector's state for an account:
@@ -710,6 +715,24 @@ func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enter
 	return out
 }
 
+// markEnterpriseHookDeletedAccounts sets AccountDeleted on each account whose
+// home is gone and that has no connector the last reconcile verified there.
+// Status listed such an account with its agents pending for the minutes
+// until the enumerator dropped it, as if it would still enroll.
+func markEnterpriseHookDeletedAccounts(enrollment []enterpriseHookEnrollment) {
+	for i := range enrollment {
+		home := strings.TrimSpace(enrollment[i].UserHome)
+		if home == "" || slices.ContainsFunc(enrollment[i].Connectors, func(state enterpriseHookEnrollmentState) bool {
+			return state.State == "enrolled"
+		}) {
+			continue
+		}
+		if _, err := os.Lstat(home); errors.Is(err, os.ErrNotExist) {
+			enrollment[i].AccountDeleted = true
+		}
+	}
+}
+
 // printEnterpriseHookEnrollment renders the per-account enrollment list.
 func printEnterpriseHookEnrollment(w io.Writer, enrollment []enterpriseHookEnrollment, updatedAt string) {
 	if len(enrollment) == 0 {
@@ -745,7 +768,15 @@ func printEnterpriseHookEnrollment(w io.Writer, enrollment []enterpriseHookEnrol
 		}
 		connectors := make([]string, 0, len(account.Connectors))
 		for _, connector := range account.Connectors {
+			if account.AccountDeleted {
+				connectors = append(connectors, connector.Connector)
+				continue
+			}
 			connectors = append(connectors, connector.Connector+" "+connector.State)
+		}
+		if account.AccountDeleted {
+			fmt.Fprintf(w, "    %s: account deleted, home removed (%s dropped at the hook enumerator's next pass)\n", label, strings.Join(connectors, ", "))
+			continue
 		}
 		fmt.Fprintf(w, "    %s: %s\n", label, strings.Join(connectors, ", "))
 	}
@@ -798,6 +829,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
 		}
 		report.Enrollment = enterpriseHookEnrollmentFromRows(state.Results)
+		markEnterpriseHookDeletedAccounts(report.Enrollment)
 	}
 	authorization, authorizationExists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
 	if authorizationErr != nil {

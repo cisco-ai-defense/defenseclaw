@@ -316,10 +316,13 @@ service read access to each user's agent folders (`.claude`, `.codex`,
 `.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others), and
 nothing else in the profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
-it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode, and
-`.gemini` for Antigravity. Kiro CLI is then found by its install folder
-`%LOCALAPPDATA%\Kiro-Cli`, which the service may list but not read, and
-Antigravity CLI by `.gemini\antigravity-cli`; Amp and OpenCode are found by
+it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
+`.gemini` for Antigravity, `.copilot` for Copilot and
+`%APPDATA%\devin` for Devin. Kiro CLI is then found by its install folder
+`%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache
+`%LOCALAPPDATA%\copilot\pkg` and Devin CLI by `%LOCALAPPDATA%\devin\cli`,
+folders the service may list but not read, and Antigravity CLI by
+`.gemini\antigravity-cli`; Amp and OpenCode are found by
 their other signals, such as a running agent process. Each signal found in a profile, and each agent
 process started from one, carries that profile's account (`user.id` is the
 account SID, `defenseclaw.user.id_kind` is `windows_sid`,

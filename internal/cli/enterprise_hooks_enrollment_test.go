@@ -169,3 +169,30 @@ func TestEnterpriseHookEnrollmentStates(t *testing.T) {
 		t.Fatalf("text = %q, want %q", out.String(), want)
 	}
 }
+
+// GAP-1867: an account whose home was deleted is shown as deleted, not with
+// its agents pending, until the enumerator drops its rows.
+func TestEnterpriseHookEnrollmentMarksADeletedAccount(t *testing.T) {
+	kept := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "gone")
+	got := enterpriseHookEnrollmentFromRows([]enterpriseHookReconcileRow{
+		{User: "gone", UID: 506, UserHome: gone, Connector: "kiro", Pending: true},
+		{User: "gone", UID: 506, UserHome: gone, Connector: "amp", Pending: true},
+		{User: "kept", UID: 507, UserHome: kept, Connector: "amp", OK: true},
+		// The last reconcile verified a hook there: not reported as deleted.
+		{User: "verified", UID: 508, UserHome: filepath.Join(gone, "verified"), Connector: "codex", OK: true},
+	})
+	markEnterpriseHookDeletedAccounts(got)
+	if len(got) != 3 || !got[0].AccountDeleted || got[1].AccountDeleted || got[2].AccountDeleted {
+		t.Fatalf("enrollment = %+v, want only gone deleted", got)
+	}
+	got = got[:2]
+	var out bytes.Buffer
+	printEnterpriseHookEnrollment(&out, got, "")
+	want := "  Enrollment:\n" +
+		"    gone (" + gone + ", uid 506): account deleted, home removed (amp, kiro dropped at the hook enumerator's next pass)\n" +
+		"    kept (" + kept + ", uid 507): amp enrolled\n"
+	if out.String() != want {
+		t.Fatalf("text = %q, want %q", out.String(), want)
+	}
+}

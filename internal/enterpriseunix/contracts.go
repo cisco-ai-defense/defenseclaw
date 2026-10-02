@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -354,6 +355,49 @@ func (l *lifecycle) describeGuardianCleanups() {
 			message += "the hook guardian removes it as that user once the home is available"
 		}
 		r.AddWarning(codeGuardianCleanupPending, message)
+	}
+}
+
+// codeEnrolledAccountDeleted names an account targets.yaml still enrolls
+// whose home no longer exists: the account was deleted, and its enrollment
+// lasts until the hook enumerator's next pass no longer finds the account.
+// It is a warning: verify and security_complete do not fail on it.
+const codeEnrolledAccountDeleted = "enrolled_account_deleted"
+
+// describeDeletedEnrolledAccounts names each enrolled account whose home is
+// gone. Until the enumerator's next pass drops it, status listed it among
+// the healthy targets with its agents pending and said nothing about the
+// deletion (GAP-1867).
+func (l *lifecycle) describeDeletedEnrolledAccounts() {
+	env, r := l.env, l.result
+	manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath))
+	if err != nil {
+		return
+	}
+	connectors := map[string][]string{}
+	var accounts []string
+	for _, target := range manifest.Targets {
+		home := strings.TrimSpace(target.UserHome)
+		if home == "" || (target.Enabled != nil && !*target.Enabled) {
+			continue
+		}
+		if _, err := os.Lstat(env.P(home)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		account := cmp.Or(strings.TrimSpace(target.User), home)
+		key := account + " (home " + home + ")"
+		if _, seen := connectors[key]; !seen {
+			accounts = append(accounts, key)
+		}
+		connectors[key] = append(connectors[key], strings.TrimSpace(target.Connector))
+	}
+	sort.Strings(accounts)
+	for _, account := range accounts {
+		names := connectors[account]
+		sort.Strings(names)
+		r.AddWarning(codeEnrolledAccountDeleted, fmt.Sprintf(
+			"user %s was deleted: its home no longer exists, but it is still enrolled for %s until the hook enumerator's next pass drops it (the hook guardian then removes it as well); nothing is left to protect in that home",
+			account, strings.Join(names, ", ")))
 	}
 }
 
