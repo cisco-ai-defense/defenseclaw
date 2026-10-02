@@ -8575,11 +8575,17 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
         delivery = None if item.custody == "hook_only" else next(delivery_rows)
         if item.custody == "external":
             tag = "warn"
-            conditions = [
-                "native exporter bypasses DefenseClaw",
-                "migration left its endpoint and credentials untouched",
-                "run explicit managed connector setup to opt in",
-            ]
+            if delivery.state == "unmapped_only":
+                # The exporter does reach this gateway; custody turns to
+                # defenseclaw with the first record DefenseClaw maps, so
+                # setup is not the next step (GAP-1664).
+                conditions = ["native exporter reaches this gateway; custody is confirmed by its first mapped record"]
+            else:
+                conditions = [
+                    "native exporter bypasses DefenseClaw",
+                    "migration left its endpoint and credentials untouched",
+                    "run explicit managed connector setup to opt in",
+                ]
             if item.credential_state == "invalid":
                 tag = "fail"
                 conditions.append(f"invalid credentials observed ({item.authentication_failures} recent failures)")
@@ -8588,15 +8594,18 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             if delivery.state == "all_drop_only":
                 tag = "fail"
             conditions.append(delivery.detail)
+            remediation = (
+                "to send it through DefenseClaw, run 'defenseclaw setup "
+                f"{'claude-code' if item.connector == 'claudecode' else item.connector}'"
+            )
+            if delivery.state == "unmapped_only" and item.credential_state != "invalid":
+                remediation = "use the agent until a model call succeeds, then rerun 'defenseclaw doctor'"
             _emit(
                 tag,
                 label,
                 "custody=external; " + "; ".join(conditions),
                 r=r,
-                remediation=(
-                    "to send it through DefenseClaw, run 'defenseclaw setup "
-                    f"{'claude-code' if item.connector == 'claudecode' else item.connector}'"
-                ),
+                remediation=remediation,
             )
             continue
         if item.custody == "hook_only":

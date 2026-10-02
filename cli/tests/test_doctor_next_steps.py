@@ -200,6 +200,23 @@ def test_unmapped_only_drops_are_healthy_delivery() -> None:
     assert "partial drop-only" not in r.checks[-1]["detail"]
 
 
+def test_all_unmapped_window_is_not_a_bypass_failure() -> None:
+    # GAP-1664: every batch unmapped right after setup (no model call succeeded yet).
+    report = _custody_report(
+        custody="external", normalized_batches=18, drop_only_batches=18, drop_only_reasons=("unsupported_identity",)
+    )
+    (row,) = summarize_native_delivery(report).connectors
+    assert row.state == "unmapped_only"
+    assert "no mapped native records yet (18/18" in row.detail
+    r = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(report, r)
+    check = r.checks[-1]
+    assert check["status"] == "warn"
+    assert "bypasses DefenseClaw" not in check["detail"]
+    assert "reaches this gateway" in check["detail"]
+    assert "setup" not in check["remediation"]
+
+
 def test_real_drop_reasons_still_warn_with_the_reason() -> None:
     report = _custody_report(drop_only_reasons=("invalid_record", "unsupported_identity"))
     (row,) = summarize_native_delivery(report).connectors

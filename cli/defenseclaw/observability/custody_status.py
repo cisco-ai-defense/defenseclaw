@@ -176,13 +176,24 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             continue
         normalized = max(item.normalized_batches, 0)
         drop_only = min(max(item.drop_only_batches, 0), normalized)
+        unmapped_only = bool(item.drop_only_reasons) and set(item.drop_only_reasons) <= _UNMAPPED_DROP_REASONS
         if normalized == 0:
             state = "no_evidence"
             detail = "no recent native delivery evidence"
+        elif drop_only == normalized and unmapped_only:
+            # Every batch so far held only record types DefenseClaw does not
+            # map (an agent whose model calls failed, for example): skipped
+            # by design, not data loss (GAP-1664).
+            state = "unmapped_only"
+            signals = ", ".join(item.drop_only_signals) or "native"
+            detail = (
+                f"no mapped native records yet ({drop_only}/{normalized} batches held only {signals} "
+                "records DefenseClaw does not map, skipped by design)"
+            )
         elif drop_only == normalized:
             state = "all_drop_only"
             detail = f"drop-only native stream ({drop_only}/{normalized} batches); no accepted native delivery observed"
-        elif drop_only and item.drop_only_reasons and set(item.drop_only_reasons) <= _UNMAPPED_DROP_REASONS:
+        elif drop_only and unmapped_only:
             # Every dropped batch held only record types DefenseClaw does
             # not map. That is normal for a healthy agent, not data loss.
             state = "accepted"
