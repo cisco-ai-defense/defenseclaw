@@ -19,9 +19,11 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -244,6 +246,15 @@ func TestPrivateUpstreamHintAndBedrockError(t *testing.T) {
 		if hint := privateUpstreamHint(host, net.ParseIP(ip)); hint != "" {
 			t.Fatalf("%s must get no allow hint, got %q", ip, hint)
 		}
+	}
+	// GAP-1703: agent UIs truncate long errors, so the fix comes first and
+	// survives the url.Error wrapping the HTTP client adds.
+	wrapped := &url.Error{Op: "Post", URL: "https://" + host + "/model/x/converse-stream", Err: &privateUpstreamRefusal{host: host, ip: net.ParseIP("10.0.2.169")}}
+	if msg := upstreamErrorMessage("upstream error: ", wrapped); !strings.HasPrefix(msg, "DefenseClaw refused a private LLM endpoint; if you trust it, run: defenseclaw guardrail allow-private-upstream "+host+" ") {
+		t.Fatalf("refusal message = %q", msg)
+	}
+	if msg := upstreamErrorMessage("upstream error: ", errors.New("boom")); msg != "upstream error: boom" {
+		t.Fatalf("other error message = %q", msg)
 	}
 	rec := httptest.NewRecorder()
 	writeBedrockUpstreamError(rec, "upstream error: refused")

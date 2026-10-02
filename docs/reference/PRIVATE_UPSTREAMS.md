@@ -25,7 +25,10 @@ and
 7. Gateway startup and accepted configuration reloads replace the process-wide
    allowlist; removing entries clears stale state.
 8. `defenseclaw doctor` reports entries from configuration and the environment
-   as a high-impact security override.
+   as a high-impact security override. A refused private upstream is returned
+   to the client with the `allow-private-upstream` command first (agent UIs cut
+   long errors), and doctor's **Private upstream** row warns about refusals in
+   `gateway.log` whose addresses are not allowed yet.
 9. The Python registry SSRF guard honors the environment-variable list and
    retains the same non-exemptible address classes.
 
