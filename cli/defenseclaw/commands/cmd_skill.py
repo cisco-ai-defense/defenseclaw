@@ -36,6 +36,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -2568,7 +2569,7 @@ def _apply_scan_enforcement(
                 f"severity={sev} findings={len(result.findings)} "
                 f"connector={canonical_connector}"
             )
-            app.logger.log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
+            saved_change_audit(app.logger).log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
 
     if failed_actions:
         failed = ", ".join(failed_actions)
@@ -4175,7 +4176,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         click.secho(f"[skill] {skill_name!r} added to block list{suffix}", fg="red")
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "skill-block", skill_name, f"reason={reason} connector={connector}",
         )
 
@@ -4294,7 +4295,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
                 f"restore explicitly with 'defenseclaw skill restore {skill_name} --connector {connector}'."
             )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-unblock", skill_name, f"manual unblock via CLI connector={connector}",
             )
         return
@@ -4333,7 +4334,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
                 f"restore explicitly with 'defenseclaw skill restore {skill_name}'."
             )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-unblock", skill_name, "manual unblock via CLI connector=all",
             )
         return
@@ -4383,7 +4384,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         )
 
     if app.logger:
-        app.logger.log_action("skill-unblock", skill_name, "manual unblock via CLI")
+        saved_change_audit(app.logger).log_action("skill-unblock", skill_name, "manual unblock via CLI")
 
 
 # ---------------------------------------------------------------------------
@@ -4435,7 +4436,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             fg="green",
         )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-allow", skill_name, f"reason={reason} connector={connector}",
             )
         return
@@ -4455,7 +4456,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         if app.store and pe.get_action("skill", skill_name) is not None:
             pe.remove_action("skill", skill_name)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-allow", skill_name, f"reason={reason} connector=all",
             )
         return
@@ -4483,7 +4484,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         )
 
     if app.logger:
-        app.logger.log_action("skill-allow", skill_name, f"reason={reason}")
+        saved_change_audit(app.logger).log_action("skill-allow", skill_name, f"reason={reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -4636,7 +4637,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
                 pe.disable_for_connector("skill", skill_name, target, reason)
 
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "skill-disable", skill_name, f"reason={reason} connector=all",
                 )
             return
@@ -4674,7 +4675,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         pe.disable("skill", skill_name, reason)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "skill-disable", skill_name, f"reason={reason} connector={connector}",
         )
 
@@ -4729,7 +4730,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
 
             pe.enable("skill", skill_name)
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "skill-enable",
                     skill_name,
                     "re-enabled via CLI connector=all",
@@ -4758,7 +4759,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         pe.enable("skill", skill_name)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "skill-enable", skill_name, f"re-enabled via CLI connector={connector}",
         )
 
@@ -4861,7 +4862,7 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
         click.echo(f"[skill] {skill_name!r} quarantined{suffix}")
 
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-quarantine",
                 skill_name,
                 f"reason={reason}, connector={target_connector}, dest={dest}",
@@ -5046,7 +5047,7 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
         click.echo(f"[skill] {skill_name!r} restored to its recorded destination{suffix}")
 
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-restore",
                 skill_name,
                 f"connector={display_connector}, restored to {target_restore_path}",
@@ -5367,7 +5368,7 @@ def _scan_installed_skill_for_connector(
             "— skipping post-scan enforcement"
         )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-allowed",
                 skill_name,
                 f"reason=allow-listed-post-scan connector={connector}",
@@ -5377,7 +5378,7 @@ def _scan_installed_skill_for_connector(
     if post_decision.verdict == "clean":
         click.echo(f"[install] {skill_name!r} installed and clean (connector={connector})")
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-clean", skill_name, f"verdict=clean connector={connector}",
             )
         return
@@ -5391,7 +5392,7 @@ def _scan_installed_skill_for_connector(
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
         if app.logger:
-            app.logger.log_action("install-warning", skill_name, detail)
+            saved_change_audit(app.logger).log_action("install-warning", skill_name, detail)
         return
 
     action_cfg = post_decision.action
@@ -5442,7 +5443,7 @@ def _scan_installed_skill_for_connector(
         actions_str = ", ".join(applied_actions)
         click.echo(f"[install] {skill_name!r}: {actions_str} ({detail})")
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-enforced", skill_name, f"{detail}; {actions_str}",
             )
         click.echo(
@@ -5457,7 +5458,7 @@ def _scan_installed_skill_for_connector(
         f"(connector={connector})"
     )
     if app.logger:
-        app.logger.log_action("install-warning", skill_name, detail)
+        saved_change_audit(app.logger).log_action("install-warning", skill_name, detail)
 
 
 @skill.command()
@@ -5523,7 +5524,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
 
         if decision.verdict == "blocked":
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name, f"reason=blocked connector={connector}",
                 )
             click.echo(
@@ -5535,7 +5536,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
 
         if decision.verdict == "rejected" and decision.source == "quarantine":
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name, f"reason=quarantined connector={connector}",
                 )
             click.echo(
@@ -5563,7 +5564,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 err=True,
             )
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name,
                     "result=rolled-back reason=staged-skill-unresolved scan=skipped",
                 )
@@ -5597,7 +5598,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 )
             pe.set_source_path("skill", skill_name, skill_path, connector)
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-allowed",
                     skill_name,
                     f"reason=allow-listed connector={connector}",

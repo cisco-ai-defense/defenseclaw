@@ -99,8 +99,11 @@ var auditExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export audit_events as JSONL (v7 schema)",
 	Long: `Write one JSON object per line. Each audit row is validated against
-schemas/audit-event.json before it is written. With --include-activity,
-append rows from activity_events validated against activity-event.json.
+schemas/audit-event.json before it is written. Configuration changes and
+operator actions are audit rows too (action config-update and others).
+--include-activity appends the rows of the activity_events table, which
+holds only history from releases before 1.0, validated against
+activity-event.json.
 
 Rows are written oldest first. --limit N keeps the first (oldest) N
 matching rows; add --newest to keep the N most recent rows instead (they
@@ -162,7 +165,7 @@ func checkManagedAuditExportDatabase() error {
 
 func init() {
 	auditExportCmd.Flags().StringVarP(&auditExportOut, "output", "o", "-", "Output file path, or '-' for stdout")
-	auditExportCmd.Flags().BoolVar(&auditExportIncludeActivity, "include-activity", false, "Append activity_events payloads (activity-event.json) after audit lines")
+	auditExportCmd.Flags().BoolVar(&auditExportIncludeActivity, "include-activity", false, "Append pre-1.0 activity_events rows (activity-event.json) after audit lines; configuration changes are audit rows already")
 	auditExportCmd.Flags().IntVar(&auditExportLimit, "limit", 0, "Max audit rows (0 = unlimited); the oldest matching rows unless --newest")
 	auditExportCmd.Flags().StringVar(&auditExportSince, "since", "", "Only rows at or after this time: RFC3339 (2026-09-27T18:30:00Z) or a duration ago (30m, 2h)")
 	auditExportCmd.Flags().StringVar(&auditExportUntil, "until", "", "Only rows before this time: RFC3339 or a duration ago")
@@ -289,7 +292,7 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 		// Activity rows are operator config mutations, not connector-scoped,
 		// so they are omitted whenever a connector filter is requested.
 		if auditExportIncludeActivity && connFilter == "" {
-			return exportActivityLines(db, out, prov, window)
+			return appendActivityLines(auditExportStderr(cmd), db, out, prov, window)
 		}
 		return nil
 	}
@@ -369,11 +372,38 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 	// Activity rows are operator config mutations, not connector-scoped, so
 	// they are omitted whenever a connector filter is requested.
 	if auditExportIncludeActivity && connFilter == "" {
-		if err := exportActivityLines(db, out, prov, window); err != nil {
+		if err := appendActivityLines(auditExportStderr(cmd), db, out, prov, window); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// activityHistoryNote says why --include-activity added nothing (GAP-1170):
+// since 1.0 operator changes are audit rows in the export itself, and
+// activity_events holds only history from older databases.
+const activityHistoryNote = "note: --include-activity added no rows. Configuration changes and operator " +
+	"actions are already audit rows in this export (action config-update and others); " +
+	"activity_events holds only history from releases before 1.0."
+
+// appendActivityLines appends the activity_events rows and notes on stderr
+// when there were none, so the flag never looks broken. stdout stays JSONL.
+func appendActivityLines(stderr io.Writer, db *sql.DB, out io.Writer, prov version.Provenance, window auditExportWindow) error {
+	counted := &lineCountWriter{w: out}
+	if err := exportActivityLines(db, counted, prov, window); err != nil {
+		return err
+	}
+	if counted.lines == 0 {
+		fmt.Fprintln(stderr, activityHistoryNote)
+	}
+	return nil
+}
+
+func auditExportStderr(cmd *cobra.Command) io.Writer {
+	if cmd == nil {
+		return os.Stderr
+	}
+	return cmd.ErrOrStderr()
 }
 
 // noteUnmatchedAuditConnector says on stderr that --connector matched no row,

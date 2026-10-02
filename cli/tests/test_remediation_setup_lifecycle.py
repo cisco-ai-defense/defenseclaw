@@ -243,3 +243,37 @@ class TestInitDirPermissions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_gap1826_rollback_keeps_the_failed_generation_lock_for_the_gateway() -> None:
+    """The gateway needs the failed generation's lock entry to switch back."""
+    import pytest
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    from tests.helpers import cleanup_app, make_app_context
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        lock_path = os.path.join(app.cfg.data_dir, "hook_contract_lock.json")
+        atomic_write_private_bytes(lock_path, b'{"version":2,"connectors":{"claudecode":{}}}\n')
+        snapshot = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        failed_lock = b'{"version":2,"connectors":{"openclaw":{}}}\n'
+        atomic_write_private_bytes(lock_path, failed_lock)
+        seen: list[bytes] = []
+
+        def restart(_app, **_kwargs):
+            with open(lock_path, "rb") as handle:
+                seen.append(handle.read())
+
+        cause = cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
+        with (
+            patch.object(cmd_setup, "_sync_guardrail_hilt_to_opa"),
+            patch.object(cmd_setup, "_restart_restored_connector_runtime", side_effect=restart),
+            pytest.raises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(app, snapshot, cause)
+        assert seen == [failed_lock]
+        assert "rollback was incomplete" not in str(raised.value)
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

@@ -6229,6 +6229,29 @@
         }
       ],
       "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_DELEGATED_FROM",
+      "category": "hook_internal",
+      "purpose": "Set to 'defenseclaw' by the Python CLI when it runs a gateway command for the user ('defenseclaw audit export' and 'audit findings' run 'defenseclaw-gateway audit ...'), so the gateway's usage errors name the command the user typed.",
+      "default": "unset",
+      "accepted_values": [
+        "defenseclaw",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_audit.py",
+          "description": "Sets it before running defenseclaw-gateway audit export/findings"
+        },
+        {
+          "location": "internal/cli/usage_args.go",
+          "description": "Names 'defenseclaw' instead of the gateway binary in usage errors"
+        }
+      ],
+      "since": "1.0.0"
     }
   ]
 }

@@ -76,6 +76,32 @@ func TestUnknownFlagIsAUsageError(t *testing.T) {
 	}
 }
 
+// GAP-1644: run by "defenseclaw audit export", a usage error names the
+// command the user typed, not the gateway binary.
+func TestDelegatedUsageErrorNamesTheTypedCommand(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"audit", "export"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parseErr := cmd.ParseFlags([]string{"--bogus"})
+	if parseErr == nil {
+		t.Fatal("audit export accepted --bogus")
+	}
+	t.Setenv(delegatedFromEnv, "defenseclaw")
+	got := cmd.FlagErrorFunc()(cmd, parseErr)
+	if commandExitCode(got) != 2 || !errors.Is(got, parseErr) {
+		t.Fatalf("exit = %d, err = %v", commandExitCode(got), got)
+	}
+	if strings.Contains(got.Error(), "defenseclaw-gateway") ||
+		!strings.Contains(got.Error(), "Try 'defenseclaw audit export --help'") {
+		t.Fatalf("usage must name defenseclaw audit export: %v", got)
+	}
+	t.Setenv(delegatedFromEnv, "")
+	if got := cmd.FlagErrorFunc()(cmd, parseErr); !strings.Contains(got.Error(), "defenseclaw-gateway audit export --help") {
+		t.Fatalf("direct run must name the gateway: %v", got)
+	}
+}
+
 // GAP-1549: a stray argument or an unknown subcommand is a usage error with
 // rc 2; hook trees and the enterprise leaves keep cobra's own handling.
 func TestStrayArgumentsAreUsageErrors(t *testing.T) {

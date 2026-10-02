@@ -20,6 +20,7 @@ GATEWAY = "/opt/dc/defenseclaw-gateway"
 @pytest.fixture
 def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
+    monkeypatch.setenv("DEFENSECLAW_DELEGATED_FROM", "")  # run_gateway sets it; undo removes it
     monkeypatch.setattr(cmd_audit, "_execv", lambda path, argv: calls.append([path, *argv]))
     monkeypatch.setattr("defenseclaw.gateway.resolve_trusted_gateway_binary", lambda: GATEWAY)
     monkeypatch.setattr(cmd_audit.os, "name", "posix")
@@ -52,6 +53,7 @@ def test_alias_execs_the_gateway_export_without_loading_config(
 def test_windows_waits_for_the_gateway_and_keeps_its_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.gateway.resolve_trusted_gateway_binary", lambda: GATEWAY)
     monkeypatch.setattr(cmd_audit.os, "name", "nt")
+    monkeypatch.setenv("DEFENSECLAW_DELEGATED_FROM", "")
     monkeypatch.setattr(cmd_audit, "_execv", lambda *_: pytest.fail("exec on Windows"))
     calls: list[list[str]] = []
 
@@ -127,3 +129,10 @@ def test_logs_grep_without_a_match_says_so(tmp_path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "No gateway log lines match 'nosuchtext-zz'" in result.output
+
+
+def test_gateway_is_told_the_typed_command(exec_capture: list[list[str]], monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1644: the gateway's usage errors name "defenseclaw audit findings".
+    CliRunner().invoke(cmd_audit.audit, ["findings", "--bogus"])
+    assert exec_capture == [[GATEWAY, GATEWAY, "audit", "findings", "--bogus"]]
+    assert cmd_audit.os.environ["DEFENSECLAW_DELEGATED_FROM"] == "defenseclaw"

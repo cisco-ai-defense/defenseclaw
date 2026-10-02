@@ -44,6 +44,7 @@ import json
 import click
 
 from defenseclaw import ux
+from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.context import AppContext, pass_ctx
 
 # Canonical write-tool names — mirrors internal/gateway/inspect.go
@@ -307,7 +308,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
         _echo_cleared_connector_overrides(cleared_connectors)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "tool-block", log_scope,
             f"reason={reason} effective_target={log_scope} "
             f"requested_scope={connector or source or 'unscoped'}",
@@ -370,7 +371,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
             scope_note = _connector_coverage_note(app)
 
     if app.logger:
-        app.logger.log_action("tool-allow", target, f"reason={reason}")
+        saved_change_audit(app.logger).log_action("tool-allow", target, f"reason={reason}")
 
     click.echo(
         f"{ux._style('[tool]', fg='green', bold=True)} {name!r}{scope_note} "
@@ -428,7 +429,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
             click.echo(f"{ux.dim('[tool]')} {name!r} has no block/allow state to clear")
             return
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "tool-unblock", target,
                 "removed from block/allow list connector=all",
             )
@@ -442,7 +443,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         pe.unblock("tool", target)
 
     if app.logger:
-        app.logger.log_action("tool-unblock", target, "removed from block/allow list")
+        saved_change_audit(app.logger).log_action("tool-unblock", target, "removed from block/allow list")
 
     click.echo(
         f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"

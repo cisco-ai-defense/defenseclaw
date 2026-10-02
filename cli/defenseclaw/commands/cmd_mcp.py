@@ -42,6 +42,7 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
@@ -1625,7 +1626,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
         click.secho(f"Blocked: {target}", fg="red")
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "block-mcp", target, f"reason={reason} connector={connector}",
         )
 
@@ -1685,7 +1686,7 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
             if app.store and pe.get_action("mcp", target) is not None:
                 pe.remove_action("mcp", target)
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "allow-mcp", target, f"reason={reason} connector=all",
                 )
             return
@@ -1696,7 +1697,7 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
         click.secho(f"Allowed: {target}", fg="green")
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "allow-mcp", target, f"reason={reason} connector={connector}",
         )
 
@@ -1768,7 +1769,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
                 "  The server will go through normal scanning on next check."
             )
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "mcp-unblock", target, "manual unblock via CLI connector=all",
                 )
             return
@@ -1793,7 +1794,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     )
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "mcp-unblock", target, f"manual unblock via CLI connector={connector}",
         )
 
@@ -2178,7 +2179,7 @@ def set_server(
             for c in scan_rejected:
                 pe.block_for_connector("mcp", name, c, reason)
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "mcp-set-blocked", name,
                     f"severity={result.max_severity()} findings={len(result.findings)} "
                     f"connectors={','.join(scan_rejected)}",
@@ -2225,14 +2226,16 @@ def set_server(
         click.secho(f"Added MCP server: {name}", fg="green")
 
     if app.logger:
-        app.logger.log_action("mcp-set", name, f"command={cmd} url={url} connectors={','.join(applied)}")
+        saved_change_audit(app.logger).log_action(
+            "mcp-set", name, f"command={cmd} url={url} connectors={','.join(applied)}"
+        )
 
     # An unexpected per-connector write failure (not the benign "no write
     # surface" skip) is surfaced with a non-zero exit so scripts/CI notice the
     # partial application, while the connectors that did land are kept.
     if write_failed:
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "mcp-set", name, f"result=failed connectors={','.join(c for c, _ in write_failed)}"
             )
         raise SystemExit(1)
@@ -2296,7 +2299,9 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             )
         if not_removed:
             if app.logger:
-                app.logger.log_action("mcp-unset", name, f"result=not-removed connectors={','.join(not_removed)}")
+                saved_change_audit(app.logger).log_action(
+                    "mcp-unset", name, f"result=not-removed connectors={','.join(not_removed)}"
+                )
             raise click.ClickException(
                 f"MCP server {name!r} was not removed from: {', '.join(not_removed)}."
             )
@@ -2311,7 +2316,9 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             fg="yellow",
         )
         if app.logger:
-            app.logger.log_action("mcp-unset", name, f"result=noop connectors={','.join(connectors)}")
+            saved_change_audit(app.logger).log_action(
+                "mcp-unset", name, f"result=noop connectors={','.join(connectors)}"
+            )
         return
 
     # GAP-1846: name the connectors whenever the removal was not complete and
@@ -2331,7 +2338,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
         )
 
     if app.logger:
-        app.logger.log_action("mcp-unset", name, f"connectors={','.join(removed)}")
+        saved_change_audit(app.logger).log_action("mcp-unset", name, f"connectors={','.join(removed)}")
 
     # Surface an unexpected per-connector removal failure, or an entry a
     # connector kept, with a non-zero exit and a closing error line so
@@ -2340,7 +2347,9 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     if write_failed or not_removed:
         if app.logger:
             failed = [c for c, _ in write_failed] + not_removed
-            app.logger.log_action("mcp-unset", name, f"result=failed connectors={','.join(failed)}")
+            saved_change_audit(app.logger).log_action(
+                "mcp-unset", name, f"result=failed connectors={','.join(failed)}"
+            )
         problems = []
         if not_removed:
             problems.append(f"was not removed from: {', '.join(not_removed)}")

@@ -249,3 +249,20 @@ func TestAuditExportSourcesFollowTheWindow(t *testing.T) {
 		t.Fatalf("fallback window export = %s, want only legacy-1", out.String())
 	}
 }
+
+// GAP-1170: --include-activity on a 1.0 database (no activity_events rows)
+// says why it added nothing instead of looking broken.
+func TestIncludeActivityWithoutHistoryNotesWhy(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var out, stderr bytes.Buffer
+	if err := appendActivityLines(&stderr, db, &out, version.Provenance{}, auditExportWindow{}); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 || !strings.Contains(stderr.String(), "config-update") {
+		t.Fatalf("stdout %q, stderr %q", out.String(), stderr.String())
+	}
+}

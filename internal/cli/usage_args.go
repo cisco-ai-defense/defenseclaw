@@ -10,6 +10,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -62,8 +63,34 @@ func usageError(c *cobra.Command, err error) error {
 			use = group
 		}
 	}
-	return withExitCode(fmt.Errorf("%w\nUsage: %s\nTry '%s --help' for help.", err, use, c.CommandPath()), 2)
+	msg := fmt.Sprintf("%v\nUsage: %s\nTry '%s --help' for help.", err, use, c.CommandPath())
+	return withExitCode(&delegatedUsageError{msg: delegatedCommandText(c, msg), err: err}, 2)
 }
+
+// delegatedFromEnv is set by the Python CLI when it runs a gateway command on
+// the user's behalf: 'defenseclaw audit export' runs 'defenseclaw-gateway
+// audit export'. Usage errors then name the command the user typed
+// (GAP-1644). Only the value "defenseclaw" is honored.
+const delegatedFromEnv = "DEFENSECLAW_DELEGATED_FROM"
+
+// delegatedCommandText replaces the gateway binary name in text with
+// "defenseclaw" when the Python CLI delegated the command.
+func delegatedCommandText(c *cobra.Command, text string) string {
+	if os.Getenv(delegatedFromEnv) != "defenseclaw" {
+		return text
+	}
+	return strings.ReplaceAll(text, c.Root().Name()+" ", "defenseclaw ")
+}
+
+// delegatedUsageError keeps the wrapped error for errors.Is/As while its
+// text may name the delegating command.
+type delegatedUsageError struct {
+	msg string
+	err error
+}
+
+func (e *delegatedUsageError) Error() string { return e.msg }
+func (e *delegatedUsageError) Unwrap() error { return e.err }
 
 // unexpectedArgs rejects positional arguments on a command that takes none
 // (GAP-1549): "status extra-arg" ran status and "watchdog bogus" started the

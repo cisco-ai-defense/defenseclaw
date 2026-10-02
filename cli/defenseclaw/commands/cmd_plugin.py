@@ -34,6 +34,7 @@ import click
 
 from defenseclaw import connector_paths
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory.plugin_directories import (
@@ -1381,7 +1382,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         for connector, plugin_path in installed_by_connector.items():
             click.echo(f"[install] installed {plugin_name!r} -> {plugin_path} (connector={connector})")
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "plugin-install",
                     plugin_name,
                     f"source={name_or_path} connector={connector}",
@@ -1420,7 +1421,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                         )
                     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
                     if app.logger:
-                        app.logger.log_action(
+                        saved_change_audit(app.logger).log_action(
                             "install-allowed",
                             plugin_name,
                             f"reason=allow-listed connector={connector}",
@@ -1501,7 +1502,7 @@ def _check_plugin_pre_install_admission(
 
         if decision.verdict == "blocked":
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected",
                     plugin_name,
                     f"reason=blocked connector={connector}",
@@ -1517,7 +1518,7 @@ def _check_plugin_pre_install_admission(
 
         if decision.verdict == "rejected" and decision.source == "quarantine":
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected",
                     plugin_name,
                     f"reason=quarantined connector={connector}",
@@ -1830,7 +1831,7 @@ def _scan_installed_plugin_for_connector(
         )
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-allowed",
                 plugin_name,
                 f"reason=allow-listed-post-scan connector={connector}",
@@ -1843,7 +1844,7 @@ def _scan_installed_plugin_for_connector(
         click.echo(f"[install] {plugin_name!r} installed and clean (connector={connector})")
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-clean",
                 plugin_name,
                 f"verdict=clean connector={connector}",
@@ -1869,7 +1870,7 @@ def _scan_installed_plugin_for_connector(
                 err=True,
             )
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected",
                     plugin_name,
                     f"{detail} result=refused reason=critical-without-action",
@@ -1883,7 +1884,7 @@ def _scan_installed_plugin_for_connector(
             app.logger.log_scan(result)
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
-            app.logger.log_action("install-warning", plugin_name, detail)
+            saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
         return False
 
     action_cfg = post_decision.action
@@ -1930,7 +1931,7 @@ def _scan_installed_plugin_for_connector(
         actions_str = ", ".join(applied_actions)
         click.echo(f"[install] {plugin_name!r}: {actions_str} ({detail})")
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-enforced",
                 plugin_name,
                 f"{detail}; {actions_str}",
@@ -1947,7 +1948,7 @@ def _scan_installed_plugin_for_connector(
     click.echo(f"[install] warning: {len(result.findings)} {sev} findings in {plugin_name!r} (connector={connector})")
     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
     if app.logger:
-        app.logger.log_action("install-warning", plugin_name, detail)
+        saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
     return False
 
 
@@ -3098,7 +3099,7 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
 
     if app.logger:
         connector_detail = f"connector={connectors[0]}" if scoped and connectors else "connector=all"
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "plugin-remove",
             safe_name,
             connector_detail,
@@ -3385,7 +3386,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "plugin-block",
             plugin_name,
             f"reason={reason} connector={connector}",
@@ -3434,7 +3435,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             fg="green",
         )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
                 plugin_name,
                 f"manual unblock via CLI connector={connector}",
@@ -3463,7 +3464,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
                 plugin_name,
                 "manual unblock via CLI connector=all",
@@ -3486,7 +3487,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         fg="green",
     )
     if app.logger:
-        app.logger.log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
+        saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
 
 
 # ---------------------------------------------------------------------------
@@ -3543,7 +3544,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             fg="green",
         )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-allow",
                 plugin_name,
                 f"reason={reason} connector={connector_scope}",
@@ -3570,7 +3571,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         if app.store and pe.get_action("plugin", plugin_name) is not None:
             pe.remove_action("plugin", plugin_name)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-allow",
                 plugin_name,
                 f"reason={reason} connector=all",
@@ -3609,7 +3610,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         )
 
     if app.logger:
-        app.logger.log_action("plugin-allow", plugin_name, f"reason={reason}")
+        saved_change_audit(app.logger).log_action("plugin-allow", plugin_name, f"reason={reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -3698,7 +3699,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
             else:
                 _warn_plugin_runtime_disable_advisory(plugin_name, target_connector, True)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-disable",
                 plugin_name,
                 f"reason={reason} connector=all",
@@ -3737,7 +3738,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         pe.disable("plugin", plugin_name, reason)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "plugin-disable",
             plugin_name,
             f"reason={reason} connector={connector_flag}",
@@ -3789,7 +3790,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
             click.echo(f"[plugin] {plugin_name!r} runtime disable cleared (connector={target_connector})")
         pe.enable("plugin", plugin_name)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-enable",
                 plugin_name,
                 "re-enabled via CLI connector=all",
@@ -3829,7 +3830,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         pe.enable("plugin", plugin_name)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "plugin-enable",
             plugin_name,
             f"re-enabled via CLI connector={connector_flag}",
@@ -3948,7 +3949,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
             pe.set_source_path("plugin", plugin_name, plugin_path)
 
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-quarantine",
                 plugin_name,
                 f"reason={reason}, dest={dest} connector={target_connector}",
@@ -4079,7 +4080,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             pe.set_source_path("plugin", plugin_name, target_restore_path)
 
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "plugin-restore",
                 plugin_name,
                 f"restored to {target_restore_path} connector={resolved_connector}",

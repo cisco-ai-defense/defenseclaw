@@ -1,0 +1,60 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Audit events of changes a command has already applied.
+
+``skill block``, ``plugin block``, ``mcp set`` and ``guardrail judge add``
+save the change first and record its audit event afterwards. With the
+gateway stopped (or never started), the event used to end the command with
+"Error: ... then run the command again", rc 1, after the change was already
+applied (GAP-1811, GAP-1823). A stopped gateway now skips only the event,
+with one warning per command run, like ``acp setup`` and ``registry add``.
+A gateway that refuses the event still fails the command.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import click
+
+_NOTED = False
+
+NOT_RECORDED_WARNING = (
+    "  ⚠ The gateway isn't running, so the audit event was not recorded "
+    "(start it with 'defenseclaw-gateway start')."
+)
+
+
+class _SavedChangeAudit:
+    def __init__(self, logger: Any) -> None:
+        self._logger = logger
+
+    def _record(self, method: str, *args: Any, **kwargs: Any) -> None:
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        global _NOTED
+        try:
+            getattr(self._logger, method)(*args, **kwargs)
+        except CanonicalObservabilityUnavailableError:
+            if not _NOTED:
+                _NOTED = True
+                click.echo(NOT_RECORDED_WARNING, err=True)
+
+    def log_action(self, *args: Any, **kwargs: Any) -> None:
+        self._record("log_action", *args, **kwargs)
+
+    def log_config_change(self, *args: Any, **kwargs: Any) -> None:
+        self._record("log_config_change", *args, **kwargs)
+
+
+def saved_change_audit(logger: Any) -> _SavedChangeAudit:
+    """Wrap *logger* for the audit event of an already applied change."""
+    return _SavedChangeAudit(logger)
