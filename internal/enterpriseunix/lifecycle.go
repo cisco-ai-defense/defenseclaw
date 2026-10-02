@@ -226,6 +226,19 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return 0
 	}
 	defer lock.release()
+	if l.opts.Action == ActionUninstall {
+		// An uninstall leaves no lifecycle directory holding only its lock
+		// (a rerun, or the package preremove after an uninstall, found
+		// nothing installed and would otherwise recreate it). A kept
+		// deployment record or retained state keeps the directory.
+		defer func() {
+			dir := env.P(env.Layout.LifecycleDir)
+			if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
+				_ = os.Remove(filepath.Join(dir, lockFileName))
+				_ = os.Remove(dir)
+			}
+		}()
+	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
 		// The previous deployment's files are only in the kept snapshot;
