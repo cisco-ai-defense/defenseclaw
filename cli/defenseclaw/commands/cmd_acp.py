@@ -1027,7 +1027,14 @@ def detect_cmd(json_output: bool) -> None:
     help="DefenseClaw ACP guard executable the editor entry starts.",
 )
 @click.option("--activate", is_flag=True, help="Enable action mode; adoption otherwise observes only.")
-@click.option("--yes", "assume_yes", is_flag=True, help="Adopt without the confirmation prompt.")
+@click.option(
+    "--yes",
+    "--non-interactive",
+    "--accept-defaults",
+    "assume_yes",
+    is_flag=True,
+    help="Adopt without the confirmation prompt (--non-interactive and --accept-defaults are aliases).",
+)
 @click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @click.pass_context
 def adopt_cmd(

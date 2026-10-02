@@ -59,7 +59,7 @@ The sidecar must be running for this command to work.`,
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
-		return loadGatewayCommandConfigFor(cmd)
+		return gatewayStatusConfigLoadError(loadGatewayCommandConfigFor(cmd))
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
 	RunE:              runSidecarStatus,
@@ -67,6 +67,20 @@ The sidecar must be running for this command to work.`,
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+}
+
+// gatewayStatusConfigLoadError adds the daemon state and the next step when
+// config.yaml does not load: a running gateway keeps enforcing the config it
+// started with, and start/restart already name the same repair (GAP-1431).
+func gatewayStatusConfigLoadError(err error) error {
+	if err == nil || !strings.HasPrefix(err.Error(), "failed to load config:") {
+		return err
+	}
+	state := "The gateway is not running."
+	if running, pid := daemon.New(config.DefaultDataPath()).IsRunning(); running {
+		state = fmt.Sprintf("The gateway (PID %d) is still running with the config it started with.", pid)
+	}
+	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
 }
 
 func printGatewayStatusBanner() {

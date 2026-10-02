@@ -305,8 +305,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             f"action=add-v8 preset={preset.id}",
             allow_offline=True,
             offline_note=(
-                "  ⚠ Saved. The gateway isn't running, so the setup audit event was not recorded; "
-                "it loads this destination when it starts (defenseclaw-gateway start)."
+                "  Saved. The gateway isn't running; it loads this destination when it starts "
+                "(defenseclaw-gateway start)."
             ),
         )
 

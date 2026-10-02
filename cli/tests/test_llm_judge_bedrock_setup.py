@@ -78,6 +78,49 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         self.assertNotIn("has no value", res.output)
         save.assert_called_once()
 
+    def test_declining_save_without_key_names_the_role(self) -> None:
+        """GAP-1490: the rerun hint keeps --role judge."""
+
+        def fake_configure(cfg, _data_dir, *, target_path="", _pending_secrets=None):
+            cfg.guardrail.judge.llm = LLMConfig(provider="openai", model="gpt-4o")
+
+        with (
+            mock.patch.object(cmd_setup, "_maybe_inherit_existing_llm", return_value=None),
+            mock.patch.object(cmd_setup, "_configure_llm", side_effect=fake_configure),
+            mock.patch.object(cmd_setup, "_interactive_llm_missing_key_env", return_value="DEFENSECLAW_LLM_KEY"),
+            mock.patch.object(self.app.cfg, "save") as save,
+        ):
+            res = CliRunner().invoke(setup, ["llm", "--role", "judge"], obj=self.app, input="n\n")
+
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("Run 'defenseclaw setup llm --role judge' when you have a key", res.output)
+        save.assert_not_called()
+
+    def test_bedrock_profile_auth_asks_for_the_profile_name(self) -> None:
+        """GAP-1492: auth mode 'profile' asks which AWS profile, and the summary shows it."""
+        import click
+        from defenseclaw.commands import _llm_picker
+
+        @click.command()
+        def run() -> None:
+            cmd_setup._configure_llm(self.app.cfg, self.app.cfg.data_dir, target_path="guardrail.judge")
+
+        with (
+            mock.patch.object(_llm_picker, "list_custom_instances", return_value=[]),
+            mock.patch.object(_llm_picker, "pick_provider", return_value="bedrock"),
+            mock.patch.object(_llm_picker, "pick_model", return_value=HAIKU),
+            mock.patch.object(_llm_picker, "pick_region", return_value="us-east-1"),
+            mock.patch.object(_llm_picker, "pick_auth_mode", return_value="profile"),
+        ):
+            res = CliRunner().invoke(run, [], input="work\n\n\n\n", catch_exceptions=False)
+
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("AWS profile name", res.output)
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.bedrock.profile_name, "work")
+        self.assertIn("bedrock.profile_name", res.output)
+        # GAP-1476: no API-key rows for AWS-credential auth.
+        self.assertNotIn("api_key_env", res.output)
+
     def test_guardrail_wizard_reuses_judge_llm_and_writes_v5_shape(self) -> None:
         """GAP-1121: the configured judge LLM is the default; no v4 fields."""
         gc = self.app.cfg.guardrail

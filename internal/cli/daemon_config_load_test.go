@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,5 +70,24 @@ func TestDaemonConfigLoadErrorNamesTheConfig(t *testing.T) {
 		!strings.Contains(err.Error(), "then run: defenseclaw-gateway start") ||
 		strings.Contains(err.Error(), "Nothing was stopped") {
 		t.Fatalf("start refusal = %v", err)
+	}
+}
+
+// GAP-1431: gateway status on a config that does not load names the daemon
+// state and the repair command, like start and restart do.
+func TestGatewayStatusConfigLoadErrorNamesStateAndNextStep(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	if err := gatewayStatusConfigLoadError(nil); err != nil {
+		t.Fatalf("nil = %v", err)
+	}
+	other := os.ErrInvalid
+	if err := gatewayStatusConfigLoadError(other); err != other {
+		t.Fatalf("unrelated error rewritten: %v", err)
+	}
+	err := gatewayStatusConfigLoadError(errors.New("failed to load config: config.yaml:3: [yaml_syntax_invalid] bad"))
+	for _, want := range []string{"failed to load config", "The gateway is not running.", "defenseclaw config validate"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not contain %q", err, want)
+		}
 	}
 }

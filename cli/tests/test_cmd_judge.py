@@ -228,6 +228,8 @@ class JudgeAddTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         app.cfg.save.assert_called_once()
         restart.assert_not_called()
+        # GAP-1476: say the running gateway needs a restart to apply it.
+        self.assertIn("defenseclaw-gateway restart", result.output)
 
     @patch.object(cmd_setup, "_restart_services")
     def test_add_skips_restart_when_guardrail_disabled(self, restart):
