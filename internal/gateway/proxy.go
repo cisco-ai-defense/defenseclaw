@@ -1171,7 +1171,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// enqueueBlockNotification above) is the canonical channel for
 	// informing the LLM about past enforcement actions, so we don't
 	// lose any security context by dropping these echo turns.
-	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); stripped > 0 {
+	//
+	// A body covered by an AWS SigV4 signature is never rewritten: the proxy
+	// cannot re-sign it, and Bedrock refuses every changed body with "The
+	// request signature we calculated does not match" (GAP-1893).
+	signedBody := requestBodyIsSigned(r)
+	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); !signedBody && stripped > 0 {
 		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
 		body = []byte(launderedBody)
 		if p.logger != nil {
@@ -1190,7 +1195,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// notice on the next turn. With this block, every supported provider
 	// surface carries the notification forward as either a system
 	// message or merged instructions string.
-	if p.notify != nil {
+	if p.notify != nil && !signedBody {
 		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
 			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
