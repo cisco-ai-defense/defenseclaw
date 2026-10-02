@@ -570,7 +570,7 @@ function Stop-Gateway {
     # the file before it exits, and while it runs Windows will not let the
     # migration replace the config it holds open.
     $process = Get-GatewayProcess
-    if (-not $process) { return $true }
+    if (-not $process) { Stop-Watchdog; return $true }
     $image = $process.Path
     Invoke-Native $image @("stop") -Quiet | Out-Null
     if (-not $process.WaitForExit(15000)) {
@@ -584,7 +584,26 @@ function Stop-Gateway {
         if ($waited -eq 5) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
         Start-Sleep -Seconds 1
     }
+    Stop-Watchdog
     return $process.HasExited -and -not (Get-GatewayProcess)
+}
+
+function Stop-Watchdog {
+    # The watchdog outlives a gateway that crashed or was stopped. Left running
+    # from the old binary (which the swap renames aside), it keeps its
+    # ownership lock, and the new gateway's watchdog cannot start (GAP-1833).
+    # The prefix also matches a binary an earlier run renamed aside.
+    $image = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not @(Get-ProcessesUnder @($image)).Count) { return }
+    Write-Info "Stopping the watchdog"
+    if (Test-Path -LiteralPath $image -PathType Leaf) { Invoke-Native $image @("watchdog", "stop") -Quiet | Out-Null }
+    for ($waited = 0; $waited -lt 10; $waited++) {
+        $left = @(Get-ProcessesUnder @($image))
+        if (-not $left.Count) { return }
+        if ($waited -eq 3) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
+        Start-Sleep -Seconds 1
+    }
+    Write-Warn "The previous watchdog is still running; stop it with: defenseclaw-gateway watchdog stop"
 }
 
 function Start-Gateway {
@@ -592,6 +611,11 @@ function Start-Gateway {
     # connector refused admission (upgrading again would not change that).
     Write-Info "Starting the gateway"
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+        # A restored DefenseClaw Setup install has its gateway elsewhere (GAP-1839).
+        Write-Warn "$gateway is missing, so the gateway was not started"
+        return 1
+    }
     $rc = Invoke-Native $gateway @("start")
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
     # A first start over a large audit database can outlast start's own
@@ -703,12 +727,15 @@ function Disable-SetupHooks {
 function Restore-SetupInstall {
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
-    if (-not $WasRunning) { return }
-    $startup = Join-Path $Setup.Root "bin\defenseclaw-startup.exe"
+    if ($WasRunning) { Start-SetupGateway $Setup.Root }
+}
+
+function Start-SetupGateway([string]$Root) {
+    $startup = Join-Path $Root "bin\defenseclaw-startup.exe"
     if (Test-Path -LiteralPath $startup) {
         [void][Diagnostics.Process]::Start($startup).WaitForExit(120000)
     } else {
-        Invoke-Native (Join-Path $Setup.Root "bin\defenseclaw-gateway.exe") @("start") -Quiet | Out-Null
+        Invoke-Native (Join-Path $Root "bin\defenseclaw-gateway.exe") @("start") -Quiet | Out-Null
     }
 }
 
@@ -766,6 +793,46 @@ function Get-DataEntries {
         $name = $_.Name
         -not @($NotData | Where-Object { $name -like $_ }).Count
     })
+}
+
+# What an install writes besides the rollback copy of the data folder: the
+# staged release with its check environment, the final environment, and the
+# uv cache and Python they come from (about 1.4 GB on a first install).
+$InstallRoom = 1500MB
+# The final environment alone, built after the release is staged.
+$FinalEnvRoom = 600MB
+
+function Get-DataSize {
+    $size = [long]0
+    if (-not (Test-Path -LiteralPath $DataDir -PathType Container)) { return $size }
+    foreach ($entry in Get-DataEntries) { $size += Get-TreeSize $entry.FullName }
+    return $size
+}
+
+function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
+    # Checked before the step that needs the room, while nothing has changed
+    # and the gateway still runs (GAP-1839, GAP-1841). Save-Snapshot checks
+    # the rollback copy once more.
+    $free = [long]-1
+    try { $free = ([IO.DriveInfo][IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir))).AvailableFreeSpace } catch { }
+    if ($free -lt 0) { return }
+    $data = Get-DataSize
+    if ($free -ge $data + $Extra + 100MB) { return }
+    Die ("Not enough free disk space next to ${DataDir}: the install needs about {0:N0} MB ({1:N0} MB for a rollback copy of the data folder and {2:N0} MB for $ForWhat), and {3:N0} MB is free. Free up space, then run the installer again; nothing was changed" -f
+        ([double]($data + $Extra + 100MB) / 1MB), ([double]$data / 1MB), ([double]$Extra / 1MB), ([double]$free / 1MB))
+}
+
+function Clear-StagedRelease {
+    # The staged release (about 900 MB) is not needed once the install stops
+    # or is undone, and on a full disk the restore and the old gateway need
+    # its room (GAP-1839, GAP-1841). DefenseClaw Setup's hook state parked
+    # there stays until it is put back.
+    foreach ($item in @(Get-ChildItem -LiteralPath $Staging -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "hook-runtime-state.json" })) {
+        Invoke-Quietly { Remove-Tree $item.FullName }
+    }
+    if ((Test-Path -LiteralPath $Staging) -and -not @(Get-ChildItem -LiteralPath $Staging -Force -ErrorAction SilentlyContinue).Count) {
+        Invoke-Quietly { Remove-Tree $Staging }
+    }
 }
 
 function Get-TreeSize([string]$Path) {
@@ -1059,7 +1126,12 @@ function Restore-Slot([string]$Slot) {
 }
 
 function Restore-Snapshot {
-    $failed = Restore-Slot $Snap
+    Clear-StagedRelease
+    try { $failed = Restore-Slot $Snap } catch {
+        # The snapshot stays marked complete, so the next run restores it.
+        Write-Err $_.Exception.Message
+        Die "Could not restore $previousLabel; run the installer again to finish restoring it. Log: $($Run.Log)"
+    }
     Restart-Old
     $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
@@ -1140,7 +1212,13 @@ function Resume-InterruptedRun {
             $state = Join-Path $Staging "hook-runtime-state.json"
             if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
             $failed = Restore-Slot $slot
-            if ($wasRunning) { [void](Start-Gateway) }
+            # A DefenseClaw Setup install that was replaced runs its own gateway (GAP-1839).
+            $setupInstall = Find-SetupInstall
+            if ($wasRunning -and $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))) {
+                Start-SetupGateway $setupInstall.Root
+            } elseif ($wasRunning) {
+                [void](Start-Gateway)
+            }
             Write-Warn "The interrupted install was kept in $failed"
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
@@ -1579,6 +1657,7 @@ function Invoke-Install {
         if (-not $Uv) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
     }
 
+    Assert-InstallRoom $InstallRoom "the new version"
     New-InstallDirectory $Staging
     New-Item -ItemType Directory -Path (Join-Path $Staging "bin") | Out-Null
     $Archive = "defenseclaw-$Ver-windows-amd64.zip"
@@ -1649,6 +1728,7 @@ function Invoke-Install {
     }
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
+    Assert-InstallRoom $FinalEnvRoom "the final Python environment"
     Wait-VenvFree
     if ($Setup) {
         Disable-SetupHooks
@@ -1663,6 +1743,7 @@ function Invoke-Install {
             Die "The running gateway did not stop; nothing was changed"
         }
     }
+    Stop-Watchdog
     if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
@@ -1671,7 +1752,9 @@ function Invoke-Install {
     try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; $saved = $false }
     if (-not $saved) {
         Invoke-Quietly { Undo-Snapshot $Snap }
+        Clear-StagedRelease
         Restart-Old
+        if ($Run.OldGatewayDown) { Die "Could not save the current install; it was not changed, but its gateway is not running (see above)" }
         Die "Could not save the current install; nothing was changed"
     }
     $previousLabel = if ($PrevVersion) { $PrevVersion } else { "the previous state" }
@@ -1790,7 +1873,10 @@ try {
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
-    if ($Run.Lock) { Invoke-Quietly { Remove-Tree $LockDir } }
+    if ($Run.Lock) {
+        Invoke-Quietly { Clear-StagedRelease }
+        Invoke-Quietly { Remove-Tree $LockDir }
+    }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
     # A variable that was unset stays unset. PowerShell 7 passes $null to
     # SetEnvironmentVariable as "", which leaves an empty variable behind
