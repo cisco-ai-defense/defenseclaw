@@ -185,6 +185,11 @@ def publish_setup_agent_selections(
     atomic_write_private_bytes(os.path.join(target_dir, SELECTION_FILENAME), body)
 
 
+_WINDOWS_NATIVE_INSTALL_HINTS = {
+    "claudecode": "install the native Claude Code build with `claude install`",
+}
+
+
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
@@ -279,7 +284,21 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             normalized_version=normalized,
             sha256=digest,
         )
-    if untrusted_found and rejection.startswith("no installed executable"):
+    if (
+        untrusted_found
+        and rejection.startswith("no installed executable")
+        and os.name == "nt"
+        and os.path.splitext(untrusted_found)[1].casefold() != ".exe"
+    ):
+        # A .cmd/.bat/.ps1 shim (npm's claude.cmd) is refused wherever it
+        # lives, so trusted-paths add cannot help (GAP-1612): name the real
+        # reason and the native install instead.
+        native = _WINDOWS_NATIVE_INSTALL_HINTS.get(connector, "install the agent's native Windows (.exe) build")
+        rejection = (
+            f"{untrusted_found} is a script wrapper, not a native .exe that setup can verify; "
+            f"{native} and re-run setup"
+        )
+    elif untrusted_found and rejection.startswith("no installed executable"):
         # Name what was found and the one command that admits it; a bare
         # "no installed executable" reads as if the agent were missing.
         rejection = (

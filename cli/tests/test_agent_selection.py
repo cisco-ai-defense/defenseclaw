@@ -120,6 +120,22 @@ def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
         agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
+def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1612: npm's claude.cmd sits in a default-trusted prefix but is a
+    # script wrapper; trusted-paths add answered "already trusted".
+    shim = tmp_path / "npm" / "claude.cmd"
+    shim.parent.mkdir()
+    shim.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(shim),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(agent_selection.os, "name", "nt")
+
+    with pytest.raises(OSError, match="claude.cmd is a script wrapper") as raised:
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "claudecode")
+    assert "claude install" in str(raised.value)
+    assert "trusted-paths add" not in str(raised.value)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
 def test_darwin_openhands_selection_rejects_identity_change_during_hash(
     tmp_path: Path,
