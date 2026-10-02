@@ -175,6 +175,12 @@ defenseclaw mcp block untrusted-fs --reason "exfil tool found"
 defenseclaw mcp allow cisco-internal --reason "first-party"
 ```
 
+When a server's latest scan failed, `mcp list` shows Verdict `scan failed` and
+Severity `-`; an older result is kept only as `last_good_severity` in `--json`,
+next to `last_scan_error`. The footer gives one next step per failed server: add
+`--allow-private` for a private or loopback URL, use an npx or uvx launcher for
+a stdio command the scanner refuses, or fix reachability and scan again.
+
 Amp MCP discovery is intentionally read-only. Use `amp mcp add` (or edit Amp's
 settings through Amp tooling) for schema-preserving writes and workspace
 approval, then re-run `defenseclaw mcp scan --connector amp`.

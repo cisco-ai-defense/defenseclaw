@@ -257,7 +257,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             allow_legacy_plain=allow_legacy_plain_scans,
         )
         _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
-        failed_rows.extend((connector, name) for name in failed_map)
+        failed_rows.extend((connector, name, row.get("error", "")) for name, row in failed_map.items())
         shown_any = True
 
     if empty_connectors:
@@ -270,10 +270,17 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         # GAP-1906: a server whose last scan failed is unverified, not "never scanned".
         ux.warn(
             f"{len(failed_rows)} MCP server(s) could not be scanned (last scan failed): "
-            + ", ".join(f"{name} ({connector})" for connector, name in failed_rows)
+            + ", ".join(f"{name} ({connector})" for connector, name, _ in failed_rows)
         )
-        connector, name = failed_rows[0]
-        ux.subhead(f"Fix reachability, then scan again: defenseclaw mcp scan {name} --connector {connector}")
+        # GAP-1992: the next step follows each server's stored error; a
+        # policy refusal is not fixed by "fix reachability".
+        for connector, name, error in failed_rows[:_FAILED_SCAN_HINT_LIMIT]:
+            ux.subhead(f"{name} ({connector}): {_failed_scan_next_step(name, connector, error)}")
+        if len(failed_rows) > _FAILED_SCAN_HINT_LIMIT:
+            ux.subhead(
+                f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
+                "each server's last_scan_error is in: defenseclaw mcp list --json"
+            )
     if shown_any:
         from defenseclaw.commands import hint
         hint("Scan all servers:  defenseclaw mcp scan --all")
@@ -422,8 +429,13 @@ def _mcp_list_json_items(
             entry["url"] = s.url
         if s.bundled:
             entry["bundled"] = True
-        if s.name in scan_map:
-            entry["severity"] = scan_map[s.name]["max_severity"]
+        severity, last_good = _mcp_list_severity(s.name, scan_map, failed_map)
+        if severity:
+            entry["severity"] = severity
+        if last_good:
+            # GAP-1991: the latest scan failed, so the older result is only
+            # the last good one; it is not this server's current severity.
+            entry["last_good_severity"] = last_good
         if s.name in actions_map:
             ae = actions_map[s.name]
             if not ae.actions.is_empty():
@@ -469,8 +481,9 @@ def _print_mcp_list_table(
     for s in servers:
         severity = "-"
         sev_style = ""
-        if s.name in scan_map:
-            severity = scan_map[s.name]["max_severity"]
+        current, _ = _mcp_list_severity(s.name, scan_map, failed_map)
+        if current:
+            severity = current
             sev_style = {
                 "CRITICAL": "bold red",
                 "HIGH": "red",
@@ -584,6 +597,7 @@ def _build_mcp_scan_map(
             "clean": finding_count == 0,
             "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
             "total_findings": finding_count,
+            "timestamp": ls.get("timestamp"),
         }
         scan_rank[name] = rank
     return scan_map
@@ -607,6 +621,53 @@ def _mcp_scan_target_name(
     if "/" not in target and allow_legacy_plain:
         return target, 0
     return None
+
+
+_FAILED_SCAN_HINT_LIMIT = 5
+
+
+def _failed_scan_next_step(name: str, connector: str, error: str) -> str:
+    """Say what to do about one failed scan, based on its stored error (GAP-1992)."""
+    cmd = f"defenseclaw mcp scan {name} --connector {connector}"
+    err = (error or "").lower()
+    if "--allow-private" in err:
+        return f"refused, the URL is a private or loopback address; to scan it anyway: {cmd} --allow-private"
+    if "allowlisted stdio launcher" in err:
+        return (
+            "refused, the command is not an npx or uvx launcher, so the scanner will not start it; "
+            f"configure it through npx/uvx or a URL, then: {cmd}"
+        )
+    if "disallowed address" in err:
+        return (
+            "refused, the URL resolves to an address the scanner never connects to; "
+            "point it at a public or private host"
+        )
+    return f"fix reachability, then scan again: {cmd}"
+
+
+def _mcp_list_severity(
+    name: str, scan_map: dict[str, dict], failed_map: dict[str, dict] | None,
+) -> tuple[str, str]:
+    """Return ``(current severity, last good severity)`` for one server.
+
+    GAP-1991: ``latest_scans_by_scanner`` skips failed scans, so when the
+    newest scan failed the clean result in *scan_map* is stale. It is then
+    reported only as the last good severity, never as the current one.
+    """
+    scan = scan_map.get(name)
+    if not scan:
+        return "", ""
+    severity = scan.get("max_severity", "")
+    failed = (failed_map or {}).get(name)
+    if failed is None:
+        return severity, ""
+    good_ts, failed_ts = scan.get("timestamp"), failed.get("timestamp")
+    try:
+        if good_ts is not None and failed_ts is not None and good_ts > failed_ts:
+            return severity, ""
+    except TypeError:
+        pass
+    return "", severity
 
 
 def _build_mcp_failed_scan_map(

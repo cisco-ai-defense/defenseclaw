@@ -166,6 +166,10 @@ those remain scan-required. Only the exact vendor cache at
 `$CODEX_HOME/skills/.system` is discovery-only and excluded from every scanner
 and enforcement entrypoint. An unrelated `.system` directory receives no
 exemption.
+In `aibom scan`, such skills count as discovery-only, not eligible: the
+skills table is titled `Skills (6): 1 eligible, 5 discovery-only`, and in
+`--json` each skill's `scan_eligible` matches `summary.skills.eligible`
+(`eligible` still means the agent loads the skill).
 
 Hermes mixes installer-synced and operator-authored skills under
 `$HERMES_HOME/skills`. DefenseClaw grants discovery-only status only when the
