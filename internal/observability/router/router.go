@@ -698,6 +698,27 @@ func (evaluator *Evaluator) Evaluate(metadata Metadata, builder RecordBuilder) (
 	return result, nil
 }
 
+// RouteCommitted returns the admission and deliveries of a log record that
+// was built and persisted to the local store by its producer's own
+// transaction (alert acknowledgement and dismissal), so the caller can hand
+// the same record to the optional destinations that ordinary Evaluate would
+// have selected (GAP-1635). A record whose logs are not collected stays local:
+// floor admission and drop return no deliveries.
+func (evaluator *Evaluator) RouteCommitted(record observability.Record) (Admission, []Delivery, error) {
+	if evaluator == nil {
+		return AdmissionDrop, nil, fmt.Errorf("observability evaluator is nil")
+	}
+	if record.Signal() != observability.SignalLogs || record.IsFloorOnly() {
+		return AdmissionDrop, nil, nil
+	}
+	metadata := metadataFromRecord(record)
+	admission, err := evaluator.Admit(metadata)
+	if err != nil || admission != AdmissionOrdinary {
+		return AdmissionDrop, nil, err
+	}
+	return admission, evaluator.route(metadata, admission), nil
+}
+
 // EvaluateManagedLogFallback is the only release-owned exception to ordinary
 // collection-before-construction. It first proves that ordinary evaluation is
 // AdmissionDrop, then proves that the active immutable plan contains and

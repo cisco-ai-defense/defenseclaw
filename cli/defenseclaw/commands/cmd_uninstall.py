@@ -1356,6 +1356,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         _remove_created_dirs(plan.data_dir)
     if "copilot" in plan.connectors or plan.remove_data_dir:
         _remove_orphan_copilot_plugin()
+    if plan.remove_data_dir and plan.data_dir:
+        # Before the data dir (and the registry naming them) goes.
+        _remove_mcp_writer_backups(plan.data_dir)
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
@@ -1473,6 +1476,47 @@ _COPILOT_PLUGIN_MANIFEST = {
     "version": "1.0.0",
     "hooks": "hooks/hooks.json",
 }
+
+
+def _remove_mcp_writer_backups(data_dir: str) -> None:
+    """Remove the agent-config backups the MCP writer left next to each config (GAP-1699).
+
+    ``defenseclaw mcp set`` copies each agent config it edits to a
+    ``.defenseclaw-<name>.bak`` sibling and records it in
+    ``<data_dir>/connector_backups/mcp/registry.json``. Removing the data dir
+    drops that registry, so the full copies would stay behind with nothing
+    pointing at them. Only a regular file at exactly the name the writer
+    gives that recorded config is removed.
+    """
+    from defenseclaw.connector_paths import _managed_mcp_backup_path
+
+    registry = os.path.join(data_dir, "connector_backups", "mcp", "registry.json")
+    try:
+        with open(registry, encoding="utf-8") as handle:
+            entries = json.load(handle)
+    except (OSError, ValueError):
+        return
+    if not isinstance(entries, dict):
+        return
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        target, backup = entry.get("path"), entry.get("backup")
+        if not isinstance(target, str) or not isinstance(backup, str):
+            continue
+        expected = os.path.abspath(_managed_mcp_backup_path(target))
+        if os.path.normcase(os.path.abspath(backup)) != os.path.normcase(expected):
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(expected).st_mode):
+                continue
+            os.unlink(expected)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove the MCP config backup {expected}: {exc}")
+            continue
+        ux.ok(f"removed {expected}")
 
 
 def _remove_orphan_copilot_plugin() -> None:
@@ -2218,6 +2262,11 @@ def _connector_teardown(plan: UninstallPlan) -> None:
         )
 
 
+# A connector teardown or verify runs the gateway's full config load, which
+# on a busy Windows host with remote observability destinations took 108 s;
+# the old fixed 60 s aborted every uninstall run there (GAP-1663).
+_CONNECTOR_COMMAND_TIMEOUT_S = 300
+
 # ``defenseclaw-gateway connector verify`` exits 2 for a connector name its
 # registry cannot resolve (a config error), distinct from 1 for residue.
 _GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2
@@ -2246,7 +2295,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -2282,6 +2331,7 @@ def _run_gateway_connector_teardown(
     gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
+    ux.subhead(f"tearing down {connector} (on a busy host this can take a few minutes)...")
     try:
         proc = subprocess.run(
             [
@@ -2295,7 +2345,7 @@ def _run_gateway_connector_teardown(
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")
@@ -2325,7 +2375,7 @@ def _run_gateway_connector_teardown(
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             ux.warn(f"gateway connector verification failed to launch: {exc}")

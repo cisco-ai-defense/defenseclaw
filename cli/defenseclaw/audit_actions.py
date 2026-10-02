@@ -284,6 +284,7 @@ ACTION_PLUGIN_DISABLE: Final[str] = "plugin-disable"
 ACTION_PLUGIN_ENABLE: Final[str] = "plugin-enable"
 ACTION_PLUGIN_QUARANTINE: Final[str] = "plugin-quarantine"
 ACTION_PLUGIN_RESTORE: Final[str] = "plugin-restore"
+ACTION_PLUGIN_UNBLOCK: Final[str] = "plugin-unblock"
 ACTION_BLOCK_MCP: Final[str] = "block-mcp"
 ACTION_ALLOW_MCP: Final[str] = "allow-mcp"
 ACTION_MCP_UNBLOCK: Final[str] = "mcp-unblock"
@@ -497,6 +498,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_PLUGIN_ENABLE,
     ACTION_PLUGIN_QUARANTINE,
     ACTION_PLUGIN_RESTORE,
+    ACTION_PLUGIN_UNBLOCK,
     ACTION_BLOCK_MCP,
     ACTION_ALLOW_MCP,
     ACTION_MCP_UNBLOCK,

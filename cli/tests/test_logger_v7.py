@@ -63,14 +63,14 @@ def test_config_version_preflight_reads_only_one_exact_discriminator(
 def test_config_version_preflight_rejects_malformed_yaml(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("config_version: [8\n", encoding="utf-8")
-    with pytest.raises(config_module.ConfigVersionError, match="invalid YAML"):
+    with pytest.raises(config_module.ConfigVersionError, match=r"invalid YAML at line \d+.*config validate"):
         config_module.source_config_version(path=str(path))
 
 
 def test_config_version_preflight_normalizes_invalid_utf8(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_bytes(b"config_version: 8\ninvalid: \xff\n")
-    with pytest.raises(config_module.ConfigVersionError, match="not valid UTF-8"):
+    with pytest.raises(config_module.ConfigVersionError, match=r"not valid UTF-8 text.*config validate"):
         config_module.source_config_version(path=str(path))
 
 

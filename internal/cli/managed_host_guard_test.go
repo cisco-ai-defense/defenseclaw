@@ -147,6 +147,16 @@ func TestManagedUnixConfigLoadErrorNamesTheManagedDeployment(t *testing.T) {
 		!strings.Contains(err.Error(), "enterprise ") {
 		t.Fatalf("status on a managed unix host: %v", err)
 	}
+	// GAP-1196: audit export names its administrator form.
+	audit := &cobra.Command{Use: "audit"}
+	export := &cobra.Command{Use: "export"}
+	root.AddCommand(audit)
+	audit.AddCommand(export)
+	err = managedWindowsConfigLoadError(export, missing)
+	if err == missing || !strings.Contains(err.Error(), "`audit export` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "defenseclaw-gateway audit export`") {
+		t.Fatalf("audit export on a managed unix host: %v", err)
+	}
 }
 
 func TestRefusePerUserGatewayIgnoresAnUntrustedDescriptor(t *testing.T) {

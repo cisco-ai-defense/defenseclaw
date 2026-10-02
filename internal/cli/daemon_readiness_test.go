@@ -52,7 +52,7 @@ func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
 	// A loaded Windows host took 142 s before the API listened (GAP-1206).
 	want := 60 * time.Second
 	if runtime.GOOS == "windows" {
-		want = 240 * time.Second
+		want = 600 * time.Second
 	}
 	if defaultStartReadinessTimeout != want {
 		t.Fatalf("default start readiness timeout = %s, want %s", defaultStartReadinessTimeout, want)
@@ -495,10 +495,30 @@ func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing
 	if ready || err != nil {
 		t.Fatalf("io readiness = %v, error = %v; want retryable not-ready", ready, err)
 	}
+	for _, primary := range []float64{0, 9} {
+		snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+		snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = primary
+		ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+		if ready || err != nil {
+			t.Fatalf("deadline/%v readiness = %v, error = %v; want retryable not-ready", primary, ready, err)
+		}
+	}
 	snap.Telemetry.Details["event_history_last_sqlite_class"] = "full"
 	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(13)
-	if _, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true}); err == nil {
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil {
 		t.Fatal("a full disk must still fail at once")
+	}
+	// GAP-1603: the failure names the cause in plain words.
+	if !strings.Contains(err.Error(), "event_history=sqlite_write_failed/full): audit events cannot be written because the disk holding the audit database is full") {
+		t.Fatalf("error = %v, want the plain cause and SQLite class", err)
+	}
+	startupRetriesSQLiteIO = false
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(9)
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil || !strings.Contains(err.Error(), "event_history=sqlite_write_failed/deadline") {
+		t.Fatalf("deadline elsewhere = %v; want an immediate failure naming the class", err)
 	}
 }
 
@@ -564,9 +584,11 @@ func TestGatewaySnapshotReadyReportsBoundedTelemetryFailureBranches(t *testing.T
 	t.Run("event history", func(t *testing.T) {
 		got := telemetryReadinessFatalError(t, map[string]interface{}{
 			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
-			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+			"event_history_last_sqlite_class": "full", "event_history_last_sqlite_primary_code": float64(13),
 		})
-		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed)"
+		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed/full): " +
+			"audit events cannot be written because the disk holding the audit database is full; " +
+			"free space on that disk (the gateway resumes writing once there is room)"
 		if got != want {
 			t.Fatalf("telemetry event-history diagnostic = %q, want %q", got, want)
 		}

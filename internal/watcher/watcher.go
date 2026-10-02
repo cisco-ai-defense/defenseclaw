@@ -204,6 +204,13 @@ func (w *InstallWatcher) SetBundledPluginCheck(check func(path string) bool) {
 	w.bundledPlugin = check
 }
 
+// isOwnPlugin reports whether a plugin path is connector-managed or
+// DefenseClaw's own unmodified plugin. Admission and the periodic rescan both
+// skip such plugins, so neither raises findings on DefenseClaw's own code.
+func (w *InstallWatcher) isOwnPlugin(path string) bool {
+	return w.isManagedArtifact(path) || (w.bundledPlugin != nil && w.bundledPlugin(path))
+}
+
 func (w *InstallWatcher) isManagedArtifact(path string) bool {
 	for _, managedPath := range w.managedArtifacts {
 		if sameWatcherPath(path, managedPath) {

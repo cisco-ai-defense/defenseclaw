@@ -158,8 +158,12 @@ _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 # can retain fail-closed canonical admission without trying to audit through a
 # sidecar that ``init --no-start-gateway`` deliberately left stopped.
 _SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
-_CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
-_CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS = 300.0
+# A loaded Windows host (Defender at 50-100 % CPU) took minutes to admit
+# each connector after a restart, so the 60 s no-progress budget failed a
+# gateway that was still converging and the rollback then raced it
+# (GAP-1206).
+_CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 180.0 if os.name == "nt" else 60.0
+_CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS = 900.0 if os.name == "nt" else 300.0
 # How long Setup waits for a running OpenCode to report that it loaded the
 # managed plugin before it accepts the plugin as current but not yet loaded.
 _OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS = 10.0
@@ -180,11 +184,11 @@ _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
-# for the port (up to 10 s), then waits for READY itself (240 s on Windows,
+# for the port (up to 10 s), then waits for READY itself (600 s on Windows,
 # 60 s elsewhere) and only then starts the watchdog. Killing it earlier left a
 # slow Windows start without its watchdog and raced the setup rollback against
-# a gateway that was still coming up (GAP-1206, GAP-1396).
-_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 300
+# a gateway that was still coming up (GAP-1206, GAP-1396, GAP-1659).
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 660
 _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS = _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS if os.name == "nt" else 30
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
@@ -417,25 +421,29 @@ def setup(
 ) -> None:
     """Configure DefenseClaw components.
 
-    Legacy behavior:
-    Multi-connector:
-      One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
-      with 'defenseclaw setup <connector>' (choose Add when prompted),
-      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
-      with 'defenseclaw guardrail ... --connector X', and inspect the
-      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
-      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
+    Run 'defenseclaw setup <connector>' to add an agent connector, or one of
+    the subcommands below for guardrails, observability, keys and more.
 
-    Legacy warning:
-    Batch (no subcommand):
-      'defenseclaw setup' with no subcommand launches an interactive
-      active-connector picker (detected connectors pre-checked), then
-      batch mode / optional judge connector pickers. For scripting, select
-      connectors with repeatable '-c/--connector', '--detected', and/or
-      '--all' (e.g. 'defenseclaw setup -c hermes -c codex --mode action').
-      Use '--add-detected --yes' to add newly installed connectors in observe
-      mode without changing the existing active roster or its modes.
+    \b
+    Multi-connector:
+      One gateway enforces several agent-native connectors (codex, claudecode,
+      hermes, antigravity, omnigent and others), listed under
+      guardrail.connectors.
+        Add one:       defenseclaw setup <connector>  (choose Add when asked)
+        Remove one:    defenseclaw setup remove <name>
+        Scope policy:  defenseclaw guardrail ... --connector <name>
+        See them all:  defenseclaw status, defenseclaw guardrail status
+      OpenClaw and ZeptoClaw use the proxy path, so they can't be added this way.
+
+    \b
+    With no subcommand:
+      'defenseclaw setup' opens a connector picker (detected connectors are
+      pre-checked), then asks for the mode and an optional judge connector.
+      For scripts, pick connectors with -c/--connector (repeatable),
+      --detected or --all, for example:
+        defenseclaw setup -c hermes -c codex --mode action
+      Use --add-detected --yes to add newly installed connectors in observe
+      mode without changing the existing connectors or their modes.
     """
     app = ctx.find_object(AppContext)
     if (
@@ -2304,6 +2312,15 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
     return rows
 
 
+# The gateway route for each connector's hook endpoint (Go HookAPIPath()).
+# Only Claude Code's route differs from its connector name.
+_HOOK_API_ROUTE_NAMES = {"claudecode": "claude-code"}
+
+
+def _hook_api_path(connector: str) -> str:
+    return f"/api/v1/{_HOOK_API_ROUTE_NAMES.get(connector, connector)}/hook"
+
+
 def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: str) -> None:
     if as_json:
         click.echo(_json.dumps({"ok": ok, "path": path, "message": message}, indent=2))
@@ -2318,7 +2335,6 @@ def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: st
 def trusted_paths(ctx: click.Context) -> None:
     """Manage directories DefenseClaw trusts for connector-binary discovery.
 
-    Legacy examples:
     Action-mode setup reads a connector's version by executing its binary, but
     only when that binary lives under a trusted prefix — a guard against a
     hostile binary planted on $PATH. Built-in defaults cover system and
@@ -5391,10 +5407,21 @@ def _record_windows_setup_agent_selections(
         return None
 
     target_dir = data_dir or os.path.expanduser("~/.defenseclaw")
+    # Each executable is probed and hashed again here; with ten connectors on
+    # a busy Windows host that took minutes with no output, so setup looked
+    # hung after its version line (GAP-1571).
+    started = time.monotonic()
+    if host_os == "windows":
+        ux.subhead(
+            f"Verifying {len(selected)} agent executable(s) ({', '.join(selected)}): "
+            "version probe and digest; this can take a few minutes on a busy host..."
+        )
     try:
         selections, selection_errors = record_setup_agent_selections(target_dir, selected)
     except OSError as exc:
         raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
+    if host_os == "windows" and selections:
+        ux.ok(f"Verified {len(selections)} agent executable(s) in {time.monotonic() - started:.0f} s")
 
     for connector in selected:
         if connector not in selections and connector not in selection_errors:
@@ -5608,8 +5635,19 @@ def _hilt_support_note(connector: str) -> str:
     return "Support depends on the connector surface."
 
 
-def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = None) -> None:
-    """Prompt for human approval settings from the guardrail advanced section."""
+def _configure_hilt_interactive(
+    gc,
+    *,
+    action_connectors: list[str] | None = None,
+    flag_enabled: bool | None = None,
+    flag_min_severity: str | None = None,
+) -> None:
+    """Prompt for human approval settings from the guardrail advanced section.
+
+    ``flag_enabled`` / ``flag_min_severity`` are ``--human-approval`` and
+    ``--hilt-min-severity``: when given, the prompts default to them, so
+    pressing Enter keeps what the command line asked for (GAP-1614).
+    """
     ux.section("Human Approval (HILT)")
     if action_connectors is not None:
         if not action_connectors:
@@ -5626,13 +5664,16 @@ def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = Non
         connector = gc.connector or "openclaw"
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
-    enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
+    enabled = click.confirm(
+        "  Human approval for risky actions?",
+        default=gc.hilt.enabled if flag_enabled is None else flag_enabled,
+    )
     gc.hilt.enabled = enabled
     if not enabled:
         gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
         return
 
-    default_min = (gc.hilt.min_severity or "HIGH").upper()
+    default_min = (flag_min_severity or gc.hilt.min_severity or "HIGH").upper()
     if default_min not in _HILT_MIN_SEVERITIES:
         default_min = "HIGH"
     gc.hilt.min_severity = click.prompt(
@@ -6524,12 +6565,16 @@ def setup_guardrail(
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
+        if guard_mode or human_approval is not None or hilt_min_severity:
+            click.echo("  The prompts below default to the flags you passed; add --yes to skip them.")
         try:
             interactive_completed = _interactive_guardrail_setup(
                 app,
                 gc,
                 agent_name=agent_name,
                 default_mode=guard_mode,
+                human_approval=human_approval,
+                hilt_min_severity=hilt_min_severity,
                 _pre_mutation_selection=preselect_guardrail_targets,
                 _pending_secrets=pending_guardrail_secrets,
             )
@@ -8411,9 +8456,33 @@ def _teardown_restored_inactive_connectors(data_dir: str, connectors: tuple[str,
                 )
 
 
+def _failed_start_left_nothing(
+    cfg,
+    snapshot: _SetupConfigSnapshot,
+    failed_locations: tuple[_SetupRegistrationLocationEvidence, ...],
+) -> bool:
+    """Whether a stopped gateway's failed setup start left nothing to reconcile.
+
+    When the start never ran a gateway (for example another account holds the
+    API port), no gateway is running and the restored runtime already matches
+    the snapshot. Starting it again only to stop it fails the same way and
+    reported the rollback as incomplete (GAP-1705).
+    """
+    from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+    try:
+        trust = _trusted_gateway_listener(cfg, platform_name="win32")
+        if trust.code not in {"missing", "missing_process"}:
+            return False
+        return not _verify_restored_setup_runtime(cfg, snapshot, failed_locations)
+    except Exception:  # noqa: BLE001 - fall back to the reconciling restart.
+        return False
+
+
 def _restore_prior_setup_lifecycle(
     app: AppContext,
     snapshot: _SetupConfigSnapshot,
+    failed_locations: tuple[_SetupRegistrationLocationEvidence, ...] = (),
 ) -> Exception | None:
     expected = snapshot.applied_runtime
     if expected is None:
@@ -8423,6 +8492,12 @@ def _restore_prior_setup_lifecycle(
         return None
 
     inactive_connectors = _stopped_snapshot_inactive_connectors(snapshot)
+    if _failed_start_left_nothing(app.cfg, snapshot, failed_locations):
+        if inactive_connectors:
+            reactivated = _restored_reactivated_inactive_connectors(app.cfg.data_dir, inactive_connectors)
+            if reactivated:
+                _teardown_restored_inactive_connectors(app.cfg.data_dir, reactivated)
+        return None
 
     from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
 
@@ -8611,7 +8686,11 @@ def _rollback_failed_connector_application(
     if authority_safe:
         try:
             if exact_runtime:
-                lifecycle_error = _restore_prior_setup_lifecycle(app, snapshot)
+                lifecycle_error = _restore_prior_setup_lifecycle(
+                    app,
+                    snapshot,
+                    failed_registration_locations or (),
+                )
                 pre_lock_runtime_failures = _verify_restored_setup_runtime(
                     app.cfg,
                     snapshot,
@@ -8685,10 +8764,15 @@ def _rollback_failed_connector_application(
         if rollback_errors
         else "restored the prior connector configuration and runtime"
     )
-    failure = click.ClickException(
-        f"connector setup did not converge {cause_text}; {outcome}. "
-        "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
-    )
+    if isinstance(cause, _GatewayRestartFailed):
+        # GAP-1705: the gateway did not start; say that (with its next steps)
+        # instead of a reference that is the same for every such failure.
+        failure = click.ClickException(f"{cause.format_message()} Setup {outcome}.")
+    else:
+        failure = click.ClickException(
+            f"connector setup did not converge {cause_text}; {outcome}. "
+            "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
+        )
     if exact_runtime:
         raise failure from None
     raise failure from cause
@@ -9454,7 +9538,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("    • Hooks      — five bound lifecycle events → /api/v1/antigravity/hook")
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
-        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
+        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
     native_otel_connectors = {"codex", "claudecode", "omnigent"}
     if connector in native_otel_connectors:
         if connector == "omnigent":
@@ -12603,6 +12687,8 @@ def _interactive_guardrail_setup(
     *,
     agent_name: str | None = None,
     default_mode: str | None = None,
+    human_approval: bool | None = None,
+    hilt_min_severity: str | None = None,
     _pre_mutation_selection=None,
     _pending_secrets: list[_PendingGuardrailSecret] | None = None,
 ) -> bool:
@@ -12689,7 +12775,13 @@ def _interactive_guardrail_setup(
             data_dir=getattr(app.cfg, "data_dir", None),
         )
         if _pre_mutation_selection is not None:
-            _pre_mutation_selection((selected_connector,))
+            # After a default uninstall the guardrail is off but the kept
+            # connectors stay configured, and the version check covers all of
+            # them; the exact OpenCode selection must cover the same set, or
+            # setup aborted with "exact OpenCode selection was not recorded"
+            # (GAP-1695).
+            kept = sorted(name for name in (getattr(gc, "connectors", None) or {}) if (name or "").strip())
+            _pre_mutation_selection(tuple(dict.fromkeys((selected_connector, *kept))))
         gc.connector = selected_connector
         click.echo()
         _print_connector_info(gc.connector)
@@ -12828,7 +12920,12 @@ def _interactive_guardrail_setup(
         hilt_action_connectors = None
         hilt_applicable = gc.mode == "action"
     if hilt_applicable:
-        _configure_hilt_interactive(gc, action_connectors=hilt_action_connectors)
+        _configure_hilt_interactive(
+            gc,
+            action_connectors=hilt_action_connectors,
+            flag_enabled=human_approval,
+            flag_min_severity=hilt_min_severity,
+        )
 
     ux.section("Scanner engine")
     click.echo(
@@ -13450,13 +13547,17 @@ def _restart_services(
     _fail_if_restart_failed(failed)
 
 
+class _GatewayRestartFailed(click.ClickException):
+    """A setup restart or start of the gateway failed (fixed, secret-free text)."""
+
+
 def _fail_if_restart_failed(failed: list[str]) -> None:
     """Raise a ``ClickException`` (non-zero exit) when any service restart
     failed, so setup fails closed instead of silently reporting success
     against a gateway that never came back up (Avarice F-0142/F-0143)."""
     if not failed:
         return
-    raise click.ClickException(
+    raise _GatewayRestartFailed(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)
         + ". The requested configuration was not verified as applied, so the agents may not be "
@@ -15009,7 +15110,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
 
     click.echo("")
     click.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
-    _restart_defense_gateway(data_dir, start_if_stopped=False)
+    if not _restart_defense_gateway(data_dir, start_if_stopped=False):
+        # GAP-1573: a failed restart left the change unapplied but exited 0.
+        _fail_if_restart_failed(["defenseclaw-gateway"])
 
 
 def _openclaw_gateway_healthy(host: str, port: int, timeout: float = 5.0) -> bool:

@@ -10694,6 +10694,9 @@ producer_identity_sets:
   - event_name: legacy.audit.plugin.restore
     bucket: enforcement.action
     compatibility_only: true
+  - event_name: legacy.audit.plugin.unblock
+    bucket: enforcement.action
+    compatibility_only: true
   - event_name: legacy.audit.quarantine
     bucket: enforcement.action
     compatibility_only: true
@@ -10963,6 +10966,9 @@ producer_identity_sets:
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.plugin.restore
+    bucket: enforcement.action
+    compatibility_only: true
+  - event_name: legacy.audit.plugin.unblock
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.quarantine
@@ -14992,6 +14998,25 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.plugin.restore
+    bucket: enforcement.action
+    compatibility_only: true
+- producer: audit_action
+  key: plugin-unblock
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.enforcement_action
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  - enforcement_state_change
+  companion_rules:
+  - asset_lifecycle_on_state_change
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.plugin.unblock
     bucket: enforcement.action
     compatibility_only: true
 - producer: audit_action

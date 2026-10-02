@@ -117,6 +117,16 @@ def test_systemd_root_hook_units_keep_setid_capabilities_under_a_syscall_filter(
         assert "User=root" in lines and "NoNewPrivileges=true" in lines, name
 
 
+def test_systemd_enumerator_can_publish_refused_surfaces():
+    # The enumerator writes refused-surfaces.json into the guardian data dir;
+    # under ProtectSystem=strict that dir must be writable or every cycle
+    # fails with EROFS and the gateway never sees the refusals (GAP-1441).
+    lines = _unit("defenseclaw-hook-enumerator.service")
+    assert "ProtectSystem=strict" in lines
+    assert "/var/lib/defenseclaw-hook-guardian" in _unit_values(lines, "ReadWritePaths")
+    assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in lines
+
+
 def test_launchd_standalone_daemons():
     directory = ROOT / "packaging" / "launchd-standalone"
     labels = sorted(p.stem for p in directory.glob("*.plist"))

@@ -778,3 +778,27 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 		t.Fatal("expected non-empty content hash")
 	}
 }
+
+func TestEnumerateTargetsSkipsOwnBundledPlugin(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	own := filepath.Join(pluginDir, "defenseclaw")
+	other := filepath.Join(pluginDir, "other")
+	for _, d := range []string{own, other} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+	w.SetBundledPluginCheck(func(path string) bool { return path == own })
+
+	var plugins []string
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target.Path)
+		}
+	}
+	if len(plugins) != 1 || plugins[0] != other {
+		t.Fatalf("rescan plugin targets = %v, want only %s", plugins, other)
+	}
+}

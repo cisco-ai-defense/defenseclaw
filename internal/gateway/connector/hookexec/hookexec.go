@@ -1132,15 +1132,26 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
-				"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, unreachableDetail(opts, reason))
+				"defenseclaw: %s (fail mode closed): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableDetail(opts, reason))
 			if text := perUserGatewayDownText(opts, reason); text != "" {
 				return emitPerUserGatewayDown(opts, sp, text)
 			}
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, unreachableDetail(opts, reason))
+	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
 	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+// unreachableLead starts the unreachable line. Another account's process on
+// the gateway port answers, so the gateway is not "unreachable" there; the
+// line names the blocked or allowed event instead, a prompt rather than a
+// tool for UserPromptSubmit (GAP-1706).
+func unreachableLead(opts Options, sp spec, reason, verdict string) string {
+	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
+		return verdict + " this " + hookEventSubject(opts.Event)
+	}
+	return "gateway unreachable, " + verdict + " " + sp.subject
 }
 
 // unreachableDetail is the text after the colon of the unreachable line. The

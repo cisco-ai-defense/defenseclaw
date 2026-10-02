@@ -320,6 +320,7 @@ const (
 	ActionPluginEnable             Action = "plugin-enable"
 	ActionPluginQuarantine         Action = "plugin-quarantine"
 	ActionPluginRestore            Action = "plugin-restore"
+	ActionPluginUnblock            Action = "plugin-unblock"
 	ActionBlockMCP                 Action = "block-mcp"
 	ActionAllowMCP                 Action = "allow-mcp"
 	ActionMCPUnblock               Action = "mcp-unblock"
@@ -537,6 +538,7 @@ func AllActions() []Action {
 		ActionPluginEnable,
 		ActionPluginQuarantine,
 		ActionPluginRestore,
+		ActionPluginUnblock,
 		ActionBlockMCP,
 		ActionAllowMCP,
 		ActionMCPUnblock,

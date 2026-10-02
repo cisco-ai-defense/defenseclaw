@@ -68,6 +68,29 @@ def test_helper_timeout_is_not_reported_as_invalid(monkeypatch: pytest.MonkeyPat
         config_inspect._run(["defenseclaw-gateway", "config-v8", "validate"])
 
 
+def test_doctor_reports_helper_timeout_as_warn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # GAP-1621: a helper timeout is a busy host; both doctor rows warn.
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.observability import v8_status
+
+    (tmp_path / "config.yaml").write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
+
+    def slow(*_args, **_kwargs):
+        raise config_inspect.ConfigInspectTimeoutError("the configuration check did not finish within 60 s")
+
+    monkeypatch.setattr(config_inspect, "inspect_v8_config", slow)
+    monkeypatch.setattr(v8_status, "inspect_v8_config", slow)
+    with pytest.raises(config_inspect.ConfigInspectTimeoutError):
+        v8_status.inspect_v8_operator_status(tmp_path / "config.yaml")
+    result = cmd_doctor._DoctorResult()
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    cmd_doctor._check_config(cfg, result)
+    cmd_doctor._check_observability(cfg, result)
+    assert (result.failed, result.warned) == (0, 2)
+
+
 def test_version_detail_arrow_has_ascii_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     # GAP-1601: '↳' came out as mojibake when piped in PowerShell.
     monkeypatch.setattr(ux, "_configured_unicode_output", False)

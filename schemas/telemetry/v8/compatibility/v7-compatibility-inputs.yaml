@@ -226,6 +226,7 @@ classes:
       ActionPluginEnable: "plugin-enable"
       ActionPluginQuarantine: "plugin-quarantine"
       ActionPluginRestore: "plugin-restore"
+      ActionPluginUnblock: "plugin-unblock"
       ActionBlockMCP: "block-mcp"
       ActionAllowMCP: "allow-mcp"
       ActionMCPUnblock: "mcp-unblock"
