@@ -304,6 +304,11 @@ enabled:
   scan intervals after the user's last successful scan.
 - `mode`, `include_shell_history`, `include_package_manifests` and
   `store_raw_local_paths` apply as usual.
+- Administrators read the per-user records on the host with
+  `defenseclaw-gateway enterprise linux discovery` or
+  `enterprise macos discovery` (root, read-only; `--user`, `--json`).
+- Skills and MCP servers found this way are inventoried only: the managed
+  gateway does not run the skill or MCP scanners on them.
 
 These per-user scans run on Linux and macOS. On Windows the gateway service
 scans every enrolled user's profile itself: the hook enumerator grants the
