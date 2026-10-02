@@ -13,15 +13,60 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 )
 
+// ownGatewayListener has the listener-owner check (foreignGatewayListenerAt)
+// see this account's running gateway on the test server's port.
+func ownGatewayListener(t *testing.T) {
+	t.Helper()
+	previous := gatewayManagedState
+	gatewayManagedState = func() (bool, int) { return true, os.Getpid() }
+	t.Cleanup(func() { gatewayManagedState = previous })
+}
+
+// TestObservabilityV8HelpersSendNoTokenToAnotherListener: while this
+// account's gateway is not running, the canary and destination-test helpers
+// send nothing to the process on the API port (GAP-1563).
+func TestObservabilityV8HelpersSendNoTokenToAnotherListener(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows proves listener ownership separately")
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	configPath, dataDir := traceCanaryHelperConfigWithBind(t, server.URL, "foreign-listener-token", "127.0.0.1")
+	// No gateway of this account runs (the helper's cleanup restores it).
+	gatewayManagedState = func() (bool, int) { return false, 0 }
+
+	result, err := requestTraceCanary(t.Context(), "galileo", configPath, dataDir, 2*time.Second)
+	if err == nil || result.FailureClass != "gateway_not_this_account" {
+		t.Fatalf("canary = %+v / %v", result, err)
+	}
+	activity := `{"phase":"attempt","destination":"soc","probe_id":"probe-1","mode":"handshake","result":"attempted"}`
+	err = recordDestinationTestActivity(t.Context(), strings.NewReader(activity), configPath, dataDir)
+	if err == nil || !strings.Contains(err.Error(), "the gateway token was not sent") {
+		t.Fatalf("destination test = %v", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("the listener received %d requests", n)
+	}
+}
+
 func TestRecordDestinationTestActivityUsesAuthenticatedLoopbackOnly(t *testing.T) {
+	ownGatewayListener(t)
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
@@ -83,6 +128,7 @@ func TestRecordDestinationTestActivityUsesAuthenticatedLoopbackOnly(t *testing.T
 }
 
 func TestRecordDestinationTestActivityBoundsRemoteFailure(t *testing.T) {
+	ownGatewayListener(t)
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	const secret = "server-response-secret"
@@ -407,6 +453,7 @@ func traceCanaryHelperConfigWithBind(
 	apiBind string,
 ) (string, string) {
 	t.Helper()
+	ownGatewayListener(t)
 	parsed, err := url.Parse(serverURL)
 	if err != nil {
 		t.Fatal(err)

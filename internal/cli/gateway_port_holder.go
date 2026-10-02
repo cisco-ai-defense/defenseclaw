@@ -34,12 +34,20 @@ var (
 // prove listener ownership separately and managed deployments run the
 // gateway as a service, so both keep their own checks.
 func foreignGatewayListener(cfg *config.Config) string {
-	if cfg == nil || runtime.GOOS == "windows" || cfg.StandaloneEnterprise() ||
+	if cfg == nil {
+		return ""
+	}
+	return foreignGatewayListenerAt(cfg, gatewayClientHost(cfg), cfg.Gateway.APIPort)
+}
+
+// foreignGatewayListenerAt is foreignGatewayListener for the API listener at
+// host:port, for a caller that resolved the address from its own view of the
+// configuration (the observability-v8 helpers). cfg may be nil.
+func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string {
+	if runtime.GOOS == "windows" || (cfg != nil && cfg.StandaloneEnterprise()) ||
 		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return ""
 	}
-	port := cfg.Gateway.APIPort
-	host := gatewayClientHost(cfg)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
