@@ -58,7 +58,7 @@ class LLMPolicy:
     max_output_tokens: int = 8192
     meta_multiplier: int = 3
     consensus_runs: int = 1
-    python_binary: str = "python3"
+    python_binary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -215,6 +215,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	for _, dir := range w.pluginDirs {
 		if watcherConnectorName(w.cfg) == "claudecode" {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
+				if w.isOwnPlugin(plugin) {
+					continue
+				}
 				targets = append(targets, InstallEvent{
 					Type:      InstallPlugin,
 					Name:      claudeWatcherPluginIdentity(dir, plugin),
@@ -232,6 +235,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 		for _, e := range entries {
 			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			if w.isOwnPlugin(filepath.Join(dir, e.Name())) {
 				continue
 			}
 			targets = append(targets, InstallEvent{
