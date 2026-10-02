@@ -50,9 +50,10 @@ def test_every_tab_has_a_name_at_160_columns_and_short_active_names_end_with_an_
         bare = [name for name, key, _label in PANELS if labels[name] in {key, f"{key}⁵"}]
         assert bare == [], (active, labels)
         assert labels["inventory"] == "6 Inv" and labels["runtime"] == "N Run"
-    # GAP-1541: an abbreviated active tab says it is abbreviated.
+    # GAP-1751: at 80 columns the active tab reads in full when other tabs'
+    # names and minor badges make room (an abbreviated one still ends with "…").
     labels = tab_fit.fit_tab_labels(PANELS, "sandboxes", unread, 66)
-    assert labels["sandboxes"].endswith("…")
+    assert labels["sandboxes"] == "7 Sandboxes" and "⁵" in labels["alerts"]
 
 
 def test_palette_enter_uses_the_text_typed_so_far() -> None:

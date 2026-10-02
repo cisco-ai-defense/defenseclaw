@@ -64,6 +64,14 @@ AUDIT_COMMON_FILTER_LABELS: dict[AuditCommonFilter, str] = {
     "credentials": "Credentials",
 }
 
+_CHIP_HINTS: dict[str, str] = {
+    "": "Showing all audit events.",
+    "risk": "Showing high-risk audit events.",
+    "blocks": "Showing block/deny/quarantine events.",
+    "scans": "Showing scan and finding events.",
+    "credentials": "Showing credential/key related events.",
+}
+
 
 @dataclass(frozen=True)
 class AuditActionIntent:
@@ -276,7 +284,7 @@ class AuditPanelModel:
         if hidden:
             # The default view hides routine events (gateway starts, reloads,
             # migrations); say so, or a table of zero rows looks broken.
-            summary += f" · {hidden} routine hidden, 1 shows all"
+            summary += f" · {hidden} routine hidden, l shows all"
         return AuditToolbarState(
             summary_label=summary,
             filter_label=filter_label,
@@ -436,6 +444,22 @@ class AuditPanelModel:
         self.correlation_target = ""
         self.correlation_run_id = ""
         self.apply_filter()
+
+    def step_common_filter(self, step: int) -> str:
+        """Move to the previous or next chip (All .. Credentials); the status text."""
+
+        order: tuple[AuditCommonFilter, ...] = ("", "risk", "blocks", "scans", "credentials")
+        if self.common_filter in order and (self.common_filter or self.show_all_events):
+            index = order.index(self.common_filter) + step
+        else:
+            index = 0  # the default view (routine rows hidden) steps to All
+        target = order[max(0, min(index, len(order) - 1))]
+        if not target:
+            self.show_all_events = True
+        self.set_common_filter(target)
+        if not target and self.store is not None:
+            self.refresh()
+        return _CHIP_HINTS[target]
 
     def set_common_filter(self, preset: AuditCommonFilter) -> None:
         self.common_filter = preset
@@ -699,24 +723,10 @@ class AuditPanelModel:
                 True,
                 hint="Type search. Use field:value like severity:HIGH, action:block, target:skill.",
             )
-        if key == "1":
-            self.show_all_events = True
-            self.set_common_filter("")
-            if self.store is not None:
-                self.refresh()
-            return AuditPanelAction(True, hint="Showing all audit events.")
-        if key == "2":
-            self.set_common_filter("risk")
-            return AuditPanelAction(True, hint="Showing high-risk audit events.")
-        if key == "3":
-            self.set_common_filter("blocks")
-            return AuditPanelAction(True, hint="Showing block/deny/quarantine events.")
-        if key == "4":
-            self.set_common_filter("scans")
-            return AuditPanelAction(True, hint="Showing scan and finding events.")
-        if key == "5":
-            self.set_common_filter("credentials")
-            return AuditPanelAction(True, hint="Showing credential/key related events.")
+        if key in {"h", "l"}:
+            # h/l step through the chips; the digits stay panel keys, as the
+            # tab bar shows (5 used to filter to Credentials, GAP-1934).
+            return AuditPanelAction(True, hint=self.step_common_filter(-1 if key == "h" else 1))
         if key == "t":
             if self.filter_same_target():
                 return AuditPanelAction(True, hint="Correlated audit view by selected target.")
@@ -743,7 +753,7 @@ class AuditPanelModel:
         if not self.filtered and not self.filter_text:
             hidden = self.hidden_routine_count()
             if hidden:
-                body = f"{hidden} routine events are hidden (gateway starts, reloads). Press 1 to show all events."
+                body = f"{hidden} routine events are hidden (gateway starts, reloads). Press l (or click All) to show all events."
             elif self.loading:
                 body = "Loading audit events... a large audit database can take a minute to read."
             else:

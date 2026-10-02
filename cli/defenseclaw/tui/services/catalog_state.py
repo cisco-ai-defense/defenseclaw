@@ -859,10 +859,11 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         merged = self.connector_filter_empty_state("MCP servers") or self.merged_empty_state("MCP servers")
         if merged:
             return merged
-        return (
-            f"No MCP servers configured in {connector_source_label(self.connector, 'mcps')} "
-            f"(active connector: {friendly_connector_name(self.connector)})."
-        )
+        name = friendly_connector_name(self.connector)
+        source = connector_source_label(self.connector, "mcps")
+        if not source:
+            return f"No MCP servers found for {name}."
+        return f"No MCP servers configured in {source} (active connector: {name})."
 
 
 class PluginsPanelModel(CatalogListModel[PluginRow]):
@@ -1812,6 +1813,10 @@ def connector_source_label(connector: str, category: str) -> str:
     claude_config = connector_config_files("claudecode")[0]
     codex_config = connector_config_files("codex")[0]
     devin_root = connector_home("devin")
+    try:
+        hermes_config = hermes_config_path()
+    except ValueError:  # an invalid HERMES_HOME; still name the default file
+        hermes_config = "~/.hermes/config.yaml"
     opencode_plugin = connector_config_files("opencode")[0]
     opencode_mcp_sources = [
         "authenticated remote .well-known/opencode (mcp; provenance unverified locally)",
@@ -1879,6 +1884,13 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.codex/config.toml ([mcp_servers]; trusted projects only)",
         ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
+        # The files the gateway reads (internal/config/claw.go); without an
+        # entry the empty state read "configured in  (active connector:
+        # Hermes)" (GAP-1935).
+        ("hermes", "mcps"): (f"{hermes_config} (mcp_servers)",),
+        ("cursor", "mcps"): ("~/.cursor/mcp.json", "./.cursor/mcp.json"),
+        ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
+        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("devin", "mcps"): (
             os.path.join(devin_root, "mcp_config.json"),
             "./.devin/mcp_config.json",

@@ -229,7 +229,7 @@ def fit_tab_labels(
         title = titles[active]
         short = _names(active, title)[1]
         wanted = list(dict.fromkeys((title, _abbreviated(short, title), short)))
-        if chosen[active] and width_of({**chosen, active: title}) > width:
+        if width_of({**chosen, active: title}) > width:
             # The tab you are on reads in full before other tabs keep their
             # least important badges: "R Registry…" showed on a 200-column
             # screen for want of one cell (GAP-1751). Alerts keeps its count.
@@ -256,11 +256,16 @@ def fit_tab_labels(
                 break
         else:
             if active not in named:
-                # Prefer "Sandbox…"; keep plain "Sandbox" when the "…" would
-                # cost another tab its name.
+                # The full name first when other tabs' names and minor badges
+                # make room for it and the Alerts count stays ("R Registry…"
+                # with room left at 80 columns, GAP-1751). Then prefer
+                # "Sandbox…"; keep plain "Sandbox" when the "…" would cost
+                # another tab its name.
                 tiny, short, _title = _names(active, title)
-                best: tuple[int, dict[str, str], set[str]] | None = None
-                for name_text in dict.fromkeys((short, tiny)):
+                best: tuple[int, dict[str, str], set[str]] | None = _squeeze({**chosen, active: title})
+                if best is not None and KEEP_BADGE & best[2]:
+                    best = None
+                for name_text in dict.fromkeys((short, tiny)) if best is None else ():
                     for want in dict.fromkeys((_abbreviated(name_text, title), name_text)):
                         squeezed = _squeeze({**chosen, active: want})
                         if squeezed is not None and (best is None or squeezed[0] < best[0]):

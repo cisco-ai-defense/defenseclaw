@@ -26,10 +26,10 @@ def test_hidden_routine_events_are_counted_and_explained() -> None:
 
     assert model.filtered == []
     assert model.hidden_routine_count() == 2
-    assert "2 routine hidden, 1 shows all" in model.toolbar_state().summary_label
-    assert "Press 1 to show all events" in model.render_text()
+    assert "2 routine hidden, l shows all" in model.toolbar_state().summary_label
+    assert "Press l (or click All) to show all events" in model.render_text()
 
-    model.handle_key("1")
+    model.handle_key("l")
     assert len(model.filtered) == 2
     assert model.hidden_routine_count() == 0
     assert "routine hidden" not in model.toolbar_state().summary_label
