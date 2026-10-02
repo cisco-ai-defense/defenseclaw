@@ -62,8 +62,12 @@ class VerifiedHarnessContractTest(unittest.TestCase):
             "unverified hooks": [verified_claudecode_image(hook_fire_verified=False)],
             "another connector": [verified_claudecode_image(connector="codex")],
             "another release built it": [verified_claudecode_image(defenseclaw_version="0.8.9")],
-            "harness version has no reviewed contract": [
-                verified_claudecode_image(harness_version="9.9.9")
+            # 2.0.0 is below claudecode-hooks-v1's reviewed range (>= 2.1.154).
+            "harness version below every reviewed range": [
+                verified_claudecode_image(harness_version="2.0.0")
+            ],
+            "harness version cannot be normalized": [
+                verified_claudecode_image(harness_version="not-a-version")
             ],
             "record has no harness version": [verified_claudecode_image(harness_version="")],
         }
@@ -75,6 +79,17 @@ class VerifiedHarnessContractTest(unittest.TestCase):
                     verified_harness_contract(tmp, "claudecode", release=RELEASE),
                     f"{name}: evidence must not be accepted",
                 )
+
+    def test_inherits_the_builders_forward_compatibility(self) -> None:
+        # A harness version above the newest reviewed minimum is claimed by that
+        # contract: the same predicate the image build applied before the record
+        # existed (harness.Spec.InstallSteps -> CheckContract).
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_store(Path(tmp), [verified_claudecode_image(harness_version="9.9.9")])
+            evidence = verified_harness_contract(tmp, "claudecode", release=RELEASE)
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence.contract_id, "claudecode-hooks-v2")
 
     def test_prefers_newest_record(self) -> None:
         older = verified_claudecode_image(

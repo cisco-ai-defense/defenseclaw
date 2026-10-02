@@ -79,8 +79,14 @@ func TestSandboxHarnessHookContractRefusals(t *testing.T) {
 	foreignRelease := verifiedClaudeCodeImage()
 	foreignRelease.DefenseClawVersion = "0.8.9"
 
+	// 2.0.0 is below claudecode-hooks-v1's reviewed range (>= 2.1.154), so no
+	// contract claims it; a version above the newest minimum is claimed by that
+	// contract on purpose (see the forward-compatibility test below).
 	unknownHarness := verifiedClaudeCodeImage()
-	unknownHarness.HarnessVersion = "9.9.9"
+	unknownHarness.HarnessVersion = "2.0.0"
+
+	unparseableHarness := verifiedClaudeCodeImage()
+	unparseableHarness.HarnessVersion = "not-a-version"
 
 	noVersion := verifiedClaudeCodeImage()
 	noVersion.HarnessVersion = ""
@@ -93,7 +99,8 @@ func TestSandboxHarnessHookContractRefusals(t *testing.T) {
 		{name: "unverified hooks", records: []image.Record{unverified}},
 		{name: "another connector", records: []image.Record{otherConnector}},
 		{name: "another release built it", records: []image.Record{foreignRelease}},
-		{name: "harness version has no reviewed contract", records: []image.Record{unknownHarness}},
+		{name: "harness version below every reviewed range", records: []image.Record{unknownHarness}},
+		{name: "harness version cannot be normalized", records: []image.Record{unparseableHarness}},
 		{name: "record has no harness version", records: []image.Record{noVersion}},
 	}
 	for _, tc := range cases {
@@ -108,6 +115,26 @@ func TestSandboxHarnessHookContractRefusals(t *testing.T) {
 				t.Fatalf("refusal case accepted evidence: %+v", evidence)
 			}
 		})
+	}
+}
+
+// TestSandboxHarnessHookContractInheritsTheBuildersForwardCompatibility pins
+// the semantics the fix inherits rather than invents: a harness version above
+// the newest reviewed minimum is claimed by that contract, which is the same
+// predicate harness.Spec.InstallSteps applied before the image was built.
+func TestSandboxHarnessHookContractInheritsTheBuildersForwardCompatibility(t *testing.T) {
+	future := verifiedClaudeCodeImage()
+	future.HarnessVersion = "9.9.9"
+
+	dir := t.TempDir()
+	writeImageStore(t, dir, future)
+
+	evidence, ok, err := sandboxHarnessHookContractFor(dir, "claudecode", "0.8.10")
+	if err != nil || !ok {
+		t.Fatalf("a future harness version must resolve like the build did (ok=%v err=%v)", ok, err)
+	}
+	if got, want := evidence.Resolution.Contract.ContractID, "claudecode-hooks-v2"; got != want {
+		t.Errorf("contract = %q, want %q", got, want)
 	}
 }
 
