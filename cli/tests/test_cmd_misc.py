@@ -127,7 +127,9 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": False})
-        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        # Windows shows "not supported on Windows" instead.
+        with patch("defenseclaw.commands.cmd_status._host_is_windows", return_value=False):
+            result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
         self.assertIn("off (set up with: defenseclaw sandbox setup)", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")

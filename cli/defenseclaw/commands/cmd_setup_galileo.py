@@ -301,7 +301,8 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> 
         if delivery:
             hint = (
                 f". The gateway's latest Galileo export failure ({when}) is {delivery}: "
-                f"{_GALILEO_DELIVERY_HINTS[delivery]}. Fix it with 'defenseclaw setup galileo', then run this test again"
+                f"{_GALILEO_DELIVERY_HINTS[delivery]}. Fix it with 'defenseclaw setup galileo', "
+                "then run this test again"
             )
         elif exc.failure_class == "gateway_rejected":
             hint = (

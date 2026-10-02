@@ -29,7 +29,10 @@ def _row(addr: str, uid: int) -> str:
 def test_linux_listener_owner(tmp_path, tcp, tcp6, expected) -> None:
     (tmp_path / "tcp").write_text(_HEADER + tcp, encoding="ascii")
     (tmp_path / "tcp6").write_text(_HEADER + tcp6, encoding="ascii")
-    with mock.patch.object(gateway.sys, "platform", "linux"), mock.patch.object(gateway.os, "getuid", return_value=1000):
+    with (
+        mock.patch.object(gateway.sys, "platform", "linux"),
+        mock.patch.object(gateway.os, "getuid", return_value=1000, create=True),
+    ):
         problem = gateway._foreign_loopback_listener_uncached(18960, str(tmp_path))
     if expected:
         assert expected in problem

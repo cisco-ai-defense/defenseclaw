@@ -1398,6 +1398,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # action without re-running setup, and protection turns the opt-in
         # protection packs on and off per scope. block-at / alert-at set the
         # tool-call block and alert levels, globally or per connector.
+        # allow-private-upstream records private upstream hosts the
+        # gateway may reach (guardrail.allow_private_upstreams).
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1411,6 +1413,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "block-message",
                 "block-at",
                 "alert-at",
+                "allow-private-upstream",
                 "judge",
                 "list-packs",
                 "mode",

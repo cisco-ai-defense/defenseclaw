@@ -244,7 +244,10 @@ def _api_port_free(host: str, port: int) -> bool:
             if platform_support.host_os() == "windows":
                 # On Windows SO_REUSEADDR lets a bind succeed over another
                 # account's listener, so ask for the port exclusively instead.
-                sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", -5), 1)
+                # Only Windows sockets have the option; elsewhere a plain bind.
+                exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                if exclusive is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
             else:
                 # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
                 # connection does not count as a holder.

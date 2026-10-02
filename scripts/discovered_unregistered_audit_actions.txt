@@ -98,6 +98,8 @@ policy-delete
 registry-add
 registry-edit
 registry-remove
+registry-require
+registry-sync
 scan-enforced
 scan-finding
 setup-connector-mode

@@ -21,6 +21,10 @@ internal/enterprisepolicy/opencode_managed_plugin.js text eol=lf
 # their SHA-256, so a Windows checkout must keep them LF as well.
 internal/gateway/connector/testdata/bridge_host/** text eol=lf
 
+# Seeded guardrail rule packs are matched by SHA-256 of their exact bytes
+# (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
+policies/guardrail/** text eol=lf
+
 # The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
 packaging/mdm/**/*.sh text eol=lf

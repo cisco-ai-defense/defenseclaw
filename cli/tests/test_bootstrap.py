@@ -942,7 +942,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
     def test_windows_live_unrelated_reused_pid_does_not_suppress_start(self):
         import subprocess
 
-        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT, _start_gateway_structured
 
         self._write_pid_file()
         completed = subprocess.CompletedProcess(
@@ -986,7 +986,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=_GATEWAY_START_TIMEOUT,
         )
 
     def test_windows_verified_gateway_still_counts_as_running(self):

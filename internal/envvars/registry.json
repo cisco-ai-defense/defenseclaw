@@ -6191,6 +6191,47 @@
         }
       ],
       "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_LOG_TIMESTAMPS",
+      "category": "debug",
+      "purpose": "Set to 0 to stop the detached gateway and background watchdog from prefixing each log line with an RFC 3339 UTC time.",
+      "default": "unset (lines are stamped)",
+      "accepted_values": [
+        "0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/logstamp.go",
+          "description": "EnvLogTimestamps constant; read by StampChildLog and StampDetachedLog"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_STAMP_LOG",
+      "category": "hook_internal",
+      "purpose": "Marker the gateway sets on the detached background watchdog so it stamps its own log lines; cleared before the watchdog starts children.",
+      "default": "(set by the watchdog launcher; child only)",
+      "accepted_values": [
+        "1"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/logstamp.go",
+          "description": "EnvStampLog constant; read by StampDetachedLog"
+        },
+        {
+          "location": "internal/cli/watchdog.go",
+          "description": "Sets the marker when spawning the detached watchdog"
+        }
+      ],
+      "since": "1.0.1"
     }
   ]
 }
