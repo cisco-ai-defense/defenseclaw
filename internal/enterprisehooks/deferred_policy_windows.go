@@ -95,6 +95,13 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	}
 
 	registry := newWindowsEnterpriseConnectorRegistry()
+	// Standalone renders the one machine-wide Claude body from the contract
+	// chosen for the whole manifest, so staging one row only adds its SID.
+	standalone := windowsEnterpriseStandaloneProcess()
+	claudeMachineContract := ""
+	if standalone {
+		claudeMachineContract = WindowsStandaloneClaudeMachinePolicyContract(manifest)
+	}
 	rollbacks := make([]func() error, 0, len(validated))
 	rollback := func(cause error) error {
 		var rollbackErrs []error
@@ -152,6 +159,12 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		if name == "codex" {
 			continue
 		}
+		if _, perUser := windowsStandalonePerUserConnector(name); perUser {
+			// A per-user connector has no machine policy to stage; the SID
+			// stays unenrolled, and its hook fails closed, until the guardian
+			// installs its runtime in the user session.
+			continue
+		}
 		sid, err := validateWindowsEnterpriseTargetSID(target.sid)
 		if err != nil {
 			return rollback(err)
@@ -180,11 +193,18 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			if !ok {
 				return rollback(errors.New("enterprise hooks: Claude connector has no managed-policy provider"))
 			}
-			body, err := provider.ManagedHookPolicy(setup)
+			policySetup := setup
+			if claudeMachineContract != "" {
+				rowSetup := setup
+				rowSetup.HookContractID = connector.ResolveHookContract(name, setup.AgentVersion).Contract.ContractID
+				policySetup = claudeMachinePolicySetup(rowSetup, claudeMachineContract, standalone)
+			}
+			policySetup = withWindowsClaudeManagedHooksOnly(policySetup)
+			body, err := provider.ManagedHookPolicy(policySetup)
 			if err != nil {
 				return rollback(err)
 			}
-			if err := provider.VerifyManagedHookPolicy(body, setup); err != nil {
+			if err := provider.VerifyManagedHookPolicy(body, policySetup); err != nil {
 				return rollback(err)
 			}
 			_, undo, err := installWindowsClaudeManagedPolicy(body, setup, sid)

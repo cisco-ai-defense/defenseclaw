@@ -26,7 +26,7 @@ import (
 // connector.EnsureOTLPPathToken writes — an owner-only file containing a
 // hex-encoded token plus trailing newline — without taking the package-
 // local mutex. We want the test to model the on-disk state the way
-// `defenseclaw setup geminicli` leaves it: present, non-empty, mode 0o600.
+// `defenseclaw setup omnigent` leaves it: present, non-empty, mode 0o600.
 func writePathTokenFile(t *testing.T, dataDir string, scope connector.OTLPPathTokenScope, token string) string {
 	t.Helper()
 	dir := filepath.Join(dataDir, "hooks")
@@ -45,17 +45,17 @@ func writePathTokenFile(t *testing.T, dataDir string, scope connector.OTLPPathTo
 
 // TestLookupOTLPPathToken_LazyReloadOnMiss is the F4 regression test:
 // when the sidecar boots with no scoped tokens loaded and the operator
-// subsequently runs `defenseclaw setup geminicli` (which mints a token
+// subsequently runs `defenseclaw setup omnigent` (which mints a token
 // on disk), the very next loopback OTLP request must succeed. Previously
-// the in-memory snapshot only refreshed at sidecar boot, so every Gemini
-// OTLP export returned 401 until the next gateway restart even though
-// settings.json and the on-disk token were correct.
+// the in-memory snapshot only refreshed at sidecar boot, so every scoped
+// OTLP export returned 401 until the next gateway restart even though the
+// agent's config and the on-disk token were correct.
 func TestLookupOTLPPathToken_LazyReloadOnMiss(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	const minted = "deadbeef" + "cafef00d" + "deadbeef" + "cafef00d" +
 		"deadbeef" + "cafef00d" + "deadbeef" + "cafef00d"
-	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
+	writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, minted)
 
 	cfg := &config.Config{}
 	cfg.DataDir = tmp
@@ -64,13 +64,13 @@ func TestLookupOTLPPathToken_LazyReloadOnMiss(t *testing.T) {
 	// boot-vs-setup race we are fixing: gateway came up first, setup
 	// minted the token after.
 
-	got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI))
+	got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent))
 	if got != minted {
 		t.Fatalf("lookupOTLPPathToken returned %q on first miss; want %q (lazy reload broken)", got, minted)
 	}
 
 	// Second call must serve from cache inside the bounded validation window.
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != minted {
 		t.Fatalf("second lookup returned %q; cache miss (want %q)", got, minted)
 	}
 }
@@ -89,12 +89,12 @@ func TestLookupOTLPPathToken_IgnoresUnknownScopes(t *testing.T) {
 	bogus := []string{
 		"../etc/passwd",
 		"unknown-vendor",
-		"GEMINI", // wrong case — not in OTLPPathTokenScopes()
+		"OMNIGENT", // wrong case — not in OTLPPathTokenScopes()
 		"",
-		"geminicli ",
+		"omnigent ",
 		"\x00", // NUL byte
-		"geminicli/extra",
-		"geminicli\nclaude", // CRLF injection attempt
+		"omnigent/extra",
+		"omnigent\nclaude", // CRLF injection attempt
 	}
 	for _, s := range bogus {
 		if got := api.lookupOTLPPathToken(s); got != "" {
@@ -111,7 +111,7 @@ func TestLookupOTLPPathToken_IgnoresUnknownScopes(t *testing.T) {
 
 // TestLookupOTLPPathToken_StatThrottlesRepeatedMisses guards against a
 // pathological caller (or a misconfigured connector) that hammers
-// /otlp/geminicli/<random>/v1/... with no on-disk token file: after the
+// /otlp/omnigent/<random>/v1/... with no on-disk token file: after the
 // first miss attempts a stat we must NOT keep re-stating disk on every
 // subsequent miss. The throttle is otlpPathTokenLastStatAt (not the
 // reload-at map, which only records actual full reloads).
@@ -123,11 +123,11 @@ func TestLookupOTLPPathToken_StatThrottlesRepeatedMisses(t *testing.T) {
 	api := &APIServer{scannerCfg: cfg}
 
 	// First miss — must attempt the stat, no token to find.
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != "" {
 		t.Fatalf("first lookup = %q, want \"\" (no token file present)", got)
 	}
 	api.otlpPathTokenMu.RLock()
-	first := api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI]
+	first := api.otlpPathTokenLastStatAt[connector.OTLPScopeOmnigent]
 	api.otlpPathTokenMu.RUnlock()
 	if first.IsZero() {
 		t.Fatalf("first miss did not record a stat timestamp; throttle inert")
@@ -139,11 +139,11 @@ func TestLookupOTLPPathToken_StatThrottlesRepeatedMisses(t *testing.T) {
 	// write lock or hitting disk, so the timestamp stays pinned at
 	// `first` and proves the syscall was elided.
 	for i, label := range []string{"second", "third"} {
-		if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+		if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != "" {
 			t.Fatalf("%s lookup (i=%d) = %q, want \"\"", label, i, got)
 		}
 		api.otlpPathTokenMu.RLock()
-		again := api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI]
+		again := api.otlpPathTokenLastStatAt[connector.OTLPScopeOmnigent]
 		api.otlpPathTokenMu.RUnlock()
 		if !again.Equal(first) {
 			t.Fatalf("%s lookup mutated stat timestamp (first=%v now=%v); throttle did not elide disk syscall",
@@ -171,7 +171,7 @@ func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
 	api := &APIServer{scannerCfg: cfg}
 
 	// First miss with no file on disk.
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != "" {
 		t.Fatalf("first lookup = %q, want \"\"", got)
 	}
 
@@ -179,7 +179,7 @@ func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
 	// the F4 boot race.
 	const minted = "0011223344556677" + "8899aabbccddeeff" +
 		"0011223344556677" + "8899aabbccddeeff"
-	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
+	writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, minted)
 
 	// Backdate the single authoritative validation timestamp to simulate the
 	// window elapsing.
@@ -187,11 +187,11 @@ func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
 	if api.otlpPathTokenLastStatAt == nil {
 		api.otlpPathTokenLastStatAt = map[connector.OTLPPathTokenScope]time.Time{}
 	}
-	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
+	api.otlpPathTokenLastStatAt[connector.OTLPScopeOmnigent] =
 		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
 	api.otlpPathTokenMu.Unlock()
 
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != minted {
 		t.Errorf("lookup after window elapsed = %q, want minted token %q (operator rotate flow broken)", got, minted)
 	}
 }
@@ -203,7 +203,7 @@ func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
 func TestLookupOTLPPathToken_NoDataDirSkipsReload(t *testing.T) {
 	t.Parallel()
 	api := &APIServer{scannerCfg: &config.Config{}}
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != "" {
 		t.Errorf("lookup with empty DataDir returned %q, want \"\"", got)
 	}
 }
@@ -222,23 +222,23 @@ func TestLookupOTLPPathToken_DetectsRotation(t *testing.T) {
 	const rotated = "1111111111111111" + "2222222222222222" +
 		"3333333333333333" + "4444444444444444"
 
-	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, original)
+	writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, original)
 	cfg := &config.Config{}
 	cfg.DataDir = tmp
 	api := &APIServer{scannerCfg: cfg}
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeGeminiCLI: original,
+		connector.OTLPScopeOmnigent: original,
 	})
 
 	// Steady-state hit: original token returned from cache.
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != original {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != original {
 		t.Fatalf("pre-rotation lookup = %q, want %q", got, original)
 	}
 
 	// Operator rotates the token. The explicit timestamp change retains the
 	// historical coverage; same-mtime replacement has its own regression below.
-	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, rotated)
-	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
+	writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, rotated)
+	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeOmnigent)
 	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatalf("chtimes: %v", err)
@@ -247,11 +247,11 @@ func TestLookupOTLPPathToken_DetectsRotation(t *testing.T) {
 	// Force the stat throttle to expire so the next lookup actually
 	// stats the file.
 	api.otlpPathTokenMu.Lock()
-	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
+	api.otlpPathTokenLastStatAt[connector.OTLPScopeOmnigent] =
 		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
 	api.otlpPathTokenMu.Unlock()
 
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != rotated {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != rotated {
 		t.Errorf("post-rotation lookup = %q, want rotated token %q (M1 rotation refresh broken)", got, rotated)
 	}
 }
@@ -397,29 +397,29 @@ func TestLookupOTLPPathToken_DropsCacheOnFileRemoval(t *testing.T) {
 	tmp := t.TempDir()
 	const minted = "feedface" + "feedface" + "feedface" + "feedface" +
 		"feedface" + "feedface" + "feedface" + "feedface"
-	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
+	writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, minted)
 	cfg := &config.Config{}
 	cfg.DataDir = tmp
 	cfg.Gateway.Token = "gateway-master"
 	api := &APIServer{scannerCfg: cfg}
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeGeminiCLI: minted,
+		connector.OTLPScopeOmnigent: minted,
 	})
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != minted {
 		t.Fatalf("pre-removal lookup = %q, want %q", got, minted)
 	}
 
 	// Operator removes the token. Force stat throttle to expire.
-	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
+	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeOmnigent)
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove token file: %v", err)
 	}
 	api.otlpPathTokenMu.Lock()
-	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
+	api.otlpPathTokenLastStatAt[connector.OTLPScopeOmnigent] =
 		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
 	api.otlpPathTokenMu.Unlock()
 
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent)); got != "" {
 		t.Errorf("post-removal lookup = %q, want \"\" (cache must drop on file removal)", got)
 	}
 	assertScopedOTLPAuth(t, api, minted, http.StatusUnauthorized)
@@ -481,7 +481,7 @@ func TestLookupOTLPPathToken_ConcurrentRotation(t *testing.T) {
 		"aaaaaaaa" + "aaaaaaaa" + "aaaaaaaa" + "aaaaaaaa"
 	const b = "bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb" +
 		"bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb"
-	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, a)
+	writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, a)
 	cfg := &config.Config{}
 	cfg.DataDir = tmp
 	api := &APIServer{scannerCfg: cfg}
@@ -501,7 +501,7 @@ func TestLookupOTLPPathToken_ConcurrentRotation(t *testing.T) {
 					return
 				default:
 				}
-				tok := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI))
+				tok := api.lookupOTLPPathToken(string(connector.OTLPScopeOmnigent))
 				if tok != "" && tok != a && tok != b {
 					t.Errorf("torn token observed: %q", tok)
 					return
@@ -516,8 +516,8 @@ func TestLookupOTLPPathToken_ConcurrentRotation(t *testing.T) {
 		if i%2 == 0 {
 			val = b
 		}
-		writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, val)
-		path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
+		writePathTokenFile(t, tmp, connector.OTLPScopeOmnigent, val)
+		path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeOmnigent)
 		future := time.Now().Add(time.Duration(i+1) * time.Second)
 		_ = os.Chtimes(path, future, future)
 		time.Sleep(5 * time.Millisecond)

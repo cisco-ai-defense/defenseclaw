@@ -1631,24 +1631,6 @@ func TestOpenShellConfig_IsStandalone(t *testing.T) {
 	}
 }
 
-func TestOpenShellConfig_EffectiveVersion(t *testing.T) {
-	tests := []struct {
-		version string
-		want    string
-	}{
-		{"", DefaultOpenShellVersion},
-		{"0.7.0", "0.7.0"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.version, func(t *testing.T) {
-			oc := OpenShellConfig{Version: tt.version}
-			if got := oc.EffectiveVersion(); got != tt.want {
-				t.Errorf("EffectiveVersion() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestOpenShellConfig_EffectiveSandboxHome(t *testing.T) {
 	tests := []struct {
 		home string
@@ -1667,84 +1649,10 @@ func TestOpenShellConfig_EffectiveSandboxHome(t *testing.T) {
 	}
 }
 
-func TestOpenShellConfig_ShouldAutoPair(t *testing.T) {
-	t.Run("nil defaults to true", func(t *testing.T) {
-		oc := OpenShellConfig{}
-		if !oc.ShouldAutoPair() {
-			t.Error("ShouldAutoPair() = false, want true (default)")
-		}
-	})
-
-	t.Run("explicit true", func(t *testing.T) {
-		b := true
-		oc := OpenShellConfig{AutoPair: &b}
-		if !oc.ShouldAutoPair() {
-			t.Error("ShouldAutoPair() = false, want true")
-		}
-	})
-
-	t.Run("explicit false", func(t *testing.T) {
-		b := false
-		oc := OpenShellConfig{AutoPair: &b}
-		if oc.ShouldAutoPair() {
-			t.Error("ShouldAutoPair() = true, want false")
-		}
-	})
-}
-
-func TestOpenShellConfig_HostNetworkingEnabled(t *testing.T) {
-	t.Run("nil defaults to true", func(t *testing.T) {
-		oc := OpenShellConfig{}
-		if !oc.HostNetworkingEnabled() {
-			t.Error("HostNetworkingEnabled() = false, want true (default)")
-		}
-	})
-
-	t.Run("explicit true", func(t *testing.T) {
-		b := true
-		oc := OpenShellConfig{HostNetworking: &b}
-		if !oc.HostNetworkingEnabled() {
-			t.Error("HostNetworkingEnabled() = false, want true")
-		}
-	})
-
-	t.Run("explicit false", func(t *testing.T) {
-		b := false
-		oc := OpenShellConfig{HostNetworking: &b}
-		if oc.HostNetworkingEnabled() {
-			t.Error("HostNetworkingEnabled() = true, want false")
-		}
-	})
-}
-
-func TestGatewayConfig_RequiresTLSWithMode(t *testing.T) {
-	tests := []struct {
-		name    string
-		host    string
-		tls     bool
-		mode    string
-		wantTLS bool
-	}{
-		{"loopback no mode", "127.0.0.1", false, "", false},
-		{"remote no mode", "10.200.0.2", false, "", true},
-		{"remote standalone", "10.200.0.2", false, "standalone", false},
-		{"explicit true standalone", "10.200.0.2", true, "standalone", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gw := GatewayConfig{Host: tt.host, TLS: tt.tls}
-			os := &OpenShellConfig{Mode: tt.mode}
-			if got := gw.RequiresTLSWithMode(os); got != tt.wantTLS {
-				t.Errorf("RequiresTLSWithMode() = %v, want %v", got, tt.wantTLS)
-			}
-		})
-	}
-}
-
 func TestDefaultConfig_OpenShellFields(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.OpenShell.Version != DefaultOpenShellVersion {
-		t.Errorf("expected version %q, got %q", DefaultOpenShellVersion, cfg.OpenShell.Version)
+	if cfg.OpenShell.Mode != "" {
+		t.Errorf("expected legacy openshell.mode to be empty by default, got %q", cfg.OpenShell.Mode)
 	}
 	if cfg.OpenShell.SandboxHome != "" {
 		t.Errorf("expected sandbox_home to be empty by default, got %q", cfg.OpenShell.SandboxHome)

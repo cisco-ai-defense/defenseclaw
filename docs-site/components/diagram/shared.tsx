@@ -40,6 +40,36 @@ export const KIND_TO_STYLE: Record<DiagramKind, KindStyle> = {
   generic:   { accent: 'var(--diagram-role-system)', label: 'System' },
 };
 
+// Trust-zone tones for <Zone> inside <Flow>. A zone's meaning is carried by
+// the tone name printed on its badge; the tint and border only reinforce it.
+// Zones outside the trust boundary (untrusted, external) also get a broken
+// border, so the boundary still reads in grayscale.
+export type ZoneTone =
+  | 'trusted'
+  | 'privileged'
+  | 'restricted'
+  | 'protected'
+  | 'untrusted'
+  | 'external';
+
+export interface ZoneToneStyle {
+  // Tone color: badge tag text, and mixed into the zone border.
+  accent: string;
+  // Faint zone fill.
+  fill: string;
+  label: string;
+  dash?: string;
+}
+
+export const ZONE_TONE_STYLE: Record<ZoneTone, ZoneToneStyle> = {
+  trusted:    { accent: 'var(--diagram-zone-trusted)',    fill: 'var(--diagram-zone-trusted-bg)',    label: 'Trusted' },
+  privileged: { accent: 'var(--diagram-zone-privileged)', fill: 'var(--diagram-zone-privileged-bg)', label: 'Privileged' },
+  restricted: { accent: 'var(--diagram-zone-restricted)', fill: 'var(--diagram-zone-restricted-bg)', label: 'Restricted' },
+  protected:  { accent: 'var(--diagram-zone-protected)',  fill: 'var(--diagram-zone-protected-bg)',  label: 'Protected' },
+  untrusted:  { accent: 'var(--diagram-zone-untrusted)',  fill: 'var(--diagram-zone-untrusted-bg)',  label: 'Untrusted', dash: '6 4' },
+  external:   { accent: 'var(--diagram-zone-external)',   fill: 'var(--diagram-zone-external-bg)',   label: 'External',  dash: '2 3' },
+};
+
 // Estimation constants, calibrated to the docs-site system-ui stack
 // at 14px medium. We can't measure text on the server, so every
 // dimension below is conservative: text never gets clipped, but
@@ -205,28 +235,7 @@ export function smoothPath(points: { x: number; y: number }[]): string {
   if (points.length === 0) return '';
   if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
 
-  const orthogonal: { x: number; y: number }[] = [points[0]];
-  for (let index = 1; index < points.length; index++) {
-    const previous = points[index - 1];
-    const current = points[index];
-    const dx = current.x - previous.x;
-    const dy = current.y - previous.y;
-
-    if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5 && Math.abs(dx) >= Math.abs(dy)) {
-      const midX = (previous.x + current.x) / 2;
-      orthogonal.push({ x: midX, y: previous.y }, { x: midX, y: current.y });
-    } else if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5) {
-      const midY = (previous.y + current.y) / 2;
-      orthogonal.push({ x: previous.x, y: midY }, { x: current.x, y: midY });
-    }
-    orthogonal.push(current);
-  }
-
-  const deduped = orthogonal.filter((point, index) => {
-    if (index === 0) return true;
-    const previous = orthogonal[index - 1];
-    return Math.abs(point.x - previous.x) >= 0.5 || Math.abs(point.y - previous.y) >= 0.5;
-  });
+  const deduped = orthogonalRoute(points);
   if (deduped.length < 2) return `M ${deduped[0].x} ${deduped[0].y}`;
 
   const commands = [`M ${deduped[0].x} ${deduped[0].y}`];
@@ -250,6 +259,34 @@ export function smoothPath(points: { x: number; y: number }[]): string {
   const last = deduped[deduped.length - 1];
   commands.push(`L ${last.x} ${last.y}`);
   return commands.join(' ');
+}
+
+// The right-angle route smoothPath draws, before corner rounding:
+// diagonal segments become doglegs and zero-length steps are dropped.
+// Expects at least one point.
+export function orthogonalRoute(points: { x: number; y: number }[]): { x: number; y: number }[] {
+  const orthogonal: { x: number; y: number }[] = [points[0]];
+  for (let index = 1; index < points.length; index++) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const dx = current.x - previous.x;
+    const dy = current.y - previous.y;
+
+    if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5 && Math.abs(dx) >= Math.abs(dy)) {
+      const midX = (previous.x + current.x) / 2;
+      orthogonal.push({ x: midX, y: previous.y }, { x: midX, y: current.y });
+    } else if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5) {
+      const midY = (previous.y + current.y) / 2;
+      orthogonal.push({ x: previous.x, y: midY }, { x: current.x, y: midY });
+    }
+    orthogonal.push(current);
+  }
+
+  return orthogonal.filter((point, index) => {
+    if (index === 0) return true;
+    const previous = orthogonal[index - 1];
+    return Math.abs(point.x - previous.x) >= 0.5 || Math.abs(point.y - previous.y) >= 0.5;
+  });
 }
 
 // A short, deterministic-ish id we use to namespace SVG marker/filter

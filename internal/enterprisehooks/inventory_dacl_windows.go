@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -25,7 +26,7 @@ import (
 // this list covers the ancestor traversal that the scanner needs. Child ACEs
 // inherit from these parents via SUB_CONTAINERS_AND_OBJECTS_INHERIT so
 // per-file reads don't need a separate grant.
-var inventoryDACLDotdirs = []string{
+var inventoryDACLDotdirs = append([]string{
 	".claude",
 	".codex",
 	".cursor",
@@ -33,13 +34,11 @@ var inventoryDACLDotdirs = []string{
 	".openhands",
 	".openclaw",
 	".hermes",
-	".windsurf",
-	".codeium",
 	".amp",
 	".opencode",
 	".agents",
 	".config",
-}
+}, legacyconnector.InventoryDotDirs...)
 
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time

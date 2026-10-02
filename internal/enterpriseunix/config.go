@@ -1,0 +1,309 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
+)
+
+// DefaultConfig is the configuration a fresh standalone install gets when
+// the administrator supplies none: local policy engine in observe mode, no
+// connectors, loopback listeners. Administrators replace it through their
+// MDM; the apply unit or `ensure` activates the change.
+func DefaultConfig(layout managed.StandaloneLayout) []byte {
+	return []byte(fmt.Sprintf(`# DefenseClaw managed enterprise configuration (standalone profile).
+# Administrator-owned. Edit through your MDM or configuration management;
+# the lifecycle validates and applies every change.
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: %s
+policy_dir: %s
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  rule_pack_dir: %s
+`, layout.DataDir, layout.VendorPolicyDir, path.Join(layout.VendorPolicyDir, "guardrail", "default")))
+}
+
+// validatedConfig is an administrator config that passed every lifecycle
+// check, with the settings the lifecycle renders from.
+type validatedConfig struct {
+	Raw                    []byte
+	SHA                    string
+	Connectors             []string
+	HomeRoots              []string
+	AgentPrefixes          []string
+	HTTPSProxy             string
+	NoProxy                string
+	SelfUpdateDisabled     bool
+	MachinePolicyOwnership map[string]string
+	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir and
+	// every connector's) to the pack the config resolves it to. An unset
+	// rule_pack_dir follows <policy_dir>/guardrail/default once that folder
+	// exists, which changes no config byte, so the record keeps the resolved
+	// packs and ensure applies (and restarts the gateway) when they change.
+	RulePacks map[string]string
+	// Loaded is the runtime config the checks loaded; machine policy is
+	// published from it.
+	Loaded *config.Config
+}
+
+// envPinMu serializes the temporary process-environment pins validation
+// needs: the config loader reads the service pins from the environment.
+var envPinMu sync.Mutex
+
+// validateConfig checks the installed config.yaml bytes; see
+// validateConfigSource.
+func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
+	return e.validateConfigSource(raw, "")
+}
+
+// validateConfigSource checks raw as the standalone deployment's config: v8
+// schema, observability graph, runtime load with the service pins, and the
+// fixed layout the units assume. The bytes are always checked as the
+// installed config.yaml; source, when set, is the file the administrator
+// supplied (--config), and errors name it instead of the installed path.
+func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
+	validated, err := e.checkConfig(raw)
+	if err != nil {
+		return nil, e.explainConfigError(err, source)
+	}
+	return validated, nil
+}
+
+// explainConfigError rewrites a config error for the managed host: it names
+// the administrator's file, and a config_version problem says how to fix the
+// file instead of pointing at `defenseclaw migrate`, a per-user command the
+// enterprise packages do not ship.
+func (e *Env) explainConfigError(err error, source string) error {
+	message := err.Error()
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		fixed := *yamlErr
+		switch yamlErr.Code {
+		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
+			fixed.Action = "add `config_version: 8` as the first line of the file"
+		case config.V8YAMLErrorVersionUpgrade:
+			fixed.Action = "write the file in the current (v8) format and set `config_version: 8`"
+		case config.V8YAMLErrorVersionUnsupported:
+			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 8`"
+		}
+		message = strings.Replace(message, yamlErr.Error(), fixed.Error(), 1)
+	}
+	if strings.Contains(message, "defenseclaw migrate") {
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 8`")
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v8) format and set `config_version: 8`")
+	}
+	if source != "" && source != e.Layout.ConfigPath {
+		message = strings.ReplaceAll(message, e.Layout.ConfigPath, source)
+	}
+	if message == err.Error() {
+		return err
+	}
+	return errors.New(message)
+}
+
+// checkConfig is the validation itself; the source path it reports is the
+// installed config.yaml.
+func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("config is empty")
+	}
+	if len(raw) > config.ObservabilityV8MaxSourceBytes {
+		return nil, fmt.Errorf("config exceeds %d bytes", config.ObservabilityV8MaxSourceBytes)
+	}
+	path := e.Layout.ConfigPath
+
+	envPinMu.Lock()
+	restore := pinEnv(map[string]string{
+		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
+	})
+	// Credential references resolve from the credentials already stored in
+	// the secrets directory, so a config naming one that `enterprise secret
+	// set` has not stored is refused before anything changes.
+	compiled, compileErr := config.ParseCompileObservabilityV8(path, raw, config.ObservabilityV8CompileOptions{
+		DefaultDataDir: e.Layout.DataDir, CredentialsDir: e.P(e.Layout.SecretsDir),
+	})
+	cfg, loadErr := config.LoadRuntimeV8InspectionCandidateFromBytes(path, raw)
+	restore()
+	envPinMu.Unlock()
+
+	if compileErr != nil {
+		return nil, fmt.Errorf("config does not compile: %w", compileErr)
+	}
+	if compiled == nil || compiled.Plan == nil {
+		return nil, errors.New("config compiled to no observability plan")
+	}
+	if loadErr != nil {
+		return nil, fmt.Errorf("config does not load: %w", loadErr)
+	}
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil, fmt.Errorf("config deployment_mode must be %s", managed.DeploymentModeManagedEnterprise)
+	}
+	if !cfg.StandaloneEnterprise() {
+		return nil, fmt.Errorf("config enterprise.profile must be %s", managed.ProfileStandalone)
+	}
+	// On macOS an unset profile means secure_client to every process that
+	// reads the config without the service pin (hooks, admin shells,
+	// status), so the file itself must say standalone. The loader enforces
+	// this for the host OS; checking the target OS here keeps plans built
+	// on another host honest.
+	if managed.DefaultEnterpriseProfile(e.GOOS) != managed.ProfileStandalone &&
+		cfg.DeclaredEnterpriseProfile() != managed.ProfileStandalone {
+		return nil, fmt.Errorf(
+			"config must set enterprise.profile: %s: on %s a process that reads it without the service pin treats an unset profile as %s",
+			managed.ProfileStandalone, e.GOOS, managed.DefaultEnterpriseProfile(e.GOOS),
+		)
+	}
+	if clean := strings.TrimRight(cfg.DataDir, "/"); clean != e.Layout.DataDir {
+		return nil, fmt.Errorf("config data_dir %q must be %s: the service sandbox only allows writes there", cfg.DataDir, e.Layout.DataDir)
+	}
+	if bind := strings.TrimSpace(cfg.Gateway.APIBind); bind != "" && bind != "127.0.0.1" {
+		return nil, fmt.Errorf("config gateway.api_bind %q must be 127.0.0.1", bind)
+	}
+	if port := cfg.Gateway.APIPort; port != 0 && port != 18970 {
+		return nil, fmt.Errorf("config gateway.api_port %d must be 18970: the socket unit owns that listener", port)
+	}
+	if err := e.checkRulePackDirs(cfg); err != nil {
+		return nil, err
+	}
+	v := &validatedConfig{
+		Raw:                    append([]byte(nil), raw...),
+		SHA:                    sha256Bytes(raw),
+		HomeRoots:              append([]string{}, cfg.Enterprise.Enrollment.HomeRoots...),
+		AgentPrefixes:          append([]string{}, cfg.Enterprise.Enrollment.AgentPrefixes...),
+		HTTPSProxy:             strings.TrimSpace(cfg.Enterprise.Network.HTTPSProxy),
+		NoProxy:                strings.TrimSpace(cfg.Enterprise.Network.NoProxy),
+		SelfUpdateDisabled:     cfg.Enterprise.Coexistence.SelfUpdateDisabled(),
+		MachinePolicyOwnership: map[string]string{},
+		Loaded:                 cfg,
+	}
+	v.RulePacks = map[string]string{}
+	for label, dir := range effectiveRulePackDirs(cfg) {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			v.RulePacks[label] = filepath.Clean(dir)
+		}
+	}
+	for name := range cfg.Guardrail.Connectors {
+		connector := strings.ToLower(strings.TrimSpace(name))
+		if connector == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+			continue
+		}
+		v.Connectors = append(v.Connectors, connector)
+		v.MachinePolicyOwnership[connector] = cfg.Enterprise.MachinePolicy.PolicyFor(connector).Ownership
+	}
+	sort.Strings(v.Connectors)
+	sort.Strings(v.HomeRoots)
+	sort.Strings(v.AgentPrefixes)
+	return v, nil
+}
+
+// checkRulePackDirs refuses rule packs the gateway cannot load or could
+// rewrite itself: every effective rule pack must be outside data_dir and
+// either ship with the vendor policies or already exist.
+func (e *Env) checkRulePackDirs(cfg *config.Config) error {
+	dirs := effectiveRulePackDirs(cfg)
+	vendor, err := policyassets.Files()
+	if err != nil {
+		return fmt.Errorf("embedded vendor policies: %w", err)
+	}
+	for _, label := range sortedKeys(dirs) {
+		dir := strings.TrimSpace(dirs[label])
+		if dir == "" {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		if clean == e.Layout.DataDir || strings.HasPrefix(clean, e.Layout.DataDir+"/") {
+			return fmt.Errorf("config %s %q is inside data_dir, which the gateway service can write; use %s or an administrator-owned directory under %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"), e.Layout.PolicyDir)
+		}
+		if rel, ok := strings.CutPrefix(clean, e.Layout.VendorPolicyDir+"/"); ok {
+			if !vendorPolicyDirExists(vendor, filepath.ToSlash(rel)) {
+				return fmt.Errorf("config %s %q is not a rule pack the product ships", label, dir)
+			}
+			continue
+		}
+		if info, err := os.Stat(e.P(clean)); err != nil || !info.IsDir() {
+			return fmt.Errorf("config %s %q does not exist; install the rule pack first or use %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"))
+		}
+	}
+	return nil
+}
+
+// effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the
+// gateway loads for it.
+func effectiveRulePackDirs(cfg *config.Config) map[string]string {
+	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
+	for name := range cfg.Guardrail.Connectors {
+		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
+	}
+	return dirs
+}
+
+func vendorPolicyDirExists(files []policyassets.File, rel string) bool {
+	for _, file := range files {
+		if strings.HasPrefix(file.Path, rel+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// machinePolicyEnabled lists connectors that publish machine policy.
+func (v *validatedConfig) machinePolicyEnabled(goos string) []string {
+	candidates := []string{}
+	for _, connector := range v.Connectors {
+		if v.MachinePolicyOwnership[connector] != config.MachinePolicyOwnershipOff {
+			candidates = append(candidates, connector)
+		}
+	}
+	return MachinePolicyConnectors(goos, candidates)
+}
+
+func pinEnv(values map[string]string) func() {
+	previous := map[string]*string{}
+	for key, value := range values {
+		if old, ok := os.LookupEnv(key); ok {
+			copyOld := old
+			previous[key] = &copyOld
+		} else {
+			previous[key] = nil
+		}
+		_ = os.Setenv(key, value)
+	}
+	return func() {
+		for key, old := range previous {
+			if old == nil {
+				_ = os.Unsetenv(key)
+			} else {
+				_ = os.Setenv(key, *old)
+			}
+		}
+	}
+}

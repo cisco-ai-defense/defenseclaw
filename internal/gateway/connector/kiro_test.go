@@ -5,12 +5,68 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
+
+// The two Kiro hook configs need different "every tool" matchers (measured
+// live on kiro-cli 2.24.1): the CLI 2.x engine reads an agent hook's matcher
+// as a glob, the v3 engine (kiro-cli --v3, and Kiro IDE) reads a .kiro/hooks
+// matcher as a regular expression tested unanchored against the tool name.
+// Swapping them silences every tool hook of that engine (#953).
+func TestKiroMatchersFollowEachEngine(t *testing.T) {
+	tools := []string{"shell", "execute_bash", "fs_write", "fs_read", "read_file", "str_replace", "use_aws"}
+	re, err := regexp.Compile(kiroV3MatchAllTools)
+	if err != nil {
+		t.Fatalf("v3 matcher %q is not a regular expression: %v", kiroV3MatchAllTools, err)
+	}
+	for _, tool := range tools {
+		if !re.MatchString(tool) {
+			t.Errorf("v3 matcher %q does not match %s", kiroV3MatchAllTools, tool)
+		}
+		if ok, err := path.Match(kiroV2MatchAllTools, tool); err != nil || !ok {
+			t.Errorf("CLI 2.x glob %q does not match %s", kiroV2MatchAllTools, tool)
+		}
+		// "." is literal in a glob: the matcher earlier releases wrote into
+		// the agent ran no CLI 2.x tool hook.
+		if ok, _ := path.Match(kiroV3MatchAllTools, tool); ok {
+			t.Errorf("the regular expression %q matched %s as a glob", kiroV3MatchAllTools, tool)
+		}
+	}
+	// Kiro's v3 engine drops a hook whose matcher does not compile. The
+	// pattern goes through a function so the check stays a runtime one
+	// (staticcheck's SA1000 flags an invalid constant pattern).
+	compiles := func(pattern string) bool { _, err := regexp.Compile(pattern); return err == nil }
+	if compiles(kiroV2MatchAllTools) {
+		t.Errorf("the CLI 2.x glob %q compiles as a regular expression; the v3 engine would run it", kiroV2MatchAllTools)
+	}
+	for _, spec := range kiroV3HookSpecs {
+		switch spec.trigger {
+		case "PreToolUse", "PostToolUse":
+			if spec.matcher != kiroV3MatchAllTools {
+				t.Errorf("v3 %s matcher = %q, want %q", spec.trigger, spec.matcher, kiroV3MatchAllTools)
+			}
+		default:
+			if spec.matcher != "" {
+				t.Errorf("v3 %s has matcher %q; Kiro ignores it there", spec.trigger, spec.matcher)
+			}
+		}
+	}
+	for _, spec := range kiroV2HookSpecs {
+		if spec.matcher != kiroV2MatchAllTools {
+			t.Errorf("CLI 2.x %s matcher = %q, want %q", spec.event, spec.matcher, kiroV2MatchAllTools)
+		}
+	}
+}
 
 func TestKiroSetupWritesV3AndDefaultAgentHooks(t *testing.T) {
 	home := t.TempDir()
@@ -258,14 +314,21 @@ func TestKiroV3CommandIsMarkedAndV2CommandIsBare(t *testing.T) {
 	c := NewKiroConnector()
 	bare := c.hookCommand(opts)
 	marked := c.hookCommandForV3Surface(opts)
-	if !strings.HasPrefix(marked, bare) {
-		t.Fatalf("marked command %q must extend bare command %q", marked, bare)
-	}
-	if !strings.HasSuffix(marked, "--hook-surface "+KiroHookSurfaceV3) {
-		t.Fatalf("marked command %q is missing the v3 marker", marked)
-	}
-	if strings.Contains(bare, "--hook-surface") {
-		t.Fatalf("bare command %q must stay unmarked for the 2.x agent config", bare)
+	if runtime.GOOS == "windows" {
+		// Both are the encoded PowerShell script; the marker is inside it.
+		if !strings.Contains(decodeKiroWindowsBridge(t, marked), "'hook --connector kiro --hook-surface v3'") || strings.Contains(decodeKiroWindowsBridge(t, bare), "--hook-surface") {
+			t.Fatalf("windows commands: marked %q bare %q", marked, bare)
+		}
+	} else {
+		if !strings.HasPrefix(marked, bare) {
+			t.Fatalf("marked command %q must extend bare command %q", marked, bare)
+		}
+		if !strings.HasSuffix(marked, "--hook-surface "+KiroHookSurfaceV3) {
+			t.Fatalf("marked command %q is missing the v3 marker", marked)
+		}
+		if strings.Contains(bare, "--hook-surface") {
+			t.Fatalf("bare command %q must stay unmarked for the 2.x agent config", bare)
+		}
 	}
 	// Ownership must survive the extra argument so teardown still reclaims
 	// the v3 entry when matching on the bare command.
@@ -302,6 +365,10 @@ func assertKiroV3Hooks(t *testing.T, path, script string) {
 		}
 		if obj["enabled"] != true {
 			t.Fatalf("%s hook %s is not enabled", path, name)
+		}
+		// Kiro's v3 engine reads the matcher as a regular expression.
+		if trigger, _ := obj["trigger"].(string); (trigger == "PreToolUse" || trigger == "PostToolUse") && obj["matcher"] != kiroV3MatchAllTools {
+			t.Fatalf("%s hook %s matcher = %#v, want the regular expression %q", path, name, obj["matcher"], kiroV3MatchAllTools)
 		}
 		seen[name] = true
 	}
@@ -341,6 +408,123 @@ func assertKiroV2AgentHooks(t *testing.T, path, script string) {
 		if entry["command"] != script {
 			t.Fatalf("agent %s command = %#v", spec.event, entry["command"])
 		}
+		// kiro-cli 2.x matches tool names as globs: "*" is every tool,
+		// ".*" is none.
+		if entry["matcher"] != "*" {
+			t.Fatalf("agent %s matcher = %#v, want the glob \"*\"", spec.event, entry["matcher"])
+		}
+		// Kiro's default hook timeout (about 10 s) ignores a slower verdict
+		// and runs the tool.
+		if entry["timeout_ms"] != float64(kiroV2HookTimeoutMillis) {
+			t.Fatalf("agent %s timeout_ms = %#v, want %d", spec.event, entry["timeout_ms"], kiroV2HookTimeoutMillis)
+		}
+	}
+}
+
+// Earlier releases registered the CLI 2.x hooks with the regular expression
+// ".*". kiro-cli 2.24.1 reads matchers as globs, so the tool hooks of those
+// agent files never ran. Setup (which the gateway runs at every start, so
+// also after an upgrade) must rewrite DefenseClaw's entries in place and
+// leave the operator's own entries alone.
+func TestKiroSetupRewritesRegexToolMatcherFromEarlierReleases(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	opts := SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "open"}
+	conn := NewKiroConnector()
+	command := conn.hookCommand(opts)
+
+	oldEntry := func(description string) map[string]interface{} {
+		return map[string]interface{}{"command": command, "description": description, "matcher": ".*"}
+	}
+	foreign := map[string]interface{}{"command": "echo operator", "matcher": ".*"}
+	earlier := map[string]interface{}{
+		"name":           kiroManagedAgentName,
+		"description":    "DefenseClaw-guarded Kiro agent",
+		"tools":          []interface{}{"*"},
+		"includeMcpJson": true,
+		"hooks": map[string]interface{}{
+			"userPromptSubmit": []interface{}{oldEntry("DefenseClaw prompt inspection")},
+			"preToolUse":       []interface{}{foreign, oldEntry("DefenseClaw tool-use inspection")},
+			"postToolUse":      []interface{}{oldEntry("DefenseClaw tool-use audit")},
+			"stop":             []interface{}{oldEntry("DefenseClaw session stop")},
+		},
+	}
+	// The operator's own default agent, patched by an earlier release too.
+	custom := map[string]interface{}{
+		"name":  "mine",
+		"model": "keep-me",
+		"hooks": map[string]interface{}{"preToolUse": []interface{}{oldEntry("DefenseClaw tool-use inspection")}},
+	}
+	writeJSON := func(path string, v interface{}) {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentPath := filepath.Join(home, "agents", kiroManagedAgentName+".json")
+	customPath := filepath.Join(home, "agents", "mine.json")
+	writeJSON(agentPath, earlier)
+	writeJSON(customPath, custom)
+	writeJSON(filepath.Join(home, "settings", "cli.json"), map[string]interface{}{kiroDefaultAgentSettingKey: "mine"})
+
+	for run := 1; run <= 2; run++ {
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			t.Fatalf("Setup run %d: %v", run, err)
+		}
+	}
+
+	readHooks := func(path string) map[string]interface{} {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		hooks, _ := cfg["hooks"].(map[string]interface{})
+		return hooks
+	}
+	agentHooks := readHooks(agentPath)
+	for _, spec := range kiroV2HookSpecs {
+		var ours []map[string]interface{}
+		list, _ := agentHooks[spec.event].([]interface{})
+		for _, item := range list {
+			entry, _ := item.(map[string]interface{})
+			if entry["command"] == command {
+				ours = append(ours, entry)
+			}
+		}
+		if len(ours) != 1 || ours[0]["matcher"] != "*" {
+			t.Fatalf("%s DefenseClaw entries after upgrade = %#v, want one with matcher \"*\"", spec.event, ours)
+		}
+	}
+	pre, _ := agentHooks["preToolUse"].([]interface{})
+	if len(pre) != 2 {
+		t.Fatalf("preToolUse = %#v, want the operator entry and DefenseClaw's", pre)
+	}
+	if first, _ := pre[0].(map[string]interface{}); first["command"] != "echo operator" || first["matcher"] != ".*" {
+		t.Fatalf("operator entry changed: %#v", pre[0])
+	}
+
+	customHooks := readHooks(customPath)
+	for _, spec := range kiroV2HookSpecs {
+		list, _ := customHooks[spec.event].([]interface{})
+		if len(list) != 1 {
+			t.Fatalf("custom agent %s = %#v", spec.event, customHooks[spec.event])
+		}
+		if entry, _ := list[0].(map[string]interface{}); entry["command"] != command || entry["matcher"] != "*" {
+			t.Fatalf("custom agent %s entry = %#v", spec.event, entry)
+		}
 	}
 }
 
@@ -365,6 +549,132 @@ func fmtString(value interface{}) string {
 	}
 	s, _ := value.(string)
 	return s
+}
+
+// Kiro's /upgrade-agent (and kiro-cli --v3's "Enable auto-upgrade") rewrites
+// the agent's event-keyed hooks into the universal (V2 + V3) array, keeping
+// each matcher and writing "timeout": 10 (measured on kiro-cli 2.24.1, which
+// reads that form with the same glob matchers). Setup used to replace the
+// array with an empty event map, deleting the user's own entries, and
+// verification and teardown did not read it (#953).
+func TestKiroSetupKeepsAnAgentKiroUpgraded(t *testing.T) {
+	home := t.TempDir()
+	KiroHomeOverride = home
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	opts := SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
+	conn := NewKiroConnector()
+	command := conn.hookCommand(opts)
+	agentPath := filepath.Join(home, "agents", kiroManagedAgentName+".json")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The universal agent Kiro 2.24.1 wrote from an earlier DefenseClaw
+	// agent (regex matchers) plus a hook the user added afterwards.
+	upgraded := map[string]interface{}{
+		"name": kiroManagedAgentName, "description": "DefenseClaw-guarded Kiro agent", "tools": []interface{}{"*"},
+		"includeMcpJson": true,
+		"hooks": []interface{}{
+			map[string]interface{}{"name": "postToolUse-0", "trigger": "postToolUse", "matcher": ".*", "timeout": 10,
+				"action": map[string]interface{}{"type": "command", "command": command}},
+			map[string]interface{}{"name": "preToolUse-0", "trigger": "preToolUse", "matcher": ".*", "timeout": 10,
+				"action": map[string]interface{}{"type": "command", "command": command}},
+			map[string]interface{}{"name": "lint", "trigger": "postToolUse", "matcher": "fs_write", "timeout": 10,
+				"action": map[string]interface{}{"type": "command", "command": "npm run lint"}},
+			map[string]interface{}{"name": "stop-0", "trigger": "stop", "matcher": ".*", "timeout": 10,
+				"action": map[string]interface{}{"type": "command", "command": command}},
+			map[string]interface{}{"name": "userPromptSubmit-0", "trigger": "userPromptSubmit", "matcher": ".*", "timeout": 10,
+				"action": map[string]interface{}{"type": "command", "command": command}},
+		},
+	}
+	body, _ := json.Marshal(upgraded)
+	if err := os.WriteFile(agentPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := kiroV2AgentReferencesHook(agentPath, command); err != nil || present {
+		t.Fatalf("upgraded agent with regex matchers: present=%v err=%v, want not present", present, err)
+	}
+
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	var agent map[string]interface{}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &agent) != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	list, ok := agent["hooks"].([]interface{})
+	if !ok {
+		t.Fatalf("Setup rewrote the universal agent into %T: %s", agent["hooks"], agent["hooks"])
+	}
+	ours := map[string]int{}
+	lint := 0
+	for _, item := range list {
+		entry := item.(map[string]interface{})
+		action := entry["action"].(map[string]interface{})
+		if action["command"] == "npm run lint" {
+			lint++
+			continue
+		}
+		if action["command"] != command || action["type"] != "command" || entry["matcher"] != kiroV2MatchAllTools ||
+			entry["timeout"] != float64(kiroUniversalHookTimeoutSeconds) {
+			t.Fatalf("DefenseClaw entry %v", entry)
+		}
+		ours[entry["trigger"].(string)]++
+	}
+	if lint != 1 {
+		t.Fatalf("the user's own hook was not kept: %v", list)
+	}
+	for _, spec := range kiroV2HookSpecs {
+		if ours[spec.event] != 1 {
+			t.Fatalf("%s has %d DefenseClaw entries, want 1: %v", spec.event, ours[spec.event], list)
+		}
+	}
+	if len(ours) != len(kiroV2HookSpecs) {
+		t.Fatalf("DefenseClaw entries %v, want one per %d events", ours, len(kiroV2HookSpecs))
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after Setup: present=%v err=%v", present, err)
+	}
+	// Setup is idempotent on the universal form.
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	var again map[string]interface{}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &again) != nil {
+		t.Fatalf("reread agent: %v", err)
+	}
+	if n := len(again["hooks"].([]interface{})); n != len(list) {
+		t.Fatalf("second Setup changed the entry count from %d to %d", len(list), n)
+	}
+
+	// Teardown takes DefenseClaw's entries out and keeps the user's hook and
+	// the file.
+	if err := removeKiroV2AgentHooks(agentPath, command); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &again) != nil {
+		t.Fatalf("agent after removal: %v", err)
+	}
+	if left := again["hooks"].([]interface{}); len(left) != 1 || left[0].(map[string]interface{})["name"] != "lint" {
+		t.Fatalf("hooks after removal = %v, want only the user's", left)
+	}
+	if present, err := kiroV2AgentReferencesAnyHook(agentPath, command); err != nil || present {
+		t.Fatalf("a DefenseClaw entry survived removal: present=%v err=%v", present, err)
+	}
+
+	// A universal agent that holds only DefenseClaw's entries is
+	// DefenseClaw's overlay: removing them removes the file.
+	onlyOurs := map[string]interface{}{"name": kiroManagedAgentName, "tools": []interface{}{"*"},
+		"hooks": []interface{}{kiroUniversalHookEntry("preToolUse", kiroV2MatchAllTools, command)}}
+	body, _ = json.Marshal(onlyOurs)
+	if err := os.WriteFile(agentPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeKiroV2AgentHooks(agentPath, command); err != nil {
+		t.Fatalf("remove overlay: %v", err)
+	}
+	if _, err := os.Stat(agentPath); !os.IsNotExist(err) {
+		t.Fatalf("the DefenseClaw-only universal agent was kept: %v", err)
+	}
 }
 
 // The sidecar verifies an effective hook registration right after Setup and
@@ -417,6 +727,64 @@ func TestKiroSetupProducesEffectiveHookRegistration(t *testing.T) {
 			t.Fatalf("restore %s: %v", path, err)
 		}
 	}
+
+	// kiro-cli 2.x matches tool names, so an agent an earlier build rendered
+	// with the regular expression ".*" ran no preToolUse hook. Such an agent
+	// must fail the check (the guardian then repairs it), and Setup must
+	// render the "*" wildcard that matches every tool.
+	agentPath := conn.agentConfigPaths(opts)[0]
+	var agent map[string]interface{}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &agent) != nil {
+		t.Fatalf("read agent %s: %v", agentPath, err)
+	}
+	for _, list := range agent["hooks"].(map[string]interface{}) {
+		for _, item := range list.([]interface{}) {
+			item.(map[string]interface{})["matcher"] = ".*"
+		}
+	}
+	stale, _ := json.Marshal(agent)
+	if err := os.WriteFile(agentPath, stale, 0o600); err != nil {
+		t.Fatalf("write stale agent: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("agent with the regex matcher: present=%v err=%v, want not present", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after repair: present=%v err=%v", present, err)
+	}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &agent) != nil {
+		t.Fatalf("reread agent: %v", err)
+	}
+	entry := agent["hooks"].(map[string]interface{})["preToolUse"].([]interface{})[0].(map[string]interface{})
+	if entry["matcher"] != "*" {
+		t.Fatalf("preToolUse matcher = %#v, want \"*\"", entry["matcher"])
+	}
+
+	// An agent an earlier build rendered without timeout_ms left Kiro's
+	// default hook timeout (about ten seconds) in place, so a slower verdict
+	// let the tool run. It fails the check too, and Setup adds the timeout.
+	for _, list := range agent["hooks"].(map[string]interface{}) {
+		for _, item := range list.([]interface{}) {
+			delete(item.(map[string]interface{}), "timeout_ms")
+		}
+	}
+	stale, _ = json.Marshal(agent)
+	if err := os.WriteFile(agentPath, stale, 0o600); err != nil {
+		t.Fatalf("write agent without timeouts: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("agent without timeout_ms: present=%v err=%v, want not present", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after the timeout repair: present=%v err=%v", present, err)
+	}
+	assertKiroV2AgentHooks(t, agentPath, conn.hookCommand(opts))
 }
 
 // containsHookScript is shared by every connector that stores hooks under
@@ -436,5 +804,59 @@ func TestContainsHookScriptWalksEventKeyedHookMaps(t *testing.T) {
 	}
 	if containsHookScript(cfg, "/data/hooks/other-hook.sh") {
 		t.Error("an unrelated script must not match")
+	}
+}
+
+// decodeKiroWindowsBridge returns the PowerShell script inside an encoded
+// system PowerShell bridge command.
+func decodeKiroWindowsBridge(t *testing.T, command string) string {
+	t.Helper()
+	const flag = " -EncodedCommand "
+	index := strings.LastIndex(command, flag)
+	if index < 0 || !strings.HasPrefix(command, windowsSystemPowerShellExe()+" ") {
+		t.Fatalf("%q is not the encoded system PowerShell bridge", command)
+	}
+	raw, err := base64.StdEncoding.DecodeString(command[index+len(flag):])
+	if err != nil || len(raw)%2 != 0 {
+		t.Fatalf("decode %q: %v", command, err)
+	}
+	wide := make([]uint16, len(raw)/2)
+	for i := range wide {
+		wide[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(wide))
+}
+
+// Kiro honors only exit 2 as a block. The Windows commands used to be
+// `& '<launcher>' hook --connector kiro ...`: cmd.exe rejects the call
+// operator (exit 1) and PowerShell does not wait for the GUI-subsystem
+// release launcher (exit 0), so Kiro went ahead after a block. Both Kiro
+// commands are now an encoded system PowerShell script, which starts the
+// launcher, waits for it and exits with its status.
+func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
+	launcher := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	t.Cleanup(PinNativeHookExecutableForTest(launcher))
+	for surface, want := range map[string]string{
+		"":                "[System.Diagnostics.ProcessStartInfo]::new('" + launcher + "','hook --connector kiro')",
+		KiroHookSurfaceV3: "[System.Diagnostics.ProcessStartInfo]::new('" + launcher + "','hook --connector kiro --hook-surface v3')",
+	} {
+		command := hookInvocationCommandFor("windows", "kiro", "")
+		if surface != "" {
+			command = kiroHookInvocationCommandFor("windows", "", surface)
+		}
+		if strings.HasPrefix(command, "&") {
+			t.Fatalf("surface %q: the call-operator form loses exit 2: %q", surface, command)
+		}
+		script := decodeKiroWindowsBridge(t, command)
+		if !strings.Contains(script, want) || !strings.HasSuffix(script, "exit $hookProcess.ExitCode") {
+			t.Fatalf("surface %q: script %q", surface, script)
+		}
+		if runtime.GOOS == "windows" && !kiroCommandOwned(command, hookInvocationCommandFor("windows", "kiro", "")) {
+			t.Fatalf("surface %q: DefenseClaw does not recognize its own command", surface)
+		}
+	}
+	// Other connectors keep their commands.
+	if got := hookInvocationCommandFor("windows", "claudecode", ""); !strings.HasPrefix(got, "& '") {
+		t.Fatalf("claudecode command changed: %q", got)
 	}
 }

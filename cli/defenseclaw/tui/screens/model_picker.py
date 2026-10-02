@@ -37,6 +37,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
 
 def filter_models(query: str, models: tuple[str, ...]) -> list[str]:
@@ -82,6 +83,24 @@ def picker_rows(query: str, models: tuple[str, ...]) -> list[str]:
     if typed and typed not in models:
         return [typed, *filtered]
     return filtered
+
+
+def opening_rows(current: str, models: tuple[str, ...]) -> tuple[list[str], int]:
+    """Rows shown when the picker opens, and the index to highlight.
+
+    The whole catalog is listed with the current model highlighted, so the
+    operator sees the alternatives straight away. (Seeding the filter with
+    the current value used to hide every other model until it was cleared.)
+    A current value outside the catalog stays first so Enter keeps it.
+    """
+
+    rows = list(models)
+    current = (current or "").strip()
+    if not current:
+        return rows, 0
+    if current not in rows:
+        rows.insert(0, current)
+    return rows, rows.index(current)
 
 
 class ModelPickerScreen(ModalScreen[str | None]):
@@ -138,14 +157,16 @@ class ModelPickerScreen(ModalScreen[str | None]):
         self._models = tuple(models)
         self._current = current
         self._provider = provider or "provider"
-        self._rows: list[str] = picker_rows("", self._models)
+        self._rows, _ = opening_rows(current, self._models)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-picker-dialog"):
-            yield Static(f"Pick a model for {self._provider}", id="model-picker-title")
+            yield Static(f"Pick a model for {self._provider}", id="model-picker-title", markup=False)
+            placeholder = "Type to filter or enter a custom model id…"
+            if self._current:
+                placeholder = f"Now: {self._current} · type to filter or enter a custom id…"
             yield Input(
-                value=self._current,
-                placeholder="Type to filter or enter a custom model id…",
+                placeholder=placeholder,
                 id="model-picker-input",
             )
             yield Static("", id="model-picker-list", markup=True)
@@ -155,7 +176,7 @@ class ModelPickerScreen(ModalScreen[str | None]):
             )
 
     def on_mount(self) -> None:
-        self._rows = picker_rows(self._current, self._models)
+        self._rows, self.selected_index = opening_rows(self._current, self._models)
         self._refresh_list()
         self.query_one(Input).focus()
 
@@ -212,11 +233,13 @@ class ModelPickerScreen(ModalScreen[str | None]):
             # id containing ``[`` (e.g. ``gpt[4``) would otherwise crash the
             # Rich render on the keystroke after the bracket.
             lines.append(f"{marker} [#22D3EE]{rich_escape(model)}[/]{suffix}")
-        target.update("\n".join(lines))
+        size = rows_that_fit(self.app.size.height, 14, cap=16)
+        target.update("\n".join(window_lines(lines, self.selected_index, size)))
 
 
 __all__ = [
     "ModelPickerScreen",
     "filter_models",
+    "opening_rows",
     "picker_rows",
 ]

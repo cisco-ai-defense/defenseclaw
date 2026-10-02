@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -423,6 +425,21 @@ func TestDetectModelFilesRejectsMalformedOllamaManifest(t *testing.T) {
 	}
 	if files != 0 || len(signals) != 0 {
 		t.Fatalf("malformed manifest was inventoried: files=%d signals=%+v", files, signals)
+	}
+}
+
+// A Library folder macOS privacy protection keeps from the scan answers
+// EPERM; it is skipped, not counted as a filesystem error, so a Mac without
+// a PPPC profile no longer reports every scan partial. Ordinary permission
+// errors, and EPERM on other systems, still count.
+func TestModelScanSkipsMacOSPrivacyProtectedEntries(t *testing.T) {
+	protected := &fs.PathError{Op: "open", Path: "/Users/alice/Library/Containers/com.example.app", Err: syscall.EPERM}
+	if !macOSPrivacyDenied("darwin", protected) {
+		t.Fatal("a TCC-protected folder on macOS is not skipped")
+	}
+	unreadable := &fs.PathError{Op: "open", Path: "/Users/alice/models", Err: syscall.EACCES}
+	if macOSPrivacyDenied("darwin", unreadable) || macOSPrivacyDenied("linux", protected) {
+		t.Fatal("an ordinary permission error is skipped as macOS privacy protection")
 	}
 }
 

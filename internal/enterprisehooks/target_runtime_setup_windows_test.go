@@ -544,6 +544,14 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
+	// Every standalone per-user connector needs a bounded fresh-root
+	// contract: without one, a failed first install's rollback refused the
+	// whole plan and left the created root behind.
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		manifest.Targets = append(manifest.Targets, ManifestTarget{
+			UserHome: home, SID: target.String(), DataDir: filepath.Join(home, ".defenseclaw"), Connector: name, AgentVersion: "1.0.0",
+		})
+	}
 	digest := strings.Repeat("7", 64)
 	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
 	if err != nil {
@@ -565,7 +573,14 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	}
 	spec := specs[windowsManagedRuntimeRootKey(plan.Roots[0].SID, plan.Roots[0].UserHome)]
 	known := writeWindowsManagedRuntimeCleanupFixture(t, plan.Roots[0], target, spec)
-	for index, connectorName := range []string{"codex", "claudecode", "cursor"} {
+	if len(spec.backupFiles) == 0 {
+		t.Fatal("per-user connector cleanup contract has no connector backup records")
+	}
+	generations := make([]string, 0, len(spec.generationConnectors))
+	for connectorName := range spec.generationConnectors {
+		generations = append(generations, connectorName)
+	}
+	for index, connectorName := range generations {
 		leaf, err := windowsManagedRuntimeBundleLeaf(
 			connectorName,
 			fmt.Sprintf("%032x", index+1),
@@ -1137,12 +1152,16 @@ func writeWindowsManagedRuntimeCleanupFixture(
 		t.Fatalf("create exact managed hooks fixture: %v", err)
 	}
 	var paths []string
-	for name := range spec.rootFiles {
+	for name, contract := range spec.rootFiles {
 		path := filepath.Join(root.DataDir, name)
 		if err := os.WriteFile(path, []byte("managed root artifact"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		if contract == windowsManagedRuntimeCleanupOwnedLockFile {
+			setWindowsManagedRuntimeCleanupFileOwnedLock(t, path, target)
+		} else {
+			setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		}
 		paths = append(paths, path)
 	}
 	for name := range spec.hookFiles {
@@ -1152,6 +1171,39 @@ func writeWindowsManagedRuntimeCleanupFixture(
 		}
 		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
 		paths = append(paths, path)
+	}
+	if len(spec.backupFiles) > 0 {
+		descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mkdir := func(path string) {
+			if _, err := os.Lstat(path); err == nil {
+				return
+			}
+			name, err := windows.UTF16PtrFromString(path)
+			if err == nil {
+				err = windows.CreateDirectory(name, &windows.SecurityAttributes{
+					Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor,
+				})
+			}
+			if err != nil {
+				t.Fatalf("create exact connector backup directory %s: %v", path, err)
+			}
+		}
+		backupRoot := filepath.Join(root.DataDir, windowsManagedRuntimeCleanupBackupDir)
+		mkdir(backupRoot)
+		for connectorName, records := range spec.backupFiles {
+			mkdir(filepath.Join(backupRoot, connectorName))
+			for leaf := range records {
+				path := filepath.Join(backupRoot, connectorName, leaf)
+				if err := os.WriteFile(path, []byte("managed backup record"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+				paths = append(paths, path)
+			}
+		}
 	}
 	// Elevated gateway creation may legitimately select BA as the SQLite owner.
 	// Preserve the exact protected safe DACL while exercising that owner form.
@@ -1185,6 +1237,39 @@ func setWindowsManagedRuntimeCleanupFileCanonical(t *testing.T, path string, tar
 	}
 	if err := setWindowsUserPathProtection(path, target, false); err != nil {
 		t.Fatalf("install exact cleanup fixture DACL on %s: %v", path, err)
+	}
+}
+
+// setWindowsManagedRuntimeCleanupFileOwnedLock gives a fixture lock the
+// descriptor connector.withOwnedFileLock creates real locks with (seen on
+// dc-win for .hermes-lifecycle.lock and .hook-api-token-publish.lock).
+func setWindowsManagedRuntimeCleanupFileOwnedLock(t *testing.T, path string, target *windows.SID) {
+	t.Helper()
+	sid := target.String()
+	descriptor, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSetupPrivilege(func() error {
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			target,
+			nil,
+			dacl,
+			nil,
+		)
+	}); err != nil {
+		t.Fatalf("install owned lock fixture descriptor on %s: %v", path, err)
 	}
 }
 

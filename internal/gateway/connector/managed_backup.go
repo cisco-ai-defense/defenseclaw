@@ -420,3 +420,94 @@ func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// RestoreManagedFileBackups puts every agent file that a connector setup
+// recorded in dataDir's connector_backups back the way setup found it: the
+// captured bytes, or no file when setup created it. A file that changed since
+// DefenseClaw last wrote it, or whose record names a path outside home, is
+// left in place and returned in kept. Each record it restores from is
+// removed. The rollback of a failed first Windows install runs it as the
+// account, before the data directory the install created is removed.
+func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, err error) {
+	err = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if !managedBackupTargetInside(home, b.Path) {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		ok, restoreErr := restoreManagedFileBackupIfUnchanged(dataDir, b.Connector, b.LogicalName, b.Path)
+		switch {
+		case restoreErr != nil:
+			return fmt.Errorf("restore %s: %w", b.Path, restoreErr)
+		case ok:
+			restored = append(restored, b.Path)
+		default:
+			kept = append(kept, b.Path)
+		}
+		return nil
+	})
+	return restored, kept, err
+}
+
+// ManagedFileBackupTargets lists the agent file each connector backup record
+// in dataDir names.
+func ManagedFileBackupTargets(dataDir string) ([]string, error) {
+	var targets []string
+	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		targets = append(targets, b.Path)
+		return nil
+	})
+	return targets, err
+}
+
+// forEachManagedFileBackup calls fn for each record in dataDir's
+// connector_backups that sits where its connector and logical name put it.
+func forEachManagedFileBackup(dataDir string, fn func(managedFileBackup) error) error {
+	root := filepath.Join(dataDir, "connector_backups")
+	connectors, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, dir := range connectors {
+		if !dir.IsDir() {
+			continue
+		}
+		entries, readErr := os.ReadDir(filepath.Join(root, dir.Name()))
+		if readErr != nil {
+			errs = append(errs, readErr)
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+				continue
+			}
+			recordPath := filepath.Join(root, dir.Name(), entry.Name())
+			b, loadErr := loadManagedFileBackupPath(recordPath)
+			if loadErr != nil {
+				errs = append(errs, fmt.Errorf("load managed backup %s: %w", recordPath, loadErr))
+				continue
+			}
+			if b.Connector != dir.Name() ||
+				!sameManagedTargetPath(managedFileBackupPath(dataDir, b.Connector, b.LogicalName), recordPath) {
+				errs = append(errs, fmt.Errorf("managed backup %s does not match its location", recordPath))
+				continue
+			}
+			if err := fn(b); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func managedBackupTargetInside(home, path string) bool {
+	if strings.TrimSpace(home) == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
+	return err == nil && rel != "." && !filepath.IsAbs(rel) &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}

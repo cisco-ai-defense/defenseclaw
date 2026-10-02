@@ -917,12 +917,10 @@ if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
     throw "Invalid version for installer payload: $Version"
 }
-$gatewayZip = Join-Path $dist "defenseclaw_${Version}_windows_amd64.zip"
+$gatewayZip = Join-Path $dist "defenseclaw-$Version-windows-amd64.zip"
 $wheel = Join-Path $dist "defenseclaw-$Version-py3-none-any.whl"
-$upgradeManifest = Join-Path $dist 'upgrade-manifest.json'
 Copy-RequiredFile $gatewayZip $gatewayZip
 Copy-RequiredFile $wheel $wheel
-Copy-RequiredFile $upgradeManifest $upgradeManifest
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 Assert-DefenseClawWheelV8Resources $wheel $repoRoot
@@ -941,18 +939,10 @@ try {
 $gatewayArchive = [IO.Compression.ZipFile]::OpenRead($gatewayZip)
 try {
     $entryNames = @($gatewayArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('defenseclaw.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')) {
+    foreach ($required in @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')) {
         if ($required -notin $entryNames) { throw "Gateway archive is missing $required." }
     }
 } finally { $gatewayArchive.Dispose() }
-
-$upgradePolicy = Get-Content -LiteralPath $upgradeManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$upgradePolicy.release_version -ne $Version -or
-    [string]$upgradePolicy.windows_installer.asset -ne 'DefenseClawSetup-x64.exe' -or
-    $upgradePolicy.windows_installer.authenticode.required -ne $false -or
-    [string]$upgradePolicy.windows_installer.authenticode.publisher -ne 'Cisco Systems, Inc.') {
-    throw 'Upgrade manifest does not match the setup version and optional pinned-publisher Authenticode policy.'
-}
 
 $build = Join-Path $state "build"
 Remove-SafeTree $build $state
@@ -1198,6 +1188,10 @@ $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build
 [IO.Directory]::CreateDirectory($gatewayPayloadDir) | Out-Null
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
+# Setup's embedded payload keeps its historical gateway member name; Setup
+# installs it as bin\defenseclaw-gateway.exe.
+Move-Item -LiteralPath (Join-Path $gatewayPayloadDir 'defenseclaw-gateway.exe') `
+    -Destination (Join-Path $gatewayPayloadDir 'defenseclaw.exe')
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
 $acpBinary = Join-Path $gatewayPayloadDir 'defenseclaw-acp.exe'
@@ -1320,7 +1314,13 @@ Copy-RequiredFile $pythonZip (Join-Path $payload $PythonEmbedName)
 Copy-RequiredFile $cosignVerifier (Join-Path $payload 'cosign.exe')
 Copy-RequiredFile $requirements (Join-Path $payload "requirements-release.txt")
 Copy-RequiredFile $yaraCompatWheel (Join-Path $payload (Split-Path -Leaf $yaraCompatWheel))
-Copy-RequiredFile $upgradeManifest (Join-Path $payload 'upgrade-manifest.json')
+# Releases no longer publish an upgrade manifest. Setup's packaged migration
+# scripts still bind the payload to its release through this stub.
+[IO.File]::WriteAllText(
+    (Join-Path $payload 'upgrade-manifest.json'),
+    '{"schema_version":2,"release_version":"' + $Version + '","required_cli_migrations":[]}' + "`n",
+    [Text.UTF8Encoding]::new($false)
+)
 
 $files = [ordered]@{}
 foreach ($file in Get-ChildItem -LiteralPath $payload -File | Sort-Object Name) {

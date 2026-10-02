@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DEFENSECLAW_CONFIG</key>
+		<string>/opt/cisco/defenseclaw/etc/config.yaml</string>
+		<key>DEFENSECLAW_DEPLOYMENT_MODE</key>
+		<string>managed_enterprise</string>
+		<key>DEFENSECLAW_ENTERPRISE_PROFILE</key>
+		<string>standalone</string>
+		<key>DEFENSECLAW_HOME</key>
+		<string>/opt/cisco/defenseclaw/runtime</string>
+		<key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
+		<string>/opt/cisco/defenseclaw/hook-guardian-state</string>
+		<key>DEFENSECLAW_UNIX_SERVICE_ACCOUNT</key>
+		<string>_defenseclaw</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>GroupName</key>
+	<string>_defenseclaw</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.cisco.defenseclaw.gateway</string>
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/cisco/defenseclaw/bin/defenseclaw-gateway</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/Cisco/DefenseClaw/gateway/gateway.out.log</string>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>UserName</key>
+	<string>_defenseclaw</string>
+	<key>WorkingDirectory</key>
+	<string>/opt/cisco/defenseclaw/runtime</string>
+</dict>
+</plist>

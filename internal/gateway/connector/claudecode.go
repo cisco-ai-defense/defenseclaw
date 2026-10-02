@@ -1127,9 +1127,10 @@ func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string,
 
 // ManagedHookPolicy renders the Claude Code settings fragment installed in
 // the administrator-managed policy tier. Claude treats hooks from this tier as
-// trusted even when allowManagedHooksOnly=true. The fragment intentionally
-// contains hooks only: per-user OTLP credentials cannot safely be placed in a
-// machine-wide policy document.
+// trusted even when allowManagedHooksOnly=true. The fragment contains the
+// hooks and, when opts.ClaudeAllowManagedHooksOnly is set (the Windows
+// standalone lock), allowManagedHooksOnly: true; per-user OTLP credentials
+// cannot safely be placed in a machine-wide policy document.
 func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup")
@@ -1145,14 +1146,14 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 		opts,
 		filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"),
 	)
-	hooks := map[string]interface{}{}
-	if err := appendClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, opts); err != nil {
-		return nil, fmt.Errorf("render Claude Code managed hook policy: %w", err)
-	}
-	if err := verifyClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
-		return nil, fmt.Errorf("verify Claude Code managed hook policy: %w", err)
+	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, hookArgs, opts)
+	if err != nil {
+		return nil, err
 	}
 	policy := map[string]interface{}{"hooks": hooks}
+	if opts.ClaudeAllowManagedHooksOnly {
+		policy["allowManagedHooksOnly"] = true
+	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal Claude Code managed hook policy: %w", err)
@@ -1194,9 +1195,29 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 		return fmt.Errorf("canonicalize expected Claude Code managed hook policy: %w", err)
 	}
 	if !bytes.Equal(actualCanonical, expectedCanonical) {
+		if lock, _ := settings["allowManagedHooksOnly"].(bool); opts.ClaudeAllowManagedHooksOnly && !lock {
+			return fmt.Errorf("Claude Code managed hook policy does not set allowManagedHooksOnly: true, so user and project hooks can rewrite tool input after inspection")
+		}
 		return fmt.Errorf("Claude Code managed hook policy differs from the canonical DefenseClaw policy")
 	}
 	return nil
+}
+
+// renderClaudeCodeManagedHookMatrix is the pure renderer behind every
+// managed-tier Claude Code hook document: the contract-selected event matrix
+// bound to one hook command, verified before it is returned. It reads no host
+// state, so the OpenShell image renderer shares it with ManagedHookPolicy.
+func renderClaudeCodeManagedHookMatrix(
+	hookCommand string, hookArgs []string, opts SetupOpts,
+) (map[string]interface{}, error) {
+	hooks := map[string]interface{}{}
+	if err := appendClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, opts); err != nil {
+		return nil, fmt.Errorf("render Claude Code managed hook policy: %w", err)
+	}
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
+		return nil, fmt.Errorf("verify Claude Code managed hook policy: %w", err)
+	}
+	return hooks, nil
 }
 
 func appendClaudeCodeHookMatrix(hooks map[string]interface{}, hookCommand string, hookArgs []string) {

@@ -17,7 +17,9 @@
 package gateway
 
 import (
+	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -49,7 +51,7 @@ func trustedBuiltInFindingLabel(label string) bool {
 	for _, category := range defaultRuleCategories {
 		for _, rule := range category.Rules {
 			base := rule.ID + ":" + rule.Title
-			if label == base || label == base+" (obfuscated)" {
+			if label == base || label == base+obfuscatedFindingLabelSuffix {
 				return true
 			}
 		}
@@ -88,4 +90,183 @@ func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string
 		return reason
 	}
 	return redaction.ReasonForSink(reason, policy)
+}
+
+// standaloneEnterpriseActive records whether the running deployment is the
+// standalone enterprise profile, where the organization's policy decides.
+// Wired next to managedEnterpriseActive by NewSidecar and the config reload.
+var standaloneEnterpriseActive atomic.Bool
+
+func setStandaloneEnterpriseActive(v bool) { standaloneEnterpriseActive.Store(v) }
+
+// agentRuleIDPattern is the shape of a rule ID an agent message may name.
+var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// agentBlockNoRetry ends every policy block the agent receives. An agent that
+// got only the rule name sometimes rewrote the blocked command to get the
+// same result; the sentence tells it the block is final.
+const agentBlockNoRetry = "Do not retry it in another form."
+
+// agentReviewAction is the action agentVerdictReason words for a
+// confirmation the connector cannot ask for: the gateway answers it with an
+// alert, so the call runs.
+const agentReviewAction = "review"
+
+// agentVerdictReason words a block or a confirmation of a local policy rule
+// for the agent's user. The bare "matched: <rule-id>:<title>" reason, with a
+// custom rule's title replaced by a "<redacted len=N sha=...>" token, read
+// like a broken hook, and users (and the model) went looking in their own
+// agent settings. The message says DefenseClaw made the decision under the
+// organization's policy (standalone enterprise) or DefenseClaw policy
+// (per-user), names the rules by ID (a compiled-in or rule-pack rule keeps
+// its title), and a block tells the agent not to retry the action in another
+// form. The audit record keeps the full source reason. A confirmation the
+// connector cannot ask for (agentReviewAction) says DefenseClaw flagged the
+// action for review.
+//
+// Other actions and any other reason (a configured block message, a
+// foreign-hook or AI Defense verdict) keep displayReason. Secure Client
+// keeps its pinned wording: a managed deployment, an explicit managed
+// redaction directive, or the managed agent-reason carve-out (which hands
+// the agent the raw reason) leave displayReason unchanged.
+func agentVerdictReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	if action != "block" && action != "confirm" && action != agentReviewAction {
+		return displayReason
+	}
+	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
+		return displayReason
+	}
+	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
+		return displayReason
+	}
+	rules := agentMatchedRules(sourceReason)
+	if rules == "" {
+		return displayReason
+	}
+	standalone := standaloneEnterpriseActive.Load()
+	switch {
+	case action == "block" && standalone:
+		return "DefenseClaw blocked this action under your organization's policy (" + rules + "). " +
+			agentBlockNoRetry + " Contact your administrator if you need it allowed."
+	case action == "block":
+		return "DefenseClaw policy blocked this action (" + rules + "). " + agentBlockNoRetry
+	case action == agentReviewAction && standalone:
+		return "DefenseClaw flagged this action for review under your organization's policy (" + rules + ")."
+	case action == agentReviewAction:
+		return "DefenseClaw policy flagged this action for review (" + rules + ")."
+	case standalone:
+		return "DefenseClaw needs your confirmation for this action under your organization's policy (" + rules + ")."
+	default:
+		return "DefenseClaw policy needs your confirmation for this action (" + rules + ")."
+	}
+}
+
+// agentOrderedRulePrefix starts the note an ordered tool-call chain match
+// appends to a reason (agent_hook_chain.go).
+const agentOrderedRulePrefix = "matched ordered safety rule: "
+
+// The notes a human-approval fallback appends to a confirm it turns into a
+// block (inspect.go). The rule that asked for the confirmation still
+// decided.
+const (
+	approvalUnsupportedNote      = "human approval unsupported on this connector surface; failing closed"
+	approvalNativeOpenClawNote   = "human approval requires native OpenClaw approval; failing closed"
+	obfuscatedFindingLabelSuffix = " (obfuscated)"
+)
+
+// activeRulePackLabel reports whether id and title are a rule of a loaded
+// rule pack (the global generation or a connector's). That title is the
+// pack author's static text, which the agent may show, unlike a scanner's
+// title, which can carry matched text.
+func activeRulePackLabel(id, title string) bool {
+	id = strings.ToUpper(strings.TrimSpace(id))
+	title = strings.TrimSpace(strings.TrimSuffix(title, obfuscatedFindingLabelSuffix))
+	if id == "" || title == "" {
+		return false
+	}
+	ruleCategoriesMu.RLock()
+	defer ruleCategoriesMu.RUnlock()
+	if allRuleGeneration != nil {
+		if _, ok := allRuleGeneration.ruleIdentityTitles[id][title]; ok {
+			return true
+		}
+	}
+	for _, generation := range connectorRuleGenerations {
+		if generation == nil {
+			continue
+		}
+		if _, ok := generation.ruleIdentityTitles[id][title]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// agentMatchedRules names the rules of a "matched: <rule-id>:<title>, ..."
+// reason, and of any ordered-chain note appended to it: "rule ID" or
+// "rules ID1, ID2". A title from the compiled-in catalog or from a loaded
+// rule pack is kept ("rule ID: Title"); any other title (a scanner's, which
+// can carry matched text) is left to the audit record. It returns "" for any
+// other reason, and for a reason that also carries another verdict's text
+// (an AI Defense or judge reason merged after the local match): naming only
+// the local rule would drop the reason that decided.
+func agentMatchedRules(reason string) string {
+	for _, note := range []string{approvalUnsupportedNote, approvalNativeOpenClawNote} {
+		reason = strings.ReplaceAll(reason, "; "+note, "")
+	}
+	var items []string
+	seen := make(map[string]bool)
+	add := func(id, item string) {
+		if len(items) == 5 || seen[id] || !agentRuleIDPattern.MatchString(id) {
+			return
+		}
+		seen[id] = true
+		items = append(items, item)
+	}
+	for i, part := range strings.Split(reason, "; ") {
+		switch {
+		case i == 0 && strings.HasPrefix(part, builtInMatchReasonPrefix):
+			for _, label := range strings.Split(strings.TrimPrefix(part, builtInMatchReasonPrefix), ", ") {
+				id, title, found := strings.Cut(label, ":")
+				if !found {
+					continue
+				}
+				item := id
+				if trustedBuiltInFindingLabel(label) || activeRulePackLabel(id, title) {
+					item = id + ": " + title
+				}
+				add(id, item)
+			}
+		case strings.HasPrefix(part, agentOrderedRulePrefix):
+			for _, id := range strings.Split(strings.TrimPrefix(part, agentOrderedRulePrefix), ", ") {
+				add(id, id)
+			}
+		default:
+			return ""
+		}
+	}
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return "rule " + items[0]
+	}
+	return "rules " + strings.Join(items, ", ")
+}
+
+// agentConfirmUnavailableReason words the block the standalone enterprise
+// profile makes of a confirmation the agent cannot ask for
+// (confirmWithoutAskAgent), so the user learns that the rule wanted their
+// approval instead of reading an ordinary block. It names the rules where
+// agentVerdictReason would, and keeps the display reason otherwise.
+func agentConfirmUnavailableReason(agent, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	detail := displayReason
+	if agentVerdictReason("confirm", sourceReason, displayReason, policy) != displayReason {
+		detail = agentMatchedRules(sourceReason)
+	}
+	if detail != "" {
+		detail = " (" + detail + ")"
+	}
+	return "DefenseClaw blocked this action: your organization's policy needs your confirmation for it" + detail +
+		", and " + agent + " cannot ask for it. Contact your administrator if you need it allowed."
 }

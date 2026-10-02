@@ -79,6 +79,7 @@ dependencies include:
   - CEL expression protobufs (cel.dev/expr) — Apache-2.0
   - ANTLR4 Go runtime (github.com/antlr4-go/antlr/v4) — BSD-3-Clause
   - Go experimental packages (golang.org/x/exp) — BSD-3-Clause
+  - NVIDIA OpenShell Go SDK (github.com/NVIDIA/OpenShell/sdk/go) — Apache-2.0
   - OpenTelemetry Go (go.opentelemetry.io/otel) — Apache-2.0
   - Lumberjack (gopkg.in/natefinch/lumberjack.v2) — MIT
   - UUID (github.com/google/uuid) — BSD-3-Clause

@@ -21,6 +21,9 @@
 package hermespath
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,7 +64,7 @@ func ConfigPath() string {
 // ManagedExecutablePath returns the updater-managed Hermes executable for the
 // current Windows token. HERMES_HOME is intentionally irrelevant here: it can
 // select a supported configuration home, but it cannot redirect executable
-// identity away from the official LocalAppData-managed virtual environment.
+// identity away from the official LocalAppData-managed install.
 func ManagedExecutablePath() string {
 	if runtime.GOOS != "windows" {
 		return ""
@@ -70,7 +73,133 @@ func ManagedExecutablePath() string {
 	if home == "" {
 		return ""
 	}
-	return filepath.Join(home, "hermes-agent", "venv", "Scripts", "hermes.exe")
+	return managedExecutableUnderHome(home)
+}
+
+// managedExecutableCandidates lists the updater-managed Hermes executables
+// under a Windows Hermes home, in preference order:
+//
+//   - hermes-agent\venv\Scripts\hermes.exe, the virtual-environment image of
+//     the original installer;
+//   - bin\hermes.exe, the launcher the bootstrap installer (Hermes 0.21.5 and
+//     later) puts on PATH. It runs the leased environment under
+//     installs\<id>\environments\<id>\venv, whose path changes with every
+//     update, so the stable launcher is the image admission binds to.
+//
+// Both record the release in hermes-agent\install-stamp.json.
+func managedExecutableCandidates(home string) []string {
+	return []string{
+		filepath.Join(home, "hermes-agent", "venv", "Scripts", "hermes.exe"),
+		filepath.Join(home, "bin", "hermes.exe"),
+	}
+}
+
+// managedExecutableUnderHome returns the first candidate that is a regular
+// file, or the original virtual-environment path when none is present so
+// callers report the historical location.
+func managedExecutableUnderHome(home string) string {
+	candidates := managedExecutableCandidates(home)
+	for _, candidate := range candidates {
+		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate
+		}
+	}
+	return candidates[0]
+}
+
+// ManagedExecutablePathForUserHome is ManagedExecutablePath for another
+// user's profile home, for privileged services acting for that user (the
+// calling token's known folders belong to the service). The default
+// AppData\Local layout under the profile is assumed.
+func ManagedExecutablePathForUserHome(userHome string) string {
+	userHome = strings.TrimSpace(userHome)
+	if runtime.GOOS != "windows" || userHome == "" {
+		return ""
+	}
+	home := ResolveHomeDir(runtime.GOOS, "", filepath.Join(userHome, "AppData", "Local"), userHome)
+	if home == "" {
+		return ""
+	}
+	return managedExecutableUnderHome(home)
+}
+
+// InstalledVersionForManagedExecutable reads the release Hermes' updater
+// recorded for an updater-managed executable (hermes-agent\install-stamp.json,
+// baseVersion) without launching it. It refuses anything but a plain,
+// bounded regular file beside the managed virtual environment.
+func InstalledVersionForManagedExecutable(executable string) (string, error) {
+	executable = strings.TrimSpace(executable)
+	if executable == "" || !filepath.IsAbs(executable) {
+		return "", errors.New("managed Hermes executable path is not absolute")
+	}
+	agent, err := managedExecutableAgentDir(executable)
+	if err != nil {
+		return "", err
+	}
+	stamp := filepath.Join(agent, "install-stamp.json")
+	info, err := os.Lstat(stamp)
+	if err != nil {
+		return "", fmt.Errorf("inspect Hermes install stamp: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return "", errors.New("Hermes install stamp is not a bounded regular file")
+	}
+	data, err := os.ReadFile(stamp)
+	if err != nil {
+		return "", fmt.Errorf("read Hermes install stamp: %w", err)
+	}
+	var parsed struct {
+		BaseVersion string `json:"baseVersion"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return "", fmt.Errorf("parse Hermes install stamp: %w", err)
+	}
+	version := strings.TrimSpace(parsed.BaseVersion)
+	if version == "" || strings.ContainsAny(version, "\x00\r\n") {
+		return "", errors.New("Hermes install stamp has no base version")
+	}
+	return version, nil
+}
+
+// managedExecutableAgentDir returns the hermes-agent directory that holds the
+// install stamp for one of the managedExecutableCandidates shapes.
+func managedExecutableAgentDir(executable string) (string, error) {
+	if !strings.EqualFold(filepath.Base(executable), "hermes.exe") {
+		return "", errors.New("executable is not an updater-managed Hermes image")
+	}
+	parent := filepath.Dir(executable)
+	if strings.EqualFold(filepath.Base(parent), "bin") {
+		// Bootstrap launcher: <home>\bin\hermes.exe.
+		return filepath.Join(filepath.Dir(parent), "hermes-agent"), nil
+	}
+	venv := filepath.Dir(parent)
+	agent := filepath.Dir(venv)
+	if !strings.EqualFold(filepath.Base(parent), "Scripts") || !strings.EqualFold(filepath.Base(venv), "venv") ||
+		!strings.EqualFold(filepath.Base(agent), "hermes-agent") {
+		return "", errors.New("executable is not the updater-managed Hermes virtual environment image or bootstrap launcher")
+	}
+	return agent, nil
+}
+
+// ConfigPathForUserHome resolves the Hermes config path inside another
+// user's profile home. Privileged services acting for that user must use it
+// instead of ConfigPath, which reads the calling token's known folders. On
+// Windows the default AppData\Local layout under the profile is assumed; a
+// redirected Local AppData is not followed.
+func ConfigPathForUserHome(userHome string) string {
+	userHome = strings.TrimSpace(userHome)
+	if userHome == "" {
+		return ""
+	}
+	localAppData := ""
+	if runtime.GOOS == "windows" {
+		localAppData = filepath.Join(userHome, "AppData", "Local")
+	}
+	home := ResolveHomeDir(runtime.GOOS, "", localAppData, userHome)
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "config.yaml")
 }
 
 // ResolveHomeDir is the pure, OS-parameterized core used by HomeDir and tests.

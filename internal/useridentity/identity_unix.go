@@ -37,6 +37,18 @@ func currentIdentity() Identity {
 	return out
 }
 
+// nameForID reads the passwd account name for a uid.
+func nameForID(id string) string {
+	if KindForID(id) != KindPOSIXUID {
+		return ""
+	}
+	resolved, err := user.LookupId(id)
+	if err != nil || resolved == nil {
+		return ""
+	}
+	return strings.TrimSpace(resolved.Username)
+}
+
 // homeForID reads the passwd home directory for a uid.
 //
 // A relative path is refused: the passwd database is administrator-owned, but

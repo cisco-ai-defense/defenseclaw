@@ -107,6 +107,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	var (
 		home           string
 		policyBody     []byte
+		policySetup    connector.SetupOpts
 		lockEntry      connector.HookContractLockEntry
 		lockUpdatedAt  string
 		entryUpdatedAt string
@@ -148,11 +149,17 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
 			return err
 		}
-		policyBody, err = provider.ManagedHookPolicy(setup)
+		// A standalone deployment renders the one machine-wide body from the
+		// contract chosen for the whole manifest, not from this row's own
+		// user-reported version; the per-user runtime keeps the row's contract.
+		policySetup = withWindowsClaudeManagedHooksOnly(
+			claudeMachinePolicySetup(setup, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess()),
+		)
+		policyBody, err = provider.ManagedHookPolicy(policySetup)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: build Claude Code managed policy: %w", err)
 		}
-		if err := provider.VerifyManagedHookPolicy(policyBody, setup); err != nil {
+		if err := provider.VerifyManagedHookPolicy(policyBody, policySetup); err != nil {
 			return fmt.Errorf("enterprise hooks: verify rendered Claude Code managed policy: %w", err)
 		}
 
@@ -351,7 +358,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	if err != nil {
 		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: read persisted Claude Code managed policy: %w", err))
 	}
-	if err := provider.VerifyManagedHookPolicy(persistedPolicy, setup); err != nil {
+	if err := provider.VerifyManagedHookPolicy(persistedPolicy, policySetup); err != nil {
 		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: persisted Claude Code managed policy is inactive: %w", err))
 	}
 	if err := verifyWindowsClaudeManagedPolicy(policyPath, policyBody); err != nil {

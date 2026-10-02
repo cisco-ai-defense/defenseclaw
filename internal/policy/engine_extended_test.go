@@ -288,25 +288,6 @@ func TestEngine_EvaluateAudit_HighSeverityAlwaysRetained(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox
-// ---------------------------------------------------------------------------
-
-func TestEngine_EvaluateSandbox(t *testing.T) {
-	e := extEngine(t)
-	out, err := e.EvaluateSandbox(extCtx(t), SandboxInput{
-		SkillName:            "test-skill",
-		RequestedEndpoints:   []string{"api.github.com", "169.254.169.254"},
-		RequestedPermissions: []string{"read"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(out.DeniedFromRequest) == 0 {
-		t.Error("want denied_from_request to contain blocked endpoint")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Guardrail
 // ---------------------------------------------------------------------------
 

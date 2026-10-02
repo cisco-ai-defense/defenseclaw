@@ -211,10 +211,9 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
     _remove_from_plugins_allow(oc_config, "defenseclaw")
 
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
         result = subprocess.run(
-            [*prefix, openclaw_bin(), "plugins", "uninstall", "defenseclaw"],
+            [openclaw_bin(), "plugins", "uninstall", "defenseclaw"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:

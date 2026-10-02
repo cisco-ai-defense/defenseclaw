@@ -895,7 +895,7 @@ func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 }
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows Cursor, Windsurf, and Copilot use PowerShell adapters while
+// path; Windows Cursor and Copilot use PowerShell adapters while
 // other connectors invoke the native Go `hook` subcommand directly.
 // PowerShell shell-string connectors include its call operator.
 func TestHookInvocationCommand(t *testing.T) {
@@ -925,16 +925,6 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if isNativeHookCommand(unix) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
-	}
-
-	windsurf := hookInvocationCommandFor("windows", "windsurf", unix)
-	wantWindsurf := "& " + powershellQuoteLiteral(strings.TrimSuffix(unix, ".sh")+".ps1")
-	if windsurf != wantWindsurf {
-		t.Errorf("windsurf command = %q, want %q", windsurf, wantWindsurf)
-	}
-	if strings.Contains(windsurf, "bash") || strings.Contains(windsurf, "wsl") ||
-		strings.Contains(windsurf, nativeHookFlag) {
-		t.Errorf("windsurf command bypasses its documented PowerShell adapter: %q", windsurf)
 	}
 
 	// Codex passes this string to cmd.exe /C as one argument. The outer command
@@ -1043,58 +1033,6 @@ func TestHookInvocationCommand(t *testing.T) {
 	if !strings.Contains(decoded, windowsNativePowerShellStartForTest(windowsExe, "antigravity")) ||
 		!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
 		t.Errorf("antigravity encoded command lost managed launcher or hardening:\n%s", decoded)
-	}
-}
-
-func TestGeminiWindowsNativeHookCommandIsSynchronousAndExactlyOwned(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	const unixHook = `/home/u/.defenseclaw/hooks/geminicli-hook.sh`
-	setHookBinaryOverride(t, hookBinary)
-
-	command := hookInvocationCommandFor("windows", "geminicli", unixHook)
-	want := windowsNativePowerShellHookCommandForBinary("geminicli", hookBinary)
-	if command != want {
-		t.Fatalf("Gemini Windows command = %q, want %q", command, want)
-	}
-	if strings.Contains(command, ".sh") || strings.Contains(command, "bash") || strings.HasPrefix(command, "& ") {
-		t.Fatalf("Gemini command regressed to a script or non-waiting call operator: %q", command)
-	}
-	decoded := decodePowerShellEncodedCommandForTest(t, command)
-	for _, marker := range []string{
-		windowsNativePowerShellStartForTest(hookBinary, "geminicli"),
-		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"exit $hookProcess.ExitCode",
-	} {
-		if !strings.Contains(decoded, marker) {
-			t.Errorf("decoded Gemini command missing %q:\n%s", marker, decoded)
-		}
-	}
-	if !isNativeHookCommand(command) {
-		t.Fatal("current Gemini encoded command is not recognized as owned")
-	}
-	if got := shellWord(command); got != command {
-		t.Fatalf("Gemini native command was shell-quoted into an inert string: %q", got)
-	}
-
-	for name, legacy := range map[string]string{
-		"unqualified Start-Process": legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("geminicli", hookBinary),
-		"non-waiting encoded":       legacyWindowsNativePowerShellHookCommandForBinary("geminicli", hookBinary),
-		"call operator":             legacyWindowsGeminiCallOperatorHookCommandForBinary(hookBinary),
-	} {
-		if !isNativeHookCommand(legacy) {
-			t.Errorf("exact Gemini %s command is not owned for migration: %q", name, legacy)
-		}
-	}
-
-	foreign := windowsNativePowerShellHookCommandForBinary(
-		"geminicli",
-		`C:\Foreign Product\defenseclaw-hook.exe`,
-	)
-	if isNativeHookCommand(foreign) {
-		t.Fatal("foreign encoded Gemini command was treated as DefenseClaw-owned")
-	}
-	if isNativeHookCommand(command + " extra") {
-		t.Fatal("tampered Gemini encoded command was treated as DefenseClaw-owned")
 	}
 }
 
@@ -1437,8 +1375,6 @@ func main() {
 		{connector: "codex", exitCode: 1},
 		{connector: "codex", exitCode: 2},
 		{connector: "antigravity", exitCode: 2},
-		{connector: "geminicli", exitCode: 0},
-		{connector: "geminicli", exitCode: 2},
 		{connector: "copilot", exitCode: 0},
 		{connector: "copilot", exitCode: 2},
 	}
@@ -2344,7 +2280,6 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 		{"codex", NewCodexConnector(), &CodexConfigPathOverride, ".toml"},
 		{"claudecode", NewClaudeCodeConnector(), &ClaudeCodeSettingsPathOverride, ".json"},
 		{"cursor", NewCursorConnector(), &CursorHooksPathOverride, ".json"},
-		{"windsurf", NewWindsurfConnector(), &WindsurfHooksPathOverride, ".json"},
 		{"copilot", NewCopilotConnector(), &CopilotHooksPathOverride, ".json"},
 		{"antigravity", NewAntigravityConnector(), &AntigravityHooksPathOverride, ".json"},
 		{"hermes-preview", NewHermesConnector(), &HermesConfigPathOverride, ".yaml"},
@@ -2418,35 +2353,6 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				} {
 					if !strings.Contains(adapterText, marker) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
-					}
-				}
-			} else if connectorName == "windsurf" {
-				wantCommand := hookInvocationCommand(
-					"windsurf",
-					filepath.Join(dataDir, "hooks", "windsurf-hook.sh"),
-				)
-				encodedCommand, err := json.Marshal(wantCommand)
-				if err != nil {
-					t.Fatalf("encode Windsurf Windows adapter command: %v", err)
-				}
-				if !strings.Contains(text, string(encodedCommand)) {
-					t.Errorf("config missing Windsurf Windows adapter command %q:\n%s", wantCommand, text)
-				}
-				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "windsurf-hook.ps1"))
-				if err != nil {
-					t.Fatalf("read Windsurf Windows adapter: %v", err)
-				}
-				adapterText := string(adapter)
-				for _, marker := range []string{
-					windowsHookBinaryName,
-					"hook --connector windsurf",
-					fmt.Sprintf("$timeoutMS = %d", windowsHookAdapterTimeoutMS),
-					"WaitForExit($remainingMS)",
-					"$process.Kill()",
-					"[Environment]::Exit([int]$exitCode)",
-				} {
-					if !strings.Contains(adapterText, marker) {
-						t.Errorf("Windsurf adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
 				}
 			} else if connectorName == "antigravity" {

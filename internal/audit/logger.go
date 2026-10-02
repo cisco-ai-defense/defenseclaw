@@ -206,6 +206,14 @@ type ScanCorrelation struct {
 	// EmitScanResult can record per-connector scan-finding metrics. Empty
 	// for connector-agnostic scans (CLI file scans, background rescans).
 	Connector string
+
+	// UserID, UserIDKind and UserName name the caller whose request the
+	// scan inspected, as the hook_decision rows do. Only the gateway's
+	// verified caller fills them, never an identity a request only claims;
+	// they stay empty for scans no caller started.
+	UserID     string
+	UserIDKind string
+	UserName   string
 }
 
 // LogScan persists the forensic scan rows and emits the canonical v8 finding,

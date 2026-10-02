@@ -138,6 +138,14 @@ func normalizeProfilePath(path string) string {
 // accountNameForSID resolves the bare account name. The domain is dropped so
 // the value cannot be mistaken for a qualified principal or an email, and an
 // unresolvable SID yields an empty name rather than a synthesized one.
+// nameForID resolves a SID's account name.
+func nameForID(id string) string {
+	if KindForID(id) != KindWindowsSID {
+		return ""
+	}
+	return accountNameForSID(id)
+}
+
 func accountNameForSID(sid string) string {
 	parsed, err := windows.StringToSid(sid)
 	if err != nil || parsed == nil {

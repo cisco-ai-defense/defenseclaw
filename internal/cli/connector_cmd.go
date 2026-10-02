@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -333,19 +334,16 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		// Devin has no supported config-home environment override. The
 		// authenticated installer binding flows through SetupOpts.ConfigHome.
 		return func() {}, nil
-	case "windsurf":
-		// Windsurf has no vendor home override variable. Bind DefenseClaw's
-		// connector path resolver directly to Setup's validated profile root;
-		// never inherit a maintenance process's ambient USERPROFILE.
+	case legacyconnector.RetiredDesktopID:
+		// Retired-ID cleanup has no vendor home override variable. Bind
+		// DefenseClaw's connector path resolver directly to Setup's validated
+		// profile root; never inherit a maintenance process's ambient
+		// USERPROFILE.
 		return connector.BindUserHomeDir(home)
 	case "antigravity":
 		// Google has no documented Antigravity configuration-home environment
 		// variable. The hidden maintenance flag already flows through
 		// SetupOpts.ConfigHome, so do not invent or export a vendor override.
-		return func() {}, nil
-	case "geminicli":
-		// Retired Gemini CLI cleanup uses only SetupOpts.ConfigHome from the
-		// authenticated maintenance handoff; never publish a new vendor override.
 		return func() {}, nil
 	case "opencode":
 		variable = "OPENCODE_CONFIG_DIR"
@@ -522,9 +520,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
 	if name != "amp" && name != "antigravity" && name != "claudecode" && name != "codex" &&
-		name != "copilot" && name != "cursor" && name != "geminicli" && name != "hermes" && name != "omnigent" &&
+		name != "copilot" && name != "cursor" && name != "hermes" && name != "omnigent" &&
 		name != "opencode" && name != "devin" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, geminicli, hermes, omnigent, and opencode")
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, hermes, omnigent, and opencode")
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
@@ -568,8 +566,11 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	if previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+		// A contract that only a different DefenseClaw release changed for the
+		// same agent version is refreshed by the Setup below, as at gateway boot.
 		if connector.HookContractCompatibilityDrifted(previous, current) && actionMode &&
-			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" &&
+			!connector.HookContractChangedByDefenseClawRelease(previous, current) {
 			return fmt.Errorf("connector reconcile %s: hook contract compatibility drift", name)
 		}
 	}
@@ -841,10 +842,11 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
-	if !ok && name == "windsurf" {
-		// Retired Cascade is never selectable or reconcilable. It remains
-		// resolvable only here so upgrades can restore its exact managed backup.
-		conn, ok = connector.NewWindsurfConnector(), true
+	if !ok {
+		// A retired connector ID is never selectable or reconcilable. It
+		// resolves only here so upgrade and uninstall can remove what an older
+		// release wrote.
+		conn, ok = connector.RetiredConnector(name)
 	}
 	if !ok {
 		return fmt.Errorf("connector teardown: unknown connector %q (known: %s)",
@@ -876,6 +878,10 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
+	if name == "opencode" {
+		// The empty folders the gateway's install watcher created go too.
+		connector.RemoveOpenCodeWatcherCreatedDirs(opts.DataDir)
+	}
 
 	if connectorFlagJSON {
 		payload := map[string]any{
@@ -903,11 +909,22 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
-	if !ok && name == "windsurf" {
-		// Private legacy verification pairs with the teardown compatibility path.
-		conn, ok = connector.NewWindsurfConnector(), true
+	if !ok {
+		// Legacy verification pairs with the retired teardown path above.
+		conn, ok = connector.RetiredConnector(name)
 	}
 	if !ok {
+		if !reg.NotShipped(name) {
+			// A plugin directory declares this name (or plugin discovery
+			// failed), so it may be an installed plugin that did not load.
+			// Exit 2 would let uninstall skip its teardown and strand the
+			// plugin's hooks; report it as not verifiable instead.
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"connector verify: connector %q is not loaded, but a plugin may provide it; fix the plugin under the configured plugin directory and retry\n",
+				name)
+			connectorExit(1)
+			return nil
+		}
 		// Map "unknown connector" to exit code 2 (config error), distinct
 		// from "connector dirty" (exit 1). Cobra surfaces RunE errors as
 		// exit 1 by default, so we need to bypass cobra and call os.Exit.

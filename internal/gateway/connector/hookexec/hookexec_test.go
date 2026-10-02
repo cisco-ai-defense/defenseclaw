@@ -19,6 +19,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -539,19 +540,6 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
-			name:      "geminicli allow with no hook_output exit 0",
-			connector: "geminicli",
-			respBody:  `{"action":"allow"}`,
-			wantCode:  0,
-		},
-		{
-			name:       "geminicli echoes hook_output deny exit 0",
-			connector:  "geminicli",
-			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
-			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
-			wantCode:   0,
-		},
-		{
 			name:       "openhands deny in hook_output exits 2",
 			connector:  "openhands",
 			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
@@ -564,19 +552,6 @@ func TestDecisionGolden(t *testing.T) {
 			respBody:   `{"hook_output":{"decision":"allow"}}`,
 			wantStdout: `{"decision":"allow"}` + "\n",
 			wantCode:   0,
-		},
-		{
-			name:       "windsurf block writes stderr exit 2 no stdout",
-			connector:  "windsurf",
-			respBody:   `{"action":"block","reason":"nope"}`,
-			wantStderr: "nope",
-			wantCode:   2,
-		},
-		{
-			name:      "windsurf allow exit 0",
-			connector: "windsurf",
-			respBody:  `{"action":"allow"}`,
-			wantCode:  0,
 		},
 		{
 			name:       "amp block writes stderr exit 2 no stdout",
@@ -656,9 +631,7 @@ func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 		"copilot",
 		"cursor",
 		"devin",
-		"geminicli",
 		"openhands",
-		"windsurf",
 	} {
 		t.Run(connector, func(t *testing.T) {
 			result := run(t, connector, ok(`{"action":"alert","reason":"advisory finding"}`), func(opts *Options) {
@@ -853,9 +826,7 @@ func TestOversizedPayload(t *testing.T) {
 		"openhands":  {stdout: `{"decision":"deny","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"cursor":     {stdout: cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook payload too large") + "\n", code: 2},
 		"copilot":    {stdout: "", code: 0},
-		"geminicli":  {stdout: "", code: 2},
 		"hermes":     {stdout: "", code: 0},
-		"windsurf":   {stdout: "", code: 2},
 	}
 	for connector, want := range cases {
 		t.Run("fail closed "+connector, func(t *testing.T) {
@@ -1281,11 +1252,10 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 		"codex":       "/api/v1/codex/hook",
 		"claudecode":  "/api/v1/claude-code/hook",
 		"cursor":      "/api/v1/cursor/hook",
-		"windsurf":    "/api/v1/windsurf/hook",
-		"geminicli":   "/api/v1/geminicli/hook",
 		"copilot":     "/api/v1/copilot/hook",
 		"antigravity": "/api/v1/antigravity/hook",
 		"hermes":      "/api/v1/hermes/hook",
+		"kiro":        "/api/v1/kiro/hook",
 	}
 	for connector, endpoint := range tests {
 		t.Run(connector, func(t *testing.T) {
@@ -1381,6 +1351,9 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	}
 }
 
+// Per-user Copilot hooks fail open on every DefenseClaw-side failure;
+// administrator-managed (standalone enterprise) Copilot hooks deny the tool
+// call with Copilot's native structured decision instead.
 func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 	type failureCase struct {
 		name   string
@@ -1406,23 +1379,29 @@ func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := run(t, "copilot", tc.rt, func(o *Options) {
-				o.Event = "preToolUse"
-				o.FailMode = "closed"
-				o.StrictAvailability = true
-				o.ManagedEnterprise = true
-				if tc.mutate != nil {
-					tc.mutate(o)
+		for _, managedHook := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managedHook), func(t *testing.T) {
+				result := run(t, "copilot", tc.rt, func(o *Options) {
+					o.Event = "preToolUse"
+					o.FailMode = "closed"
+					o.StrictAvailability = true
+					o.ManagedEnterprise = managedHook
+					if tc.mutate != nil {
+						tc.mutate(o)
+					}
+				})
+				want := ""
+				if managedHook {
+					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+				}
+				if result.code != 0 || result.stdout != want {
+					t.Fatalf(
+						"Copilot failure result: code=%d stdout=%q stderr=%q, want stdout %q",
+						result.code, result.stdout, result.stderr, want,
+					)
 				}
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"Copilot failure synthesized enforcement: code=%d stdout=%q stderr=%q",
-					result.code, result.stdout, result.stderr,
-				)
-			}
-		})
+		}
 	}
 }
 
@@ -1931,6 +1910,74 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if !strings.Contains(errb.String(), "enterprise_managed_sid_unregistered") {
 		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
 	}
+
+	// The Windows standalone hook says the account is not
+	// enrolled instead of "gateway unreachable", and still blocks.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "codex",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		FailMode:                 "open",
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != blockExit || rt.requests != 0 {
+		t.Fatalf("unenrolled account: code = %d requests = %d, want fail-closed without a gateway call", code, rt.requests)
+	}
+	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
+		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
+	}
+	// Codex shows its structured denial, not stderr, so the denial names
+	// the reason too instead of the generic failed-closed text.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "codex",
+		Event:                    "PreToolUse",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		FailMode:                 "open",
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != 0 || !strings.Contains(out.String(), `"permissionDecision":"deny"`) ||
+		!strings.Contains(out.String(), "this account is not enrolled") || strings.Contains(out.String(), failedClosed) {
+		t.Fatalf("codex denial: code = %d stdout = %q, want a deny that names the enrollment", code, out.String())
+	}
+	// Hermes has no fail-closed contract: the same refusal allows, so the
+	// hook must not claim to block.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "hermes",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
+		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	}
 }
 
 func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
@@ -2023,7 +2070,7 @@ func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedM
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "geminicli", "hermes", "openhands"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -2416,5 +2463,90 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302 (redirect surfaced, not followed)", resp.StatusCode)
+	}
+}
+
+// Work the hook did before Run (the standalone foreign-hook guard's scan)
+// counts against the request budget: a budget already spent must fail
+// closed before gateway contact instead of granting a fresh full budget
+// that outlives the agent's own hook timeout.
+func TestRunChargesWorkBeforeRunToTheRequestBudget(t *testing.T) {
+	r := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) {
+		o.StartedAt = time.Now().Add(-time.Hour)
+		o.FailMode = "closed"
+	})
+	if r.rt.requests != 0 {
+		t.Fatalf("a spent budget must not contact the gateway: %d requests", r.rt.requests)
+	}
+	if r.code == 0 || !strings.Contains(r.stderr, "budget exhausted") {
+		t.Fatalf("a spent budget must fail closed: code=%d stderr=%q", r.code, r.stderr)
+	}
+	if fresh := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) { o.FailMode = "closed" }); fresh.rt.requests != 1 {
+		t.Fatalf("a zero StartedAt keeps the full budget: %d requests", fresh.rt.requests)
+	}
+}
+
+// A foreign-hook guard denial must reach the user in each connector's
+// native block response with the guard's reason (file and allowlist key),
+// not the generic "policy service unavailable" text, and must never
+// contact the gateway.
+func TestForeignHookBlockNamesTheFileInEveryConnectorsResponse(t *testing.T) {
+	reason := ForeignHookBlockedReasonPrefix + " The project file /repo/.cursor/hooks.json defines a hook (digest sha256:ab). Ask your administrator to add the digest to enterprise.machine_policy.connectors.x.allowed_hooks."
+	for _, tc := range []struct {
+		connector, event, payload string
+		code                      int
+		stdout, stderr            string
+	}{
+		{connector: "cursor", payload: `{"hook_event_name":"preToolUse","tool_name":"Shell"}`, code: 2, stdout: `"permission":"deny"`},
+		{connector: "codex", event: "PreToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
+		{connector: "antigravity", event: "PreToolUse", code: 0, stdout: `"decision":"deny"`},
+		{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stdout: `"decision":"block"`},
+		{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stderr: "blocking claude-code tool"},
+		{connector: "copilot", event: "preToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
+	} {
+		rt := ok(`{"action":"allow"}`)
+		r := run(t, tc.connector, rt, func(o *Options) {
+			o.ManagedEnterprise = true
+			o.ManagedRuntimeFailure = reason
+			o.Event = tc.event
+			if tc.payload != "" {
+				o.Stdin = strings.NewReader(tc.payload)
+			}
+		})
+		if rt.requests != 0 {
+			t.Fatalf("%s: a foreign-hook block must not contact the gateway", tc.connector)
+		}
+		if r.code != tc.code || !strings.Contains(r.stdout, tc.stdout) || !strings.Contains(r.stderr, tc.stderr) {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q", tc.connector, r.code, r.stdout, r.stderr)
+		}
+		shown := r.stdout
+		if tc.connector == "claudecode" {
+			shown = r.stderr
+		}
+		if !strings.Contains(shown, "/repo/.cursor/hooks.json") || !strings.Contains(shown, "allowed_hooks") {
+			t.Fatalf("%s: the block must name the file and the allowlist key: stdout=%q stderr=%q", tc.connector, r.stdout, r.stderr)
+		}
+		if strings.Contains(r.stderr, "gateway unreachable") {
+			t.Fatalf("%s: a policy block is not a gateway outage: %q", tc.connector, r.stderr)
+		}
+	}
+}
+
+// A managed Copilot hook that cannot get a decision denies in Copilot's own
+// shape (permissionRequest answers with behavior), while sessionStart, which
+// cannot block, keeps the fail-open result.
+func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
+	sp := specs["copilot"]
+	var stdout, stderr bytes.Buffer
+	opts := Options{Connector: "copilot", Event: "permissionRequest", ManagedEnterprise: true, Stdout: &stdout, Stderr: &stderr}
+	var body map[string]string
+	if code := failUnreachable(opts, sp, "closed", "enterprise_managed_sid_unregistered"); code != 0 ||
+		json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &body) != nil || body["behavior"] != "deny" {
+		t.Fatalf("permissionRequest = %d %q", code, stdout.String())
+	}
+	stdout.Reset()
+	opts.Event = "sessionStart"
+	if code := failUnreachable(opts, sp, "closed", "x"); code != 0 || stdout.Len() != 0 {
+		t.Fatalf("sessionStart = %d %q", code, stdout.String())
 	}
 }

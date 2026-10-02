@@ -47,20 +47,38 @@ fi
 # missing-token branch so the bypass goes through
 # defenseclaw_handle_missing_token and honors
 # DEFENSECLAW_STRICT_AVAILABILITY (matches claude-code-hook /
-# codex-hook / geminicli-hook).
+# codex-hook).
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call. The registered event
+# is taken from argv again afterwards: an inherited HOOK_EVENT export would
+# otherwise have been dropped with the rest of the environment.
+. "${HOOK_DIR}/_sandbox.sh"
+HOOK_EVENT="${1:-}"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status, so no failed, refused or unparseable reply may turn into an allow.
+# Antigravity enforces only a synchronous PreToolUse {"decision":"deny"} on
+# stdout, which every failure below prints for that event.
+FAIL_MODE="closed"
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
-antigravity_emit_fallback() {
-  local closed="${1:-0}"
+{{if .Sandbox}}# A closed PreToolUse fallback's deny reason says why (the second argument):
+# an unreachable DefenseClaw, a request it refused, a reply that is no
+# verdict. The tool call is blocked either way.
+{{end}}antigravity_emit_fallback() {
+  local closed="${1:-0}"{{if .Sandbox}}
+  local reason="${2:-DefenseClaw policy service is unavailable.}"{{end}}
   case "$HOOK_EVENT" in
     PreToolUse)
       if [ "$closed" = "1" ]; then
-        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}'
-      else
+{{if .Sandbox}}        printf '{"decision":"deny","reason":"%s"}\n' "$(defenseclaw_json_escape "$reason")"
+{{else}}        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}'
+{{end}}      else
         printf '%s\n' '{"decision":"allow"}'
       fi
       ;;
@@ -77,7 +95,31 @@ DEFENSECLAW_HOOK_CONNECTOR="antigravity"
 DEFENSECLAW_HOOK_NAME="antigravity-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+{{if .Sandbox}}# The image registers exactly one documented lifecycle event per handler.
+if [ "$#" -ne 1 ]; then
+  defenseclaw_log_hook_failure antigravity antigravity-hook "unexpected registered command arguments" response closed
+  antigravity_emit_fallback 1 "DefenseClaw hook was called with unexpected arguments, so the tool call is blocked."
+  exit 0
+fi
+case "$HOOK_EVENT" in
+  PreInvocation|PreToolUse|PostToolUse|PostInvocation|Stop) ;;
+  *)
+    defenseclaw_log_hook_failure antigravity antigravity-hook "unregistered event" response closed
+    antigravity_emit_fallback 1
+    exit 0
+    ;;
+esac
+
+# The binding token is the only credential a sandbox hook may present.
+case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+  ''|*$'\n'*|*$'\r'*)
+    defenseclaw_log_hook_failure antigravity antigravity-hook "missing or malformed sandbox binding token" transport closed
+    echo "defenseclaw: missing or malformed sandbox binding token (DEFENSECLAW_SANDBOX_TOKEN), blocking antigravity tool (sandbox hooks fail closed)" >&2
+    antigravity_emit_fallback 1 "DefenseClaw hook has no valid sandbox binding token, so the tool call is blocked."
+    exit 0
+    ;;
+esac
+{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_log_hook_failure antigravity antigravity-hook "missing gateway token" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     antigravity_emit_fallback 1
@@ -86,18 +128,20 @@ if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   fi
   exit 0
 fi
-
+{{end}}
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    antigravity_emit_fallback 1
+    antigravity_emit_fallback 1{{if .Sandbox}} "DefenseClaw hook payload is too large, so the tool call is blocked."{{end}}
   else
     antigravity_emit_fallback 0
   fi
   exit 0
 }
 API_ADDR="{{.APIAddr}}"
-if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
+{{if .Sandbox}}# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   DEFENSECLAW_GATEWAY_TOKEN=
   if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
     IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
@@ -107,7 +151,7 @@ elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 
 fail_unreachable() {
   defenseclaw_log_hook_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
@@ -124,14 +168,14 @@ fail_response() {
   defenseclaw_log_hook_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    antigravity_emit_fallback 1
+    antigravity_emit_fallback 1{{if .Sandbox}} "${2:-DefenseClaw answered the hook request without a verdict, so the tool call is blocked.}"{{end}}
   else
     antigravity_emit_fallback 0
   fi
   exit 0
 }
 
-AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -154,18 +198,29 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/antigravity/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/antigravity/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: antigravity-hook/1.0" \
+  -H "X-DefenseClaw-Antigravity-Event: ${HOOK_EVENT}" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/antigravity/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: antigravity-hook/1.0" \
   -H "X-DefenseClaw-Antigravity-Event: ${HOOK_EVENT}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
+  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
   --max-time 29 \
   -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -174,14 +229,37 @@ if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
   fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if .Sandbox}}elif [ "$HTTP_CODE" -ge 400 ] 2>/dev/null && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
+  # The request was refused (a malformed hook input, a token or route the
+  # ingress does not accept, a rate limit), which is no unreachable service.
+  fail_response "gateway returned HTTP ${HTTP_CODE}" "DefenseClaw hook request was refused (HTTP ${HTTP_CODE}), so the tool call is blocked."
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
+# reply the workload may have shaped, never an allow. A block without a
+# rendered directive still denies PreToolUse.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|alert|confirm) ;;
+  block)
+    if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && [ "$HOOK_EVENT" = "PreToolUse" ]; then
+      REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+      if [ -z "$REASON" ]; then
+        REASON="Blocked by DefenseClaw Antigravity policy."
+      fi
+      OUTPUT="$(printf '{"decision":"deny","reason":"%s"}' "$(defenseclaw_json_escape "$REASON")")"
+    fi
+    ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 else
   antigravity_emit_fallback 0

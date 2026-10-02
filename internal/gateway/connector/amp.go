@@ -103,14 +103,14 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 		}
 		return false, err
 	}
-	if err := validatePluginArtifactDestination(path); err != nil {
+	if err := validatePluginArtifactDestinationFor(path, opts.ManagedTargetSID); err != nil {
 		return false, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false, err
 	}
-	for _, marker := range [][]byte{
+	markers := [][]byte{
 		[]byte("// defenseclaw-managed-plugin v2"),
 		[]byte("/api/v1/amp/hook"),
 		[]byte(`amp.on("session.start"`),
@@ -118,7 +118,19 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 		[]byte(`amp.on("tool.call"`),
 		[]byte(`amp.on("tool.result"`),
 		[]byte(`amp.on("agent.end"`),
-	} {
+	}
+	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD: string = ", "\n"); guard != nil {
+		markers = append(markers, guard, []byte(`await foreignHookCheck("tool.call")`))
+	}
+	// A plugin rendered before the listener proof existed would still send
+	// its credential to whoever holds the TCP port; it is repaired.
+	if managedPluginListenerProof(opts) {
+		markers = append(markers,
+			[]byte("const DC_LISTENER_PROOF: string = \"1\"\n"),
+			[]byte("if (DC_LISTENER_PROOF) await proveListener(token, init.signal)"),
+		)
+	}
+	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil
 		}

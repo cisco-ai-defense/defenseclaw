@@ -3108,7 +3108,7 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         model_prompt.assert_called_once()
 
     def test_multi_guardrail_setup_action_defaults_ignore_stale_global_mode(self):
-        targets = ["antigravity", "claudecode", "devin", "geminicli", "hermes", "opencode", "openhands"]
+        targets = ["antigravity", "claudecode", "devin", "hermes", "opencode", "openhands"]
         self._seed_map(*targets)
         gc = self.app.cfg.guardrail
         gc.enabled = True

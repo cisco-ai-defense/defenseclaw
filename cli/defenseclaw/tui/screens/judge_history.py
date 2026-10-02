@@ -36,9 +36,13 @@ class JudgeHistoryScreen(ModalScreen[None]):
         align: center middle;
     }}
 
+    /* Shrink to the terminal: at 80x24 a fixed 120x32 dialog showed only
+       an empty frame and the Close button. */
     #judge-history-dialog {{
         width: 120;
+        max-width: 96%;
         height: 32;
+        max-height: 95%;
         padding: 1 2;
         border: round {TOKENS.border_active};
         background: {TOKENS.surface_panel};
@@ -53,7 +57,7 @@ class JudgeHistoryScreen(ModalScreen[None]):
     }}
 
     #judge-history-body {{
-        height: 23;
+        height: 1fr;
         overflow-y: auto;
         color: {TOKENS.text_secondary};
     }}

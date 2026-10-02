@@ -21,6 +21,9 @@ _ALLOWED_BINARIES = {
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
     "defenseclaw-hook.exe",
+    "skill-scanner.cmd",
+    "mcp-scanner.cmd",
+    "defenseclaw-hook-state.json",
 }
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0

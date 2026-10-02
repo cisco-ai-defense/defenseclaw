@@ -60,8 +60,16 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite: actionfacts.ExactDirectoryCredentialAcquisition,
 		alertOnly:    true,
 	},
+	// Split by operation class. The dump/crack half is the compromise itself and
+	// is enforceable at CRITICAL; the ticket-request half stays non-enforcing so
+	// the returned-TGS lifecycle rule can still observe its result. The two
+	// predicates are total and mutually exclusive, so nothing loses coverage.
 	"credential.directory_credential_acquisition": {
-		prerequisite:     actionfacts.ExactDirectoryCredentialAcquisition,
+		prerequisite:     actionfacts.ExactDirectoryCredentialCompromise,
+		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
+	},
+	"credential.directory_ticket_request": {
+		prerequisite:     actionfacts.ExactDirectoryCredentialTicketRequest,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
 	"credential.pkcs12_private_key_extract": {

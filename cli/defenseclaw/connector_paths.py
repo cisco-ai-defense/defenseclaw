@@ -27,8 +27,8 @@ It mirrors:
 
 Importing this module instead of reaching into private helpers in
 :mod:`defenseclaw.config` lets other CLI commands (``cmd_doctor``,
-``cmd_uninstall``, ``cmd_setup_sandbox``) walk the connector matrix
-without circular imports through ``Config``.
+``cmd_uninstall``) walk the connector matrix without circular imports
+through ``Config``.
 
 Public surface
 --------------
@@ -77,6 +77,7 @@ except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
 
 import yaml
 
+from defenseclaw import legacy_connector
 from defenseclaw.file_permissions import (
     UnsafePathError,
     atomic_write_private_bytes,
@@ -85,7 +86,6 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     reject_reparse_path,
 )
-from defenseclaw.platform_support import DEPRECATED_CONNECTORS
 from defenseclaw.safety import is_symlink
 
 _MCP_CONFIG_MAX_BYTES = 2 * 1024 * 1024
@@ -103,7 +103,6 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "hermes",
     "cursor",
     "devin",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",
@@ -155,7 +154,6 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "hermes",
         "cursor",
         "devin",
-        "geminicli",
         "copilot",
         "openhands",
         "antigravity",
@@ -365,8 +363,6 @@ def normalize(connector: str | None) -> str:
         return "openhands"
     if name in {"claude-code", "claude_code"}:
         return "claudecode"
-    if name in {"gemini-cli", "gemini_cli", "gemini"}:
-        return "geminicli"
     return name or "openclaw"
 
 
@@ -376,34 +372,94 @@ def is_known(connector: str | None) -> bool:
     return normalize(connector) in KNOWN_CONNECTORS
 
 
-def is_cleanup_only(connector: str | None) -> bool:
-    """Return whether *connector* is retained only for managed cleanup.
+# How much of a plugin.yaml is read, in bytes (the gateway's
+# maxPluginManifestBytes).
+_PLUGIN_MANIFEST_MAX_BYTES = 64 * 1024
 
-    Cleanup-only connectors stay in :data:`KNOWN_CONNECTORS` so historical
-    receipts, aliases, and exact teardown paths remain resolvable. They must
-    not participate in new asset discovery or mutation surfaces.
+
+def _read_plugin_manifest(manifest: str) -> dict | None:
+    """Parse one plugin.yaml the way the gateway does, or return ``None``.
+
+    The bytes go straight to the YAML parser, which reads a UTF-8 or UTF-16
+    (BOM) manifest; any read, decode or parse error means "no manifest",
+    as in the gateway's ``readPluginManifestName``.
     """
+    try:
+        with open(manifest, "rb") as fh:
+            doc = yaml.safe_load(fh.read(_PLUGIN_MANIFEST_MAX_BYTES))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    return doc if isinstance(doc, dict) else None
 
-    return normalize(connector) in DEPRECATED_CONNECTORS
+
+def scan_plugin_connectors(plugin_dir: str) -> tuple[set[str], bool]:
+    """Return ``(declared names, whether any manifest is loadable)``.
+
+    A manifest is loadable when it sets ``entry`` and ``sha256`` and its
+    ``entry`` is a regular file in the plugin's directory, on an OS where the
+    gateway loads Go plugins (not Windows). Raises :class:`OSError` when
+    *plugin_dir* exists but cannot be listed.
+    """
+    names: set[str] = set()
+    loadable = False
+    if not (plugin_dir or "").strip():
+        return names, loadable
+    try:
+        entries = list(os.scandir(plugin_dir))
+    except FileNotFoundError:
+        return names, loadable
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        names.add(entry.name.strip().lower())
+        doc = _read_plugin_manifest(os.path.join(entry.path, "plugin.yaml"))
+        if doc is None:
+            continue
+        if isinstance(doc.get("name"), str):
+            names.add(doc["name"].strip().lower())
+        if all(isinstance(doc.get(key), str) and doc[key].strip() for key in ("entry", "sha256")):
+            loadable = loadable or _plugin_entry_loadable(entry.path, doc["entry"].strip())
+    return names, loadable
 
 
-def cleanup_only_guidance(connector: str | None) -> str:
-    """Operator guidance for a retired connector's blocked active surface."""
+def _plugin_entry_loadable(directory: str, entry: str) -> bool:
+    """Report whether the gateway could open plugin *entry* of *directory*:
+    Go plugins never load on Windows, and the loader opens
+    ``<directory>/<entry>`` only when it is a regular file."""
+    if sys.platform == "win32":
+        return False
+    try:
+        info = os.lstat(os.path.join(directory, entry))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
 
-    name = normalize(connector)
-    if name == "geminicli":
-        return (
-            "Gemini CLI is retired and cleanup-only; use the Antigravity "
-            "connector. Remove existing DefenseClaw-managed Gemini CLI state "
-            "with `defenseclaw setup remove geminicli --yes`."
-        )
-    if name == "windsurf":
-        return (
-            "Windsurf/Cascade is retired and cleanup-only; use Devin. "
-            "DefenseClaw upgrade and uninstall retain authenticated legacy "
-            "receipt cleanup without exposing new Windsurf asset surfaces."
-        )
-    return f"Connector {name!r} is retired and cleanup-only."
+
+def declared_plugin_connectors(plugin_dir: str) -> set[str]:
+    """Return the connector names the plugin directories under *plugin_dir* declare.
+
+    Each subdirectory declares its own name and, when its ``plugin.yaml`` has
+    one, that ``name`` (both lowercased), mirroring the gateway's
+    ``pluginDirDeclares``. A manifest that cannot be read, decoded (for
+    example one that is not UTF-8) or parsed declares only its directory
+    name, as in the gateway. A missing *plugin_dir* declares nothing. Only a
+    *plugin_dir* that exists but cannot be listed raises :class:`OSError`:
+    callers must then treat every name as one a plugin might provide.
+    """
+    return scan_plugin_connectors(plugin_dir)[0]
+
+
+def plugin_dir_may_provide_any_connector(plugin_dir: str) -> bool:
+    """Report whether a plugin under *plugin_dir* could register any name.
+
+    The gateway registers a plugin connector under the name its code reports
+    (``Name()``), which need not match the plugin's directory or manifest
+    name. So while *plugin_dir* holds a manifest the gateway would try to
+    load (``entry`` and ``sha256`` set and the entry file present, not on
+    Windows), no connector name can be ruled out offline. Raises
+    :class:`OSError` like :func:`declared_plugin_connectors`.
+    """
+    return scan_plugin_connectors(plugin_dir)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1109,102 +1165,6 @@ def devin_hook_config_path(workspace_dir: str | None = None) -> str:
     return _workspace_path(workspace_dir, ".devin", "hooks.v1.json")
 
 
-def windsurf_user_home() -> str:
-    """Return DefenseClaw's exact Windsurf user-profile binding.
-
-    Windsurf has no vendor configuration-home override. Native Setup records
-    the Windows Profile Known Folder and the packaged launcher supplies that
-    validated value through this DefenseClaw-only environment contract.
-    Reject malformed bindings instead of falling back to an ambient profile.
-    """
-
-    configured = os.environ.get("WINDSURF_USER_HOME")
-    if configured:
-        if (
-            configured.strip() != configured
-            or "\x00" in configured
-            or "\r" in configured
-            or "\n" in configured
-            or not os.path.isabs(configured)
-            or os.path.normpath(configured) != configured
-        ):
-            raise ValueError("WINDSURF_USER_HOME is not an absolute normalized path")
-        return configured
-    if os.name == "nt" and os.environ.get("DEFENSECLAW_INSTALL_ROOT"):
-        raise ValueError("packaged Windsurf profile binding is missing")
-    return os.path.abspath(str(Path.home()))
-
-
-def windsurf_config_home() -> str:
-    """Return the bound user-level Windsurf configuration directory."""
-
-    root = windsurf_user_home()
-    candidate = os.path.normpath(os.path.join(root, ".codeium", "windsurf"))
-    if os.path.commonpath((root, candidate)) != os.path.commonpath((root, root)):
-        raise ValueError("Windsurf configuration path escapes its bound profile")
-    return candidate
-
-
-def windsurf_hook_config_path() -> str:
-    """Return the exact bound user-level Cascade hooks file."""
-
-    expected = os.path.join(windsurf_config_home(), "hooks.json")
-    configured = os.environ.get("WINDSURF_HOOK_CONFIG_PATH")
-    if configured:
-        if (
-            configured.strip() != configured
-            or "\x00" in configured
-            or "\r" in configured
-            or "\n" in configured
-            or not os.path.isabs(configured)
-            or os.path.normpath(configured) != configured
-            or os.path.normcase(configured) != os.path.normcase(expected)
-        ):
-            raise ValueError("WINDSURF_HOOK_CONFIG_PATH does not match the bound profile")
-        return configured
-    return expected
-
-
-def gemini_config_home() -> str:
-    """Return Gemini CLI's DefenseClaw-bound user configuration root.
-
-    Native DefenseClaw launchers rehydrate the authenticated derived ``.gemini``
-    directory through a private binding. Source installs without that binding
-    follow Gemini CLI's official ``GEMINI_CLI_HOME`` contract: the variable is
-    a parent home root, so Gemini creates/loads ``.gemini`` underneath it.
-    """
-
-    configured = os.environ.get("DEFENSECLAW_GEMINI_CONFIG_HOME")
-    if configured is not None:
-        if (
-            not configured
-            or configured.strip() != configured
-            or "\x00" in configured
-            or "\r" in configured
-            or "\n" in configured
-            or not os.path.isabs(configured)
-            or os.path.normpath(configured) != configured
-        ):
-            raise ValueError(
-                "DEFENSECLAW_GEMINI_CONFIG_HOME is not an absolute normalized path"
-            )
-        return configured
-
-    vendor_home = os.environ.get("GEMINI_CLI_HOME")
-    if vendor_home:
-        if (
-            vendor_home.strip() != vendor_home
-            or "\x00" in vendor_home
-            or "\r" in vendor_home
-            or "\n" in vendor_home
-            or not os.path.isabs(vendor_home)
-            or os.path.normpath(vendor_home) != vendor_home
-        ):
-            raise ValueError("GEMINI_CLI_HOME is not an absolute normalized path")
-        return os.path.join(vendor_home, ".gemini")
-    return os.path.join(os.path.abspath(str(Path.home())), ".gemini")
-
-
 def amp_config_home() -> str:
     """Return Amp's documented system configuration directory."""
 
@@ -1549,8 +1509,6 @@ def connector_home(
         return amp_config_home()
     if name == "zeptoclaw":
         return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
-    if name == "geminicli":
-        return gemini_config_home()
     if name == "copilot":
         return copilot_home()
     if name == "openhands":
@@ -1637,11 +1595,6 @@ def connector_config_files(
         paths = [
             os.path.join(zepto_home, "config.json"),
             _workspace_path(workspace_dir, ".mcp.json"),
-        ]
-    elif name == "geminicli":
-        paths = [
-            os.path.join(gemini_config_home(), "settings.json"),
-            _workspace_path(workspace_dir, ".gemini", "settings.json"),
         ]
     elif name == "copilot":
         copilot_root = copilot_home()
@@ -1866,8 +1819,6 @@ def skill_dirs(
     ``~/.openclaw/openclaw.json``).
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "claudecode":
         return _claudecode_skill_dirs(workspace_dir)
     if name == "codex":
@@ -1916,8 +1867,6 @@ def skill_write_dirs(
     install behavior.
     """
 
-    if is_cleanup_only(connector):
-        return []
     if normalize(connector) == "amp":
         workspace = _workspace_dir(workspace_dir)
         if workspace:
@@ -1959,8 +1908,6 @@ def plugin_dirs(
     * OpenClaw:    ``<home_dir>/extensions``
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "claudecode":
         return _claudecode_plugin_dirs(workspace_dir)
     if name == "codex":
@@ -2030,8 +1977,6 @@ def agent_dirs(
     owned by their existing inventory adapters.
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "codex":
         return _dedup(
             [
@@ -2081,8 +2026,6 @@ def rule_dirs(
     omitted on native Windows.
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "copilot":
         return copilot_instruction_paths(workspace_dir)
     if name == "cursor":
@@ -2092,6 +2035,9 @@ def rule_dirs(
             [
                 devin_config_home(),
                 _workspace_path(workspace_dir, ".devin", "rules"),
+                # Pre-rename Devin Desktop rule locations the vendor still
+                # loads (read-only inventory).
+                *legacy_connector.desktop_legacy_rule_paths(str(Path.home()), _workspace_dir(workspace_dir)),
             ]
         )
     if name == "opencode":
@@ -2116,7 +2062,6 @@ def mcp_servers(
     openclaw_config: str | None = None,
     workspace_dir: str | None = None,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     infer_workspace_from_cwd: bool = False,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
@@ -2142,15 +2087,11 @@ def mcp_servers(
     * OpenClaw:    ``openclaw config get mcp.servers`` (preferred)
                     falling back to direct ``openclaw.json`` parse
 
-    *openclaw_bin_resolver* and *openclaw_cmd_prefix* let callers
-    inject test doubles or sandbox-mode prefixes (``sudo -u sandbox``);
-    when omitted, lookups go through ``shutil.which`` and an empty
-    prefix.
+    *openclaw_bin_resolver* lets callers inject a test double; when
+    omitted, the lookup goes through ``shutil.which``.
     """
     name = normalize(connector)
     infer = infer_workspace_from_cwd
-    if is_cleanup_only(name):
-        return []
     if name == "claudecode":
         return _claudecode_mcp_servers(
             workspace_dir,
@@ -2220,7 +2161,6 @@ def mcp_servers(
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
 
@@ -2258,8 +2198,6 @@ def mcp_source_locations(
     name = normalize(connector)
     infer = infer_workspace_from_cwd
     home = str(Path.home())
-    if is_cleanup_only(name):
-        return []
 
     def ws(*parts: str) -> str:
         return _discovery_path(workspace_dir, *parts, infer_from_cwd=infer)
@@ -2974,6 +2912,9 @@ def _devin_skill_dirs(workspace_dir: str | None = None) -> list[str]:
             os.path.join(home, ".agents", "skills"),
             _workspace_path(workspace_dir, ".devin", "skills"),
             _workspace_path(workspace_dir, ".agents", "skills"),
+            # Pre-rename Devin Desktop locations the vendor still loads
+            # (read-only inventory; installs use the native roots above).
+            *legacy_connector.desktop_legacy_skill_paths(home, _workspace_dir(workspace_dir)),
         ]
     )
 
@@ -3087,6 +3028,30 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
             if entry.name.casefold() in instruction_names:
                 add(entry.path)
     return _dedup(files)
+
+
+def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
+    """Return a folder of an OpenCode plugin destination that group or other can write.
+
+    The gateway refuses to install its plugin there and does not start.
+    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
+    as 0775. Only the folders inside the home directory are checked.
+    """
+    if os.name == "nt":
+        return ""
+    home = os.path.realpath(os.path.expanduser("~"))
+    for plugin_path in plugin_paths:
+        folder = os.path.dirname(os.path.realpath(plugin_path))
+        while folder.startswith(home + os.sep):
+            try:
+                mode = os.lstat(folder).st_mode
+            except OSError:
+                folder = os.path.dirname(folder)
+                continue
+            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
+                return folder
+            folder = os.path.dirname(folder)
+    return ""
 
 
 def _opencode_config_dir() -> str:
@@ -3207,16 +3172,6 @@ def _antigravity_skill_dirs(workspace_dir: str | None = None) -> list[str]:
             _workspace_path(workspace_dir, ".agent", "skills"),
             os.path.join(home, ".gemini", "antigravity-cli", "skills"),
             *plugin_skill_dirs,
-        ]
-    )
-
-
-def _gemini_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    return _dedup(
-        [
-            os.path.join(gemini_config_home(), "skills"),
-            _workspace_path(workspace_dir, ".gemini", "skills"),
-            _workspace_path(workspace_dir, ".agents", "skills"),
         ]
     )
 
@@ -3559,12 +3514,6 @@ def _plugin_component_dirs(plugin_dirs: list[str], component: str) -> list[str]:
             if os.path.isdir(component_dir):
                 out.append(component_dir)
     return _dedup(out)
-
-
-def _gemini_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
-    # Gemini CLI extensions are installed into the user configuration root.
-    # The CLI does not document a project-local .gemini/extensions layer.
-    return [os.path.join(gemini_config_home(), "extensions")]
 
 
 def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
@@ -3912,12 +3861,10 @@ def _openclaw_mcp_servers(
     openclaw_config: str | None,
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     cli_entries = _read_mcp_servers_via_openclaw_cli(
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
     if cli_entries is not None:
@@ -4018,37 +3965,6 @@ def _devin_mcp_servers(
     entries: list[MCPServerEntry] = []
     for path in _devin_mcp_read_paths(workspace or None):
         entries.extend(_read_dotmcp_json(path, diagnostic_sink=diagnostic_sink))
-    return _dedup_mcp_entries(entries)
-
-
-def _gemini_mcp_servers(
-    workspace_dir: str | None = None,
-    *,
-    infer_from_cwd: bool = False,
-    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
-) -> list[MCPServerEntry]:
-    entries: list[MCPServerEntry] = []
-    # Gemini's project settings override user settings. Only consult the
-    # project layer when a workspace is pinned or the caller opts into cwd
-    # inference; never infer it from a daemon's current working directory.
-    project_settings = _discovery_path(
-        workspace_dir, ".gemini", "settings.json", infer_from_cwd=infer_from_cwd,
-    )
-    if project_settings:
-        entries.extend(
-            _read_mcp_settings_block(
-                project_settings,
-                keys=("mcpServers",),
-                diagnostic_sink=diagnostic_sink,
-            )
-        )
-    entries.extend(
-        _read_mcp_settings_block(
-            os.path.join(gemini_config_home(), "settings.json"),
-            keys=("mcpServers",),
-            diagnostic_sink=diagnostic_sink,
-        )
-    )
     return _dedup_mcp_entries(entries)
 
 
@@ -4757,14 +4673,12 @@ def _devin_config_paths(workspace_dir: str | None = None) -> list[str]:
 def _read_mcp_servers_via_openclaw_cli(
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry] | None:
     """Run ``openclaw config get mcp.servers`` and parse the JSON.
 
     Returns ``None`` (not ``[]``) on any failure so callers can fall
-    back to direct ``openclaw.json`` parsing. Honors *openclaw_cmd_prefix*
-    so sandbox-mode setups can prepend ``sudo -u sandbox``.
+    back to direct ``openclaw.json`` parsing.
     """
     if openclaw_bin_resolver is None:
         import shutil
@@ -4772,10 +4686,9 @@ def _read_mcp_servers_via_openclaw_cli(
         bin_path = shutil.which("openclaw") or "openclaw"
     else:
         bin_path = openclaw_bin_resolver()
-    prefix = list(openclaw_cmd_prefix or [])
     try:
         result = subprocess.run(
-            [*prefix, bin_path, "config", "get", "mcp.servers"],
+            [bin_path, "config", "get", "mcp.servers"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -4986,8 +4899,6 @@ def set_mcp_server(
                      (for example OpenHands writes ``~/.openhands/mcp.json``).
     """
     name_n = normalize(connector)
-    if is_cleanup_only(name_n):
-        raise MCPWriteUnsupportedError(cleanup_only_guidance(name_n))
     if name_n == "openclaw":
         if openclaw_config_setter is None:
             raise RuntimeError(
@@ -5091,8 +5002,6 @@ def unset_mcp_server(
     :class:`MCPWriteUnsupportedError`.
     """
     name_n = normalize(connector)
-    if is_cleanup_only(name_n):
-        raise MCPWriteUnsupportedError(cleanup_only_guidance(name_n))
     if name_n == "openclaw":
         if openclaw_config_unsetter is None:
             raise RuntimeError(

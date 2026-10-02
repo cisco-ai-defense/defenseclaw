@@ -63,6 +63,13 @@
             "codex.notify",
             "codex.notify.agent-turn-complete",
             "codex.notify.malformed",
+            "sandbox-lifecycle",
+            "sandbox-workspace",
+            "sandbox-egress",
+            "sandbox-approval",
+            "sandbox-policy",
+            "sandbox-health",
+            "sandbox-finding",
             "sidecar-start",
             "sidecar-stop",
             "sidecar-connected",
@@ -169,7 +176,6 @@
             "init-gateway",
             "init-guardrail",
             "init-notifications-toggle",
-            "init-sandbox",
             "init-sidecar",
             "policy-create",
             "policy-activate",
@@ -287,6 +293,14 @@
     "rule_pack_dir": {
       "type": ["string", "null"],
       "description": "Effective rule-pack directory the verdict was evaluated against (per-connector override or global). Null when no rule pack applies."
+    },
+    "sandbox_id": {
+      "type": ["string", "null"],
+      "description": "OpenShell sandbox id of the sandbox whose request produced the event, taken only from its authenticated binding. Null for host traffic."
+    },
+    "sandbox_name": {
+      "type": ["string", "null"],
+      "description": "OpenShell sandbox name of the sandbox whose request produced the event, taken only from its authenticated binding. Null for host traffic."
     }
   },
   "additionalProperties": false

@@ -39,7 +39,7 @@ A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can p
 | Antigravity | `PreToolUse` only | `PreInvocation` and `PostInvocation` are context-transform surfaces, `PostToolUse` is observation-only, and DefenseClaw returns allow for `Stop`. No permission-bypass override is claimed without persisted official-client evidence. |
 | Amp | `tool.call` and model-bound `tool.result` in the active foreground thread | A background thread or unavailable plugin UI rejects the call or withholds the result safely |
 | OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Post-phase confirm is audited and continues without a pause; DENY may suppress onward-visible content but cannot roll back completed work |
-| ZeptoClaw, Codex, Hermes, Devin, OpenHands | None | Connector-specific alert/allow/context behavior; no pause or TUI resume. |
+| ZeptoClaw, Codex, Hermes, Devin, OpenHands | None | Connector-specific alert/allow/context behavior; no pause or TUI resume. In the standalone enterprise profile, a confirm verdict on a Hermes `pre_tool_call` or an OpenHands `PreToolUse` is blocked instead, with a message that the organization's rule needs a confirmation the agent cannot ask for. |
 | OpenCode | `permission.ask` intentionally unimplemented | No native ask or context injection claim; no pause or TUI resume |
 
 For block events, fail-closed support, and the machine-readable source, see the [Capability Matrix](/docs/capability-matrix).

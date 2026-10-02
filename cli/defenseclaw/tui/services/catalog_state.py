@@ -20,12 +20,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
+from rich.markup import escape as rich_escape
+
 from defenseclaw.connector_paths import (
-    cleanup_only_guidance,
     connector_config_files,
     connector_home,
     hermes_config_path,
-    is_cleanup_only,
 )
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
@@ -513,6 +513,23 @@ class CatalogListModel(Generic[RowT]):
             return False
         return any(action.key == key and not action.disabled for action in actions())
 
+    def direct_action(self, key: str, *, origin: str) -> CatalogPanelAction:
+        """Run the s/b/a/u shortcut for the selected row, or say why not.
+
+        A key that doesn't apply (``b`` on an already-blocked skill) used to
+        do nothing at all, with no message.
+        """
+
+        row = self.selected()
+        if row is None:
+            return CatalogPanelAction(True, hint="Select a row first.")
+        if not self.action_key_available(key):
+            name = getattr(row, "display_name", "") or getattr(row, "name", "") or "this row"
+            status = getattr(row, "status", "") or "in its current state"
+            word = _DIRECT_KEY_WORDS.get(key, key)
+            return CatalogPanelAction(True, hint=f"Can't {word} {name}: it is {status}. Press o for its actions.")
+        return CatalogPanelAction(True, self.action_intent(key, origin=origin))  # type: ignore[attr-defined]
+
     def select_row(self, index: int) -> RowT | None:
         self.set_cursor(index)
         return self.selected()
@@ -588,21 +605,15 @@ class CatalogListModel(Generic[RowT]):
         return self.row_connector(row) or "—"
 
     def summary_text(self, title: str) -> str:
-        filter_text = f" filter={self.filter_text!r}" if self.filter_text else ""
-        detail = " detail=open" if self.detail_open else ""
-        # Group navigation vs. action keys on separate lines so the
-        # eye lands on the action set (which is what operators reach
-        # for) instead of getting buried in the navigation primer.
-        # The legacy single-line hint hid ``o`` between ``Enter`` and
-        # ``r`` so operators couldn't tell that pressing ``o`` opens
-        # the per-row action menu.
-        return (
-            f"[bold #22D3EE]{title}[/]\n"
-            f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
-            "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  "
-            "u unblock  ·  R reveal in registry"
-        )
+        """One header line: the title and how many rows the filter shows.
+
+        Keys are in the hint bar, the ``?`` sheet and (per row) the detail
+        pane's action legend; repeating them here cost four rows, which at
+        80x24 hid the table rows and the detail pane.
+        """
+
+        filter_text = f"  [dim]filter:[/] {rich_escape(self.filter_text)}" if self.filter_text else ""
+        return f"[bold #22D3EE]{title}[/]  {len(self.filtered)} of {len(self.items)}{filter_text}"
 
     def _haystack(self, row: RowT) -> str:
         parts = [str(getattr(row, field_name, "")) for field_name in self._filter_fields]
@@ -659,14 +670,10 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         return sum(1 for row in self.items if row.status == "blocked")
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
-        if is_cleanup_only(self.connector):
-            return ()
         row = self.selected()
         return skill_actions(row.status if row else "", bundled=bool(row and row.bundled))
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
-        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
-            return None
         row = self.selected()
         if row is None:
             return None
@@ -696,13 +703,8 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="skills") if self.selected() and self.action_key_available(key) else None
-            )
-            return CatalogPanelAction(True, intent)
+            return self.direct_action(key, origin="skills")
         if key == "r":
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
             return CatalogPanelAction(True, registry_focus=self.registry_focus())
@@ -763,14 +765,10 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         return sum(1 for row in self.items if row.status == "blocked")
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
-        if is_cleanup_only(self.connector):
-            return ()
         row = self.selected()
         return mcp_actions(row.status if row else "", self.connector)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
-        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
-            return None
         row = self.selected()
         if row is None:
             return None
@@ -800,17 +798,10 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="mcps") if self.selected() and self.action_key_available(key) else None
-            )
-            return CatalogPanelAction(True, intent)
+            return self.direct_action(key, origin="mcps")
         if key in {"n", "+"}:
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, open_mcp_set_form=True)
         if key == "r":
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
             return CatalogPanelAction(True, registry_focus=self.registry_focus())
@@ -868,16 +859,12 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         )
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
-        if is_cleanup_only(self.connector):
-            return ()
         row = self.selected()
         if row is None:
             return plugin_actions("", "", False)
         return plugin_actions(row.verdict, row.status, row.enabled)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
-        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
-            return None
         row = self.selected()
         if row is None:
             return None
@@ -904,21 +891,14 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             return CatalogPanelAction(True, detail_opened=True)
         if key == "s":
             row = self.selected()
-            if row is None or is_cleanup_only(self.action_connector(row) or self.connector):
+            if row is None:
                 return CatalogPanelAction(True)
             return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.action_connector(row)))
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="plugins")
-                if self.selected() and self.action_key_available(key)
-                else None
-            )
-            return CatalogPanelAction(True, intent)
+            return self.direct_action(key, origin="plugins")
         if key == "r":
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         return CatalogPanelAction(False)
 
@@ -1438,8 +1418,6 @@ def skill_actions(status: str, *, bundled: bool = False) -> tuple[CatalogMenuAct
 
 
 def mcp_actions(status: str, connector: str) -> tuple[CatalogMenuAction, ...]:
-    if is_cleanup_only(connector):
-        return ()
     actions = [
         CatalogMenuAction("s", "Scan", "Run security scan"),
         CatalogMenuAction("i", "Info", "Show full details"),
@@ -1540,8 +1518,6 @@ _PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r"
 
 
 def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     verbs = {
         "s": ("scan", "scan skill"),
         "i": ("info", "info skill"),
@@ -1570,8 +1546,6 @@ def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str 
 
 
 def mcp_action_intent(key: str, row: MCPRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     verbs = {
         "s": ("scan", "scan mcp"),
         "i": ("list", "list mcp"),
@@ -1591,8 +1565,6 @@ def mcp_action_intent(key: str, row: MCPRow, *, origin: str, connector: str = ""
 
 
 def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     target = row.id
     args = ["plugin", "scan", target]
     if connector:
@@ -1605,8 +1577,6 @@ def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCom
 
 
 def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     verbs = {
         "s": ("scan", "scan plugin"),
         "i": ("info", "info plugin"),
@@ -1658,8 +1628,6 @@ def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = 
 
 
 def mcp_unset_target_for_connector(connector: str) -> str:
-    if is_cleanup_only(connector):
-        return cleanup_only_guidance(connector)
     match normalized_connector(connector):
         case "claudecode":
             return connector_config_files("claudecode")[0]
@@ -1724,8 +1692,6 @@ def friendly_connector_name(connector: str) -> str:
             return "Cursor"
         case "devin":
             return "Devin"
-        case "geminicli":
-            return "Gemini CLI (deprecated; use Antigravity)"
         case "copilot":
             return "GitHub Copilot CLI"
         case "openhands":
@@ -1746,8 +1712,6 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = normalized_connector(connector)
-    if is_cleanup_only(connector):
-        return cleanup_only_guidance(connector)
     claude_root = connector_home("claudecode")
     codex_root = connector_home("codex")
     claude_config = connector_config_files("claudecode")[0]
@@ -1981,6 +1945,15 @@ _STATUS_COLOR: Mapping[str, str] = {
 }
 
 
+_DIRECT_KEY_WORDS: Mapping[str, str] = {"s": "scan", "b": "block", "a": "allow", "u": "unblock"}
+
+
+def _esc(value: object) -> str:
+    """Escape row data (names, commands, reasons) for the Rich-markup detail pane."""
+
+    return rich_escape(str(value))
+
+
 def _colored(value: str, palette: Mapping[str, str]) -> str:
     """Return ``value`` wrapped in Rich color markup when the key is
     known. Unknown values fall through unstyled so we never emit an
@@ -1990,7 +1963,7 @@ def _colored(value: str, palette: Mapping[str, str]) -> str:
     if not value:
         return "-"
     color = palette.get(value.upper(), palette.get(value, ""))
-    return f"[{color}]{value}[/]" if color else value
+    return f"[{color}]{_esc(value)}[/]" if color else _esc(value)
 
 
 def _format_severity(severity: str) -> str:
@@ -2009,7 +1982,7 @@ def _format_decisions(file_action: str, install_action: str, runtime_action: str
     the current status, instead of guessing from the Actions column.
     """
 
-    return f"install={install_action or '-'}  runtime={runtime_action or '-'}  file={file_action or '-'}"
+    return _esc(f"install={install_action or '-'}  runtime={runtime_action or '-'}  file={file_action or '-'}")
 
 
 _SEVERITY_BUCKET_LABEL: Mapping[str, str] = {
@@ -2070,28 +2043,28 @@ def _scan_line(
     if breakdown:
         parts.append(breakdown)
     if target:
-        parts.append(f"target={target}")
+        parts.append(f"target={_esc(target)}")
     return " · ".join(parts)
 
 
 def _format_skill_detail(row: SkillRow) -> str:
     lines = [
-        f"[bold #22D3EE]Skill[/] {row.name}",
-        f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
+        f"[bold #22D3EE]Skill[/] {_esc(row.name)}",
+        f"  Status     {_format_status(row.status)}    Actions  {_esc(row.actions)}",
         f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
         f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target, row.severity_counts)}",
     ]
     if row.source:
-        lines.append(f"  Source     {row.source}")
+        lines.append(f"  Source     {_esc(row.source)}")
     if row.registry_badge:
-        lines.append(f"  Registry   {row.registry_badge}")
+        lines.append(f"  Registry   {_esc(row.registry_badge)}")
     if row.description:
         lines.append("")
-        lines.append(f"  {row.description}")
+        lines.append(f"  {_esc(row.description)}")
     if row.verdict and row.verdict not in {row.status, row.severity}:
-        lines.append(f"  Verdict    {row.verdict}")
+        lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
-        lines.append(f"  Reason     {row.reason}")
+        lines.append(f"  Reason     {_esc(row.reason)}")
     lines.append("")
     lines.append(_skill_action_legend(row.status))
     return "\n".join(lines)
@@ -2099,25 +2072,25 @@ def _format_skill_detail(row: SkillRow) -> str:
 
 def _format_mcp_detail(row: MCPRow) -> str:
     lines = [
-        f"[bold #22D3EE]MCP[/] {row.name}",
-        f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
+        f"[bold #22D3EE]MCP[/] {_esc(row.name)}",
+        f"  Status     {_format_status(row.status)}    Actions  {_esc(row.actions)}",
         f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
-        f"  Transport  {row.transport or '-'}",
+        f"  Transport  {_esc(row.transport or '-')}",
     ]
     if row.server_url:
-        lines.append(f"  URL        {row.server_url}")
+        lines.append(f"  URL        {_esc(row.server_url)}")
     if row.command:
-        lines.append(f"  Command    {row.command}")
+        lines.append(f"  Command    {_esc(row.command)}")
     if row.total_findings > 0 or row.severity or row.scan_target:
         lines.append(
             f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target, row.severity_counts)}"
         )
     if row.registry_badge:
-        lines.append(f"  Registry   {row.registry_badge}")
+        lines.append(f"  Registry   {_esc(row.registry_badge)}")
     if row.verdict and row.verdict not in {row.status, row.severity}:
-        lines.append(f"  Verdict    {row.verdict}")
+        lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
-        lines.append(f"  Reason     {row.reason}")
+        lines.append(f"  Reason     {_esc(row.reason)}")
     lines.append("")
     lines.append(_mcp_action_legend(row.status))
     return "\n".join(lines)
@@ -2127,13 +2100,13 @@ def _format_plugin_detail(row: PluginRow) -> str:
     status = row.status or ("enabled" if row.enabled else "disabled")
     enabled_label = "yes" if row.enabled else "no"
     lines = [
-        f"[bold #22D3EE]Plugin[/] {row.display_name}",
+        f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}",
         f"  Status     {_format_status(status)}    Enabled  {enabled_label}",
     ]
     if row.version:
-        lines.append(f"  Version    {row.version}")
+        lines.append(f"  Version    {_esc(row.version)}")
     if row.origin:
-        lines.append(f"  Origin     {row.origin}")
+        lines.append(f"  Origin     {_esc(row.origin)}")
     if row.scan is not None:
         # E4i: plugin scans carry the same per-severity breakdown; reuse
         # ``_scan_line`` (no target for plugins) so the rendering matches
@@ -2149,10 +2122,10 @@ def _format_plugin_detail(row: PluginRow) -> str:
             )
         )
     if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
-        lines.append(f"  Verdict    {row.verdict}")
+        lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.description:
         lines.append("")
-        lines.append(f"  {row.description}")
+        lines.append(f"  {_esc(row.description)}")
     lines.append("")
     lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
     return "\n".join(lines)
@@ -2160,14 +2133,14 @@ def _format_plugin_detail(row: PluginRow) -> str:
 
 def _format_tool_detail(row: ToolRow) -> str:
     lines = [
-        f"[bold #22D3EE]Tool[/] {row.name}",
+        f"[bold #22D3EE]Tool[/] {_esc(row.name)}",
         f"  Status     {_format_status(row.status)}",
-        f"  Scope      {row.display_scope}",
+        f"  Scope      {_esc(row.display_scope)}",
     ]
     if row.reason:
-        lines.append(f"  Reason     {row.reason}")
+        lines.append(f"  Reason     {_esc(row.reason)}")
     if row.target_name and row.target_name != row.name:
-        lines.append(f"  Target     {row.target_name}")
+        lines.append(f"  Target     {_esc(row.target_name)}")
     return "\n".join(lines)
 
 
@@ -2182,10 +2155,20 @@ def _action_legend(actions: tuple[CatalogMenuAction, ...]) -> str:
 
     if not actions:
         return "  [dim]No actions available for this row.[/]"
+    # Only s/b/a/u are row shortcuts; the rest are in the o menu. Listing
+    # "[d] Disable" or "[q] Quarantine" here promised keys that did nothing
+    # (or, for n and r, did something else).
+    direct = tuple(action for action in actions if action.key in _DIRECT_KEY_WORDS)
+    menu_only = [action.label for action in actions if action.key not in _DIRECT_KEY_WORDS and not action.disabled]
     chunks: list[str] = []
-    for action in actions:
-        label = f"[{action.key}] {action.label}"
+    for action in direct:
+        # ``[s] Scan`` must be escaped: Rich reads ``[s]``/``[b]``/``[i]`` as
+        # style tags and ``[a]``/``[q]`` as invalid ones, which dropped the
+        # whole detail pane to unstyled text with raw markup showing.
+        label = f"{_esc(f'[{action.key}]')} {_esc(action.label)}"
         chunks.append(f"[dim]{label}[/]" if action.disabled else label)
+    if menu_only:
+        chunks.append("\\[o] more: " + _esc(", ".join(menu_only)))
     return "  [dim]Actions:[/] " + "  ·  ".join(chunks)
 
 

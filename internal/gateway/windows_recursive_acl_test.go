@@ -35,7 +35,7 @@ func TestWindowsRecursiveEveryoneFullControlProfilePosture(t *testing.T) {
 		action   string
 		severity string
 	}{
-		{name: "default", action: "alert", severity: "HIGH"},
+		{name: "default", action: "block", severity: "CRITICAL"},
 		{name: "permissive", action: "alert", severity: "HIGH"},
 		{name: "strict", action: "block", severity: "CRITICAL"},
 	}

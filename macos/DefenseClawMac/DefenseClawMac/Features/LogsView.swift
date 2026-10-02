@@ -28,16 +28,24 @@ struct LogsView: View {
     @State private var eventTypeFilter = "all"
     @State private var search = ""
     @State private var rows: [LogRow] = []
+    @State private var structuredSource = "audit.db · canonical events"
+    @State private var structuredError: String?
     /// Cached filter output. Filtering up to 20k rows inside `body` stalls the
     /// main thread during trackpad scrolling — recompute only when inputs change.
     @State private var filtered: [LogRow] = []
     @State private var displayRows: [DisplayLogRow] = []
     @State private var selectedRowID: String?
     @State private var autoScroll = true
-    /// True while the last row is on screen; auto-scroll only then, so live
-    /// tail updates never yank the view away from what the user is reading.
-    @State private var isAtBottom = true
+    /// Row visibility callbacks run during AppKit row reuse. Keep this
+    /// imperative scroll-follow flag outside SwiftUI observation so those
+    /// callbacks cannot invalidate the List while it is laying out rows.
+    @State private var scrollFollow = ScrollFollowState()
     @State private var showRedactionPolicy = false
+
+    @MainActor
+    private final class ScrollFollowState {
+        var isAtBottom = true
+    }
 
     // Superset of the TUI's Verdicts-stream chips (ACTION_FILTERS: block/alert/
     // confirm/allow; EVENT_TYPE_FILTERS: verdict/judge/lifecycle/error/
@@ -83,6 +91,10 @@ struct LogsView: View {
     var body: some View {
         VStack(spacing: 0) {
             filterBar
+            if let structuredError, stream == .verdicts || stream == .otel {
+                Label(structuredError, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange).padding(8)
+            }
             Divider()
             if displayRows.isEmpty {
                 DCEmptyState(
@@ -97,10 +109,11 @@ struct LogsView: View {
                 logList
             }
         }
-        .inspector(isPresented: inspectorPresented) {
-            if let selectedDisplayRow {
-                logInspector(selectedDisplayRow)
-                    .dcInspectorColumnWidth()
+        .dcInspector(isPresented: inspectorPresented) {
+            VStack(spacing: 0) {
+                if let selectedDisplayRow {
+                    logInspector(selectedDisplayRow)
+                }
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search log lines")
@@ -276,8 +289,8 @@ struct LogsView: View {
                 }
                 .id(item.id)
                 .listRowSeparator(.hidden)
-                .onAppear { if item.id == displayRows.last?.id { isAtBottom = true } }
-                .onDisappear { if item.id == displayRows.last?.id { isAtBottom = false } }
+                .onAppear { if item.id == displayRows.last?.id { scrollFollow.isAtBottom = true } }
+                .onDisappear { if item.id == displayRows.last?.id { scrollFollow.isAtBottom = false } }
                 .contextMenu {
                     Button("Copy Summary") { copyToPasteboard(item.message) }
                     Button("Copy JSON") { copyToPasteboard(row.rawJSON) }
@@ -287,7 +300,7 @@ struct LogsView: View {
             .onChange(of: displayRows.count) { _, _ in
                 // Follow the tail only while the user is already at the bottom —
                 // never steal the scroll position mid-read.
-                if autoScroll, isAtBottom, let last = displayRows.last {
+                if autoScroll, scrollFollow.isAtBottom, let last = displayRows.last {
                     var transaction = Transaction()
                     transaction.disablesAnimations = true
                     withTransaction(transaction) {
@@ -305,7 +318,7 @@ struct LogsView: View {
         case .watchdog:
             appState.installationContext.watchdogLogURL.lastPathComponent
         case .verdicts, .otel:
-            appState.installationContext.gatewayJSONLURL.lastPathComponent
+            structuredSource
         }
     }
 
@@ -411,7 +424,11 @@ struct LogsView: View {
     private func load(force: Bool = false) async {
         let installationGeneration = appState.installationGeneration
         let fresh = await appState.stream.logBuffers[stream] ?? []
+        let source = await appState.stream.structuredSource
+        let error = await appState.stream.structuredError
         guard installationGeneration == appState.installationGeneration else { return }
+        structuredSource = source
+        structuredError = error
         guard force || fresh.count != rows.count || fresh.last?.id != rows.last?.id else { return }
         rows = fresh
         applyFilter()
@@ -420,7 +437,9 @@ struct LogsView: View {
     private func reload() {
         Task {
             let installationGeneration = appState.installationGeneration
-            _ = await appState.stream.reload()
+            let history = await appState.audit.canonicalHistory()
+            guard installationGeneration == appState.installationGeneration else { return }
+            _ = await appState.stream.reload(canonicalHistory: history)
             guard installationGeneration == appState.installationGeneration else { return }
             await load(force: true)
         }

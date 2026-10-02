@@ -293,6 +293,63 @@ func TestHookSpawnIntentFailureCancelsPendingOwnership(t *testing.T) {
 	}
 }
 
+// Parallel Claude Code Agent calls leave one spawn intent each, all of the
+// main agent, and their SubagentStarts name nothing to tell them apart by
+// (#957): each subagent takes the oldest, and both get the main agent as
+// parent. Intents of different parents still never tie-break, and other
+// connectors keep refusing a tie.
+func TestHookSpawnIntentSameParentTieBreak(t *testing.T) {
+	now := time.Now().UTC()
+	child := func(source, agentID string) llmEventMeta {
+		c := hookSpawnTestChild(source, "parallel", agentID)
+		c.AgentName, c.AgentType = "general-purpose", "general-purpose"
+		return c
+	}
+	payload := func(agentID string) map[string]any {
+		return map[string]any{"agent_id": agentID, "agent_type": "general-purpose"}
+	}
+	t.Run("claudecode", func(t *testing.T) {
+		api := &APIServer{}
+		for _, call := range []string{"toolu_agent_1", "toolu_agent_2"} {
+			parent := hookSpawnTestParent("claudecode", "parallel", "main", "main", 0, call)
+			parent.ToolName = "Agent"
+			api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentRequested, now,
+				`{"description":"Echo a marker","prompt":"Run it","subagent_type":"general-purpose"}`)
+		}
+		for i, id := range []string{"a1111111111111111", "a2222222222222222"} {
+			got := api.applyHookSpawnIntentLineageAt(child("claudecode", id), payload(id), now)
+			if got.ParentAgentID != "main" || got.RootAgentID != "main" || got.AgentDepth != 1 || !got.ParentLineageResolved {
+				t.Fatalf("subagent %d lineage=%+v", i+1, got)
+			}
+			if left := hookSpawnIntentCount(api); left != 1-i {
+				t.Fatalf("after subagent %d: %d intents left, want %d", i+1, left, 1-i)
+			}
+		}
+	})
+	t.Run("claudecode different parents", func(t *testing.T) {
+		api := &APIServer{}
+		for i, owner := range []string{"main", "other"} {
+			parent := hookSpawnTestParent("claudecode", "parallel", owner, owner, 0, "toolu_"+strconv.Itoa(i))
+			api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentRequested, now, `{"prompt":"Run it"}`)
+		}
+		got := api.applyHookSpawnIntentLineageAt(child("claudecode", "a3333333333333333"), payload("a3333333333333333"), now)
+		if got.ParentLineageResolved || hookSpawnIntentCount(api) != 2 {
+			t.Fatalf("tie between two parents joined: %+v, intents %d", got, hookSpawnIntentCount(api))
+		}
+	})
+	t.Run("codex", func(t *testing.T) {
+		api := &APIServer{}
+		for _, call := range []string{"spawn-1", "spawn-2"} {
+			parent := hookSpawnTestParent("codex", "parallel", "main", "main", 0, call)
+			api.rememberHookSpawnIntentAt(parent, parent.ToolName, hookSpawnIntentRequested, now, `{"message":"run"}`)
+		}
+		got := api.applyHookSpawnIntentLineageAt(child("codex", "codex-child"), payload("codex-child"), now)
+		if got.ParentLineageResolved || hookSpawnIntentCount(api) != 2 {
+			t.Fatalf("codex tie joined: %+v, intents %d", got, hookSpawnIntentCount(api))
+		}
+	})
+}
+
 func TestHookSpawnIntentExpiresAndEvictsWithinBound(t *testing.T) {
 	t.Run("stale", func(t *testing.T) {
 		api := &APIServer{}

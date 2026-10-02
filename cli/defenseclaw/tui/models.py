@@ -196,3 +196,14 @@ class HintState:
     command_elapsed_secs: int = 0
     logs_paused: bool = False
     new_lines_since_pause: int = 0
+    # The active panel's sub-view, for panels whose keys differ by view
+    # (Sandboxes: sandboxes, activity, asks; Setup: see panels/setup_keys.py).
+    panel_view: str = ""
+    # The panel's own key line when it also depends on the selected row
+    # (Sandboxes: no u on a tool block, no A on a private-network ask).
+    panel_keys: str = ""
+    # Conditions that switch view keys on (Setup: restart_pending, ...).
+    panel_conditions: tuple[str, ...] = ()
+    # False when the active panel's table is empty (Sandboxes uses it to
+    # stop advertising row keys that have no row to act on).
+    panel_has_rows: bool = True

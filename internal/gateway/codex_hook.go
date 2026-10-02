@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -96,6 +97,30 @@ type codexHookRequest struct {
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
 	Payload              map[string]interface{} `json:"-"`
+	// sandboxView is the binding's filesystem view for a sandbox request and
+	// nil for host traffic. Path-reading helpers go through it instead of the
+	// host filesystem (see sandbox_hook_scope.go).
+	sandboxView *sandboxauth.FSView
+
+	// activeHome is the trusted home for "~" resolution, set by the handler
+	// from the request context (never decoded from the body).
+	activeHome         string
+	activeHomeResolved bool
+}
+
+// withTrustedActiveHome records the request's trusted home so helpers that
+// only see the request resolve "~" against the verified caller.
+func (r codexHookRequest) withTrustedActiveHome(ctx context.Context) codexHookRequest {
+	r.activeHome = trustedActiveHome(ctx)
+	r.activeHomeResolved = true
+	return r
+}
+
+func (r codexHookRequest) resolvedActiveHome() string {
+	if r.activeHomeResolved {
+		return r.activeHome
+	}
+	return trustedSameHostHome()
 }
 
 type codexHookResponse struct {
@@ -119,6 +144,9 @@ type codexHookResponse struct {
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled *bool  `json:"-"`
 	SourceReason     string `json:"-"`
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// took part in the verdict. Never serialized.
+	laneVerdict bool
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -175,7 +203,7 @@ func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 }
 
 func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest) codexHookResponse {
-	return a.evaluateCodexHookForProfile(ctx, req, a.hookProfileForConnector("codex"))
+	return a.evaluateCodexHookForProfile(ctx, req, a.hookProfileForRequest(ctx, "codex"))
 }
 
 func (a *APIServer) evaluateCodexHookForProfile(
@@ -183,8 +211,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
-	mode := a.codexMode()
-	if a.scannerCfg != nil && !a.codexEnabled() {
+	mode := sandboxHookMode(ctx, "codex", a.codexMode())
+	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()
@@ -232,12 +261,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 			toolUseID:     req.ToolUseID,
 		}
-		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
 				Args:                     toolArgs,
 				CWD:                      req.CWD,
-				ActiveHome:               trustedSameHostHome(),
+				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
@@ -246,7 +276,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			EnforcementCapable:        true,
 			DowngradeReadOnlyDataArgs: mode != "action",
 			record:                    toolChainRecorderFromContext(ctx),
-		})
+		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -342,6 +372,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.laneVerdict = verdict.laneVerdict
 	return resp
 }
 
@@ -456,6 +487,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	additional := codexAdditionalContext(rawAction, severity, safeReason, mode, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,
@@ -834,7 +866,11 @@ func (a *APIServer) inspectCodexToolResult(
 	req codexHookRequest,
 	mode string,
 ) *ToolInspectVerdict {
+	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
+	if sandboxToolResultUntrusted(ctx) {
+		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
+	}
 	strictScope := codexToolResultContentScope(req)
 	if mode == "action" || strictScope == ruleContentScopeSource {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, strictScope))
@@ -932,6 +968,7 @@ func mergeCodexToolResultVerdicts(
 		merged.RawAction = untrusted.RawAction
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
+	merged.laneVerdict = source.laneVerdict || untrusted.laneVerdict
 	if source.RedactionEnabled != nil || untrusted.RedactionEnabled != nil {
 		enabled := source.RedactionEnabled != nil && *source.RedactionEnabled ||
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled
@@ -1377,7 +1414,9 @@ func codexReadVerifiedGitDiffCurrentLines(
 		!codexSingleLinkRegularFile(target, listed) {
 		return nil, false
 	}
-	file, err := os.Open(target)
+	// The target may be swapped for a FIFO after the Lstat above; open it
+	// without blocking and let the regular-file check below refuse it.
+	file, err := openHostFileForInspection(target)
 	if err != nil {
 		return nil, false
 	}
@@ -1456,7 +1495,7 @@ func codexToolResultContentScope(req codexHookRequest) ruleContentScope {
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	if len(facts.Network) != 0 {
 		return ruleContentScopeUntrusted
@@ -1500,7 +1539,7 @@ func codexObserveWorkspaceSourceProofForRequest(req codexHookRequest) codexObser
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	if len(facts.Network) != 0 {
 		return codexObserveSourceUntrusted
@@ -1518,7 +1557,7 @@ func codexObserveWorkspaceSourceProofForRequest(req codexHookRequest) codexObser
 	}
 	commandText := codexExactMapString(req.ToolInput, "command", "cmd", "script")
 	if powerShellFacts, candidate := codexStaticPowerShellReaderFacts(
-		commandText, facts, req.CWD, toolName,
+		commandText, facts, req.CWD, toolName, "",
 	); candidate {
 		if codexStaticPowerShellReaderSourceScopeWithTarget(
 			powerShellFacts, req.CWD, trustedCodexObserveSourceTarget,
@@ -1787,7 +1826,7 @@ func codexObserveGitDiffPathspecsForRequest(
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	commandText := codexExactMapString(req.ToolInput, "command", "cmd", "script")
 	if len(facts.Network) != 0 || facts.Parse.Dialect != actionfacts.DialectPOSIX ||
@@ -1896,7 +1935,7 @@ func codexStaticSafeReaderSourceScope(
 	toolName string,
 ) bool {
 	if powerShellFacts, candidate := codexStaticPowerShellReaderFacts(
-		command, facts, cwd, toolName,
+		command, facts, cwd, toolName, "",
 	); candidate {
 		return codexStaticPowerShellReaderSourceScope(powerShellFacts, cwd)
 	}
@@ -1959,11 +1998,15 @@ func codexStaticSafeReaderSourceScope(
 // explicit PowerShell/CMD tool or for a generic execution envelope running on
 // Windows. This preserves Unix `type`/`gc` semantics while covering the same
 // generic exec_command envelope Codex uses on Windows.
+// codexStaticPowerShellReaderFacts re-parses a short PowerShell reader.
+// activeHome is the home "~" means for the request; empty means the host
+// user's.
 func codexStaticPowerShellReaderFacts(
 	command string,
 	facts actionfacts.Facts,
 	cwd string,
 	toolName string,
+	activeHome string,
 ) (actionfacts.Facts, bool) {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -1999,7 +2042,7 @@ func codexStaticPowerShellReaderFacts(
 		Tool:        "powershell",
 		Command:     command,
 		CWD:         cwd,
-		ActiveHome:  trustedSameHostHome(),
+		ActiveHome:  firstNonEmpty(activeHome, facts.ActiveHome),
 		DialectHint: actionfacts.DialectPowerShell,
 	}), true
 }
@@ -3443,14 +3486,22 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
+	var results []*scanner.ScanResult
+	if req.sandboxView != nil {
+		results = sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, targets)
+	} else {
+		cg := scanner.NewCodeGuardScanner(rulesDir)
+		for _, target := range targets {
+			result, err := cg.Scan(ctx, target)
+			if err != nil {
+				continue
+			}
+			results = append(results, result)
+		}
+	}
 	maxSeverity := scanner.SeverityInfo
 	findings := []string{}
-	for _, target := range targets {
-		result, err := cg.Scan(ctx, target)
-		if err != nil {
-			continue
-		}
+	for _, result := range results {
 		if a.logger != nil {
 			_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 		}
@@ -3480,6 +3531,13 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 }
 
 func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) []string {
+	if req.sandboxView != nil {
+		var scanPaths []string
+		if a.scannerCfg != nil {
+			scanPaths = a.scannerCfg.ConnectorHookConfig("codex").ScanPaths
+		}
+		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
+	}
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
@@ -3687,6 +3745,14 @@ func runGitList(ctx context.Context, cwd string, args ...string) ([]string, erro
 
 func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookRequest) int {
 	if a.scannerCfg == nil {
+		return 0
+	}
+	if req.sandboxView != nil {
+		// Component targets are the host user's Codex home plus project
+		// layers found by walking up the host tree. Neither applies to a
+		// sandbox, and the skill/plugin/MCP scanners are subprocesses that
+		// must not be pointed at an agent-writable tree on the host.
+		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
 	if !req.ScanComponents && !a.codexComponentScanDue() {

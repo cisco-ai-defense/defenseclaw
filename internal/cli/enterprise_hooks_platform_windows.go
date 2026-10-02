@@ -6,7 +6,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +32,28 @@ var enterpriseHookWindowsTargetSessionCheck = enterprisehooks.RequireWindowsEnte
 var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
+
+// enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
+// a guardian row of a local account that was deleted and whose profile
+// folder was removed too: no one can sign in as it, and the enumerator drops
+// its rows at its next pass. Tests replace it.
+var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.UserHome) == "" {
+		return false
+	}
+	if _, err := os.Lstat(row.UserHome); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return windowsEnterpriseAccountDeleted(row.SID)
+}
+
+// enterpriseHookManifestCatchUpAllowed reports a standalone deployment,
+// whose status waits for the guardian to activate a targets.yaml the
+// enumerator just republished (enterpriseHookManifestActivationIssue).
+// Tests replace it.
+var enterpriseHookManifestCatchUpAllowed = func() bool {
+	return cfg != nil && cfg.StandaloneEnterprise()
+}
 
 func enterpriseHookTargetSessionAvailable(
 	target enterprisehooks.ManifestTarget,
@@ -60,6 +84,56 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, nil
 }
 
+// enterpriseHookMachinePolicyContract returns the hook contract a standalone
+// deployment renders its single machine-wide Claude policy from, so every
+// Claude row installs, repairs and verifies one body. Secure Client renders
+// each row's own contract.
+func enterpriseHookMachinePolicyContract(manifest enterprisehooks.Manifest) string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return ""
+	}
+	return enterprisehooks.WindowsStandaloneClaudeMachinePolicyContract(manifest)
+}
+
+// enterpriseHookStandaloneManifestPath is the standalone guardian's
+// targets.yaml, the manifest the deployment-wide Claude contract comes from.
+var enterpriseHookStandaloneManifestPath = func() (string, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return "", err
+	}
+	return layout.ManifestPath, nil
+}
+
+// enterpriseHookInstallMachinePolicyContract returns the deployment-wide
+// Claude machine-policy contract for a single-target administrator install.
+// Without it the install would render the shared body from this row's own
+// contract and the guardian's next reconcile would rewrite it back. A
+// standalone host whose guardian has not published targets.yaml yet has no
+// deployment contract, so the row's own is used; a manifest that exists but
+// is untrusted or unreadable refuses the install.
+func enterpriseHookInstallMachinePolicyContract(connectorName string) (string, error) {
+	if cfg == nil || !cfg.StandaloneEnterprise() ||
+		!strings.EqualFold(strings.TrimSpace(connectorName), "claudecode") {
+		return "", nil
+	}
+	path, err := enterpriseHookStandaloneManifestPath()
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks install: resolve the guardian manifest: %w", err)
+	}
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err := enterpriseHookManifestFileTrustCheck(path); err != nil {
+		return "", fmt.Errorf("enterprise hooks install: guardian manifest trust check failed: %w", err)
+	}
+	manifest, err := enterprisehooks.LoadManifest(path)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks install: load the guardian manifest for the machine-wide Claude contract: %w", err)
+	}
+	return enterpriseHookMachinePolicyContract(manifest), nil
+}
+
 func stageEnterpriseHookDeferredManagedPolicies(
 	manifest enterprisehooks.Manifest,
 	pending []enterprisehooks.ManifestTarget,
@@ -73,6 +147,26 @@ func stageEnterpriseHookDeferredManagedPolicies(
 }
 
 func syncEnterpriseHookManagedEnrollments(
+	manifest enterprisehooks.Manifest,
+	apiAddr string,
+	publishExact bool,
+) error {
+	if cfg != nil && cfg.StandaloneEnterprise() {
+		// Standalone per-user connectors carry their own machine enrollment;
+		// revoke SIDs the manifest no longer authorizes first so they fail
+		// closed even when a later step fails.
+		codexOpts, err := resolveWindowsCodexRequirementsLayout("reconcile")
+		if err != nil {
+			return err
+		}
+		if err := pruneWindowsStandalonePerUserEnrollments(manifest, codexOpts.HookBinary); err != nil {
+			return err
+		}
+	}
+	return syncEnterpriseHookManagedMachineEnrollments(manifest, apiAddr, publishExact)
+}
+
+func syncEnterpriseHookManagedMachineEnrollments(
 	manifest enterprisehooks.Manifest,
 	apiAddr string,
 	publishExact bool,

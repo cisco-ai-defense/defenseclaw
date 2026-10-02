@@ -90,6 +90,9 @@ jobs:
       - name: Unit tests (feature demos)
         run: npm run test:feature-demos
 
+      - name: Unit tests (diagram zones)
+        run: npm run test:diagram-zones
+
       - name: Lint docs site
         # Next.js 16 no longer runs lint from `next build`, so keep the
         # standalone ESLint CLI as an explicit deploy gate.

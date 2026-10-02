@@ -101,13 +101,14 @@ struct AuditView: View {
                 table
             }
         }
-        .inspector(isPresented: Binding(
+        .dcInspector(isPresented: Binding(
             get: { selectedEvent != nil },
             set: { if !$0 { selection = [] } }
         )) {
-            if let event = selectedEvent {
-                auditInspector(event)
-                    .dcInspectorColumnWidth()
+            VStack(spacing: 0) {
+                if let event = selectedEvent {
+                    auditInspector(event)
+                }
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search action, target, details")

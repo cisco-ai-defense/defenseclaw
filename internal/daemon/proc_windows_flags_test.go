@@ -105,9 +105,9 @@ func TestWindowsDaemonChildSelfRegistersStrongIdentity(t *testing.T) {
 	if info.StartIdentity == "" || !d.HasManagedProcessIdentity(info.PID) {
 		t.Fatalf("registered process identity is not strong: %+v", info)
 	}
-	startedAt, ok := d.ManagedProcessStartedAt(info.PID)
-	if !ok || startedAt.Before(registrationBegan) || startedAt.After(time.Now()) {
-		t.Fatalf("registered launch lower bound = (%s, %v), want child pre-initialization time", startedAt, ok)
+	startedAt := time.Unix(info.StartTime, 0)
+	if startedAt.Before(registrationBegan) || startedAt.After(time.Now()) {
+		t.Fatalf("registered launch lower bound = %s, want child pre-initialization time", startedAt)
 	}
 }
 

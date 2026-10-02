@@ -1210,7 +1210,7 @@ class InventoryPanelModel:
             return InventoryPanelAction(True, hint="Inventory filter: all.")
         if key in {"2", "3", "4"}:
             if self.active_sub not in {"skills", "plugins"}:
-                return InventoryPanelAction(True)
+                return InventoryPanelAction(True, hint="Filters 2-4 apply to the Skills and Plugins sub-tabs.")
             if self.active_sub == "skills":
                 filters: Mapping[str, InventoryFilter] = {
                     "2": "eligible",
@@ -1252,7 +1252,8 @@ class InventoryPanelModel:
             return InventoryPanelAction(True, detail_opened=True)
         if key == "o":
             self.toggle_fast_scan()
-            return InventoryPanelAction(True, hint=f"scope={','.join(self.category_scope) or 'all'}")
+            scope = ", ".join(self.category_scope) or "all categories"
+            return InventoryPanelAction(True, hint=f"The next inventory scan (r) covers {scope}.")
         if key == "r":
             return InventoryPanelAction(True, self.load_intent())
         return InventoryPanelAction(False)

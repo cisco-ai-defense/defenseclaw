@@ -66,7 +66,8 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 @click.option(
     "--sandbox",
     is_flag=True,
-    help="Set up experimental OpenClaw/OpenShell sandbox mode (Linux only).",
+    hidden=True,
+    help="Deprecated and ignored: the legacy openshell-sandbox mode was removed.",
 )
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
@@ -230,12 +231,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     (the two compose). With neither flag (nor --connector), init keeps the
     legacy single-connector default.
 
-    Use --sandbox to set up OpenClaw/OpenShell standalone sandbox mode
-    (experimental, Linux only).
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
-    import platform
-
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -337,6 +334,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         )
         return
 
+    from defenseclaw.bootstrap import SANDBOX_FLAG_DEPRECATION
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -347,9 +345,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
-    if sandbox and platform.system() != "Linux":
-        ux.err("Sandbox mode requires Linux.", indent="  ")
-        raise SystemExit(1)
+    if sandbox:
+        click.echo(f"  warning: {SANDBOX_FLAG_DEPRECATION}", err=True)
 
     ux.banner("Environment")
 
@@ -374,22 +371,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     else:
         cfg = load()
         if getattr(cfg, "_source_config_version", None) != 8:
-            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw upgrade' first")
+            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw migrate' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
-
-    from defenseclaw.bootstrap import (
-        FreshMigrationStateError,
-        repair_pending_first_run_config,
-    )
-
-    try:
-        repaired_migration_state = repair_pending_first_run_config(cfg)
-    except FreshMigrationStateError as exc:
-        raise click.ClickException(
-            f"could not recover pending fresh migration state: {exc}; rerun 'defenseclaw init' after repair"
-        ) from exc
-    if repaired_migration_state:
-        click.echo("  Migration:     " + ux._style("recovered pending fresh cursor", fg="green"))
 
     cfg.environment = env
     click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
@@ -482,61 +465,16 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
-    # Sandbox setup (Linux only)
-    if sandbox:
-        already_configured = cfg.openshell.is_standalone()
-        if already_configured:
-            ux.banner("Sandbox")
-            click.echo(
-                "  Sandbox:       "
-                + ux._style("already configured", fg="green")
-                + ux.dim(" (openshell.mode=standalone)")
-            )
-        else:
-            ux.banner("Sandbox")
-            from defenseclaw.commands.cmd_init_sandbox import _init_sandbox
+    ux.banner("Sidecar")
+    _start_gateway(cfg, logger)
 
-            sandbox_ok = _init_sandbox(cfg, logger)
-
-            if sandbox_ok:
-                ux.banner("Sandbox Networking")
-                from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
-
-                app.cfg = cfg
-                ctx = click.Context(setup_sandbox, parent=click.get_current_context())
-                ctx.invoke(
-                    setup_sandbox,
-                    sandbox_ip="10.200.0.2",
-                    host_ip="10.200.0.1",
-                    sandbox_home=None,
-                    openclaw_port=18789,
-                    dns="8.8.8.8,1.1.1.1",
-                    policy="default",
-                    no_auto_pair=False,
-                    disable=False,
-                    non_interactive=True,
-                )
-
-    sidecar_started = False
-    if not sandbox:
-        ux.banner("Sidecar")
-        _start_gateway(cfg, logger)
-        sidecar_started = True
-
-        if guardrail_ok and sidecar_started:
-            click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
-            _restart_gateway_quiet()
+    if guardrail_ok:
+        click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
+        _restart_gateway_quiet()
 
     from defenseclaw.bootstrap import finalize_first_run_config
 
-    try:
-        finalize_first_run_config(cfg, was_config_absent=is_new_config)
-    except FreshMigrationStateError as exc:
-        store.close()
-        raise click.ClickException(
-            f"config was saved but its fresh migration cursor was not published: {exc}; "
-            "rerun 'defenseclaw init' to retry safely"
-        ) from exc
+    finalize_first_run_config(cfg, was_config_absent=is_new_config)
 
     # Final completion banner. We render it as a plain divider with
     # bold success text so the eye lands here when the operator
@@ -547,12 +485,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     ux.ok("DefenseClaw initialized.", indent="  ")
     click.echo()
     click.echo("  " + ux.bold("Next steps:"))
-    if sandbox and not guardrail_ok:
+    if not guardrail_ok:
         click.echo(f"    {ux.accent('defenseclaw setup guardrail')}   " + ux.dim("Enable LLM traffic inspection"))
-    elif not guardrail_ok:
-        click.echo(f"    {ux.accent('defenseclaw setup guardrail')}   " + ux.dim("Enable LLM traffic inspection"))
-    if not sidecar_started and not sandbox:
-        click.echo(f"    {ux.accent('defenseclaw-gateway start')}     " + ux.dim("Start the sidecar"))
     click.echo(f"    {ux.accent('defenseclaw setup')}            " + ux.dim("Customize scanners and policies"))
     click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
@@ -561,6 +495,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         f"    {ux.accent('defenseclaw setup <connector>')} "
         + ux.dim("Add another supported native agent")
     )
+    if _sandboxes_possible():
+        click.echo(
+            f"    {ux.accent('defenseclaw sandbox setup')}    " + ux.dim("Run coding agents in OpenShell sandboxes")
+        )
 
     store.close()
 
@@ -657,6 +595,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
+    # --start-gateway/--no-start-gateway as typed (None: neither); the wizard
+    # replaces start_gateway with its answer.
+    start_gateway_flag = start_gateway
     # Reject a legacy source before discovery prompts or connector mutation.
     # The hard cut requires the ordinary upgrade transaction to create v8;
     # spending an entire interactive setup session before discovering that
@@ -778,6 +719,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
+    if not start_gateway:
+        _word_sidecar_skip(report, prompted=interactive_wizard, flag=start_gateway_flag)
 
     config_upgrade_required = any(
         step.name == "Config" and step.status == "fail" and step.next_command == "defenseclaw upgrade"
@@ -1067,7 +1010,8 @@ def _prompt_connector_selection(
     wizard's per-connector questions out so several agents can be brought
     up in one pass. The selected names become the active connector set.
     Defaults to every installed hook connector so the
-    common "start everything I have" case is a single Enter."""
+    common "start everything I have" case is a single Enter; clearing
+    every box returns ``["none"]``."""
     if connector:
         names = _parse_connector_list(connector)
         if names:
@@ -1100,22 +1044,33 @@ def _prompt_connector_selection(
         click.echo()
     _note_proxy_connectors(disc)
     installed = _installed_hook_connectors(disc)
+    # Choosing no connector is the interactive form of --connector none, for
+    # someone who only wants sandboxes or will add an agent later.
+    later = "'defenseclaw setup <connector>' can add one later"
+    if _sandboxes_possible():
+        later = "OpenShell sandboxes still work, and " + later
     if installed:
-        return _prompt_checkbox_selection(
+        ux.subhead(f"Clear every box to protect no host agent now; {later}.")
+        selected = _prompt_checkbox_selection(
             installed,
             default_selected=installed,
             title="Select active connector(s). Detected connectors are pre-selected.",
-            empty_ok=False,
+            empty_ok=True,
         )
+        if selected:
+            return selected
+        ux.subhead("No host connector selected; DefenseClaw will not protect a host agent.")
+        return ["none"]
 
     fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
+    ux.subhead(f"Choose none to protect no host agent now; {later}.")
     choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
     if fallback not in choices:
         fallback = choices[0] if choices else "codex"
     raw = click.prompt(
         "  Connector",
-        type=click.Choice(choices, case_sensitive=False),
+        type=click.Choice([*choices, "none"], case_sensitive=False),
         default=fallback,
         show_default=True,
     )
@@ -1597,11 +1552,16 @@ def _prompt_first_run(
     # Every connector defaults to observe. The operator names the subset to
     # enforce instead of choosing observe/action for each one. An explicit
     # `--profile` with a single explicit `--connector` keeps the legacy
-    # single-connector intent without re-prompting.
-    if connector and profile is not None and len(connectors) == 1:
+    # single-connector intent without re-prompting. "none" is not a host
+    # connector, so it is never offered for action mode.
+    host_connectors = [c for c in connectors if c != "none"]
+    if not host_connectors:
+        requested_action = []
+        ux.subhead("Action enforcement: skipped because no host connector is selected.")
+    elif connector and profile is not None and len(connectors) == 1:
         requested_action = list(connectors) if profile.lower() == "action" else []
     else:
-        requested_action = _prompt_action_connectors(connectors)
+        requested_action = _prompt_action_connectors(host_connectors)
 
     # Gate action connectors on hook-contract support; unverified ones are
     # downgraded to observe (still guarded, just non-blocking).
@@ -2074,8 +2034,39 @@ def _render_first_run_report(report, renderer) -> None:
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if _sandboxes_possible():
+        renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():
         renderer.echo(f"  Unguarded ACP agents found ({summary}): defenseclaw setup acp")
+
+
+def _sandboxes_possible() -> bool:
+    """Whether this machine could run OpenShell sandboxes: Linux or macOS with Docker.
+
+    Advisory only, like the ACP hint: ``defenseclaw sandbox setup`` checks the
+    rest (Landlock, the Docker daemon, OpenShell itself).
+    """
+
+    return platform_support.openshell_sandboxes_supported() and shutil.which("docker") is not None
+
+
+# The Sidecar step bootstrap records when init does not start the gateway;
+# init words it by how that was decided.
+_SIDECAR_SKIPPED_DETAIL = "not started (--no-start-gateway)"
+
+
+def _word_sidecar_skip(report, *, prompted: bool, flag: bool | None) -> None:
+    """Describe a gateway init did not start by the answer given, not a flag never typed."""
+
+    if prompted:
+        detail = "not started (you chose not to start it)"
+    elif flag is False:
+        detail = _SIDECAR_SKIPPED_DETAIL
+    else:
+        detail = "not started (init starts it only with --start-gateway)"
+    for step in report.setup:
+        if step.name == "Sidecar" and step.status == "skip" and step.detail == _SIDECAR_SKIPPED_DETAIL:
+            step.detail = detail
 
 
 def _unguarded_acp_summary() -> str:
@@ -3088,10 +3079,9 @@ def _start_gateway(cfg, logger) -> None:
         click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
 
     if started:
-        bind = "127.0.0.1"
-        if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
-            bind = cfg.guardrail.host
-        _check_sidecar_health(cfg.gateway.api_port, bind=bind)
+        from defenseclaw.gateway import gateway_api_client_host
+
+        _check_sidecar_health(cfg.gateway.api_port, bind=gateway_api_client_host(cfg))
 
 
 def _get_gateway_version() -> str | None:
@@ -3191,7 +3181,8 @@ def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.
     import urllib.error
     import urllib.request
 
-    url = f"http://{bind}:{api_port}/health"
+    host = f"[{bind}]" if ":" in bind and not bind.startswith("[") else bind
+    url = f"http://{host}:{api_port}/health"
     for i in range(retries):
         time.sleep(1)
         try:

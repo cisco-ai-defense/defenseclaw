@@ -39,10 +39,14 @@ func Analyze(input Input) (facts Facts) {
 		}
 	}()
 
-	return analyze(input)
+	return analyze(input, "", nil)
 }
 
-func analyze(input Input) Facts {
+// analyze computes the facts of input. twinCommand, when set, replaces the
+// raw command text before it is parsed, and capture, when set, receives the
+// runtime-expanded redirect targets of that parse
+// (analyzeWithRedirectTargets).
+func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
 	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
@@ -167,6 +171,8 @@ func analyze(input Input) Facts {
 	}
 
 	startID := int64(1)
+	var homeTildeOperands map[string]string
+	homeRewrittenCommands := map[int64]struct{}{}
 	if len(argv) > 0 {
 		dialect := dialectHint
 		if dialect == "" || dialect == DialectNone {
@@ -181,6 +187,9 @@ func analyze(input Input) Facts {
 		startID = base.nextID
 	}
 	if command != "" && len(argv) == 0 {
+		if twinCommand != "" {
+			command = twinCommand
+		}
 		dialect, ambiguous := chooseRawCommandDialect(
 			input.Tool,
 			dialectHint,
@@ -189,11 +198,34 @@ func analyze(input Input) Facts {
 		if ambiguous {
 			base.markAmbiguous(IssueConflictingSources)
 		}
-		parsed := parseCommandAs(command, dialect, startID, 0)
-		parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
-		expandBoundedInlineInterpreters(&parsed, 0)
-		classifyOutput(&parsed)
-		enforceAnalyzeAuthority(&parsed)
+		parse := func(source string) parseOutput {
+			parsed := parseCommandAs(source, dialect, startID, 0)
+			parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
+			expandBoundedInlineInterpreters(&parsed, 0)
+			classifyOutput(&parsed)
+			enforceAnalyzeAuthority(&parsed)
+			return parsed
+		}
+		parsed := parse(command)
+		if capture != nil {
+			// The redirect targets of the command as sent: the reduction
+			// only runs on its partial analysis, never on the rewrite below.
+			*capture = parsed.redirectTargets
+		}
+		if parsed.status == StatusPartial && dialect == DialectPOSIX {
+			// A trusted ActiveHome makes a lone command's "~/" operands
+			// exact; the rewrite is kept only when nothing else is dynamic.
+			home, _ := normalizeActiveHome(input.ActiveHome)
+			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
+				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
+					parsed = resolved
+					homeTildeOperands = rewrite.tildeOperands
+					for _, rewritten := range resolved.commands {
+						homeRewrittenCommands[rewritten.ID] = struct{}{}
+					}
+				}
+			}
+		}
 		base.merge(parsed)
 	}
 	if extracted.policyBypass {
@@ -217,6 +249,7 @@ func analyze(input Input) Facts {
 		safeScalar(cwd, maxScalarBytes),
 		activeHome,
 	)
+	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,

@@ -145,11 +145,6 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			args:      map[string]interface{}{"command": command},
 		},
 		{
-			connector: "windsurf",
-			tool:      "run_command",
-			args:      map[string]interface{}{"command": command},
-		},
-		{
 			connector: "opencode",
 			tool:      "bash",
 			args:      map[string]interface{}{"command": command},
@@ -173,11 +168,6 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 		{
 			connector: "hermes",
 			tool:      "execute_command",
-			args:      map[string]interface{}{"command": command},
-		},
-		{
-			connector: "geminicli",
-			tool:      "RunShellCommand",
 			args:      map[string]interface{}{"command": command},
 		},
 		{

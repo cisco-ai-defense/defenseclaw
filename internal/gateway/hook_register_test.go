@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // TestHookRegister_HasBuiltinFactories confirms init() wired up the
@@ -34,7 +35,7 @@ func TestHookRegister_HasBuiltinFactories(t *testing.T) {
 			t.Errorf("expected hook factory for connector %q to be registered", name)
 		}
 	}
-	for _, name := range []string{"windsurf", "geminicli"} {
+	for _, name := range []string{legacyconnector.RetiredDesktopID, "retired-example"} {
 		if _, ok := connectorHookHandlerByName[name]; ok {
 			t.Errorf("retired connector %q still has an active hook factory", name)
 		}
@@ -73,7 +74,7 @@ func TestRegisterConnectorHookRoutes_DataDriven(t *testing.T) {
 	}
 }
 
-func TestRegisterConnectorHookRoutesDoesNotExposeDeprecatedGemini(t *testing.T) {
+func TestRegisterConnectorHookRoutesDoesNotExposeRemovedConnector(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		reg  *connector.Registry
@@ -87,10 +88,10 @@ func TestRegisterConnectorHookRoutesDoesNotExposeDeprecatedGemini(t *testing.T) 
 			a.registerConnectorHookRoutes(mux)
 
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/geminicli/hook", nil)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/retired-example/hook", nil)
 			mux.ServeHTTP(rec, req)
 			if rec.Code != http.StatusNotFound {
-				t.Fatalf("deprecated Gemini hook endpoint status=%d, want 404", rec.Code)
+				t.Fatalf("unregistered connector hook endpoint status=%d, want 404", rec.Code)
 			}
 		})
 	}

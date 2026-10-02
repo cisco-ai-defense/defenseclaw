@@ -5,6 +5,12 @@ Cisco Secure Client AVC packaging pipeline for the signed Windows
 managed-enterprise Setup. DefenseClaw produces an unsigned build kit; AVC owns
 both Authenticode signing rounds and returns the finalized release artifacts.
 
+This handoff covers only the Secure Client Setup,
+`DefenseClawSetup-Enterprise-x64.exe`. The standalone Setup,
+`DefenseClawSetup-Enterprise-Standalone-x64.exe`, has no AVC kit; it is built
+and signed as described in
+[Windows enterprise Setup](WINDOWS-ENTERPRISE-SETUP.md#standalone-setup).
+
 Do not use the retired on-host Windows builder. Use
 `make packaging-windows-avc-buildkit VERSION=<version>` for a signed release
 handoff, or `make packaging-windows-enterprise-installer VERSION=<version>` only
@@ -19,9 +25,11 @@ The build-kit directory is
 windows-enterprise-buildkit-<version>/
 ├── payload/
 │   ├── DefenseClawEnterprise.psm1
+│   ├── defenseclaw-acp.exe
 │   ├── defenseclaw-cmid-broker.exe
 │   ├── defenseclaw-gateway.exe
 │   ├── defenseclaw-hook.exe
+│   ├── defenseclaw-sensor-helper.exe
 │   ├── defenseclaw.exe
 │   └── install-enterprise.ps1
 ├── source/                         # trimmed, vendored, offline Go build
@@ -35,7 +43,7 @@ windows-enterprise-buildkit-<version>/
 ```
 
 `payload-metadata.json` binds the expected filenames, DefenseClaw version,
-source commit, and CMID pseudo-version. The six-file inventory is closed: a
+source commit, and CMID pseudo-version. The eight-file inventory is closed: a
 missing, renamed, substituted, or additional embedded payload file is an
 assembly failure.
 
@@ -51,7 +59,7 @@ bytes of the already-signed inner payload.
 
 ### 1. Sign the inner payload
 
-AVC Authenticode-signs all six files under `payload/`. The signing wrapper may
+AVC Authenticode-signs all eight files under `payload/`. The signing wrapper may
 use its standard certificate and timestamp arguments, but every result must
 validate to the exact publisher common name `Cisco Systems, Inc.`. EXEs and the
 PowerShell script/module are all part of this signed set.
@@ -70,7 +78,7 @@ Bash-hosted kit:
 ```bash
 export SOURCE_COMMIT=0123456789abcdef0123456789abcdef01234567
 export SOURCE_DATE_EPOCH=1787097600
-export RELEASE_VERSION=0.9.0-rc1
+export RELEASE_VERSION=X.Y.Z
 export CMID_PSEUDO_VERSION=v0.0.0-20260819000000-0123456789ab
 ./assemble.sh \
   --source-commit "$SOURCE_COMMIT" \
@@ -86,7 +94,7 @@ PowerShell-hosted kit:
 
 ```powershell
 $SourceCommit = '0123456789abcdef0123456789abcdef01234567'
-$Version = '0.9.0-rc1'
+$Version = 'X.Y.Z'
 $CmidPseudoVersion = 'v0.0.0-20260819000000-0123456789ab'
 $env:SOURCE_DATE_EPOCH = '1787097600'
 pwsh -File .\assemble.ps1 `
@@ -173,7 +181,7 @@ Do not publish partial output. A signature, inventory, reproducibility,
 assembly, hash, or provenance mismatch fails the handoff and requires a clean
 rerun from the approved kit.
 
-Any change to the six-file payload, kit layout, signer identity, assembly
+Any change to the eight-file payload, kit layout, signer identity, assembly
 arguments, toolchain pin, signing order, output names, or provenance fields is
 a contract change. Update this document, the generated `README-AVC.md`, both
 assembler implementations, their parity checks, and the release verification

@@ -20,6 +20,8 @@ import (
 )
 
 func TestWindowsEnterpriseLifecycleReportsTheFatalInstallExitCode(t *testing.T) {
+	// Hermetic: the host running the test may carry a real deployment.
+	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseCommandRunner
 	originalScriptFinder := windowsEnterpriseScriptFinder
 	t.Cleanup(func() {

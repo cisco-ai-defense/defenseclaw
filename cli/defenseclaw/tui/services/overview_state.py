@@ -18,12 +18,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from defenseclaw.connector_paths import (
-    cleanup_only_guidance,
     connector_config_files,
     connector_home,
     hermes_config_path,
     hermes_home,
-    is_cleanup_only,
 )
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
@@ -497,7 +495,7 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("i", "Inventory", ("aibom", "scan", "--json")),
     ("g", "Guardrail", ("setup", "guardrail")),
     ("m", "Mode", ("setup", "connector")),
-    ("p", "Policy", ("policy", "list")),
+    # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
     ("N", "Notify", ("setup", "notifications")),
     ("u", "Upgrade", ("upgrade",)),
@@ -516,6 +514,7 @@ class OverviewPanelModel:
     def __init__(self, cfg: OverviewConfig | None = None, *, version: str = "") -> None:
         self.cfg = cfg
         self.version = version
+        self.active_policy: object | None = None
         self.health: HealthSnapshot | None = None
         # Availability of the sidecar management endpoint is deliberately
         # tracked separately from ``health.gateway``.  That payload field is
@@ -599,6 +598,15 @@ class OverviewPanelModel:
         """Install bounded native OTLP evidence without treating absence as failure."""
 
         self.native_delivery_summary = summary
+
+    def set_active_policy(self, policy: object | None) -> None:
+        """Install the active named policy (a ``policy_catalog.PolicySummary``).
+
+        The Policies loader reads the catalog in a thread and hands the active
+        policy over so Overview's "Policy posture" names its real thresholds.
+        """
+
+        self.active_policy = policy
 
     def set_runtime_overview(self, runtime: RuntimeOverview | None) -> None:
         """Install the latest Runtime-plane summary used by Overview."""
@@ -1242,8 +1250,11 @@ class OverviewPanelModel:
             parts.append(self.cfg.guardrail_mode)
         if self.cfg.guardrail_port:
             parts.append(f"port {self.cfg.guardrail_port}")
-        if self.cfg.guardrail_strategy:
-            parts.append(self.cfg.guardrail_strategy)
+        # The rule pack, not guardrail_strategy: that is read from a
+        # "strategy" key the config doesn't have, so it always said "default".
+        pack = _rule_pack_label(self.cfg.guardrail_rule_pack_dir)
+        if pack:
+            parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
         return ", ".join(parts)
@@ -1449,7 +1460,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 policy events after {formatted} - "
                 "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
             )
-        case "hermes" | "cursor" | "devin" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
+        case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -1477,8 +1488,6 @@ def friendly_connector_name(connector: str) -> str:
             return "Cursor"
         case "devin":
             return "Devin"
-        case "geminicli":
-            return "Gemini CLI (deprecated; use Antigravity)"
         case "copilot":
             return "GitHub Copilot CLI"
         case "openhands":
@@ -1499,8 +1508,6 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = (connector or "").strip().lower()
-    if is_cleanup_only(connector):
-        return cleanup_only_guidance(connector)
     hermes_root = hermes_home()
     hermes_config = hermes_config_path()
     claude_root = connector_home("claudecode")
@@ -1891,3 +1898,14 @@ __all__ = [
     "string_detail",
     "zero_connector_requests_notice",
 ]
+
+
+def _rule_pack_label(path: str) -> str:
+    """Folder name of a rule pack; a composed ``protected-<scope>/<profile>`` pack by its scope folder."""
+
+    if not path:
+        return ""
+    from defenseclaw.policy_catalog import is_protected_pack_path
+
+    norm = os.path.normpath(path)
+    return os.path.basename(os.path.dirname(norm) if is_protected_pack_path(path) else norm)

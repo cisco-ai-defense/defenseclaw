@@ -139,7 +139,7 @@ func NormalizeHookEventTypeLabel(eventType string) string {
 		return "tool_call"
 	case "toolresult", "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall", "postreadcode", "postwritecode", "postruncommand", "postmcptooluse", "aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit", "afteragentthought", "afteragent", "posttoolbatch":
 		return "tool_result"
-	case "postllmcall", "postinvocation", "postcascaderesponse", "postcascaderesponsewithtranscript", "messagedisplay", "afteragentresponse", "aftermodel":
+	case "postllmcall", "postinvocation", "messagedisplay", "afteragentresponse", "aftermodel":
 		return "response"
 	case "stop", "stopfailure", "agentstop", "sessionidle", "teammateidle":
 		return "stop"

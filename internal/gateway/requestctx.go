@@ -84,6 +84,10 @@ func RequestIDFromContext(ctx context.Context) string {
 	return v
 }
 
+// clientRequestIDHeaders are the request-ID header names a client may
+// supply, in precedence order.
+var clientRequestIDHeaders = []string{RequestIDHeader, "X-Request-Id", "X-Correlation-Id"}
+
 // requestIDFromHeaders returns the first non-empty correlation ID
 // found in any of the recognised request-ID header names, or "".
 // Clients commonly use X-Request-Id (OpenTelemetry, Envoy) or
@@ -91,7 +95,7 @@ func RequestIDFromContext(ctx context.Context) string {
 // our canonical header so integrations don't require header
 // rewriting.
 func requestIDFromHeaders(h http.Header) string {
-	for _, name := range []string{RequestIDHeader, "X-Request-Id", "X-Correlation-Id"} {
+	for _, name := range clientRequestIDHeaders {
 		if v := strings.TrimSpace(h.Get(name)); v != "" {
 			return sanitizeClientRequestID(v)
 		}
@@ -446,6 +450,13 @@ func ScanCorrelationFromContext(ctx context.Context) audit.ScanCorrelation {
 			spanID = sp.SpanContext().SpanID().String()
 		}
 	}
+	// Finding and scan rows name the same caller the hook_decision rows do:
+	// the verified caller on a standalone gateway, never an identity the
+	// request only claims. Secure Client rows keep their existing shape.
+	var caller auditCaller
+	if !ManagedEnterpriseActive() {
+		caller = auditCallerIdentity(ctx)
+	}
 	return audit.ScanCorrelation{
 		RunID:           envelope.RunID,
 		RequestID:       firstNonEmpty(RequestIDFromContext(ctx), envelope.RequestID),
@@ -456,5 +467,8 @@ func ScanCorrelationFromContext(ctx context.Context) audit.ScanCorrelation {
 		AgentName:       aid.AgentName,
 		AgentInstanceID: aid.AgentInstanceID,
 		Connector:       envelope.Connector,
+		UserID:          caller.ID,
+		UserIDKind:      caller.IDKind,
+		UserName:        caller.Name,
 	}
 }

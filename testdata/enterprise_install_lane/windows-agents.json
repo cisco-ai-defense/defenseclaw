@@ -1,0 +1,7 @@
+{
+  "description": "Agent CLI version claims the Windows install lane (scripts/test-enterprise-windows-install.ps1) stages in the runner account's profile, at AppData\\Roaming\\npm\\node_modules\\<package>\\package.json, so standalone enrollment admits a Claude Code and a Codex row. Each version is a pinned release client (scripts/windows-native-ci.ps1) with a known Windows hook contract; internal/enterprisehooks pins that discovery and admission accept exactly these.",
+  "agents": [
+    {"connector": "claudecode", "package": "@anthropic-ai/claude-code", "version": "2.1.208"},
+    {"connector": "codex", "package": "@openai/codex", "version": "0.144.3"}
+  ]
+}

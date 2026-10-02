@@ -70,6 +70,20 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
     return app
 
 
+# Status draws a table or per-connector blocks by the terminal width, which
+# other tests in the same process (a pytest worker, a CI shard) can leave
+# narrowed. These tests assume 120 columns unless one patches it itself.
+_TERMINAL_WIDTH = patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=120)
+
+
+def setUpModule():
+    _TERMINAL_WIDTH.start()
+
+
+def tearDownModule():
+    _TERMINAL_WIDTH.stop()
+
+
 class ResolveActiveConnectorTests(unittest.TestCase):
     def test_uses_active_connector_method(self):
         cfg = SimpleNamespace()
@@ -216,7 +230,7 @@ class StatusCommandTests(unittest.TestCase):
             result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("- Codex", result.output)
-        self.assertIn("key:       codex", result.output)
+        self.assertRegex(result.output, r"key:\s+codex")
         self.assertNotIn("connector: codex", result.output)
         self.assertIn("rule-pack:", result.output)
         self.assertIn("scan:", result.output)
@@ -611,7 +625,7 @@ class PerConnectorToggleTests(unittest.TestCase):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         result = runner.invoke(
-            cmd_guardrail.disable_cmd, ["--connector", "windsurf", "--yes"], obj=app
+            cmd_guardrail.disable_cmd, ["--connector", "cursor", "--yes"], obj=app
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not configured", result.output)
@@ -701,17 +715,24 @@ class PerConnectorToggleTests(unittest.TestCase):
         # claudecode inherits the defaults.
         from defenseclaw import config as dcconfig
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app = make_multi_ctx({"codex": None, "claudecode": None, "copilot": None})
         app.cfg.guardrail.connectors["codex"].rule_pack_dir = "/packs/strict"
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
-        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        app.cfg.guardrail.connectors["copilot"].rule_pack_dir = "/packs/protected-copilot/default"
+        app.cfg.guardrail.block_at = "HIGH"
+        with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout
+            result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Rule pack", result.output)
         self.assertIn("strict", result.output)    # codex's own pack
         self.assertIn("default", result.output)   # claudecode inherits
         self.assertIn("on@LOW", result.output)    # codex's own HILT
+        self.assertIn("protected-copilot", result.output)  # a composed pack by its scope
+        # Tool-call levels: the global block_at over each connector's pack.
+        self.assertIn("HIGH+/LOW+", result.output)     # codex: strict alerts LOW+
+        self.assertIn("HIGH+/MEDIUM+", result.output)  # claudecode: default alerts MEDIUM+
 
     def test_status_global_disable_overrides_per_connector_enabled(self):
         # Regression: when the GLOBAL guardrail kill switch is off, no
@@ -856,9 +877,9 @@ class PerConnectorFailModeTests(unittest.TestCase):
 
     def test_bare_set_open_reconciles_closed_connector_override(self):
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "open"
-        app.cfg.guardrail.connectors["geminicli"].hook_fail_mode = "closed"
+        app.cfg.guardrail.connectors["cursor"].hook_fail_mode = "closed"
         state = SimpleNamespace(current=True, drift=())
         with (
             patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock,
@@ -873,18 +894,18 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertNotIn("nothing to do", result.output)
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
-        self.assertEqual(app.cfg.guardrail.connectors["geminicli"].hook_fail_mode, "open")
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("geminicli"), "open")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "open")
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         self.assertEqual(
             set(restart_mock.call_args.kwargs["connectors"]),
-            {"codex", "geminicli"},
+            {"codex", "cursor"},
         )
 
     def test_bare_set_reload_failure_restores_config_and_runtime(self):
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "open"
         with patch(
             "defenseclaw.commands.cmd_setup._restart_services",
@@ -896,7 +917,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "")
-        self.assertEqual(app.cfg.guardrail.connectors["geminicli"].hook_fail_mode, "")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "")
         self.assertEqual(restart_mock.call_count, 2)
         self.assertIn("restored", result.output)
 
@@ -1014,7 +1035,7 @@ class HILTCommandTests(unittest.TestCase):
 
     def test_bare_set_on_fans_out_to_all_active_connectors(self):
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app = make_multi_ctx({"codex": None, "cursor": None})
         with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
             "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
         ) as sync_mock:
@@ -1025,7 +1046,7 @@ class HILTCommandTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertFalse(app.cfg.guardrail.hilt.enabled)
-        for connector in ("codex", "geminicli"):
+        for connector in ("codex", "cursor"):
             eff = app.cfg.guardrail.effective_hilt(connector)
             self.assertTrue(eff.enabled)
             self.assertEqual(eff.min_severity, "MEDIUM")
@@ -1035,12 +1056,12 @@ class HILTCommandTests(unittest.TestCase):
 
     def test_bare_set_off_reconciles_enabled_connector_override(self):
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app = make_multi_ctx({"codex": None, "cursor": None})
         from defenseclaw import config as dcconfig
 
         app.cfg.guardrail.hilt.enabled = False
         app.cfg.guardrail.hilt.min_severity = "HIGH"
-        app.cfg.guardrail.connectors["geminicli"].hilt = dcconfig.HILTConfig(
+        app.cfg.guardrail.connectors["cursor"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="MEDIUM"
         )
         with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
@@ -1049,10 +1070,10 @@ class HILTCommandTests(unittest.TestCase):
             result = runner.invoke(cmd_guardrail.hilt_cmd, ["off", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertNotIn("nothing to do", result.output)
-        for connector in ("codex", "geminicli"):
+        for connector in ("codex", "cursor"):
             eff = app.cfg.guardrail.effective_hilt(connector)
             self.assertFalse(eff.enabled)
-        self.assertEqual(app.cfg.guardrail.connectors["geminicli"].hilt.min_severity, "MEDIUM")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hilt.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
         sync_mock.assert_not_called()
         restart_mock.assert_called_once()
@@ -1173,9 +1194,9 @@ class BlockMessageCommandTests(unittest.TestCase):
 
     def test_bare_set_message_fans_out_to_all_active_connectors(self):
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.block_message = "Old global"
-        app.cfg.guardrail.connectors["geminicli"].block_message = "Gemini scoped block"
+        app.cfg.guardrail.connectors["cursor"].block_message = "Cursor scoped block"
         with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
             result = runner.invoke(
                 cmd_guardrail.block_message_cmd,
@@ -1184,7 +1205,7 @@ class BlockMessageCommandTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.block_message, "Global block")
-        for connector in ("codex", "geminicli"):
+        for connector in ("codex", "cursor"):
             self.assertEqual(app.cfg.guardrail.connectors[connector].block_message, "Global block")
             self.assertEqual(app.cfg.guardrail.effective_block_message(connector), "Global block")
         app.cfg.save.assert_called_once()
@@ -1204,10 +1225,10 @@ class BlockMessageCommandTests(unittest.TestCase):
 
     def test_bare_clear_message_fans_out_to_all_active_connectors(self):
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.block_message = "Global block"
         app.cfg.guardrail.connectors["codex"].block_message = "Codex scoped block"
-        app.cfg.guardrail.connectors["geminicli"].block_message = "Gemini scoped block"
+        app.cfg.guardrail.connectors["cursor"].block_message = "Cursor scoped block"
         with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
             result = runner.invoke(
                 cmd_guardrail.block_message_cmd,
@@ -1216,7 +1237,7 @@ class BlockMessageCommandTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.block_message, "")
-        for connector in ("codex", "geminicli"):
+        for connector in ("codex", "cursor"):
             self.assertEqual(app.cfg.guardrail.connectors[connector].block_message, "")
             self.assertEqual(app.cfg.guardrail.effective_block_message(connector), "")
         app.cfg.save.assert_called_once()
@@ -1319,7 +1340,10 @@ class CommandRegistrationTests(unittest.TestCase):
         # packs (built-in presets + the dir each connector enforces) — the
         # day-to-day counterpart to `setup <connector> --rule-pack` (R2).
         # validate-pack delegates strict offline validation to the installed
-        # gateway helper without starting the runtime.
+        # gateway helper without starting the runtime. mode flips observe /
+        # action without re-running setup, and protection turns the opt-in
+        # protection packs on and off per scope. block-at / alert-at set the
+        # tool-call block and alert levels, globally or per connector.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1331,8 +1355,13 @@ class CommandRegistrationTests(unittest.TestCase):
                 "fail-mode",
                 "hilt",
                 "block-message",
+                "block-at",
+                "alert-at",
                 "judge",
                 "list-packs",
+                "mode",
+                "protection",
+                "use-pack",
                 "validate-pack",
             },
         )

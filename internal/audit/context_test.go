@@ -12,6 +12,7 @@ package audit
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -163,5 +164,32 @@ func TestLogEventCtx_CallerOverridesEnvelope(t *testing.T) {
 	}
 	if got.RunID != "run-from-ctx" {
 		t.Errorf("RunID=%q want fill from ctx", got.RunID)
+	}
+}
+
+// TestMergeEnvelope_CoversEveryField walks every CorrelationEnvelope field so
+// a newly added one (the sandbox binding identity, for example) cannot be
+// silently dropped by MergeEnvelope: an empty base field takes the overlay
+// value and a set base field always wins.
+func TestMergeEnvelope_CoversEveryField(t *testing.T) {
+	fields := reflect.TypeOf(CorrelationEnvelope{})
+	for index := 0; index < fields.NumField(); index++ {
+		field := fields.Field(index)
+		if field.Type.Kind() != reflect.String {
+			t.Fatalf("CorrelationEnvelope.%s is %s; extend this test for non-string fields", field.Name, field.Type)
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			var base, overlay CorrelationEnvelope
+			reflect.ValueOf(&overlay).Elem().Field(index).SetString("overlay-" + field.Name)
+			merged := MergeEnvelope(base, overlay)
+			if got := reflect.ValueOf(merged).Field(index).String(); got != "overlay-"+field.Name {
+				t.Fatalf("empty base %s = %q, want the overlay value", field.Name, got)
+			}
+			reflect.ValueOf(&base).Elem().Field(index).SetString("base-" + field.Name)
+			merged = MergeEnvelope(base, overlay)
+			if got := reflect.ValueOf(merged).Field(index).String(); got != "base-"+field.Name {
+				t.Fatalf("set base %s = %q, want the base value to win", field.Name, got)
+			}
+		})
 	}
 }

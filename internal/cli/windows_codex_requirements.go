@@ -247,6 +247,9 @@ func resolveWindowsCodexRequirementsLayout(
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
 		CodexTargetEnabled:              applicability.Codex,
 		CursorTargetEnabled:             applicability.Cursor,
+		HookContractID: connector.WindowsCodexStandaloneHookContract(
+			filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
+		),
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")

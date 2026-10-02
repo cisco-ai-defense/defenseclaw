@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from defenseclaw import credential_provenance
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config
@@ -148,7 +149,14 @@ def _openclaw_gateway_token(cfg: Config) -> Requirement:
     claw = getattr(cfg, "claw", None)
     claw_mode = getattr(claw, "mode", "")
     if str(claw_mode or "").strip():
-        return Requirement.REQUIRED if _connector_name(claw_mode) == "openclaw" else Requirement.NOT_USED
+        if _connector_name(claw_mode) != "openclaw":
+            return Requirement.NOT_USED
+        # claw.mode's openclaw default on a machine without OpenClaw: the
+        # gateway reports the OpenClaw gateway off and never uses the token
+        # (#958), so the Keys pill must not ask for it.
+        if openclaw_implied_but_not_installed(cfg):
+            return Requirement.NOT_USED
+        return Requirement.REQUIRED
 
     # Old configs defaulted to OpenClaw when no connector was specified.
     # We auto-detect it from ~/.openclaw/openclaw.json when available,
@@ -216,7 +224,6 @@ _HOOK_POLICY_ONLY_CONNECTORS = frozenset(
         "hermes",
         "cursor",
         "devin",
-        "geminicli",
         "copilot",
         "openhands",
         "antigravity",

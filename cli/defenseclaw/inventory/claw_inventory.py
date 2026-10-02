@@ -1337,11 +1337,9 @@ def _run_openclaw(*args: str) -> _CmdResult:
     """
     cmd_str = "openclaw " + " ".join(args) + " --json"
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
         proc = subprocess.run(
-            [*prefix, openclaw_bin(), *args, "--json"],
+            [openclaw_bin(), *args, "--json"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1879,7 +1877,6 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
       frontmatter with closest-project-over-user precedence
     * codex      — standalone TOML in candidate project and user agent layers
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` array
-    * geminicli  — ``.gemini/agents`` and ``~/.gemini/agents``
     * copilot    — precedence-aware project/ancestor agents plus
       ``$COPILOT_HOME/agents`` (default ``~/.copilot/agents``)
     * cursor     — explicitly pinned project ``.cursor/agents`` and user ``~/.cursor/agents``
@@ -1904,13 +1901,6 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     if name == "zeptoclaw":
         return _agents_from_zeptoclaw_json(
             os.path.join(home, ".zeptoclaw", "agents.json"),
-        )
-    if name == "geminicli":
-        return _agents_from_md_dirs(
-            connector_paths.agent_dirs(
-                name,
-                workspace_dir=_connector_workspace_dir(cfg),
-            )
         )
     if name == "copilot":
         return _agents_from_copilot_dirs(connector_paths.copilot_agent_dirs(_connector_workspace_dir(cfg)))

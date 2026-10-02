@@ -18,7 +18,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +64,43 @@ func TestActiveConnector_NilSafe(t *testing.T) {
 	var cfg *Config
 	if got := cfg.activeConnector(); got != "openclaw" {
 		t.Errorf("nil cfg activeConnector() = %q, want openclaw", got)
+	}
+}
+
+// TestOpenClawConfigCandidates pins the openclaw.json paths the gateway
+// checks before it reports the claw.mode default as "OpenClaw is not
+// installed" (#958): claw.config_file and <claw.home_dir>/openclaw.json,
+// expanded and deduplicated, with the loader default when both are empty.
+func TestOpenClawConfigCandidates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	defaultPath := filepath.Join(home, ".openclaw", "openclaw.json")
+
+	tests := []struct {
+		name       string
+		configFile string
+		homeDir    string
+		want       []string
+	}{
+		{"loader_defaults_dedupe", "~/.openclaw/openclaw.json", "~/.openclaw", []string{defaultPath}},
+		{"both_empty_uses_default", "", "", []string{defaultPath}},
+		{"custom_home_dir_adds_its_json", "~/.openclaw/openclaw.json", "/srv/oc", []string{defaultPath, filepath.Clean("/srv/oc/openclaw.json")}},
+		{"home_dir_only", "", "/srv/oc", []string{filepath.Clean("/srv/oc/openclaw.json")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Claw: ClawConfig{ConfigFile: tt.configFile, HomeDir: tt.homeDir}}
+			got := cfg.OpenClawConfigCandidates()
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("OpenClawConfigCandidates() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	var nilCfg *Config
+	if got := nilCfg.OpenClawConfigCandidates(); len(got) != 1 || got[0] != defaultPath {
+		t.Errorf("nil cfg OpenClawConfigCandidates() = %q, want [%q]", got, defaultPath)
 	}
 }
 
@@ -323,63 +359,6 @@ args = ["hi"]
 	}
 }
 
-func TestWindsurfInventoryUsesPersistedBoundUserHome(t *testing.T) {
-	root := t.TempDir()
-	bound := filepath.Join(root, "bound-profile")
-	ambient := filepath.Join(root, "ambient-profile")
-	workspace := filepath.Join(root, "repo")
-	testenv.SetHome(t, ambient)
-	t.Setenv("WINDSURF_USER_HOME", bound)
-
-	for _, item := range []struct {
-		home string
-		name string
-	}{
-		{home: bound, name: "bound"},
-		{home: ambient, name: "ambient"},
-	} {
-		dir := filepath.Join(item.home, ".codeium", "windsurf")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		body := fmt.Sprintf(`{"mcpServers":{"%s":{"command":"%s-mcp"}}}`, item.name, item.name)
-		if err := os.WriteFile(filepath.Join(dir, "mcp_config.json"), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	guessed := filepath.Join(bound, ".codeium", "windsurf", "mcp.json")
-	if err := os.WriteFile(guessed, []byte(`{"mcpServers":{"guessed":{"command":"guessed-mcp"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
-	if got, want := cfg.ConnectorHomeDir("windsurf"), filepath.Join(bound, ".codeium", "windsurf"); got != want {
-		t.Fatalf("ConnectorHomeDir(windsurf) = %q, want %q", got, want)
-	}
-	wantSkills := []string{
-		filepath.Join(bound, ".codeium", "windsurf", "skills"),
-		filepath.Join(bound, ".agents", "skills"),
-		filepath.Join(workspace, ".windsurf", "skills"),
-		filepath.Join(workspace, ".agents", "skills"),
-	}
-	if got := cfg.SkillDirsForConnector("windsurf"); len(got) != len(wantSkills) {
-		t.Fatalf("SkillDirsForConnector(windsurf) = %v, want %v", got, wantSkills)
-	} else {
-		for _, want := range wantSkills {
-			if !containsPath(got, want) {
-				t.Fatalf("SkillDirsForConnector(windsurf) = %v, missing %q", got, want)
-			}
-		}
-	}
-	entries, err := cfg.ReadMCPServersForConnector("windsurf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name != "bound" || entries[0].Command != "bound-mcp" {
-		t.Fatalf("Windsurf MCP entries = %+v, want only bound profile", entries)
-	}
-}
-
 func TestDevinInventoryUsesBoundUserAndPinnedWorkspace(t *testing.T) {
 	root := t.TempDir()
 	bound := filepath.Join(root, "bound-devin")
@@ -431,108 +410,6 @@ func TestDevinInventoryUsesBoundUserAndPinnedWorkspace(t *testing.T) {
 	}
 	if _, err := cfg.ReadMCPServersForConnector("devin"); err == nil {
 		t.Fatal("invalid Devin binding did not fail MCP discovery")
-	}
-}
-
-func TestGeminiInventoryUsesPrivateInstallBindingAcrossUserSurfaces(t *testing.T) {
-	root := t.TempDir()
-	bound := filepath.Join(root, "official-profile", ".gemini")
-	ambient := filepath.Join(root, "hostile-profile")
-	workspace := filepath.Join(root, "workspace")
-	testenv.SetHome(t, ambient)
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(ambient, "vendor-override"))
-	t.Setenv("GEMINI_CLI_HOME", filepath.Join(ambient, "official-vendor-root"))
-	t.Setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", bound)
-	if err := os.MkdirAll(bound, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(bound, "settings.json"),
-		[]byte("{\n  // Gemini accepts comments before JSON.parse.\n  \"mcpServers\": {\"shared\": {\"command\": \"user-mcp\"}, \"user\": {\"command\": \"user-only\"}}\n}\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	projectConfig := filepath.Join(workspace, ".gemini", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		projectConfig,
-		[]byte(`{"mcpServers":{"shared":{"command":"project-mcp"},"project":{"command":"project-only"}}}`),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
-	if got := cfg.ConnectorHomeDir("geminicli"); got != bound {
-		t.Fatalf("ConnectorHomeDir(geminicli) = %q, want %q", got, bound)
-	}
-	for _, want := range []string{
-		filepath.Join(bound, "skills"),
-		filepath.Join(workspace, ".gemini", "skills"),
-		filepath.Join(workspace, ".agents", "skills"),
-	} {
-		if got := cfg.SkillDirsForConnector("geminicli"); !containsPath(got, want) {
-			t.Fatalf("SkillDirsForConnector(geminicli) = %v, missing %q", got, want)
-		}
-	}
-	if got, want := cfg.PluginDirsForConnector("geminicli"), []string{filepath.Join(bound, "extensions")}; len(got) != 1 || got[0] != want[0] {
-		t.Fatalf("PluginDirsForConnector(geminicli) = %v, want user-global %v", got, want)
-	}
-	entries, err := cfg.ReadMCPServersForConnector("geminicli")
-	if err != nil {
-		t.Fatal(err)
-	}
-	byName := map[string]MCPServerEntry{}
-	for _, entry := range entries {
-		byName[entry.Name] = entry
-	}
-	if len(entries) != 3 || byName["shared"].Command != "project-mcp" ||
-		byName["project"].Command != "project-only" || byName["user"].Command != "user-only" {
-		t.Fatalf("Gemini MCP entries = %+v, want project-first merged inventory", entries)
-	}
-
-	t.Setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", "relative")
-	if got := cfg.ConnectorHomeDir("geminicli"); got != "" {
-		t.Fatalf("invalid Gemini binding resolved home %q", got)
-	}
-	if got := cfg.SkillDirsForConnector("geminicli"); len(got) != 0 {
-		t.Fatalf("invalid Gemini binding resolved skill paths %v", got)
-	}
-	if _, err := cfg.ReadMCPServersForConnector("geminicli"); err == nil {
-		t.Fatal("invalid Gemini binding did not fail MCP discovery")
-	}
-}
-
-func TestGeminiInventoryUsesOfficialCLIHomeForSourceInstalls(t *testing.T) {
-	previous, existed := os.LookupEnv("DEFENSECLAW_GEMINI_CONFIG_HOME")
-	if err := os.Unsetenv("DEFENSECLAW_GEMINI_CONFIG_HOME"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if existed {
-			_ = os.Setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", previous)
-		} else {
-			_ = os.Unsetenv("DEFENSECLAW_GEMINI_CONFIG_HOME")
-		}
-	})
-
-	root := filepath.Join(t.TempDir(), "gemini-home-root")
-	t.Setenv("GEMINI_CLI_HOME", root)
-	configHome := filepath.Join(root, ".gemini")
-	cfg := &Config{}
-	if got := cfg.ConnectorHomeDir("geminicli"); got != configHome {
-		t.Fatalf("ConnectorHomeDir(geminicli) = %q, want official root child %q", got, configHome)
-	}
-	if got := cfg.PluginDirsForConnector("geminicli"); len(got) != 1 || got[0] != filepath.Join(configHome, "extensions") {
-		t.Fatalf("PluginDirsForConnector(geminicli) = %v", got)
-	}
-
-	t.Setenv("GEMINI_CLI_HOME", "relative")
-	if got := cfg.ConnectorHomeDir("geminicli"); got != "" {
-		t.Fatalf("invalid GEMINI_CLI_HOME resolved config home %q", got)
 	}
 }
 

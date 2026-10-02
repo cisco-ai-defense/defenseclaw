@@ -279,7 +279,7 @@ func TestEffectiveEnabled(t *testing.T) {
 		t.Errorf("EffectiveEnabled(cursor) = false, want true (unset pointer inherits default)")
 	}
 	// Unknown connector, empty name, and nil receiver all default true.
-	if !g.EffectiveEnabled("windsurf") {
+	if !g.EffectiveEnabled("retired-example") {
 		t.Errorf("EffectiveEnabled(unknown) = false, want true (default)")
 	}
 	if !g.EffectiveEnabled("") {
@@ -338,11 +338,11 @@ func TestConnectorOverride_NameInsensitive(t *testing.T) {
 	}
 
 	// Genuinely-absent connector still falls through to the global.
-	if got := g.EffectiveMode("windsurf"); got != "observe" {
-		t.Errorf("EffectiveMode(windsurf) = %q, want observe (no override)", got)
+	if got := g.EffectiveMode("retired-example"); got != "observe" {
+		t.Errorf("EffectiveMode(retired-example) = %q, want observe (no override)", got)
 	}
-	if g.HasConnector("windsurf") {
-		t.Errorf("HasConnector(windsurf) = true, want false")
+	if g.HasConnector("retired-example") {
+		t.Errorf("HasConnector(retired-example) = true, want false")
 	}
 }
 

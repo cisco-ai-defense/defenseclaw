@@ -146,10 +146,6 @@
       "acp_support": "none"
     },
     {
-      "connector_id": "geminicli",
-      "acp_support": "none"
-    },
-    {
       "connector_id": "claudecode",
       "acp_support": "none"
     },

@@ -45,6 +45,14 @@ var userHomeOverride string
 // userHomeDir returns the current user's home directory in a cross-platform
 // way. It prefers os.UserHomeDir() (which uses USERPROFILE on Windows,
 // HOME on Unix) and falls back to os.Getenv("HOME") for legacy compatibility.
+// activeUserHomeOverride returns the home installed by WithUserHomeDir, or
+// "" when connector paths resolve for the process user.
+func activeUserHomeOverride() string {
+	userHomeOverrideMu.RLock()
+	defer userHomeOverrideMu.RUnlock()
+	return strings.TrimSpace(userHomeOverride)
+}
+
 func userHomeDir() string {
 	userHomeOverrideMu.RLock()
 	override := strings.TrimSpace(userHomeOverride)
@@ -85,7 +93,7 @@ func WithUserHomeDir(home string, fn func() error) error {
 // BindUserHomeDir holds an explicit user-home binding until the returned
 // restore function is called. Native Windows Setup uses this for maintenance
 // commands whose connector config lives below the profile root (for example,
-// Windsurf's .codeium/windsurf/hooks.json). The caller validates the path
+// a legacy per-user hooks file under the profile). The caller validates the path
 // before binding it; this function deliberately never falls back to an ambient
 // profile.
 func BindUserHomeDir(home string) (func(), error) {
@@ -163,12 +171,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 		return unixCommand
 	}
 	// Codex's generic command field can still be selected by older builds that
-	// do not understand command_windows. Gemini CLI likewise evaluates one
-	// command string on Windows. Use the same stable absolute launcher and
-	// shell-independent encoded system PowerShell boundary for both: release
-	// launchers use the GUI subsystem, so a call operator would not reliably
-	// wait for stdout or exit 2. Never fall back to a session's stale PATH.
-	if connector == "codex" || connector == "geminicli" {
+	// do not understand command_windows. Use the stable absolute launcher and
+	// shell-independent encoded system PowerShell boundary: release launchers
+	// use the GUI subsystem, so a call operator would not reliably wait for
+	// stdout or exit 2. Never fall back to a session's stale PATH.
+	if connector == "codex" {
 		return windowsNativePowerShellHookCommand(connector)
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
@@ -187,11 +194,8 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if connector == "copilot" {
 		return windowsCopilotPowerShellAdapterCommand(unixCommand)
 	}
-	// Cursor requires an adapter for its object-pipeline transport. Retired Cascade
-	// documents a `powershell` command field and JSON stdin; its adapter uses
-	// byte streams so the payload and response streams reach the exact packaged
-	// launcher unchanged, synchronously preserving exit 2.
-	if connector == "cursor" || connector == "windsurf" {
+	// Cursor requires an adapter for its object-pipeline transport.
+	if connector == "cursor" {
 		adapter := strings.TrimSuffix(unixCommand, ".sh") + ".ps1"
 		return "& " + powershellQuoteLiteral(adapter)
 	}
@@ -215,6 +219,15 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// before its bash boundary, leaving bash to parse PowerShell source.
 	if connector == "devin" {
 		return windowsDevinBashHookCommand(defenseclawHookBinary())
+	}
+	// Kiro honors only exit 2 as a block. Release launchers use the GUI
+	// subsystem, which PowerShell's call operator does not await (the hook's
+	// status is lost and Kiro proceeds), and cmd.exe rejects the call operator
+	// outright. Use Kiro's encoded system PowerShell command, which awaits the
+	// launcher and returns its exit status to cmd.exe and to any launcher that
+	// runs the command line directly (windowsKiroHookCommandForBinary).
+	if connector == "kiro" {
+		return windowsKiroHookCommandForBinary(defenseclawHookBinary(), "")
 	}
 	// Claude Code evaluates hook command strings with PowerShell on Windows.
 	// A quoted executable path alone is only a string expression there; the
@@ -633,7 +646,12 @@ func windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBina
 	return windowsNativePowerShellHookCommandForBoundEvent("codex", event, contractID, hookBinary)
 }
 
-func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractID, hookBinary string) string {
+// windowsNativePowerShellHookCommandForBoundEvent renders the encoded system
+// PowerShell bridge for one hook registration. extra are further hook
+// arguments (flag, value pairs such as Kiro's --hook-surface v3), appended
+// after the event and contract; without them the bytes are the same as
+// before extra existed.
+func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractID, hookBinary string, extra ...string) string {
 	arguments := []string{
 		powershellQuoteLiteral("hook"),
 		powershellQuoteLiteral("--connector"),
@@ -650,6 +668,9 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 			powershellQuoteLiteral("--hook-contract"),
 			powershellQuoteLiteral(contractID),
 		)
+	}
+	for _, argument := range extra {
+		arguments = append(arguments, powershellQuoteLiteral(argument))
 	}
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
@@ -765,15 +786,6 @@ func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary str
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
-// legacyWindowsGeminiCallOperatorHookCommandForBinary reconstructs the exact
-// command emitted for Gemini CLI before it moved to the synchronous encoded
-// system-PowerShell bridge. Release hook launchers use the GUI subsystem, so
-// this form is retained only as a finite repair/teardown identity and is never
-// generated for a new registration.
-func legacyWindowsGeminiCallOperatorHookCommandForBinary(hookBinary string) string {
-	return "& " + powershellQuoteLiteral(hookBinary) + " " + nativeHookFlag + "geminicli"
-}
-
 // legacyWindowsNativePowerShellHookCommandForCodexEvent reconstructs the exact
 // event-bound non-waiting Codex command emitted before WIN-AUD-069. Keep this
 // separate from the current Start-Process generator: it is accepted only as a
@@ -831,12 +843,12 @@ func isNativeHookCommand(cmd string) bool {
 	if isDevinBashNativeHookCommand(cmd) {
 		return true
 	}
-	// Current Codex, Gemini CLI, and Antigravity registrations use a system PowerShell
+	// Current Codex and Antigravity registrations use a system PowerShell
 	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
 	// without shell interpolation. Compare against the exact commands we emit;
 	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
 	hookBinaries := nativeHookBinaryOwnershipCandidates()
-	for _, connectorName := range []string{"codex", "geminicli", "antigravity"} {
+	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
 			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
 				cmd == legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||

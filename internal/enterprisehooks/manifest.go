@@ -37,6 +37,11 @@ type ManifestTarget struct {
 	// The bit lives in the administrator-owned, digest-bound manifest so an
 	// ordinary disabled row can never be mistaken for automatic enrollment.
 	Deferred bool `json:"deferred,omitempty" yaml:"deferred,omitempty"`
+	// HomeInode binds a standalone Unix row to the home directory the
+	// enumerator observed. A reused uid or a recreated home gets a new
+	// inode, so the row is treated as a new enrollment with no prior
+	// repair rights. Zero (absent) on every other platform and profile.
+	HomeInode uint64 `json:"home_inode,omitempty" yaml:"home_inode,omitempty"`
 }
 
 const enterpriseHookManifestMaxBytes int64 = 4 << 20

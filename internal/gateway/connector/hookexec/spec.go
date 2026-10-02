@@ -37,14 +37,24 @@ const (
 	styleCodex
 	// styleHookEcho: echo hook_output and exit 0 — the gateway already
 	// encoded the decision in the agent-native hook_output. (cursor / copilot
-	// / geminicli / hermes)
+	// / hermes)
 	styleHookEcho
 	// styleHookEchoDecision: echo hook_output, then exit 2 if its
 	// `decision` is deny/block. (openhands-hook.sh)
 	styleHookEchoDecision
 	// styleActionStderr: no stdout echo; on action=block write reason to
-	// stderr + exit 2. (windsurf-hook.sh)
+	// stderr + exit 2. (amp-plugin)
 	styleActionStderr
+	// styleHookDecisionStderr: no stdout; when hook_output's decision is
+	// deny/block write its reason to stderr and exit 2. Kiro adds hook
+	// stdout to the agent's context. (kiro-hook.sh)
+	styleHookDecisionStderr
+	// stylePluginBridge: echo the whole gateway response object as one JSON
+	// line and exit 0. An in-agent plugin that delegates to this runner (the
+	// managed OpenCode plugin) reads hook_output and mode from it exactly as
+	// it would from its own gateway call; failures print a hook_output deny.
+	// There is no .sh counterpart.
+	stylePluginBridge
 )
 
 // failResult is a fail-closed outcome: an optional connector-native JSON body
@@ -95,6 +105,18 @@ var specs = map[string]spec{
 		unreachableStrict:  failResult{exit: blockExit},
 		responseClosed:     failResult{exit: blockExit},
 	},
+	// The managed OpenCode plugin (machine policy) runs this binary for each
+	// event instead of calling the gateway itself, so the protected managed
+	// runtime selects the transport. Its failures are hook_output denials.
+	"opencode": {
+		connector: "opencode", hookName: "opencode-plugin", errLabel: "opencode",
+		subject: "opencode tool", endpoint: "/api/v1/opencode/hook",
+		outputField: "", style: stylePluginBridge,
+		defaultBlockReason: "DefenseClaw blocked this tool call.",
+		oversizedClosed:    failResult{body: openCodeDenyBody(tooLarge), exit: blockExit},
+		unreachableStrict:  failResult{body: openCodeDenyBody(failedClosed), exit: blockExit},
+		responseClosed:     failResult{body: openCodeDenyBody(failedClosed), exit: blockExit},
+	},
 	"claudecode": {
 		connector: "claudecode", hookName: "claude-code-hook", errLabel: "claude-code",
 		subject: "claude-code tool", endpoint: "/api/v1/claude-code/hook",
@@ -131,14 +153,6 @@ var specs = map[string]spec{
 		subject: "copilot tool", endpoint: "/api/v1/copilot/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
-	"geminicli": {
-		connector: "geminicli", hookName: "geminicli-hook", errLabel: "geminicli",
-		subject: "geminicli tool", endpoint: "/api/v1/geminicli/hook",
-		outputField: "hook_output", style: styleHookEcho,
-		oversizedClosed:   failResult{exit: blockExit},
-		unreachableStrict: failResult{exit: blockExit},
-		responseClosed:    failResult{exit: blockExit},
-	},
 	// Antigravity consumes per-event JSON on stdout. PreToolUse decision=deny is
 	// the only documented hard block; hookexec converts generic failure results
 	// into exact event-native bodies and does not rely on process exit status.
@@ -155,15 +169,6 @@ var specs = map[string]spec{
 		subject: "hermes tool", endpoint: "/api/v1/hermes/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
-	"windsurf": {
-		connector: "windsurf", hookName: "windsurf-hook", errLabel: "windsurf",
-		subject: "windsurf tool", endpoint: "/api/v1/windsurf/hook",
-		outputField: "", style: styleActionStderr,
-		defaultBlockReason: "DefenseClaw blocked this Cascade action.",
-		oversizedClosed:    failResult{exit: blockExit},
-		unreachableStrict:  failResult{exit: blockExit},
-		responseClosed:     failResult{exit: blockExit},
-	},
 	"devin": {
 		connector: "devin", hookName: "devin-hook", errLabel: "devin",
 		subject: "devin hook", endpoint: "/api/v1/devin/hook",
@@ -173,6 +178,20 @@ var specs = map[string]spec{
 		unreachableStrict:  failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
 		responseClosed:     failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
 	},
+	// Kiro blocks PreToolUse (every surface) and, in Kiro IDE,
+	// UserPromptSubmit with exit 2 and shows stderr (kiro-cli 2.24.1 --v3
+	// attaches a prompt hook's result and calls the model); any other non-zero
+	// status is a failed hook Kiro proceeds past, so every closed failure
+	// here exits 2. Kiro appends hook stdout to the agent's context, so the
+	// hook never prints one.
+	"kiro": {
+		connector: "kiro", hookName: "kiro-hook", errLabel: "kiro",
+		subject: "kiro hook", endpoint: "/api/v1/kiro/hook",
+		outputField: "hook_output", style: styleHookDecisionStderr,
+		oversizedClosed:   failResult{exit: blockExit},
+		unreachableStrict: failResult{exit: blockExit},
+		responseClosed:    failResult{exit: blockExit},
+	},
 	"openhands": {
 		connector: "openhands", hookName: "openhands-hook", errLabel: "openhands",
 		subject: "openhands hook", endpoint: "/api/v1/openhands/hook",
@@ -181,6 +200,11 @@ var specs = map[string]spec{
 		unreachableStrict: failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 		responseClosed:    failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 	},
+}
+
+// openCodeDenyBody is the managed OpenCode plugin's block answer.
+func openCodeDenyBody(reason string) string {
+	return `{"hook_output":{"decision":"deny","reason":` + mustJSONString(reason) + `}}`
 }
 
 func cursorFallbackOutput(event string, closed bool, reason string) string {
@@ -242,11 +266,6 @@ func specFor(connector string) (spec, bool) {
 func SupportedConnectors() []string {
 	names := make([]string, 0, len(specs))
 	for name := range specs {
-		if name == "windsurf" {
-			// Retained solely so already-installed Cascade hooks can fail safely
-			// while the upgrade transaction restores their legacy backup.
-			continue
-		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

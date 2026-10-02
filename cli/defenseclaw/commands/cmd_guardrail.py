@@ -27,10 +27,15 @@ This command surfaces the common policy levers directly:
   defenseclaw guardrail status         # enabled? roster of active connectors + their modes
   defenseclaw guardrail enable         # turn on + connector setup
   defenseclaw guardrail disable        # turn off + connector teardown
+  defenseclaw guardrail mode           # observe (log only) vs action (enforce)
+  defenseclaw guardrail block-at       # lowest severity a tool call is blocked at
+  defenseclaw guardrail alert-at       # lowest severity a tool call raises an alert at
   defenseclaw guardrail fail-mode      # open vs closed on hook failures
   defenseclaw guardrail hilt           # human-in-the-loop prompting
   defenseclaw guardrail block-message  # message shown when an action is blocked
   defenseclaw guardrail validate-pack  # strict offline rule-pack validation
+  defenseclaw guardrail use-pack       # switch the rule pack, globally or per connector
+  defenseclaw guardrail protection     # opt-in protection packs on/off per scope
 
 All of these accept ``--connector X`` to scope the change to one
 configured peer on a multi-connector install (one gateway enforces N
@@ -82,8 +87,6 @@ _CONNECTOR_LABELS = {
     "hermes": "Hermes",
     "cursor": "Cursor",
     "devin": "Devin",
-    "windsurf": "Retired Cascade (cleanup only)",
-    "geminicli": "Gemini CLI (deprecated; use Antigravity)",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
@@ -303,10 +306,15 @@ def guardrail() -> None:
     \b
       status         enabled state + roster (mode/fail/rule-pack/hilt/judge)
       enable/disable flip enforcement on/off
+      mode           observe (log only) vs action (enforce)
+      block-at       lowest severity a tool call is blocked at
+      alert-at       lowest severity a tool call raises an alert at
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
       list-packs     list rule packs + the dir each connector enforces
+      use-pack       switch the rule pack, globally or for one connector
+      protection     turn opt-in protection packs on/off per scope
       validate-pack  validate one pack with the authoritative Go loader
 
     \b
@@ -450,6 +458,7 @@ def _render_connector_table(rows: list[dict[str, tuple[str, str]]]) -> None:
         ("mode", "Mode"),
         ("fail", "Fail"),
         ("rule_pack", "Rule pack"),
+        ("levels", "Block/alert"),
         ("hilt", "HILT"),
         ("scan", "Scan"),
         ("judge", "Judge"),
@@ -488,6 +497,7 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
         ("mode", "mode"),
         ("fail", "fail"),
         ("rule_pack", "rule-pack"),
+        ("levels", "block/alert"),
         ("hilt", "hilt"),
         ("scan", "scan"),
         ("judge", "judge"),
@@ -531,6 +541,8 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
     connector is set up, status renders an explicit "none configured" state
     rather than a phantom ``openclaw``.
     """
+    from defenseclaw import policy_catalog
+
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
@@ -652,7 +664,9 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             if hasattr(gc, "effective_rule_pack_dir")
             else ""
         )
-        rule_pack_raw = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        # A composed protection pack (protected-<scope>/<profile>) is named
+        # after its scope folder, not its profile folder.
+        rule_pack_raw = policy_catalog.pack_name_for_path(app.cfg, rp_dir)[0] if rp_dir.strip() else "default"
         rule_pack = ux.accent(rule_pack_raw) if rule_pack_raw != "default" else ux.dim(rule_pack_raw)
         # Per-connector HILT (human-in-the-loop): on@<min-severity> or off, so
         # the roster reflects `guardrail hilt --connector X` overrides.
@@ -667,6 +681,11 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             hilt_str = ux.dim(hilt_raw)
         scan_raw = _scan_value(gc, name)
         judge_raw = _connector_judge_value(gc, name)
+        # Tool-call block / alert levels (guardrail.block_at / alert_at, else
+        # the rule pack's), highlighted when a setting replaces the pack's.
+        levels = policy_catalog.scope_levels(app.cfg, name)
+        levels_raw = f"{levels.block_at}/{levels.alert_at}"
+        levels_str = ux.dim(levels_raw) if levels.source == "pack" else ux.accent(levels_raw)
         rows.append(
             {
                 "label": (_connector_label(name), _connector_label(name)),
@@ -675,6 +694,7 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
                 "mode": (cmode or "observe", _style_mode(cmode or "observe")),
                 "fail": (fail_raw, cfm_display),
                 "rule_pack": (rule_pack_raw, rule_pack),
+                "levels": (levels_raw, levels_str),
                 "hilt": (hilt_raw, hilt_str),
                 "scan": (scan_raw, _style_scan_value(scan_raw)),
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
@@ -1620,12 +1640,25 @@ def _set_connector_hilt(
             indent="  ",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-hilt",
-            "config",
-            f"connector={key} scope=per-connector "
-            f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+    _log_hilt(
+        app,
+        f"connector={key} scope=per-connector "
+        f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+    )
+
+
+def _log_hilt(app: AppContext, details: str) -> None:
+    """Audit a saved HILT change; a stopped gateway only skips the audit event."""
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    if not app.logger:
+        return
+    try:
+        app.logger.log_action("guardrail-hilt", "config", details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+            err=True,
         )
 
 
@@ -1856,17 +1889,15 @@ def hilt_cmd(
             indent="  ",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-hilt",
-            "config",
-            (
-                f"scope=active-connectors count={len(hilt_targets)} "
-                f"state={state or 'preserve'} min_severity={min_severity or 'preserve'} restart={restart}"
-                if hilt_targets
-                else f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}"
-            ),
-        )
+    _log_hilt(
+        app,
+        (
+            f"scope=active-connectors count={len(hilt_targets)} "
+            f"state={state or 'preserve'} min_severity={min_severity or 'preserve'} restart={restart}"
+            if hilt_targets
+            else f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}"
+        ),
+    )
 
 
 def _set_connector_block_message(
@@ -2303,15 +2334,33 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
 
 
 @guardrail.command("list-packs")
+@click.option("--json", "json_out", is_flag=True, help="Print the rule packs as JSON.")
 @pass_ctx
-def list_packs_cmd(app: AppContext) -> None:
+def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     """List the available guardrail rule packs and who enforces which.
 
-    Shows the built-in presets accepted by ``defenseclaw setup <connector>
-    --rule-pack`` alongside the resolved rule-pack directory each active
-    connector is actually enforcing (per-connector override > global pack >
-    built-in default). Read-only — it changes nothing.
+    Shows the built-in presets, custom packs found under
+    ``<policy_dir>/guardrail/`` or configured anywhere, and the resolved
+    rule-pack directory each active connector is actually enforcing
+    (per-connector override > global pack > built-in default). Switch packs
+    with ``defenseclaw guardrail use-pack``. Read-only — it changes nothing.
     """
+    from defenseclaw import policy_catalog
+
+    if json_out:
+        click.echo(
+            json.dumps(
+                {
+                    "version": 1,
+                    "global": policy_catalog.global_pack(app.cfg).to_json(),
+                    "connectors": [row.to_json() for row in policy_catalog.effective_packs(app.cfg)],
+                    "packs": [pack.to_json() for pack in policy_catalog.discover_rule_packs(app.cfg)],
+                },
+                indent=2,
+            )
+        )
+        return
+
     gc = app.cfg.guardrail
     ux.section("Guardrail rule packs", indent="  ")
 
@@ -2319,6 +2368,17 @@ def list_packs_cmd(app: AppContext) -> None:
     for pname, desc in _RULE_PACK_PRESETS:
         click.echo(f"      - {ux.accent(pname)}: {ux.dim(desc)}")
     click.echo()
+
+    try:
+        custom = [p for p in policy_catalog.discover_rule_packs(app.cfg) if p.kind == "custom"]
+    except Exception:  # noqa: BLE001 — discovery is best-effort in a listing.
+        custom = []
+    if custom:
+        click.echo(f"  • {ux._style('custom packs:', fg='bright_black', bold=True)}")
+        for pack in custom:
+            used = f" (used by {', '.join(pack.used_by)})" if pack.used_by else ""
+            click.echo(f"      - {ux.accent(pack.name)}: {pack.path}{ux.dim(used)}")
+        click.echo()
 
     global_dir = (getattr(gc, "rule_pack_dir", "") or "").strip()
     click.echo(
@@ -2368,6 +2428,1247 @@ def list_packs_cmd(app: AppContext) -> None:
         shown = ux.accent(rp_dir) if rp_dir else ux.dim("(built-in default)")
         click.echo(f"      - {_connector_label(name)} ({name}): {shown}")
     click.echo()
+
+
+#: How a saved rule-pack / mode change reached the running gateway (also the
+#: ``gateway`` field of the ``--json`` results).
+_GATEWAY_OUTCOMES = {
+    "restarted": "Restarted the gateway; it is enforcing the change now.",
+    "live": "The running gateway applies it now.",
+    "not_running": "The gateway isn't running; it loads this when it starts.",
+    "guardrail_off": "The guardrail is off; this takes effect when you run defenseclaw guardrail enable.",
+    "restart_needed": (
+        "The running gateway keeps the previous setting until you restart it: defenseclaw-gateway restart."
+    ),
+    "restart_failed": (
+        "The change is saved, but the gateway restart failed; run defenseclaw-gateway restart, "
+        "then defenseclaw doctor."
+    ),
+}
+
+
+def _resolve_scope_connector(app: AppContext, connector: str) -> tuple[str, str]:
+    """``(config key, "")`` for an active connector, else ``(name, problem)``.
+
+    A single-connector install (no ``guardrail.connectors`` map) accepts its
+    one active connector: an override block for it keeps the active set.
+    """
+    key = _resolve_member_connector(app, connector)
+    if key is not None:
+        return key, ""
+    requested = normalize_connector(connector)
+    try:
+        actives = [normalize_connector(c) for c in app.cfg.active_connectors()]
+    except Exception:  # noqa: BLE001 — treat an unreadable roster as empty.
+        actives = []
+    if not (getattr(app.cfg.guardrail, "connectors", None) or {}) and requested in actives:
+        return requested, ""
+    return requested, (
+        f"{connector!r} is not an active connector here (active: {', '.join(actives) or 'none'}); nothing was changed."
+    )
+
+
+def _connector_block_for_write(gc, key: str):
+    """The ``guardrail.connectors[key]`` override block, created if missing."""
+    conns = getattr(gc, "connectors", None)
+    if conns is None:
+        conns = {}
+        gc.connectors = conns
+    block = conns.get(key)
+    if block is None:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        block = PerConnectorGuardrailConfig()
+        conns[key] = block
+    return block
+
+
+def _assign_rule_pack(app: AppContext, connector_key: str | None, path: str, *, clear_overrides: bool) -> list[str]:
+    """Point the global pack (``connector_key`` None) or one connector at *path*.
+
+    With ``clear_overrides`` a global switch also drops every per-connector
+    override (``use-pack``); returns the connectors whose override it dropped.
+    Only ``rule_pack_dir`` fields are touched — never enabled/mode/port.
+    """
+    gc = app.cfg.guardrail
+    cleared: list[str] = []
+    if connector_key is None:
+        gc.rule_pack_dir = path
+        if clear_overrides:
+            for name, block in sorted((getattr(gc, "connectors", None) or {}).items()):
+                if (getattr(block, "rule_pack_dir", "") or "").strip():
+                    block.rule_pack_dir = ""
+                    cleared.append(name)
+    else:
+        _connector_block_for_write(gc, connector_key).rule_pack_dir = path
+    return cleared
+
+
+def _gateway_running(app: AppContext) -> bool:
+    # Same probe as cmd_setup._is_pid_alive, without importing cmd_setup.
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 — an unreadable PID file means "not running".
+        return False
+
+
+def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: bool, quiet: bool) -> str:
+    """Make a saved guardrail change reach a running gateway; returns the outcome.
+
+    Hot config reload refuses ``rule_pack_dir`` and ``guardrail.connectors``
+    changes (the gateway reports "config reload requires gateway restart"),
+    never re-reads a pack directory recomposed in place, and doesn't reach
+    hook decisions at all: those read the API server's copy of the config,
+    taken when the gateway starts. So mode, level and pack changes restart a
+    running gateway; a stopped gateway is never started here. ``quiet`` sends
+    the restart progress to stderr so ``--json`` stdout stays parseable.
+    """
+    if not getattr(app.cfg.guardrail, "enabled", False):
+        return "guardrail_off"
+    if not _gateway_running(app):
+        return "not_running"
+    if not needs_restart:
+        return "live"
+    if not restart:
+        return "restart_needed"
+    import contextlib
+    import sys
+
+    from defenseclaw.commands import cmd_setup
+
+    with contextlib.redirect_stdout(sys.stderr) if quiet else contextlib.nullcontext():
+        restarted = cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False)
+    return "restarted" if restarted else "restart_failed"
+
+
+def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None:
+    """Audit a saved change; a stopped or refusing gateway only skips the event.
+
+    The gateway admits only registered audit actions (internal/audit/actions.go)
+    and answers anything else with HTTP 400, so these changes are recorded as
+    the registered ``config-update`` action with the operation named in the
+    details (for example ``guardrail-mode scope=codex mode=action``).
+    """
+    from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    if not app.logger:
+        return
+    try:
+        app.logger.log_action(ACTION_CONFIG_UPDATE, "config", f"{operation} {details}".strip())
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+            err=True,
+        )
+    except CanonicalObservabilityError as exc:
+        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+
+
+_restart_option = click.option(
+    "--restart/--no-restart",
+    default=True,
+    help=(
+        "Restart a running gateway when the change needs it, so it enforces the change now "
+        "(default: on; a stopped gateway is never started)."
+    ),
+)
+
+
+@guardrail.command("use-pack")
+@click.argument("pack", required=False)
+@click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help="Switch only this connector (writes its per-connector override).",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    help="With --connector: drop that connector's override so it uses the global pack.",
+)
+@click.option(
+    "--no-validate",
+    "no_validate",
+    is_flag=True,
+    help="Skip rule-pack validation (only needed when the validator is unavailable).",
+)
+@_restart_option
+@click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+@pass_ctx
+def use_pack_cmd(
+    app: AppContext,
+    pack: str | None,
+    connector: str | None,
+    clear: bool,
+    no_validate: bool,
+    restart: bool,
+    json_out: bool,
+) -> None:
+    """Switch the guardrail rule pack, globally or for one connector.
+
+    PACK is a built-in preset (default, strict, permissive), the name of a
+    pack under ``<policy_dir>/guardrail/``, or a directory path. The pack is
+    validated first; an invalid pack changes nothing. Without ``--connector``
+    every connector uses PACK and any per-connector overrides are removed.
+    With ``--connector X`` only X's override is written. ``--clear
+    --connector X`` removes X's override. The guardrail's on/off state, mode
+    and port are never changed. A running gateway only loads a new pack on
+    restart, so it is restarted (``--no-restart`` to skip); a stopped one
+    loads it when it starts.
+    """
+    from defenseclaw import policy_catalog, rulepack_validation
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        scope: str,
+        pack_name: str = "",
+        path: str = "",
+        cleared: list[str] | None = None,
+        validation: dict | None = None,
+        warning: str = "",
+        gateway: str | None = None,
+    ) -> None:
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "connector": connector_key,
+                        "pack": pack_name,
+                        "path": path,
+                        "cleared_overrides": list(cleared or []),
+                        "validation": validation,
+                        "gateway": gateway,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            if warning:
+                ux.warn(warning, indent="  ")
+            if ok:
+                ux.ok(message, indent="  ")
+            else:
+                ux.err(message, indent="  ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    scope = "connector" if connector else "global"
+    connector_key: str | None = None
+    gc = app.cfg.guardrail
+
+    if clear and not connector:
+        raise click.UsageError("--clear needs --connector NAME (the global pack can't be cleared, only switched).")
+    if clear and pack:
+        raise click.UsageError("Pass either PACK or --clear, not both.")
+    if not clear and not (pack or "").strip():
+        raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
+
+    if connector:
+        connector_key, problem = _resolve_scope_connector(app, connector)
+        if problem:
+            _finish(ok=False, exit_code=1, scope=scope, message=problem)
+
+    if clear:
+        block = (getattr(gc, "connectors", None) or {}).get(connector_key)
+        previous = (getattr(block, "rule_pack_dir", "") or "").strip() if block is not None else ""
+        fallback = policy_catalog.global_pack(app.cfg)
+        if not previous:
+            _finish(
+                ok=True,
+                exit_code=0,
+                scope=scope,
+                pack_name=fallback.pack,
+                path=fallback.path,
+                message=(
+                    f"{_connector_label(connector_key)} has no rule-pack override; it already uses the global pack."
+                ),
+            )
+            return
+        _preflight_config_write(app)
+        block.rule_pack_dir = ""
+        _save_use_pack(app, _finish, scope)
+        _log_use_pack(app, f"connector={connector_key} cleared=true")
+        outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
+        _finish(
+            ok=outcome != "restart_failed",
+            exit_code=1 if outcome == "restart_failed" else 0,
+            scope=scope,
+            pack_name=fallback.pack,
+            path=fallback.path,
+            gateway=outcome,
+            message=(
+                f"{_connector_label(connector_key)} now uses the global rule pack "
+                f"'{fallback.pack}' ({fallback.path}). {_GATEWAY_OUTCOMES[outcome]}"
+            ),
+        )
+        return
+
+    # Resolve PACK -> (name, directory, kind).
+    raw = (pack or "").strip()
+    if raw in policy_catalog.RULE_PACK_PRESETS:
+        path = policy_catalog.preset_pack_dir(app.cfg, raw)
+        pack_name, kind = raw, "preset"
+    else:
+        candidate = policy_catalog.normalize_pack_path(raw)
+        if not os.path.isdir(candidate):
+            named = [
+                p for p in policy_catalog.discover_rule_packs(app.cfg) if p.name == raw and os.path.isdir(p.path)
+            ]
+            if not named or os.sep in raw or (os.altsep and os.altsep in raw):
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    scope=scope,
+                    pack_name=raw,
+                    path=candidate,
+                    message=(
+                        f"No rule pack {raw!r}: not a preset (default, strict, permissive) "
+                        "and not an existing directory. Nothing was changed."
+                    ),
+                )
+            candidate = named[0].path
+        path = candidate
+        pack_name, kind = policy_catalog.pack_name_for_path(app.cfg, path)
+
+    if kind == "preset" and not os.path.isdir(path):
+        _finish(
+            ok=False,
+            exit_code=1,
+            scope=scope,
+            pack_name=pack_name,
+            path=path,
+            message=f"The '{pack_name}' preset isn't installed at {path}; run defenseclaw init. Nothing was changed.",
+        )
+
+    validation: dict | None = None
+    warning = ""
+    if not no_validate:
+        try:
+            result = rulepack_validation.validate_rule_pack(path)
+        except rulepack_validation.RulePackValidationBridgeError as exc:
+            validation = rulepack_validation.bridge_error_wire(exc)
+            if kind != "preset":
+                _finish(
+                    ok=False,
+                    exit_code=2,
+                    scope=scope,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=(
+                        f"Can't validate {path} ({exc}). Nothing was changed; "
+                        "pass --no-validate to use it anyway."
+                    ),
+                )
+            warning = f"Couldn't validate the built-in '{pack_name}' pack ({exc}); using it anyway."
+        else:
+            validation = result.to_wire_dict()
+            if not result.valid:
+                issue = result.error
+                detail = f": {issue.code} at {issue.path}: {issue.reason}" if issue is not None else ""
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    scope=scope,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=f"Rule pack {path} is invalid{detail}. Nothing was changed.",
+                )
+
+    _preflight_config_write(app)
+    cleared = _assign_rule_pack(app, connector_key, path, clear_overrides=True)
+    if connector_key is None:
+        message = f"All connectors now use the '{pack_name}' rule pack ({path})."
+        if cleared:
+            message += " Removed per-connector overrides for: " + ", ".join(cleared) + "."
+    else:
+        message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack ({path})."
+
+    _save_use_pack(app, _finish, scope)
+    _log_use_pack(app, f"scope={scope} connector={connector_key or ''} pack={pack_name} cleared={','.join(cleared)}")
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
+    _finish(
+        ok=outcome != "restart_failed",
+        exit_code=1 if outcome == "restart_failed" else 0,
+        scope=scope,
+        pack_name=pack_name,
+        path=path,
+        cleared=cleared,
+        validation=validation,
+        warning=warning,
+        gateway=outcome,
+        message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
+    )
+
+
+def _log_use_pack(app: AppContext, details: str) -> None:
+    """Audit a saved pack switch; a stopped gateway only skips the audit event."""
+    _log_guardrail_change(app, "guardrail-use-pack", details)
+
+
+def _save_use_pack(app: AppContext, finish, scope: str) -> None:
+    try:
+        app.cfg.save()
+    except (OSError, ValueError) as exc:
+        finish(ok=False, exit_code=1, scope=scope, message=f"Failed to save config: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# guardrail protection — opt-in protection packs per scope
+# ---------------------------------------------------------------------------
+
+
+@guardrail.group("protection")
+def protection() -> None:
+    """Turn the opt-in protection packs on and off, globally or per connector.
+
+    \b
+      list     the packs, and which scopes have which on
+      enable   layer a pack into a scope's rule pack
+      disable  take it out again
+
+    Turning a pack on composes <policy_dir>/guardrail/protected-<scope>/<profile>/ from
+    the scope's current rule pack plus every pack that is on (Policy Creator's
+    merge: a pack's rules replace base rules with the same id), validates it
+    with the gateway's validator and switches the scope to it. A pack asserts
+    something about the connector's environment (for example that its cloud
+    credentials reach production); DefenseClaw takes that as the operator's
+    word and never infers it from resource names.
+    """
+
+
+def _scope_rule_pack(cfg, connector_key: str | None):
+    """The ConnectorPack a scope enforces right now."""
+    from defenseclaw import policy_catalog
+
+    if connector_key is None:
+        return policy_catalog.global_pack(cfg)
+    wanted = normalize_connector(connector_key)
+    for row in policy_catalog.effective_packs(cfg):
+        if normalize_connector(row.connector) == wanted:
+            return row
+    fallback = policy_catalog.global_pack(cfg)
+    return policy_catalog.ConnectorPack(
+        connector=connector_key, pack=fallback.pack, path=fallback.path, source=fallback.source
+    )
+
+
+def _protection_not_covered(cfg, name: str, *, enable: bool) -> list[str]:
+    """Connectors with their own rule pack that a global change doesn't reach."""
+    from defenseclaw import policy_catalog
+
+    out: list[str] = []
+    for row in policy_catalog.effective_packs(cfg):
+        if row.source != "override":
+            continue
+        has_it = name in policy_catalog.enabled_protection(row.path)
+        if has_it != enable:
+            out.append(row.connector)
+    return out
+
+
+def _not_covered_notes(names: list[str], pack_name: str, *, enable: bool) -> list[str]:
+    verb = "enable" if enable else "disable"
+    return [
+        f"Not covered: {_connector_label(other)} has its own rule pack — {verb} it there too: "
+        f"defenseclaw guardrail protection {verb} {pack_name} --connector {other}"
+        for other in names
+    ]
+
+
+def _pack_dir_in_use(cfg, path: str) -> bool:
+    from defenseclaw import policy_catalog
+
+    gc = cfg.guardrail
+    configured = [getattr(gc, "rule_pack_dir", "") or ""]
+    configured.extend(getattr(b, "rule_pack_dir", "") or "" for b in (getattr(gc, "connectors", None) or {}).values())
+    target = os.path.realpath(path)
+    return any(
+        os.path.realpath(policy_catalog.normalize_pack_path(raw)) == target for raw in configured if raw.strip()
+    )
+
+
+@protection.command("list")
+@click.option("--json", "json_out", is_flag=True, help="Print the packs and scopes as JSON.")
+@pass_ctx
+def protection_list_cmd(app: AppContext, json_out: bool) -> None:
+    """List the opt-in protection packs and which scopes have them on.
+
+    Read-only. A scope is the global rule pack or one active connector.
+    """
+    from defenseclaw import policy_catalog
+
+    packs = policy_catalog.protection_packs()
+    scopes = [
+        {"scope": row.scope, "pack": row.pack, "path": row.pack_path, "enabled": list(row.protection)}
+        for row in policy_catalog.scope_postures(app.cfg)
+    ]
+    if json_out:
+        click.echo(json.dumps({"version": 1, "packs": [p.to_json() for p in packs], "scopes": scopes}, indent=2))
+        return
+
+    ux.section("Opt-in protection packs", indent="  ")
+    if not packs:
+        click.echo(f"  {ux.dim('No protection packs are installed with this DefenseClaw.')}")
+    width = max((len(p.name) for p in packs), default=0)
+    for pack in packs:
+        state = f"{pack.rule_count} rules" if pack.selectable else "staged, not available yet"
+        click.echo(f"  • {ux.accent(pack.name.ljust(width))}  {pack.covers}  {ux.dim('(' + state + ')')}")
+    click.echo()
+    click.echo(f"  • {ux._style('on per scope:', fg='bright_black', bold=True)}")
+    for scope in scopes:
+        who = "global" if scope["scope"] == "global" else f"{_connector_label(scope['scope'])} ({scope['scope']})"
+        enabled = ", ".join(scope["enabled"]) or ux.dim("none")
+        click.echo(f"      - {who}: {enabled} {ux.dim('· pack ' + str(scope['pack']))}")
+    click.echo()
+    ux.subhead("Turn one on with: defenseclaw guardrail protection enable NAME [--connector NAME]", indent="  ")
+    click.echo()
+
+
+@protection.command("enable")
+@click.argument("name")
+@click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help="Turn it on for this connector only (writes its rule-pack override).",
+)
+@click.option(
+    "--no-validate",
+    "no_validate",
+    is_flag=True,
+    help="Skip validating the composed pack (only needed when the validator is unavailable).",
+)
+@_restart_option
+@click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+@pass_ctx
+def protection_enable_cmd(
+    app: AppContext, name: str, connector: str | None, no_validate: bool, restart: bool, json_out: bool
+) -> None:
+    """Turn opt-in protection pack NAME on, globally or for one connector.
+
+    Composes <policy_dir>/guardrail/protected-<scope>/<profile>/ from the scope's base
+    pack plus every pack that's on, validates it (invalid: exit 1; validator
+    unavailable: exit 2 unless --no-validate; nothing is switched either way)
+    and points the scope at it. The global scope leaves per-connector packs
+    alone and names the connectors it doesn't reach. See
+    ``defenseclaw guardrail protection list`` for the pack names.
+    """
+    _change_protection(
+        app, name, connector, enable=True, no_validate=no_validate, restart=restart, json_out=json_out
+    )
+
+
+@protection.command("disable")
+@click.argument("name")
+@click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help="Turn it off for this connector only.",
+)
+@_restart_option
+@click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+@pass_ctx
+def protection_disable_cmd(app: AppContext, name: str, connector: str | None, restart: bool, json_out: bool) -> None:
+    """Turn opt-in protection pack NAME off, globally or for one connector.
+
+    The scope's pack is recomposed without NAME; when no opt-in pack is left
+    the scope goes back to its base pack.
+    """
+    _change_protection(app, name, connector, enable=False, no_validate=False, restart=restart, json_out=json_out)
+
+
+def _change_protection(
+    app: AppContext,
+    name: str,
+    connector: str | None,
+    *,
+    enable: bool,
+    no_validate: bool,
+    restart: bool,
+    json_out: bool,
+) -> None:
+    from defenseclaw import policy_catalog, rulepack_compose, rulepack_validation
+
+    scope = "global"
+    connector_key: str | None = None
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        pack_path: str = "",
+        protection: tuple[str, ...] | list[str] = (),
+        validation: dict | None = None,
+        not_covered: list[str] | None = None,
+        gateway: str | None = None,
+        warning: str = "",
+        notes: list[str] | None = None,
+        **_ignored: object,
+    ) -> None:
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "pack_path": pack_path,
+                        "protection": list(protection),
+                        "validation": validation,
+                        "not_covered": list(not_covered or []),
+                        "gateway": gateway,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            if warning:
+                ux.warn(warning, indent="  ")
+            (ux.ok if ok else ux.err)(message, indent="  ")
+            for note in notes or []:
+                ux.subhead(note, indent="    ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    if connector:
+        connector_key, problem = _resolve_scope_connector(app, connector)
+        scope = normalize_connector(connector_key)
+        if problem:
+            _finish(ok=False, exit_code=1, message=problem)
+
+    packs = policy_catalog.protection_packs()
+    pack = next((p for p in packs if p.name == name), None)
+    if pack is None:
+        available = ", ".join(p.name for p in packs if p.selectable) or "none on this install"
+        _finish(
+            ok=False,
+            exit_code=1,
+            message=f"There's no opt-in protection pack called {name!r} (available: {available}). Nothing was changed.",
+        )
+    if not pack.selectable:
+        _finish(
+            ok=False,
+            exit_code=1,
+            message=(
+                f"{pack.title} ({pack.name}) is staged, not available yet: it has no rules DefenseClaw "
+                "can enforce. Nothing was changed."
+            ),
+        )
+
+    cfg = app.cfg
+    where = "the global rule pack" if connector_key is None else _connector_label(scope)
+    current = _scope_rule_pack(cfg, connector_key)
+    on_now = policy_catalog.enabled_protection(current.path)
+
+    def _refuse(message: str, *, exit_code: int = 1, validation: dict | None = None) -> None:
+        _finish(
+            ok=False,
+            exit_code=exit_code,
+            pack_path=current.path,
+            protection=on_now,
+            validation=validation,
+            message=f"{message} Nothing was changed.",
+        )
+    try:
+        base_path, base_name = rulepack_compose.resolve_base(cfg, current.path)
+        # Keep the base's profile as the folder name: the gateway reads
+        # tool-call levels from it, so strict + opt-in packs stays strict.
+        final = policy_catalog.protected_pack_dir(
+            cfg, rulepack_compose.protected_scope_name(scope), policy_catalog.pack_profile(base_path)
+        )
+        if not final:
+            raise rulepack_compose.ComposeError("No policy directory is configured.")
+    except rulepack_compose.ComposeError as exc:
+        _refuse(str(exc))
+    built_in = set(policy_catalog.packs_layered_in(base_path, packs))
+
+    if (name in on_now) == enable:
+        state = "on" if enable else "off"
+        gaps = _protection_not_covered(cfg, name, enable=enable) if connector_key is None else []
+        _finish(
+            ok=True,
+            exit_code=0,
+            pack_path=current.path,
+            protection=on_now,
+            not_covered=gaps,
+            notes=_not_covered_notes(gaps, name, enable=enable),
+            message=f"{pack.title} is already {state} for {where}; nothing was changed.",
+        )
+        return
+    if not enable and name in built_in:
+        _refuse(
+            f"{pack.title} is part of the base pack '{base_name}' ({base_path}) itself, so it can't be "
+            "turned off here; switch to another base pack with defenseclaw guardrail use-pack."
+        )
+
+    wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
+    desired = [p.name for p in packs if p.selectable and p.name in wanted]
+    layer = [n for n in desired if n not in built_in]
+
+    _preflight_config_write(app)
+    validation: dict | None = None
+    warning = ""
+    if layer:
+        try:
+            rulepack_compose.check_target(final)
+            staged = rulepack_compose.stage_pack(
+                base_dir=base_path, base_name=base_name, protection=desired, layer=layer, final=final
+            )
+        except rulepack_compose.ComposeError as exc:
+            _refuse(str(exc))
+        if not no_validate:
+            try:
+                result = rulepack_validation.validate_rule_pack(staged)
+            except rulepack_validation.RulePackValidationBridgeError as exc:
+                validation = rulepack_validation.bridge_error_wire(exc)
+                if enable:
+                    rulepack_compose.discard(staged)
+                    _refuse(
+                        f"Can't validate the composed pack ({exc}); pass --no-validate to turn {pack.name} on anyway.",
+                        exit_code=2,
+                        validation=validation,
+                    )
+                warning = f"Couldn't validate the recomposed pack ({exc}); switching anyway, it only takes rules out."
+            else:
+                validation = result.to_wire_dict()
+                if not result.valid:
+                    rulepack_compose.discard(staged)
+                    issue = result.error
+                    detail = f": {issue.code} at {issue.path}: {issue.reason}" if issue is not None else ""
+                    _refuse(
+                        f"The pack composed from '{base_name}' + {', '.join(layer)} is invalid{detail}.",
+                        validation=validation,
+                    )
+        try:
+            replaced = rulepack_compose.install_pack(staged, final)
+        except rulepack_compose.ComposeError as exc:
+            _refuse(str(exc))
+        target = final
+    else:
+        replaced, target = "", base_path
+
+    _assign_rule_pack(app, connector_key, target, clear_overrides=False)
+    try:
+        _save_use_pack(app, _finish, scope)
+    except BaseException:
+        # The saved config may already point at `final`, so a failed save must
+        # not leave the recomposed pack in place for the next gateway start.
+        if layer:
+            rulepack_compose.rollback_install(final, replaced)
+        raise
+    rulepack_compose.commit_install(replaced)
+    if not layer and os.path.isdir(final) and not _pack_dir_in_use(cfg, final):
+        rulepack_compose.remove_pack(final)
+    _log_guardrail_change(
+        app,
+        "guardrail-protection",
+        f"scope={scope} pack={name} enabled={str(enable).lower()} protection={','.join(desired)} path={target}",
+    )
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
+    not_covered = _protection_not_covered(cfg, name, enable=enable) if connector_key is None else []
+
+    if enable:
+        message = f"{pack.title} is on for {where} ({os.path.basename(final)}, on top of '{base_name}')."
+    elif layer:
+        message = f"{pack.title} is off for {where}; {os.path.basename(final)} still layers {', '.join(layer)}."
+    else:
+        message = f"{pack.title} is off for {where}; it's back on '{base_name}' ({base_path})."
+    notes: list[str] = []
+    if enable:
+        who = "every connector on the global rule pack" if connector_key is None else where
+        notes.append(
+            f"Only keep this on if it's true for {who}: DefenseClaw takes the pack as your word "
+            "about that environment and blocks what it proves there."
+        )
+    notes.extend(_not_covered_notes(not_covered, pack.name, enable=enable))
+    _finish(
+        ok=outcome != "restart_failed",
+        exit_code=1 if outcome == "restart_failed" else 0,
+        pack_path=target,
+        protection=desired,
+        validation=validation,
+        not_covered=not_covered,
+        gateway=outcome,
+        warning=warning,
+        notes=notes,
+        message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# guardrail mode — observe vs action without re-running setup
+# ---------------------------------------------------------------------------
+
+
+@guardrail.command("mode")
+@click.argument("mode", required=False, type=click.Choice(["observe", "action"]))
+@click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help="Set only this connector's mode (writes its per-connector override).",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    help="With --connector: drop that connector's mode override so it follows the global mode.",
+)
+@_restart_option
+@click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+@pass_ctx
+def mode_cmd(
+    app: AppContext, mode: str | None, connector: str | None, clear: bool, restart: bool, json_out: bool
+) -> None:
+    """Switch the guardrail between observe (log only) and action (enforce).
+
+    Sets only ``guardrail.mode``, or with ``--connector X`` only
+    ``guardrail.connectors.X.mode`` (creating that block if needed); ``--clear
+    --connector X`` removes X's override. The guardrail's on/off state, rule
+    pack and port are never touched. Hook decisions read the configuration
+    the gateway started with, so any mode change restarts a running gateway
+    (``--no-restart`` to skip; a stopped gateway is never started).
+    """
+    from defenseclaw import policy_catalog
+
+    if clear and not connector:
+        raise click.UsageError("--clear needs --connector NAME (the global mode can't be cleared, only switched).")
+    if clear and mode:
+        raise click.UsageError("Pass either MODE or --clear, not both.")
+    if not clear and not mode:
+        raise click.UsageError("Missing MODE: observe or action.")
+
+    gc = app.cfg.guardrail
+    scope = "global"
+    connector_key: str | None = None
+
+    def _effective(key: str | None) -> str:
+        return policy_catalog.mode_label(gc.effective_mode(key) if key else gc.mode)
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        new_mode: str = "",
+        previous: str = "",
+        source: str = "",
+        changed: bool = False,
+        not_covered: list[str] | None = None,
+        gateway: str | None = None,
+        notes: list[str] | None = None,
+        **_ignored: object,
+    ) -> None:
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "mode": new_mode,
+                        "previous": previous,
+                        "mode_source": source,
+                        "changed": changed,
+                        "not_covered": list(not_covered or []),
+                        "gateway": gateway,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            (ux.ok if ok else ux.err)(message, indent="  ")
+            for note in notes or []:
+                ux.subhead(note, indent="    ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    if connector:
+        connector_key, problem = _resolve_scope_connector(app, connector)
+        scope = normalize_connector(connector_key)
+        if problem:
+            _finish(ok=False, exit_code=1, message=problem)
+
+    try:
+        actives = [str(c) for c in app.cfg.active_connectors()]
+    except Exception:  # noqa: BLE001 — treat an unreadable roster as empty.
+        actives = []
+
+    def _override(key: str) -> str:
+        block = gc._connector_override(key) if hasattr(gc, "_connector_override") else None
+        return (getattr(block, "mode", "") or "").strip() if block is not None else ""
+
+    affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
+    fail_before = {c: gc.effective_hook_fail_mode(c) for c in affected}
+    previous = _effective(connector_key)
+
+    if connector_key is None:
+        if (gc.mode or "").strip() == mode:
+            _finish(
+                ok=True,
+                exit_code=0,
+                new_mode=previous,
+                previous=previous,
+                source="global",
+                message=f"The global guardrail mode is already {mode}; nothing was changed.",
+            )
+            return
+    elif clear:
+        if not _override(connector_key):
+            _finish(
+                ok=True,
+                exit_code=0,
+                new_mode=previous,
+                previous=previous,
+                source="global",
+                message=(
+                    f"{_connector_label(scope)} has no mode override; it already follows the global mode ({previous})."
+                ),
+            )
+            return
+    elif _override(connector_key) == mode:
+        _finish(
+            ok=True,
+            exit_code=0,
+            new_mode=previous,
+            previous=previous,
+            source="override",
+            message=f"{_connector_label(scope)} is already in {mode} mode; nothing was changed.",
+        )
+        return
+
+    _preflight_config_write(app)
+    if connector_key is None:
+        gc.mode = mode
+    elif clear:
+        _connector_block_for_write(gc, connector_key).mode = ""
+    else:
+        _connector_block_for_write(gc, connector_key).mode = mode
+    new_mode = _effective(connector_key)
+    source = "override" if connector_key and not clear else "global"
+    fail_after = {c: gc.effective_hook_fail_mode(c) for c in affected}
+    fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
+    if fail_flips:
+        # Only hook connectors bake a fail mode into their registration; the
+        # gateway re-bakes it when it restarts.
+        from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+        fail_flips = {c: fm for c, fm in fail_flips.items() if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS}
+
+    try:
+        app.cfg.save()
+    except (OSError, ValueError) as exc:
+        _finish(ok=False, exit_code=1, new_mode=previous, previous=previous, message=f"Failed to save config: {exc}")
+    _log_guardrail_change(
+        app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
+    )
+    # Hook decisions read the config the gateway started with, so even a
+    # global mode change needs a restart to reach them.
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
+
+    plain = {"action": "enforces the policy (blocks what it blocks)", "observe": "logs findings, blocks nothing"}
+    if connector_key is None:
+        message = f"The global guardrail mode is now {new_mode}: it {plain[new_mode]}."
+        not_covered = [c for c in actives if _override(c) and policy_catalog.mode_label(_override(c)) != new_mode]
+    elif clear:
+        message = f"{_connector_label(scope)} follows the global mode again ({new_mode}: it {plain[new_mode]})."
+        not_covered = []
+    else:
+        message = f"{_connector_label(scope)} is now in {new_mode} mode: it {plain[new_mode]}."
+        not_covered = []
+    consequence = {
+        "closed": "the action is blocked if the hook can't reach the gateway",
+        "open": "the action goes ahead if the hook can't reach the gateway",
+    }
+    notes = [
+        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
+        for c, fm in fail_flips.items()
+    ]
+    notes.extend(
+        f"{_connector_label(c)} keeps its own mode ({policy_catalog.mode_label(_override(c))}); "
+        f"change it with: defenseclaw guardrail mode {new_mode} --connector {c}"
+        for c in not_covered
+    )
+    _finish(
+        ok=outcome != "restart_failed",
+        exit_code=1 if outcome == "restart_failed" else 0,
+        new_mode=new_mode,
+        previous=previous,
+        source=source,
+        changed=True,
+        not_covered=not_covered,
+        gateway=outcome,
+        notes=notes,
+        message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
+    )
+
+
+_LEVEL_CHOICES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "inherit")
+_LEVEL_WORDS = {
+    "block_at": {
+        "noun": "block",
+        "command": "block-at",
+        "does": "blocks tool calls at",
+        "done": "are blocked at",
+    },
+    "alert_at": {
+        "noun": "alert",
+        "command": "alert-at",
+        "does": "alerts on tool calls at",
+        "done": "raise an alert at",
+    },
+}
+_LEVEL_SOURCE_WORDS = {"override": "its own", "global": "the global", "pack": "its rule pack's"}
+
+
+def _set_tool_call_level(
+    app: AppContext, setting: str, level: str, connector: str | None, *, restart: bool, json_out: bool
+) -> None:
+    """``guardrail block-at`` / ``alert-at``: set one scope's tool-call level.
+
+    Writes only ``guardrail.<setting>`` or ``guardrail.connectors.<C>.<setting>``
+    (``inherit`` clears it); precedence and clamp are the gateway's
+    (``policy_catalog.resolve_levels``). Hook decisions read the
+    configuration the gateway started with, so a global or per-connector
+    change restarts a running gateway; a stopped one is never started.
+    """
+    from defenseclaw import policy_catalog
+
+    words = _LEVEL_WORDS[setting]
+    noun = words["noun"]
+    gc = app.cfg.guardrail
+    value = "" if level.lower() == "inherit" else level.upper()
+    scope = "global"
+    connector_key: str | None = None
+
+    def _own(key: str | None) -> str:
+        block = gc if key is None else gc._connector_override(key)
+        return policy_catalog.level_value(getattr(block, setting, "")) if block is not None else ""
+
+    def _levels() -> policy_catalog.ScopeLevels:
+        return policy_catalog.scope_levels(app.cfg, connector_key or "")
+
+    def _setting(levels: policy_catalog.ScopeLevels) -> tuple[str, str, int]:
+        """``(effective label, source, rank)`` of this command's setting."""
+        if setting == "block_at":
+            return levels.block_at, levels.block_source, levels.block_rank
+        return levels.alert_at, levels.alert_source, levels.alert_rank
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        previous: str,
+        gateway: str | None = None,
+        notes: list[str] | None = None,
+        requested: bool = False,
+    ) -> None:
+        levels = _levels()
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "setting": setting,
+                        # A failure reports the level asked for; nothing was written.
+                        "level": (value if requested else _own(connector_key)) or "inherit",
+                        "previous": previous or "inherit",
+                        "source": _setting(levels)[1],
+                        "effective_block_at": levels.block_at,
+                        "effective_alert_at": levels.alert_at,
+                        "gateway": gateway,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            (ux.ok if ok else ux.err)(message, indent="  ")
+            for note in notes or []:
+                ux.subhead(note, indent="    ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    if connector:
+        connector_key, problem = _resolve_scope_connector(app, connector)
+        scope = normalize_connector(connector_key)
+        if problem:
+            # Not a connector here: it stores nothing, and would follow the global default.
+            connector_key = None
+            _finish(ok=False, exit_code=1, message=problem, previous="", requested=True)
+    subject = f"{_connector_label(scope)} ({scope})" if connector_key else ""
+
+    previous = _own(connector_key)
+    if previous == value:
+        label, source, _rank = _setting(_levels())
+        if connector_key and value:
+            message = f"{subject} already has its own {noun} level, {value}; nothing was changed."
+        elif connector_key:
+            message = (
+                f"{subject} has no {noun} level of its own; it already follows "
+                f"{_LEVEL_SOURCE_WORDS[source]} {noun} level ({label}); nothing was changed."
+            )
+        elif value:
+            message = f"The global {noun} level is already {value}; nothing was changed."
+        else:
+            message = (
+                f"No global {noun} level is set, so each connector uses its own or its rule pack's; "
+                "nothing was changed."
+            )
+        _finish(ok=True, exit_code=0, message=message, previous=previous)
+        return
+
+    try:
+        actives = [str(c) for c in app.cfg.active_connectors()]
+    except Exception:  # noqa: BLE001 — treat an unreadable roster as empty.
+        actives = []
+    # A global value replaces the level of every connector without its own,
+    # whatever its rule pack says: remember them to name the ones it loosens.
+    followers = {} if connector_key else {c: _setting(policy_catalog.scope_levels(app.cfg, c)) for c in actives}
+    global_rank = _setting(_levels())[2]
+
+    _preflight_config_write(app)
+    target = gc if connector_key is None else _connector_block_for_write(gc, connector_key)
+    setattr(target, setting, value)
+    try:
+        app.cfg.save()
+    except (OSError, ValueError) as exc:
+        setattr(target, setting, previous)
+        _finish(ok=False, exit_code=1, message=f"Failed to save config: {exc}", previous=previous, requested=True)
+    _log_guardrail_change(
+        app,
+        f"guardrail-{words['command']}",
+        f"scope={scope} {setting}={value or 'inherit'} previous={previous or 'inherit'}",
+    )
+    # Like mode: hook decisions only see the new level after a restart.
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
+
+    levels = _levels()
+    label, source, _rank = _setting(levels)
+    if connector_key and value:
+        message = f"{subject} now {words['does']} {label}."
+    elif connector_key:
+        message = f"{subject} follows {_LEVEL_SOURCE_WORDS[source]} {noun} level again: {label}."
+    elif value:
+        message = (
+            f"The global {noun} level is now {value}: tool calls {words['done']} {label} "
+            "unless a connector has its own."
+        )
+    else:
+        pack = policy_catalog.global_pack(app.cfg).pack
+        message = (
+            f"The global {noun} level is cleared: each connector without its own uses its rule pack's "
+            f"({label} for the {pack} pack)."
+        )
+    notes: list[str] = []
+    if levels.alert_clamped:
+        notes.append(
+            f"Alerts start at {levels.alert_at}, not {policy_catalog.level_label(levels.wanted_alert_rank)}: "
+            "anything that blocks also alerts."
+        )
+    if connector_key and policy_catalog.mode_label(gc.effective_mode(connector_key)) != "action":
+        notes.append(
+            f"{_connector_label(scope)} is in observe mode, so it only logs; the levels apply once it's in action mode."
+        )
+    elif not connector_key and policy_catalog.mode_label(gc.mode) != "action":
+        notes.append(
+            "The global mode is observe, so connectors that follow it only log; "
+            "the levels apply once they're in action mode."
+        )
+    for name, (old_label, _old_source, old_rank) in followers.items():
+        own = _own(name)
+        if own:
+            notes.append(
+                f"{_connector_label(name)} ({name}) keeps its own {noun} level ({own}); change it with: "
+                f"defenseclaw guardrail {words['command']} {value or 'inherit'} --connector {name}"
+            )
+            continue
+        new_label, _new_source, new_rank = _setting(policy_catalog.scope_levels(app.cfg, name))
+        # Only a connector whose own rule pack set a different level than the
+        # global default's is loosened behind the operator's back.
+        if new_rank > old_rank and old_rank != global_rank:
+            notes.append(
+                f"{_connector_label(name)} ({name}) now {words['does']} {new_label} instead of {old_label}; "
+                f"keep it with: defenseclaw guardrail {words['command']} "
+                f"{policy_catalog.level_name(old_rank)} --connector {name}"
+            )
+    _finish(
+        ok=outcome != "restart_failed",
+        exit_code=1 if outcome == "restart_failed" else 0,
+        message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
+        previous=previous,
+        gateway=outcome,
+        notes=notes,
+    )
+
+
+def _level_command(setting: str):
+    words = _LEVEL_WORDS[setting]
+
+    @click.argument("level", metavar="LEVEL", type=click.Choice(_LEVEL_CHOICES, case_sensitive=False))
+    @click.option(
+        "--connector",
+        "connector",
+        default=None,
+        help=f"Set only this connector's {words['noun']} level (writes its per-connector override).",
+    )
+    @_restart_option
+    @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+    @pass_ctx
+    def command(app: AppContext, level: str, connector: str | None, restart: bool, json_out: bool) -> None:
+        _set_tool_call_level(app, setting, level, connector, restart=restart, json_out=json_out)
+
+    return command
+
+
+block_at_cmd = guardrail.command(
+    "block-at",
+    help="""Set the lowest severity at which tool calls are blocked.
+
+    LEVEL is CRITICAL, HIGH, MEDIUM or LOW (any case), or inherit to clear
+    the value. Sets only ``guardrail.block_at``, or with ``--connector X``
+    only ``guardrail.connectors.X.block_at``. A connector's own level wins
+    over the global one, which wins over the rule pack's (strict blocks
+    MEDIUM+, default and permissive CRITICAL). Levels apply to tool calls
+    in action mode; the named policy's thresholds for LLM traffic through
+    the guardrail proxy are separate (``policy edit guardrail``). A change
+    restarts a running gateway so hook decisions pick it up (``--no-restart``
+    to skip; a stopped gateway is never started).
+    """,
+)(_level_command("block_at"))
+
+alert_at_cmd = guardrail.command(
+    "alert-at",
+    help="""Set the lowest severity at which tool calls raise an alert.
+
+    LEVEL is CRITICAL, HIGH, MEDIUM or LOW (any case), or inherit to clear
+    the value. Sets only ``guardrail.alert_at``, or with ``--connector X``
+    only ``guardrail.connectors.X.alert_at``; precedence, reload and
+    restart work like ``guardrail block-at``. Anything that blocks also
+    alerts, so an alert level above the block level alerts from the block
+    level instead (strict packs alert on LOW+, default MEDIUM+, permissive
+    HIGH+).
+    """,
+)(_level_command("alert_at"))
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The

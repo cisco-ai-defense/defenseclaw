@@ -93,7 +93,7 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 | --- | --- |
 | `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
-| `active_process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
+| `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
 | `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
 | `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
@@ -278,6 +278,33 @@ Stops the scanner and clears the `ai_discovery.*` block. Existing audit events a
   </Tab>
 </Tabs>
 
+### Per-user scans in standalone enterprise
+
+In the standalone enterprise profile the gateway runs as a service account
+that cannot read user homes or see other accounts' processes. The hook
+guardian therefore runs the static scan for each user in the target
+manifest, as that user, every `scan_interval_min`, while `ai_discovery` is
+enabled:
+
+- The scan reads only that user's home and sees only that user's processes.
+  Home-relative `scan_roots` apply; other roots, loopback probes and
+  environment names stay with the gateway's own scan, which still covers
+  machine-wide binaries and applications.
+- The guardian checks each result and writes it to the `ai-discovery`
+  directory of the authorization ledger (`root`, readable by the gateway's
+  group). The gateway adds it to its inventory on every full scan.
+- Each signal carries `user` and `user_id` from the account the guardian
+  started the scan for, never from the scan's own output. The
+  `ai_component.discovered`, `changed` and `removed` records, managed
+  `ai_component.observed` records and the per-entry skill, plugin and MCP
+  records carry the same user (`user.id`, `defenseclaw.user.name`).
+- The gateway's own process detector does not run; the scan summary reports
+  `detector_notes.process: provided by per-user scans`.
+- A user's results turn `gone` when the user leaves the manifest, or three
+  scan intervals after the user's last successful scan.
+- `mode`, `include_shell_history`, `include_package_manifests` and
+  `store_raw_local_paths` apply as usual.
+
 ### Tunable knobs
 
 `agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:
@@ -371,7 +398,7 @@ Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--
 defenseclaw agent processes --limit 20
 ```
 
-Live AI process table — model serving, sandbox runners, scanner subprocesses. Useful when something is running but you can't tell which agent spawned it.
+Live AI process table — running agent CLIs, local model servers, and AI desktop apps whose process name matches the signature catalog. Useful when something is running but you can't tell which agent spawned it.
   </Tab>
   <Tab value="Components">
 ```bash

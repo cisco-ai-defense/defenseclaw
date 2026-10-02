@@ -102,7 +102,7 @@ func (c *ZeptoClawConnector) Name() string                           { return "z
 func (c *ZeptoClawConnector) Description() string                    { return "api_base redirect + proxy response-scan" }
 func (c *ZeptoClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *ZeptoClawConnector) SubprocessPolicy() SubprocessPolicy {
-	return ResolveSubprocessPolicy(SubprocessSandbox)
+	return ResolveSubprocessPolicy(SubprocessShims)
 }
 
 // AllowedHosts returns ZeptoClaw's upstream LLM hosts that the
@@ -145,7 +145,7 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	// Surface 3: Plugin subprocess enforcement
-	policy := ResolveSubprocessPolicy(SubprocessSandbox)
+	policy := ResolveSubprocessPolicy(SubprocessShims)
 	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
 		return fmt.Errorf("zeptoclaw subprocess enforcement: %w", err)
 	}

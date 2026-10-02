@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -157,8 +158,15 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 				return fmt.Errorf("enterprise hooks: verify newly created managed directory %s: %w", currentPath, err)
 			}
 		} else if err := validateWindowsTargetOwnedDirectoryHandle(child, currentPath, target); err != nil {
+			adopted, adoptErr := adoptWindowsAccountCreatedDataDir(
+				currentHandle, child, part, currentPath,
+				sameWindowsEnterprisePath(currentPath, filepath.Dir(canonicalHookDir)), target,
+			)
 			_ = windows.CloseHandle(child)
-			return fmt.Errorf("enterprise hooks: reject managed directory %s: %w", currentPath, err)
+			if adoptErr != nil || adopted == 0 {
+				return fmt.Errorf("enterprise hooks: reject managed directory %s: %w", currentPath, errors.Join(err, adoptErr))
+			}
+			child = adopted
 		}
 		if err := windows.CloseHandle(currentHandle); err != nil {
 			_ = windows.CloseHandle(child)
@@ -168,6 +176,214 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 		currentHandle = child
 	}
 	return nil
+}
+
+// Bounds for a pre-existing data directory the account created itself.
+const (
+	windowsAccountCreatedDataDirMaxEntries = 256
+	windowsAccountCreatedDataDirMaxDepth   = 8
+)
+
+// adoptWindowsAccountCreatedDataDir takes over, in the standalone profile
+// only, a %USERPROFILE%\.defenseclaw the account created before it was
+// enrolled (for example the hook's hook-failures.jsonl from an agent run
+// that was refused as unregistered): it runs on the impersonated target
+// thread, and when windowsAccountCreatedDataDir accepts the tree it reopens
+// the same name without following reparse points and applies the protected
+// canonical DACL to that directory. It returns the validated handle, or 0
+// when the directory is not an account-created data directory.
+func adoptWindowsAccountCreatedDataDir(
+	parent windows.Handle,
+	child windows.Handle,
+	name string,
+	path string,
+	dataDir bool,
+	target *windows.SID,
+) (windows.Handle, error) {
+	if !dataDir || !windowsEnterpriseStandaloneProcess() {
+		return 0, nil
+	}
+	descriptor, err := windows.GetSecurityInfo(child, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return 0, err
+	}
+	if ok, err := windowsAccountCreatedDataDir(path, descriptor, target); err != nil || !ok {
+		return 0, err
+	}
+	handle, err := openWindowsTargetDirectoryForDACL(parent, name)
+	if err != nil {
+		return 0, fmt.Errorf("enterprise hooks: reopen account-created data directory %s: %w", path, err)
+	}
+	reopened, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err == nil {
+		// The reopened object must still be a plain directory the target
+		// owns before its DACL changes: never a junction put in its place.
+		err = validateWindowsGuardianACLHandle(handle, target, true, true, false)
+	}
+	if err == nil {
+		var ok bool
+		ok, err = windowsAccountCreatedDataDirDescriptor(reopened, target)
+		if err == nil && !ok {
+			err = fmt.Errorf("enterprise hooks: %s changed while it was adopted", path)
+		}
+	}
+	if err == nil {
+		var acl *windows.ACL
+		if acl, err = windowsUserPathProtectionACL(target, true); err == nil {
+			err = setWindowsObjectDACLNoPropagation(handle, acl, true)
+		}
+	}
+	if err == nil {
+		err = validateWindowsTargetOwnedDirectoryHandle(handle, path, target)
+	}
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, fmt.Errorf("enterprise hooks: adopt account-created data directory %s: %w", path, err)
+	}
+	return handle, nil
+}
+
+// windowsAccountCreatedDataDir reports whether path, with descriptor, is a
+// data directory the target account created with an ordinary create call:
+// owned by the target, an unprotected DACL made only of entries inherited
+// from the profile for the target, LocalSystem and Administrators, no
+// hooks child (the managed runtime is never adopted), and a bounded tree of
+// plain files and directories all owned by the target.
+func windowsAccountCreatedDataDir(path string, descriptor *windows.SECURITY_DESCRIPTOR, target *windows.SID) (bool, error) {
+	if ok, err := windowsAccountCreatedDataDirDescriptor(descriptor, target); err != nil || !ok {
+		return false, err
+	}
+	// The folder itself must be plain: a junction there would have the
+	// checks below read, and the pending proof accept, another folder.
+	root, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if attrs, _ := root.Sys().(*syscall.Win32FileAttributeData); attrs == nil || !root.IsDir() ||
+		attrs.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false, nil
+	}
+	if _, err := os.Lstat(filepath.Join(path, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	entries := 0
+	var walk func(dir string, depth int) (bool, error)
+	walk = func(dir string, depth int) (bool, error) {
+		if depth > windowsAccountCreatedDataDirMaxDepth {
+			return false, nil
+		}
+		items, err := os.ReadDir(dir)
+		if err != nil {
+			return false, err
+		}
+		for _, item := range items {
+			entries++
+			if entries > windowsAccountCreatedDataDirMaxEntries {
+				return false, nil
+			}
+			full := filepath.Join(dir, item.Name())
+			info, err := item.Info()
+			if err != nil {
+				return false, err
+			}
+			attrs, _ := info.Sys().(*syscall.Win32FileAttributeData)
+			if attrs == nil || attrs.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+				!(info.IsDir() || info.Mode().IsRegular()) {
+				return false, nil
+			}
+			owner, err := windowsPathOwnerNoFollow(full)
+			if err != nil {
+				return false, err
+			}
+			if owner == nil || !owner.Equals(target) {
+				return false, nil
+			}
+			if info.IsDir() {
+				if ok, err := walk(full, depth+1); err != nil || !ok {
+					return false, err
+				}
+			}
+		}
+		return true, nil
+	}
+	return walk(path, 1)
+}
+
+// windowsAccountCreatedDataDirDescriptor is the descriptor half of
+// windowsAccountCreatedDataDir.
+func windowsAccountCreatedDataDirDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, target *windows.SID) (bool, error) {
+	if descriptor == nil || target == nil {
+		return false, nil
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return false, err
+	}
+	if owner == nil || !owner.Equals(target) {
+		return false, nil
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return false, err
+	}
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		return false, nil
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil || dacl.AceCount == 0 {
+		return false, err
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if !sid.Equals(target) && !sid.IsWellKnown(windows.WinLocalSystemSid) &&
+			!sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// openWindowsTargetDirectoryForDACL opens an existing child directory of
+// parent for a DACL change, never following a reparse point.
+func openWindowsTargetDirectoryForDACL(parent windows.Handle, name string) (windows.Handle, error) {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: parent,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&handle,
+		windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES|
+			windows.FILE_LIST_DIRECTORY|windows.FILE_APPEND_DATA|windows.SYNCHRONIZE,
+		&attributes,
+		&status,
+		nil,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0,
+		0,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return handle, nil
 }
 
 func windowsTargetOwnedDirectorySecurityDescriptor(target *windows.SID) (*windows.SECURITY_DESCRIPTOR, error) {

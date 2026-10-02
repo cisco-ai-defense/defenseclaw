@@ -109,6 +109,21 @@
       "type": "string",
       "maxLength": 4096,
       "description": "Effective rule-pack directory the verdict used. Mirrors audit_events.rule_pack_dir."
+    },
+    "user.id": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Verified caller of the hook request (a uid on Linux and macOS, a SID on Windows), when the standalone gateway verified it."
+    },
+    "defenseclaw.user.id_kind": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "Kind of user.id, for example uid or sid."
+    },
+    "defenseclaw.user.name": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Account name of the verified caller."
     }
   },
   "additionalProperties": false

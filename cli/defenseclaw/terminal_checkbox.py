@@ -89,14 +89,19 @@ def render_checkbox_menu(
     cursor: int,
     *,
     redraw: bool,
+    rows_below: int = 0,
 ) -> None:
-    """Render the full checkbox list, optionally replacing prior ANSI rows."""
+    """Render the full checkbox list, optionally replacing prior ANSI rows.
+
+    *rows_below* counts the lines printed under the previous menu (a
+    warning), so the cursor climbs past them to the menu's first row.
+    """
 
     if redraw:
         # CSI A (cursor up) is understood both by VT terminals and Colorama's
         # native Windows-console adapter. CSI F was not translated by Colorama,
         # which caused the menu to fall back or stack in legacy Windows hosts.
-        click.echo(f"\x1b[{len(options)}A\r", nl=False, color=True)
+        click.echo(f"\x1b[{len(options) + rows_below}A\r", nl=False, color=True)
     for idx, name in enumerate(options):
         if redraw:
             click.echo("\r\x1b[2K", nl=False, color=True)
@@ -263,6 +268,11 @@ def prompt_checkbox_selection(
 
     rendered = False
     status_width = 0
+    # Redraw mode shows a warning on one line under the menu, and the next
+    # render replaces it; printing it on its own let that render overwrite
+    # it and leave a stale copy of the first row above the menu.
+    warning = ""
+    warning_rows = 0
     if not redraw:
         _render_static_menu(options, selected)
         status_width = _render_non_redraw_status(
@@ -275,8 +285,20 @@ def prompt_checkbox_selection(
     with _preserve_terminal_input_mode():
         while True:
             if redraw:
-                render_checkbox_menu(options, selected, cursor, redraw=rendered)
+                render_checkbox_menu(
+                    options,
+                    selected,
+                    cursor,
+                    redraw=rendered,
+                    rows_below=warning_rows,
+                )
                 rendered = True
+                if warning_rows:
+                    click.echo("\r\x1b[2K", nl=False, color=True)
+                    warning_rows = 0
+                if warning:
+                    ux.warn(warning, indent="  ")
+                    warning, warning_rows = "", 1
 
             key = checkbox_key_name(read_key())
             if key == "enter":
@@ -284,9 +306,11 @@ def prompt_checkbox_selection(
                     if not redraw:
                         click.echo()
                     return [name for name in options if name in selected]
-                if not redraw:
+                if redraw:
+                    warning = "Select at least one connector."
+                else:
                     click.echo()
-                ux.warn("Select at least one connector.", indent="  ")
+                    ux.warn("Select at least one connector.", indent="  ")
             elif key == "toggle":
                 name = options[cursor]
                 if name in selected:

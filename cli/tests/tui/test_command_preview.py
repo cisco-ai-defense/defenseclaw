@@ -12,11 +12,8 @@
 
 from __future__ import annotations
 
-import pytest
 from defenseclaw.tui.command_line import ParsedCommand
-from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, build_command_preview, mask_argv
-from textual.app import App, ComposeResult
-from textual.widgets import Static
+from defenseclaw.tui.screens.command_preview import build_command_preview, mask_argv
 
 
 def _parsed(args: tuple[str, ...], *, category: str = "setup") -> ParsedCommand:
@@ -47,87 +44,3 @@ def test_command_preview_shows_origin_and_restart_effect() -> None:
 
     assert preview.origin == "setup"
     assert preview.restart == "possible"
-
-
-class PreviewHarness(App[bool | None]):
-    def __init__(self, command: ParsedCommand) -> None:
-        super().__init__()
-        self.command = command
-        self.result: bool | None = None
-
-    def compose(self) -> ComposeResult:
-        yield Static("preview harness")
-
-    def on_mount(self) -> None:
-        self.push_screen(CommandPreviewScreen(self.command), self._set_result)
-
-    def _set_result(self, result: bool) -> None:
-        self.result = result
-
-
-@pytest.mark.asyncio
-async def test_command_preview_enter_confirms() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex")))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.result is True
-
-
-@pytest.mark.asyncio
-async def test_command_preview_run_button_confirms() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex")))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.click("#preview-run")
-        await pilot.pause()
-
-        assert app.result is True
-
-
-@pytest.mark.asyncio
-async def test_command_preview_cancel_button_dismisses() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex")))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.click("#preview-cancel")
-        await pilot.pause()
-
-        assert app.result is False
-
-
-@pytest.mark.asyncio
-async def test_command_preview_benign_focuses_run() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex"), category="setup"))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "preview-run"
-
-
-@pytest.mark.asyncio
-async def test_command_preview_destructive_focuses_cancel_so_enter_cancels() -> None:
-    app = PreviewHarness(_parsed(("uninstall", "--all", "--yes"), category="other"))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "preview-cancel"
-
-        # A reflexive Enter now cancels instead of running the destructive cmd.
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.result is False
-
-
-@pytest.mark.asyncio
-async def test_command_preview_secret_focuses_cancel() -> None:
-    app = PreviewHarness(_parsed(("keys", "set", "OPENAI_API_KEY", "--value", "sk-x"), category="keys"))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "preview-cancel"

@@ -431,10 +431,7 @@ def string_constant(name):
 
 api_addr = string_constant("DC_API_ADDR")
 token_file = string_constant("DC_TOKEN_FILE")
-endpoint = re.search(
-    r'fetch\(`http://\$\{DC_API_ADDR\}([^`$]+)`\s*,',
-    source,
-)
+endpoint = re.search(r'gatewayFetch\("(/[^"]+)"\s*,', source)
 if api_addr != expected_addr:
     raise SystemExit("managed Amp plugin has the wrong gateway address")
 if endpoint is None or endpoint.group(1) != expected_path:

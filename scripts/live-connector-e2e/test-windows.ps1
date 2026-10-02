@@ -2558,7 +2558,7 @@ connection.close()
         'cursor', 'devin', 'hermes', 'omnigent', 'opencode'
     )
     $excludedContractConnectors = @(
-        'geminicli', 'openhands', 'openclaw', 'windsurf', 'zeptoclaw'
+        'openhands', 'openclaw', 'zeptoclaw'
     )
     $genericContractConnectors = if ($connectorMatrix.Success) {
         @($connectorMatrix.Groups[1].Value -split '\s*,\s*')
@@ -2638,14 +2638,13 @@ connection.close()
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 8) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
-        '-Leaf bootstrap -DiagnosticsLeaf windows-native-diagnostics-bootstrap -ArtifactLeaf windows-bootstrap-fixture',
         "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist",
         '-Leaf omnigent -DiagnosticsLeaf windows-native-diagnostics-omnigent -ArtifactLeaf windows-native-dist'
     )) {
@@ -2755,35 +2754,16 @@ connection.close()
         'native process harness parses Go JSON only on failure, bounds collection, and reports the focused summary instead of the full JSON stream'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
-    Assert-True ($nativeWorkflowText -match "Get-ChildItem cli/tests -Recurse -File -Filter 'test_\*\.py'") 'Windows Python suite discovers every test file before applying its documented TUI mode'
     Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8\]' -and
-        $nativeWorkflowText -match "WINDOWS_TUI_MODE: \$\{\{ github\.event_name == 'pull_request' && 'smoke' \|\| 'full' \}\}" -and
-        $nativeWorkflowText -match '\$fullTUI = \$env:WINDOWS_TUI_MODE -eq ''full''' -and
-        $nativeWorkflowText -match 'Join-Path \$env:GITHUB_WORKSPACE ''cli\\tests\\tui''' -and
-        $nativeWorkflowText -match 'return \$fullTUI -or -not \$isTUI' -and
-        $nativeWorkflowText -match "\.Name -eq 'test_app_shell\.py'" -and
-        $nativeWorkflowText -match "'--collect-only', '-q', '--color=no'" -and
-        $nativeWorkflowText -match "Collected no test_app_shell\.py nodes" -and
-        $nativeWorkflowText -match '\$appShellNodes\[\$index\]' -and
-        $nativeWorkflowText -match '\(\$index % 8\) -eq \$shardIndex' -and
-        $nativeWorkflowText -match 'elseif \(\$shardIndex -eq 0\)' -and
-        $nativeWorkflowText -match 'test_textual_shell_starts_on_overview' -and
-        $nativeWorkflowText -match 'test_digit_shortcut_switches_panel_placeholder' -and
-        $nativeWorkflowText -match 'test_executor_gateway_windows\.py' -and
-        $nativeWorkflowText -match 'test_windows_clipboard\.py' -and
-        $nativeWorkflowText -match '\$tuiPytestArgs.*?\$tuiTargets' -and
+        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''8'', ''--shard-index'', \[string\]\$shardIndex' -and
+        $nativeWorkflowText -match '\$shardSelectionArgs \+= @\(''--exclude'', \$telemetryFile\)' -and
+        $nativeWorkflowText -match 'pytest-shard-\{0\}-files\.log' -and
+        $nativeWorkflowText -match 'selected no ordinary test files' -and
         $nativeWorkflowText -match '\$ordinaryPytestArgs.*?\$shardFiles' -and
-        $nativeWorkflowText -match 'pytest-shard-\{0\}-tui\.log' -and
-        $nativeWorkflowText -match 'pytest-shard-\{0\}-ordinary\.log') `
-        'Windows Python suite keeps full TUI coverage on main/manual runs and a bounded native smoke set on pull requests'
-    foreach ($node in @(
-        'test_existing_openclaw_integration_requires_pin',
-        'test_f0162_refuses_swapped_symlink',
-        'test_f0421_rechecks_pinned_home_before_chown'
-    )) {
-        Assert-True ($nativeWorkflowText -match "--deselect=.*$node") `
-            "native Windows suite excludes the POSIX-only sandbox assertion $node"
-    }
+        $nativeWorkflowText -match 'pytest-shard-\{0\}-ordinary\.log' -and
+        $nativeWorkflowText -notmatch 'WINDOWS_TUI_MODE' -and
+        $nativeWorkflowText -notmatch 'test_app_shell') `
+        'Windows Python suite balances every test file, the TUI suite included, across eight size-weighted shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
@@ -3140,7 +3120,7 @@ connection.close()
         $nativeHarnessText -match 'DefenseClawWindowsResourceIcon\.png' -and
         $nativeHarnessText -match 'DefenseClawWindowsResourceVersion\.txt' -and
         $standardUserCIText -match
-            '(?s)\$resourceVerifierInputs = if \(\$Mode -eq ''bootstrap-acceptance''\) \{\s*@\(\)\s*\} else \{\s*@\(' -and
+            '(?m)^\$resourceVerifierInputs = @\(' -and
         $standardUserCIText -match '\[IO\.File\]::Copy\(\$source, \$destination, \$false\)') `
         'packaged lifecycle carries an offline immutable Windows resource verifier into the disposable child'
     Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
@@ -3356,9 +3336,9 @@ connection.close()
         ).Count -ge 4 -and
         $standardUserCIText -match 'exact Setup artifact hash changed during') `
         'disposable acceptance revalidates the exact single-link Setup handle before and after the lifecycle'
-    Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
-        $releaseWorkflowText -match '-Mode setup-acceptance' -and
-        $releaseWorkflowText -notmatch '(?s)Validate the exact installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
+    Assert-True ($nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
+        $nativeWorkflowText -match '-Mode setup-acceptance' -and
+        $nativeWorkflowText -notmatch '(?s)Validate the exact installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
         'Setup acceptance uses the same real standard-user boundary'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
     $pathSnapshotFunction = [regex]::Match(
@@ -3445,8 +3425,7 @@ connection.close()
         $setupAcceptanceFunction -notmatch '\(@\(\$roster \| Sort-Object\) -join "`0"\)\) \{' -and
         $setupAcceptanceFunction -match 'Assert-NativeConnectorCleanupAuthorityPresent \$dataRoot \$repairedRoster' -and
         $setupAcceptanceFunction -match 'Assert-NativeConnectorBackupMarkersConsumed \$dataRoot' -and
-        $setupAcceptanceFunction -match 'foreach \(\$configuredConnector in @\(''codex'', ''claudecode'', ''amp'', ''copilot'', ''cursor'', ''antigravity''\)\)' -and
-        $setupAcceptanceFunction -match "Get-NativeConnectorBackupMarkers \`$dataRoot 'windsurf'") `
+        $setupAcceptanceFunction -match 'foreach \(\$configuredConnector in @\(''codex'', ''claudecode'', ''amp'', ''copilot'', ''cursor'', ''antigravity''\)\)') `
         'packaged Setup preserves and migrates the exact staged connector roster with complete supported cleanup custody'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
@@ -3715,24 +3694,17 @@ connection.close()
         $releaseWorkflowText -notmatch 'secrets\.ANTHROPIC_API_KEY' -and
         $releaseWorkflowText -notmatch '-Operation release-certification') `
         'production release does not depend on provider-backed Windows live radar'
-    $releaseAssemblyJob = [regex]::Match(
+    $releasePublishJob = [regex]::Match(
         $releaseWorkflowText,
-        '(?ms)^  assemble-release-candidate:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
+        '(?ms)^  publish:.*?(?=^  [a-z0-9][a-z0-9-]*:|^  #|\z)'
     ).Value
-    Assert-True ($releaseAssemblyJob -match 'needs:\s*\[release-preflight,\s*build-runtime-candidate,\s*macos-app,\s*windows-installer\]' -and
-        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-installer\.outputs\.artifact_id \}\}' -and
-        $releaseAssemblyJob -match '--windows-dir candidate-input/windows') `
-        'immutable release assembly consumes the tested Windows artifact bundle directly'
+    Assert-True ($releasePublishJob -match 'needs:\s*\[sign,\s*install-gate\]' -and
+        $releaseWorkflowText -match 'scripts/test-install-lifecycle\.ps1 -Assets release') `
+        'the release publishes only the signed assets that the Windows install gate tested'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
     Assert-True ($harnessText -notmatch '(?i)\bwsl(?:\.exe)?\b|git bash|/bin/|Get-Command\s+(?:jq|tail|curl)|Invoke-Tool\s+''(?:jq|tail|curl)''') 'native harness has no WSL, Git Bash, or Unix utility dependency'
-    $packagedConnectorHomes = [regex]::Match(
-        $harnessText,
-        '(?s)function Assert-PackagedConnectorHomes\b.*?(?=\nfunction Get-StableHookRuntimeExecutable\b)'
-    ).Value
-    Assert-True ($packagedConnectorHomes -notmatch '(?i)windsurf|cascade|geminicli|gemini cli') `
-        'packaged connector-home setup exposes no retired Windsurf/Cascade or Gemini CLI binding'
     $setupOtlpFixture = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Start-SetupAcceptanceOtlpCollector\b.*?(?=\nfunction Stop-SetupAcceptanceOtlpCollector\b)'
@@ -3888,10 +3860,6 @@ connection.close()
         $packagedHomeGuard -match 'packaged Amp home must be a strict child' -and
         $packagedHomeGuard -match '\$env:HERMES_HOME = \$homes\[5\]') `
         'packaged connector homes are authentic, contained, existing, and non-reparse'
-    Assert-True ($nativeWorkflowText -notmatch '(?i)geminicli|gemini cli' -and
-        $wizardHarnessText -notmatch '(?i)geminicli|gemini cli' -and
-        $standardUserCIText -notmatch "ValidateSet\([^)]*geminicli") `
-        'Gemini CLI is absent from active Windows workflow and setup-selection surfaces'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
     $dangerousCommandContract = [regex]::Match(
         $harnessText,
@@ -5009,10 +4977,9 @@ connection.close()
         $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''hermes-home''' -and
         $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''opencode-home''' -and
         $nativeHarnessText -match '\$openCodePluginDir = Join-Path \$openCodeHome ''plugins''' -and
-        $nativeHarnessText -match '(?s)Assert-WindowsNativePathsDisjoint @\(\s*\$contractHome, \$codexHome, \$claudeHome, \$copilotHome, \$hermesHome,\s*\$openCodeHome, \$geminiCLIHome\s*\)' -and
-        $nativeHarnessText -notmatch '\$officialWindsurfConfig' -and
+        $nativeHarnessText -match '(?s)Assert-WindowsNativePathsDisjoint @\(\s*\$contractHome, \$codexHome, \$claudeHome, \$copilotHome, \$hermesHome,\s*\$openCodeHome\s*\)' -and
         $contractInstall -ge 0) `
-        'connector contract keeps active connector homes and legacy Gemini cleanup custody disjoint without a Windsurf target'
+        'connector contract keeps active connector homes disjoint'
     foreach ($homeAssignment in @(
         '$env:CODEX_HOME = $codexHome',
         '$env:CLAUDE_CONFIG_DIR = $claudeHome',
@@ -5025,11 +4992,6 @@ connection.close()
         Assert-True ($homeCapture -ge 0 -and $homeCapture -lt $contractInstall) `
             "connector contract captures recorded home before native Setup: $homeAssignment"
     }
-    Assert-True ($contractFunction -match 'fresh native Setup install state retained deprecated connector custody' -and
-        $contractFunction -match "'gemini_cli_home', 'gemini_config_dir'" -and
-        $contractFunction -match "'windsurf_user_home', 'windsurf_hooks_path'" -and
-        $contractFunction -notmatch '\$contractInstallState\.(gemini_cli_home|gemini_config_dir|windsurf_user_home|windsurf_hooks_path)') `
-        'connector contract rejects fresh retired Gemini/Windsurf custody without dereferencing absent state properties'
     $contractCleanupTry = $contractFunction.IndexOf('    try {', [StringComparison]::Ordinal)
     $contractProfileCreate = $contractFunction.IndexOf(
         '[IO.Directory]::CreateDirectory($path)',

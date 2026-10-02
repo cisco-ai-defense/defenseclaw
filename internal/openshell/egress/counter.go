@@ -1,0 +1,707 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package egress
+
+import (
+	"cmp"
+	"net/netip"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/net/publicsuffix"
+)
+
+// DefaultLargeUploadBytes is the default large-upload threshold (the
+// openshell.egress.large_upload_mb default of 25).
+const DefaultLargeUploadBytes int64 = 25 << 20
+
+const defaultMaxDestinations = 8192
+
+// CounterOptions configures a Counter.
+type CounterOptions struct {
+	// LargeUploadBytes is the volume sent to a first-seen destination that
+	// raises the large-upload signal. Zero uses DefaultLargeUploadBytes; a
+	// negative value disables the signal.
+	//
+	// A binding's uploads to first-seen hosts are also totalled per
+	// registrable domain (the name under its ICANN public suffix, so every
+	// customer zone of a hosting provider such as workers.dev or github.io
+	// counts together) and per resolved address (per /64 for IPv6, all of
+	// which one server can answer on), and each of those totals
+	// has the same threshold: rotating subdomains, domains pointing at one
+	// server, or a provider's free subdomains does not reset it. Uploads to
+	// unblocked or operator-allowed destinations count only toward their
+	// own host.
+	LargeUploadBytes int64
+	// BlockLargeUploads also cuts the tunnel or request that crosses the
+	// threshold and refuses further uploads to that destination (or every
+	// first-seen destination under that domain or at that address) for the
+	// binding, unless the decision came from an unblock or operator allow.
+	// It applies to every principal; Principal.BlockLargeUploads turns it
+	// on for one.
+	BlockLargeUploads bool
+	// KnownHost reports destinations that are not first-seen for a
+	// principal, for example hosts contacted in earlier sessions or trusted
+	// by the operator. It is called once per binding and destination, at
+	// the first contact; refused attempts are not contact. Nil treats every
+	// destination as first-seen at its first contact.
+	KnownHost func(p Principal, host string) bool
+	// MaxDestinations caps tracked (binding, destination) pairs. Over the
+	// cap, idle contacted destinations are evicted, those with the least
+	// upload counted toward the large-upload signal first, then the least
+	// recently used. Destinations that were only ever refused are capped
+	// separately at the same number, so refusals never evict a contacted
+	// destination. Zero uses 8192.
+	MaxDestinations int
+	// Now overrides the clock (tests).
+	Now func() time.Time
+}
+
+// Counter keeps byte and tunnel counts per binding and destination and
+// raises the large-upload signal. It is safe for concurrent use.
+type Counter struct {
+	threshold int64
+	block     bool
+	known     func(Principal, string) bool
+	max       int
+	now       func() time.Time
+
+	mu    sync.Mutex
+	dests map[destKey]*destination
+	// refused holds destinations that were only ever refused. Refusals pass
+	// no rate limit, so they are kept apart: they never call KnownHost,
+	// never use up a destination's first contact, and can only evict each
+	// other.
+	refused map[destKey]*refusal
+	// aggs total a binding's uploads to first-seen hosts per registrable
+	// domain and per address.
+	aggs map[aggKey]*aggregate
+
+	// reserve serializes the large-upload reservation under the block, which
+	// checks a chunk against every total it counts toward before adding it
+	// to any.
+	reserve sync.Mutex
+}
+
+type destKey struct {
+	binding string
+	host    string
+}
+
+// aggKind says what an aggregate totals uploads by.
+type aggKind uint8
+
+const (
+	aggSite aggKind = iota + 1 // registrable domain
+	aggAddr                    // resolved address
+)
+
+type aggKey struct {
+	binding string
+	kind    aggKind
+	key     string
+}
+
+// aggregate is a binding's upload total to its first-seen hosts under one
+// registrable domain or at one address.
+type aggregate struct {
+	key      aggKey
+	up       atomic.Int64
+	flagged  atomic.Bool
+	lastSeen atomic.Int64
+}
+
+// scope describes the destinations an aggregate totals, for events.
+func (a *aggregate) scope() string {
+	if a.key.kind == aggAddr {
+		return "destinations at " + a.key.key
+	}
+	return "destinations under " + a.key.key
+}
+
+// registrableDomain is the name under its ICANN public suffix
+// (a.b.example.co.uk -> example.co.uk). A private-section suffix of the
+// Public Suffix List, a hosting provider's customer zones such as
+// workers.dev, github.io or s3.amazonaws.com, is treated as part of the
+// provider's domain: anyone can take a fresh name there, so each one must
+// not start a fresh upload total. Names under an unlisted TLD keep one
+// label below it.
+func registrableDomain(host string) string {
+	suffix, icann := publicsuffix.PublicSuffix(host)
+	for !icann {
+		i := strings.IndexByte(suffix, '.')
+		if i < 0 {
+			break
+		}
+		suffix, icann = publicsuffix.PublicSuffix(suffix[i+1:])
+	}
+	if host == suffix || !strings.HasSuffix(host, "."+suffix) {
+		return host
+	}
+	rest := host[:len(host)-len(suffix)-1]
+	return rest[strings.LastIndexByte(rest, '.')+1:] + "." + suffix
+}
+
+type destination struct {
+	key       destKey
+	firstSeen time.Time
+	novel     bool
+	// threshold is the large-upload threshold of the principal at first
+	// contact; eviction ranks the destination by it. Uploads are checked
+	// against the threshold of the flow's own principal.
+	threshold int64
+
+	lastSeen atomic.Int64
+	up       atomic.Int64
+	down     atomic.Int64
+	tunnels  atomic.Int64
+	active   atomic.Int64
+	blocked  atomic.Int64
+	flagged  atomic.Bool
+}
+
+// refusal counts the refused attempts to a destination that was never
+// contacted. Counter.mu guards it.
+type refusal struct {
+	count     int64
+	firstSeen time.Time
+	lastSeen  int64
+}
+
+// DestinationStats is a snapshot of one binding's traffic to one host.
+type DestinationStats struct {
+	BindingID string
+	Host      string
+	// BytesUp and BytesDown are payload bytes sent and received across all
+	// tunnels and requests. For absolute-form requests BytesUp is the
+	// request as sent upstream (head and body, TLS records for https://)
+	// and BytesDown the response body.
+	BytesUp   int64
+	BytesDown int64
+	// Tunnels counts tunnels and forwarded requests that reached the
+	// destination; Active those still open.
+	Tunnels int64
+	Active  int64
+	// Blocked counts refused attempts.
+	Blocked int64
+	// Contacted reports that a tunnel or request reached the destination;
+	// false for one that was only ever refused.
+	Contacted bool
+	// FirstSeen is when the destination was first tracked: its first
+	// refusal or its first contact, whichever came first.
+	FirstSeen time.Time
+	LastSeen  time.Time
+	// Novel reports that the destination was not a known host at first
+	// contact, so uploads to it count toward the large-upload signal. It is
+	// false for destinations that were only ever refused.
+	Novel bool
+	// LargeUpload reports that the large-upload signal fired.
+	LargeUpload bool
+}
+
+// NewCounter returns a Counter.
+func NewCounter(opts CounterOptions) *Counter {
+	c := &Counter{
+		threshold: opts.LargeUploadBytes,
+		block:     opts.BlockLargeUploads,
+		known:     opts.KnownHost,
+		max:       opts.MaxDestinations,
+		now:       opts.Now,
+		dests:     map[destKey]*destination{},
+		refused:   map[destKey]*refusal{},
+		aggs:      map[aggKey]*aggregate{},
+	}
+	if c.threshold == 0 {
+		c.threshold = DefaultLargeUploadBytes
+	}
+	if c.max <= 0 {
+		c.max = defaultMaxDestinations
+	}
+	if c.now == nil {
+		c.now = time.Now
+	}
+	return c
+}
+
+// LargeUploadBytes returns the default threshold (<= 0 when disabled), for
+// principals without their own.
+func (c *Counter) LargeUploadBytes() int64 { return c.threshold }
+
+// thresholdFor is p's large-upload threshold (<= 0 when disabled): its own
+// (Principal.LargeUploadBytes), else the counter's.
+func (c *Counter) thresholdFor(p Principal) int64 {
+	if p.LargeUploadBytes != 0 {
+		return p.LargeUploadBytes
+	}
+	return c.threshold
+}
+
+// blocksFor reports whether the large-upload block applies to p's
+// traffic: the counter's (CounterOptions.BlockLargeUploads) or its own
+// (Principal.BlockLargeUploads). It still needs a threshold (thresholdFor).
+func (c *Counter) blocksFor(p Principal) bool {
+	return c.block || p.BlockLargeUploads
+}
+
+// contact returns p's record for host, creating it at the first contact,
+// and reports whether it was created.
+func (c *Counter) contact(p Principal, host string) (*destination, bool) {
+	key := destKey{binding: p.BindingID, host: host}
+	now := c.now()
+	c.mu.Lock()
+	if d := c.dests[key]; d != nil {
+		c.mu.Unlock()
+		d.lastSeen.Store(now.UnixNano())
+		return d, false
+	}
+	c.mu.Unlock()
+
+	// KnownHost is caller code; never run it under the lock.
+	novel := c.known == nil || !c.known(p, host)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d := c.dests[key]; d != nil {
+		d.lastSeen.Store(now.UnixNano())
+		return d, false
+	}
+	if len(c.dests) >= c.max {
+		c.evictLocked()
+	}
+	d := &destination{key: key, firstSeen: now, novel: novel, threshold: c.thresholdFor(p)}
+	if r := c.refused[key]; r != nil {
+		d.firstSeen = r.firstSeen
+		d.blocked.Store(r.count)
+		delete(c.refused, key)
+	}
+	d.lastSeen.Store(now.UnixNano())
+	c.dests[key] = d
+	return d, true
+}
+
+// armedUp is the upload counted toward the large-upload signal.
+func (c *Counter) armedUp(d *destination) int64 {
+	if d.threshold <= 0 || !d.novel {
+		return 0
+	}
+	return d.up.Load()
+}
+
+// evictLocked drops idle, unflagged destinations down to 7/8 of the cap:
+// first those with the least upload counted toward the large-upload signal,
+// so contacting many other hosts cannot reset a destination's progress
+// toward the threshold, then the least recently used. Active and flagged
+// ones are kept so live counters and the large-upload state survive.
+func (c *Counter) evictLocked() {
+	type candidate struct {
+		d               *destination
+		armed, lastSeen int64
+	}
+	target := c.max - c.max/8
+	idle := make([]candidate, 0, len(c.dests))
+	for _, d := range c.dests {
+		if d.active.Load() == 0 && !d.flagged.Load() {
+			idle = append(idle, candidate{d: d, armed: c.armedUp(d), lastSeen: d.lastSeen.Load()})
+		}
+	}
+	slices.SortFunc(idle, func(a, b candidate) int {
+		return cmp.Or(cmp.Compare(a.armed, b.armed), cmp.Compare(a.lastSeen, b.lastSeen))
+	})
+	for _, cand := range idle {
+		if len(c.dests) <= target {
+			return
+		}
+		delete(c.dests, cand.d.key)
+	}
+}
+
+// recordBlocked counts a refused attempt. A refusal is not contact: a
+// destination that was never contacted gets a refusal-only record, which
+// costs no KnownHost call and no eviction sort.
+func (c *Counter) recordBlocked(p Principal, host string) {
+	key := destKey{binding: p.BindingID, host: host}
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d := c.dests[key]; d != nil {
+		d.blocked.Add(1)
+		d.lastSeen.Store(now.UnixNano())
+		return
+	}
+	r := c.refused[key]
+	if r == nil {
+		if len(c.refused) >= c.max {
+			c.evictRefusedLocked()
+		}
+		r = &refusal{firstSeen: now}
+		c.refused[key] = r
+	}
+	r.count++
+	r.lastSeen = now.UnixNano()
+}
+
+// evictRefusedLocked drops an arbitrary eighth of the refusal-only records.
+// They only feed statistics, and skipping the sort keeps a refusal flood
+// cheap.
+func (c *Counter) evictRefusedLocked() {
+	n := max(c.max/8, 1)
+	for k := range c.refused {
+		if n == 0 {
+			return
+		}
+		delete(c.refused, k)
+		n--
+	}
+}
+
+// uploadBlocked reports that the large-upload block already applies to
+// p's traffic to host: its own total, or its registrable domain's, crossed
+// the threshold. A host with no record yet is not refused here (whether it
+// is first-seen is only known at contact), and neither is one whose address
+// total crossed (the address is only known once dialed): a CONNECT tunnel
+// is refused once its flow opens (flow.uploadRefused), and a forwarded
+// request's first upload chunk is cut.
+func (c *Counter) uploadBlocked(p Principal, host string) bool {
+	if !c.blocksFor(p) || c.thresholdFor(p) <= 0 {
+		return false
+	}
+	c.mu.Lock()
+	d := c.dests[destKey{binding: p.BindingID, host: host}]
+	var site *aggregate
+	if d != nil && d.novel {
+		site = c.aggs[siteKey(p, host)]
+	}
+	c.mu.Unlock()
+	return d != nil && d.novel && (d.flagged.Load() || (site != nil && site.flagged.Load()))
+}
+
+// siteKey is the registrable-domain aggregate of p's uploads to host.
+func siteKey(p Principal, host string) aggKey {
+	return aggKey{binding: p.BindingID, kind: aggSite, key: registrableDomain(host)}
+}
+
+// aggregatesFor returns the totals a first-seen destination's uploads over
+// remote also count toward, creating them.
+func (c *Counter) aggregatesFor(p Principal, host string, remote netip.Addr) []*aggregate {
+	var keys []aggKey
+	if _, err := netip.ParseAddr(host); err != nil {
+		keys = append(keys, siteKey(p, host))
+	}
+	if remote = remote.Unmap().WithZone(""); remote.IsValid() {
+		key := remote.String()
+		if remote.Is6() {
+			// One server can answer on every address of its /64.
+			key = netip.PrefixFrom(remote, 64).Masked().String()
+		}
+		keys = append(keys, aggKey{binding: p.BindingID, kind: aggAddr, key: key})
+	}
+	now := c.now().UnixNano()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*aggregate, 0, len(keys))
+	for _, k := range keys {
+		a := c.aggs[k]
+		if a == nil {
+			if len(c.aggs) >= c.max {
+				c.evictAggregatesLocked()
+			}
+			a = &aggregate{key: k}
+			c.aggs[k] = a
+		}
+		a.lastSeen.Store(now)
+		out = append(out, a)
+	}
+	return out
+}
+
+// evictAggregatesLocked drops unflagged aggregates down to 7/8 of the cap,
+// those with the least upload first (as destinations are evicted), so
+// creating many totals cannot reset the one closest to the threshold.
+// Flows holding a dropped aggregate keep counting into it.
+func (c *Counter) evictAggregatesLocked() {
+	target := c.max - c.max/8
+	idle := make([]*aggregate, 0, len(c.aggs))
+	for _, a := range c.aggs {
+		if !a.flagged.Load() {
+			idle = append(idle, a)
+		}
+	}
+	slices.SortFunc(idle, func(a, b *aggregate) int {
+		return cmp.Or(cmp.Compare(a.up.Load(), b.up.Load()), cmp.Compare(a.lastSeen.Load(), b.lastSeen.Load()))
+	})
+	for _, a := range idle {
+		if len(c.aggs) <= target {
+			return
+		}
+		delete(c.aggs, a.key)
+	}
+}
+
+// open starts counting one tunnel or request over the upstream address
+// remote and reports whether this is the binding's first contact with host.
+func (c *Counter) open(p Principal, host string, remote netip.Addr) (*flow, bool) {
+	f := c.pending(p, host)
+	return f, f.openAt(remote)
+}
+
+// pending returns a flow that counts toward host only once it opens: a
+// forwarded request becomes contact when it gets an upstream connection.
+func (c *Counter) pending(p Principal, host string) *flow {
+	return &flow{counter: c, principal: p, host: host}
+}
+
+// flow counts one tunnel or forwarded request.
+type flow struct {
+	counter   *Counter
+	principal Principal
+	host      string
+
+	opening sync.Once
+	dest    atomic.Pointer[destination]
+	// aggs are the totals the flow's uploads count toward besides its
+	// destination's; set when it opens, for first-seen destinations only.
+	aggs   []*aggregate
+	first  atomic.Bool
+	closed atomic.Bool
+	up     atomic.Int64
+	down   atomic.Int64
+}
+
+// open counts the flow toward its destination, once, and reports whether
+// that was the binding's first contact. A closed flow no longer opens.
+func (f *flow) open() bool { return f.openAt(netip.Addr{}) }
+
+// openAt opens the flow over the upstream address remote, which its
+// uploads also count toward.
+func (f *flow) openAt(remote netip.Addr) bool {
+	f.opening.Do(func() {
+		if f.closed.Load() {
+			return
+		}
+		c := f.counter
+		d, created := c.contact(f.principal, f.host)
+		if c.thresholdFor(f.principal) > 0 && d.novel {
+			f.aggs = c.aggregatesFor(f.principal, f.host, remote)
+		}
+		d.tunnels.Add(1)
+		d.active.Add(1)
+		f.first.Store(created)
+		f.dest.Store(d)
+	})
+	return f.first.Load()
+}
+
+// uploadRefused reports that the large-upload block already refuses every
+// upload of the open flow: its destination's total, or a registrable-domain
+// or address total it counts toward, crossed the threshold before it sent
+// anything, so addUp would cut its first chunk. scope describes the
+// aggregate, empty for the destination's own total. Admission checks the
+// host and its domain (uploadBlocked); only an open flow knows its address.
+func (f *flow) uploadRefused(exempt bool) (scope string, refused bool) {
+	c, d := f.counter, f.dest.Load()
+	if d == nil || exempt || !c.blocksFor(f.principal) || c.thresholdFor(f.principal) <= 0 || !d.novel {
+		return "", false
+	}
+	if d.flagged.Load() {
+		return "", true
+	}
+	for _, a := range f.aggs {
+		if a.flagged.Load() {
+			return a.scope(), true
+		}
+	}
+	return "", false
+}
+
+// uploadVerdict is the large-upload outcome of one upload chunk.
+type uploadVerdict struct {
+	// signal is set exactly once per destination, registrable domain and
+	// address: on the chunk that pushed its total over the threshold.
+	signal bool
+	// scope, for a signal, describes an aggregate that crossed; empty when
+	// the destination's own total did.
+	scope string
+	// cut means the chunk was not counted and the flow must stop.
+	cut bool
+	// total is the upload total that crossed, else the destination's.
+	total int64
+}
+
+// addUp accounts n bytes about to be sent upstream, opening the flow if it
+// is not open yet. exempt flows (unblocked or operator-allowed
+// destinations) are signalled but never cut, and count toward their own
+// destination only. Under the block the chunk is reserved against every
+// total it counts toward at once, so parallel flows cannot together send
+// more than the threshold to one destination, domain or address.
+func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
+	f.open()
+	c, d := f.counter, f.dest.Load()
+	if d == nil {
+		return uploadVerdict{cut: true} // closed before it opened: nothing more is relayed
+	}
+	now := c.now().UnixNano()
+	threshold := c.thresholdFor(f.principal)
+	armed := threshold > 0 && d.novel
+	aggs := f.aggs
+	if exempt {
+		aggs = nil
+	}
+	if armed {
+		// Account the chunk against the destination and its aggregates as
+		// one step: a destination and its registrable domain cross the
+		// threshold on the same chunk, and interleaved flows would
+		// otherwise each report one of the two crossings.
+		c.reserve.Lock()
+		defer c.reserve.Unlock()
+	}
+	if armed && c.blocksFor(f.principal) && !exempt {
+		over := d.flagged.Load() || d.up.Load()+n > threshold
+		for _, a := range aggs {
+			over = over || a.flagged.Load() || a.up.Load()+n > threshold
+		}
+		if over {
+			v := uploadVerdict{cut: true, total: d.up.Load()}
+			if d.up.Load()+n > threshold && d.flagged.CompareAndSwap(false, true) {
+				v.signal = true
+			}
+			for _, a := range aggs {
+				if a.up.Load()+n > threshold && a.flagged.CompareAndSwap(false, true) && !v.signal {
+					v.signal, v.scope, v.total = true, a.scope(), a.up.Load()
+				}
+			}
+			return v
+		}
+	}
+	f.up.Add(n)
+	v := uploadVerdict{total: d.up.Add(n)}
+	d.lastSeen.Store(now)
+	if armed && v.total > threshold && d.flagged.CompareAndSwap(false, true) {
+		v.signal = true
+	}
+	for _, a := range aggs {
+		total := a.up.Add(n)
+		a.lastSeen.Store(now)
+		if total > threshold && a.flagged.CompareAndSwap(false, true) && !v.signal {
+			v.signal, v.scope, v.total = true, a.scope(), total
+		}
+	}
+	return v
+}
+
+// addDown accounts n bytes received from upstream. A flow that never
+// opened has had no upstream, so it counts nothing.
+func (f *flow) addDown(n int64) {
+	d := f.dest.Load()
+	if d == nil {
+		return
+	}
+	f.down.Add(n)
+	d.down.Add(n)
+	d.lastSeen.Store(f.counter.now().UnixNano())
+}
+
+func (f *flow) close() {
+	if !f.closed.CompareAndSwap(false, true) {
+		return
+	}
+	f.opening.Do(func() {}) // wait out an open in progress; later ones are no-ops
+	if d := f.dest.Load(); d != nil {
+		d.active.Add(-1)
+		d.lastSeen.Store(f.counter.now().UnixNano())
+	}
+}
+
+func (d *destination) stats() DestinationStats {
+	return DestinationStats{
+		BindingID:   d.key.binding,
+		Host:        d.key.host,
+		BytesUp:     d.up.Load(),
+		BytesDown:   d.down.Load(),
+		Tunnels:     d.tunnels.Load(),
+		Active:      d.active.Load(),
+		Blocked:     d.blocked.Load(),
+		Contacted:   true,
+		FirstSeen:   d.firstSeen,
+		LastSeen:    time.Unix(0, d.lastSeen.Load()),
+		Novel:       d.novel,
+		LargeUpload: d.flagged.Load(),
+	}
+}
+
+// Destinations returns a snapshot of every tracked destination, ordered by
+// binding and host.
+func (c *Counter) Destinations() []DestinationStats {
+	return c.snapshot(func(destKey) bool { return true })
+}
+
+// DestinationsFor returns the destinations of one binding, ordered by host.
+func (c *Counter) DestinationsFor(bindingID string) []DestinationStats {
+	return c.snapshot(func(k destKey) bool { return k.binding == bindingID })
+}
+
+func (c *Counter) snapshot(keep func(destKey) bool) []DestinationStats {
+	c.mu.Lock()
+	out := make([]DestinationStats, 0, len(c.dests)+len(c.refused))
+	for k, d := range c.dests {
+		if keep(k) {
+			out = append(out, d.stats())
+		}
+	}
+	for k, r := range c.refused {
+		if keep(k) {
+			out = append(out, DestinationStats{
+				BindingID: k.binding, Host: k.host, Blocked: r.count,
+				FirstSeen: r.firstSeen, LastSeen: time.Unix(0, r.lastSeen),
+			})
+		}
+	}
+	c.mu.Unlock()
+	slices.SortFunc(out, func(a, b DestinationStats) int {
+		return cmp.Or(cmp.Compare(a.BindingID, b.BindingID), cmp.Compare(a.Host, b.Host))
+	})
+	return out
+}
+
+// Forget drops every destination of bindingID (for example when its sandbox
+// is deleted) and returns how many were dropped. Open flows keep counting
+// into their detached records.
+func (c *Counter) Forget(bindingID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for k := range c.dests {
+		if k.binding == bindingID {
+			delete(c.dests, k)
+			n++
+		}
+	}
+	for k := range c.refused {
+		if k.binding == bindingID {
+			delete(c.refused, k)
+			n++
+		}
+	}
+	for k := range c.aggs {
+		if k.binding == bindingID {
+			delete(c.aggs, k)
+		}
+	}
+	return n
+}

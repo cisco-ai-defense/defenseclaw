@@ -70,13 +70,13 @@ struct ActivityView: View {
             if tab == .commands { commandContent(selection: $activity.selectedID) }
             else { mutationContent }
         }
-        .inspector(isPresented: inspectorPresented) {
-            if tab == .commands, let entry = selectedCommand {
-                commandInspector(entry)
-                    .dcInspectorColumnWidth()
-            } else if let mutation = selectedMutation {
-                mutationInspector(mutation)
-                    .dcInspectorColumnWidth()
+        .dcInspector(isPresented: inspectorPresented) {
+            VStack(spacing: 0) {
+                if tab == .commands, let entry = selectedCommand {
+                    commandInspector(entry)
+                } else if let mutation = selectedMutation {
+                    mutationInspector(mutation)
+                }
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search activity")

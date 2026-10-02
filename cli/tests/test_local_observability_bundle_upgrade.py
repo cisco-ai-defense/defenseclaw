@@ -38,10 +38,6 @@ from defenseclaw.bundle_refresh import (
     restart_upgraded_local_observability_stack,
     upgrade_local_observability_stack,
 )
-from defenseclaw.commands.cmd_upgrade import (
-    _crash_bundle_rollback_result,
-    _restore_local_observability_upgrade_backup,
-)
 from defenseclaw.observability.local_stack import (
     GRAFANA_ACCESS_NO_PASSWORD,
     GRAFANA_ACCESS_PASSWORD,
@@ -612,85 +608,8 @@ def test_same_target_retry_is_idempotent(
     assert custom.exists()
 
 
-def test_schema_two_backup_round_trips_through_bridge_rollback(
-    installed_bundle: tuple[Path, Path, Path],
-    tmp_path: Path,
-) -> None:
-    source, data_dir, destination = installed_bundle
-    source.joinpath("README.md").write_text("target replacement\n", encoding="utf-8")
-    before = _managed_snapshot(destination)
-    backup_dir = tmp_path / "backup"
-
-    result = _upgrade(source, data_dir, backup_dir)
-    metadata = json.loads((backup_dir / "local-observability-stack/refresh-backup.json").read_text(encoding="utf-8"))
-
-    assert set(metadata) == {
-        "schema_version",
-        "managed_paths",
-        "existing_paths",
-        "old_sha256",
-        "old_modes",
-        "created_sha256",
-        "old_windows_security",
-        "restart_required",
-    }
-    assert metadata["schema_version"] == 2
-    assert metadata["restart_required"] is False
-    assert set(metadata["created_sha256"]) == {".defenseclaw-bundle-manifest.json"}
-    assert os.path.samefile(
-        backup_dir / "local-observability-stack/created/.defenseclaw-bundle-manifest.json",
-        destination / ".defenseclaw-bundle-manifest.json",
-    )
-
-    durable_restart = _restore_local_observability_upgrade_backup(
-        str(data_dir),
-        str(backup_dir),
-        result.to_dict(),
-    )
-
-    assert durable_restart is False
-    assert _managed_snapshot(destination) == before
 
 
-def test_crash_after_first_publish_replays_schema_two_custody_exactly(
-    installed_bundle: tuple[Path, Path, Path],
-    tmp_path: Path,
-) -> None:
-    source, data_dir, destination = installed_bundle
-    source.joinpath("README.md").write_text("target replacement\n", encoding="utf-8")
-    before = _managed_snapshot(destination)
-    backup_dir = tmp_path / "backup"
-
-    def crash_after_publish(event: str, relative: str | None) -> None:
-        if event == "after_activate" and relative == "README.md":
-            raise SystemExit("injected hard crash")
-
-    with (
-        patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
-        patch("defenseclaw.bundle_refresh._strict_compose_project_running", return_value=False),
-        pytest.raises(SystemExit, match="injected hard crash"),
-    ):
-        upgrade_local_observability_stack(
-            str(data_dir),
-            str(backup_dir),
-            bundle_version="8.0.0",
-            fault_injector=crash_after_publish,
-        )
-
-    assert destination.joinpath("README.md").read_text(encoding="utf-8") == "target replacement\n"
-    recovered = _crash_bundle_rollback_result(str(backup_dir), required=True)
-    assert recovered is not None
-    assert recovered["installed"] is True
-    assert recovered["restart_required"] is False
-
-    durable_restart = _restore_local_observability_upgrade_backup(
-        str(data_dir),
-        str(backup_dir),
-        recovered,
-    )
-
-    assert durable_restart is False
-    assert _managed_snapshot(destination) == before
 
 
 def test_non_local_bundle_install_is_a_noop_before_docker_or_source_lookup(

@@ -71,14 +71,14 @@ bob:502:20:/Users/bob"
 
 t_unsupported_connector_skipped() {
   _reset_discover_stub
-  # `windsurf` is not in is_supported_connector; it must be dropped
+  # `hermes` is not in is_supported_connector; it must be dropped
   # even if the caller lists it in the CSV.
   local users="alice:501:20:/Users/alice"
   local out
-  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,windsurf" "${users}")"
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,hermes" "${users}")"
 
   assert_contains     "${out}" 'connector: "codex"'    "codex kept"
-  assert_not_contains "${out}" 'connector: "windsurf"' "unsupported connector dropped"
+  assert_not_contains "${out}" 'connector: "hermes"' "unsupported connector dropped"
 
   # Only 1 row should remain (alice × codex).
   local count

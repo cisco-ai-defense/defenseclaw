@@ -81,7 +81,7 @@
       "os": {
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.31 (reviewed range >=1.18.10,<1.19.0); the v1.18.31 Hooks entries used by this contract match the v1.18.19 signatures and a thrown Error from tool.execute.before remains the block surface. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
+      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.33 (reviewed range >=1.18.10,<1.19.0); the v1.18.33 Hooks entries used by this contract match the v1.18.19 signatures and a thrown Error from tool.execute.before remains the block surface. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",

@@ -64,82 +64,6 @@ func testInstallState(installRoot, dataRoot, maintenancePath, transactionID, ver
 	}
 }
 
-func TestValidateInstallStateForRootsRequiresExactWindsurfHooksTarget(t *testing.T) {
-	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
-	state := testInstallState(
-		installRoot,
-		dataRoot,
-		maintenancePath,
-		testCurrentTransactionID,
-		"1.0.0",
-	)
-	state.Connector = "windsurf"
-	state.WindsurfUserHome = filepath.Join(t.TempDir(), "bound-profile")
-	state.WindsurfHooksPath = filepath.Join(
-		state.WindsurfUserHome,
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
-	if err := validateInstallStateForRoots(
-		&state,
-		installRoot,
-		dataRoot,
-		maintenancePath,
-	); err != nil {
-		t.Fatalf("exact Windsurf hook target was rejected: %v", err)
-	}
-
-	state.WindsurfHooksPath = filepath.Join(
-		t.TempDir(),
-		"other-profile",
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
-	if err := validateInstallStateForRoots(
-		&state,
-		installRoot,
-		dataRoot,
-		maintenancePath,
-	); err == nil || !strings.Contains(err.Error(), "inconsistent Windsurf hooks path") {
-		t.Fatalf("mismatched Windsurf hook target error = %v", err)
-	}
-}
-
-func TestValidateInstallStateForRootsRequiresConsistentGeminiCLIHomeBinding(t *testing.T) {
-	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
-	state := testInstallState(
-		installRoot,
-		dataRoot,
-		maintenancePath,
-		testCurrentTransactionID,
-		"1.0.0",
-	)
-	state.Connector = "geminicli"
-	state.GeminiCLIHome = filepath.Join(t.TempDir(), "gemini-cli-home")
-	state.GeminiConfigDir = filepath.Join(state.GeminiCLIHome, ".gemini")
-	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err != nil {
-		t.Fatalf("consistent Gemini CLI binding was rejected: %v", err)
-	}
-
-	state.GeminiConfigDir = filepath.Join(t.TempDir(), ".gemini")
-	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err == nil ||
-		!strings.Contains(err.Error(), "inconsistent Gemini CLI home binding") {
-		t.Fatalf("mismatched Gemini CLI binding error = %v", err)
-	}
-
-	state.GeminiCLIHome = ""
-	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err != nil {
-		t.Fatalf("predecessor config-only Gemini state was rejected: %v", err)
-	}
-	state.GeminiConfigDir += " "
-	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err == nil ||
-		!strings.Contains(err.Error(), "invalid Gemini CLI configuration dir") {
-		t.Fatalf("surrounding-whitespace Gemini state error = %v", err)
-	}
-}
-
 func writeInstallTree(t *testing.T, tree string, state installState) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(tree, "installer"), 0o755); err != nil {
@@ -965,74 +889,6 @@ func TestValidateSetupTransactionAntigravityHomeIgnoresSpoofedDataRoot(t *testin
 	}
 }
 
-func TestValidateSetupTransactionGeminiHomeBindingIgnoresSpoofedDataRoot(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("native Windows Gemini home custody contract")
-	}
-	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
-	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
-	geminiCLIHome := filepath.Join(t.TempDir(), "gemini-cli-home")
-	spoofedDataRoot := filepath.Join(t.TempDir(), "spoofed-profile", ".defenseclaw")
-	transaction.DataRoot = spoofedDataRoot
-	transaction.TargetConnector = "geminicli"
-	transaction.GeminiCLIHome = geminiCLIHome
-	transaction.GeminiConfigDir = filepath.Join(geminiCLIHome, ".gemini")
-	expected := setupTransactionExpectations{
-		InstallRoot:     installRoot,
-		DataRoot:        spoofedDataRoot,
-		MaintenancePath: maintenancePath,
-	}
-	if err := validateSetupTransaction(transaction, expected); err != nil {
-		t.Fatalf("valid Gemini home changed with a spoofed DataRoot: %v", err)
-	}
-	transaction.GeminiCLIHome += " "
-	transaction.GeminiConfigDir = filepath.Join(transaction.GeminiCLIHome, ".gemini")
-	if err := validateSetupTransaction(transaction, expected); err == nil ||
-		!strings.Contains(err.Error(), "invalid Gemini CLI home override") {
-		t.Fatalf("surrounding-whitespace Gemini transaction error = %v", err)
-	}
-	transaction.GeminiCLIHome = geminiCLIHome
-	transaction.GeminiConfigDir = connectorDefaultHomeBesideDataRoot(spoofedDataRoot, "geminicli")
-	if err := validateSetupTransaction(transaction, expected); err == nil ||
-		!strings.Contains(err.Error(), "inconsistent Gemini CLI home binding") {
-		t.Fatalf("spoofed DataRoot redirected Gemini custody: %v", err)
-	}
-}
-
-func TestValidateSetupTransactionGeminiSchemaTwoCompatibilityIsFailClosed(t *testing.T) {
-	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
-	expected := setupTransactionExpectations{
-		InstallRoot:     installRoot,
-		DataRoot:        dataRoot,
-		MaintenancePath: maintenancePath,
-	}
-	preGemini := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
-	preGemini.GeminiConfigDir = ""
-	if err := validateSetupTransaction(preGemini, expected); err != nil {
-		t.Fatalf("pre-Gemini schema-2 transaction was rejected: %v", err)
-	}
-
-	selected := preGemini
-	selected.TargetConnector = "geminicli"
-	if err := validateSetupTransaction(selected, expected); err == nil ||
-		!strings.Contains(err.Error(), "no valid Gemini CLI home binding") {
-		t.Fatalf("Gemini selection without a bound home was accepted: %v", err)
-	}
-
-	previouslyManaged := preGemini
-	previouslyManaged.PreviousConnectors = []string{"geminicli"}
-	if err := validateSetupTransaction(previouslyManaged, expected); err == nil ||
-		!strings.Contains(err.Error(), "no valid Gemini CLI home binding") {
-		t.Fatalf("Gemini-bearing predecessor transaction without a bound home was accepted: %v", err)
-	}
-
-	predecessorConfigOnly := selected
-	predecessorConfigOnly.GeminiConfigDir = filepath.Join(t.TempDir(), "legacy-home", ".gemini")
-	if err := validateSetupTransaction(predecessorConfigOnly, expected); err != nil {
-		t.Fatalf("canonical predecessor config-only binding was rejected: %v", err)
-	}
-}
-
 func TestSetupJournalRoundTripsAntigravityConfigHomeCustody(t *testing.T) {
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	previous := testInstallState(
@@ -1668,7 +1524,7 @@ func TestTeardownSupersededConnectorsSwitchesConnector(t *testing.T) {
 func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *testing.T) {
 	transaction := setupTransaction{
 		DataRoot:           `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors: []string{"codex", "claudecode", "cursor", "windsurf", "opencode"},
+		PreviousConnectors: []string{"codex", "claudecode", "cursor", "opencode"},
 		TargetConnector:    "none",
 	}
 	var calls []string
@@ -1683,7 +1539,6 @@ func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *test
 		"codex:teardown", "codex:verify",
 		"claudecode:teardown", "claudecode:verify",
 		"cursor:teardown", "cursor:verify",
-		"windsurf:teardown", "windsurf:verify",
 		"opencode:teardown", "opencode:verify",
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -1796,142 +1651,6 @@ func TestTeardownSupersededCursorMovesSelectedConnectorToNewHome(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("Cursor home migration calls = %v, want %v", calls, want)
-	}
-}
-
-func TestTeardownSupersededWindsurfUsesExactPreviousProfile(t *testing.T) {
-	transaction := setupTransaction{
-		DataRoot:                 `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors:       []string{"windsurf"},
-		TargetConnector:          "windsurf",
-		PreviousWindsurfUserHome: `C:\Users\bound-profile`,
-		WindsurfUserHome:         `C:\Users\new-profile`,
-	}
-	var calls []string
-	run := func(_, _, connector, action string, env []string) error {
-		calls = append(calls, connector+":"+action+":"+envValue(env, "WINDSURF_USER_HOME"))
-		return nil
-	}
-	if err := teardownSupersededConnectors(
-		transaction,
-		`C:\DefenseClaw\gateway.exe`,
-		transactionPreviousChildEnv(transaction),
-		run,
-	); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		`windsurf:teardown:C:\Users\bound-profile`,
-		`windsurf:verify:C:\Users\bound-profile`,
-	}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("Windsurf profile migration calls = %v, want %v", calls, want)
-	}
-}
-
-func TestTransactionChildEnvReplacesAmbientWindsurfBindings(t *testing.T) {
-	t.Setenv("WINDSURF_USER_HOME", `C:\Users\ambient-profile`)
-	t.Setenv(
-		"WINDSURF_HOOK_CONFIG_PATH",
-		`C:\Users\ambient-profile\.codeium\windsurf\hooks.json`,
-	)
-	transaction := setupTransaction{
-		DataRoot:         `C:\Users\tester\.defenseclaw`,
-		WindsurfUserHome: `C:\Users\bound-profile`,
-	}
-
-	env := transactionChildEnv(transaction)
-	if got := envValue(env, "WINDSURF_USER_HOME"); got != transaction.WindsurfUserHome {
-		t.Fatalf("Windsurf user home = %q, want %q", got, transaction.WindsurfUserHome)
-	}
-	wantHooks := filepath.Join(
-		transaction.WindsurfUserHome,
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
-	if got := envValue(env, "WINDSURF_HOOK_CONFIG_PATH"); got != wantHooks {
-		t.Fatalf("Windsurf hooks path = %q, want %q", got, wantHooks)
-	}
-}
-
-func TestGeminiTransactionRoundTripRehydratesVendorRootAndPrivateCustody(t *testing.T) {
-	root := t.TempDir()
-	previousCLIHome := filepath.Join(root, "previous")
-	currentCLIHome := filepath.Join(root, "current")
-	transaction := setupTransaction{
-		DataRoot:                filepath.Join(root, ".defenseclaw"),
-		PreviousGeminiCLIHome:   previousCLIHome,
-		PreviousGeminiConfigDir: filepath.Join(previousCLIHome, ".gemini"),
-		GeminiCLIHome:           currentCLIHome,
-		GeminiConfigDir:         filepath.Join(currentCLIHome, ".gemini"),
-	}
-	t.Setenv("GEMINI_CLI_HOME", filepath.Join(root, "ambient-vendor-root"))
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(root, "ambient-vendor"))
-	t.Setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", filepath.Join(root, "ambient-internal"))
-
-	body, err := json.Marshal(transaction)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var restored setupTransaction
-	if err := json.Unmarshal(body, &restored); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, test := range []struct {
-		name   string
-		env    []string
-		root   string
-		config string
-	}{
-		{name: "current", env: transactionChildEnv(restored), root: transaction.GeminiCLIHome, config: transaction.GeminiConfigDir},
-		{name: "previous", env: transactionPreviousChildEnv(restored), root: transaction.PreviousGeminiCLIHome, config: transaction.PreviousGeminiConfigDir},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := envValue(test.env, "GEMINI_CLI_HOME"); !samePath(got, test.root) {
-				t.Fatalf("vendor Gemini CLI home = %q, want %q", got, test.root)
-			}
-			if got := envValue(test.env, "DEFENSECLAW_GEMINI_CONFIG_HOME"); !samePath(got, test.config) {
-				t.Fatalf("internal Gemini custody binding = %q, want %q", got, test.config)
-			}
-			if got := envValue(test.env, "GEMINI_CONFIG_DIR"); got != "" {
-				t.Fatalf("ambient GEMINI_CONFIG_DIR survived as %q", got)
-			}
-			if got, err := connectorLifecycleConfigHome(test.env, "geminicli"); err != nil || !samePath(got, test.config) {
-				t.Fatalf("Gemini lifecycle config home = %q, %v; want %q", got, err, test.config)
-			}
-		})
-	}
-}
-
-func TestNewSetupTransactionIgnoresRetiredConnectorAmbientAndCreatesNoCustody(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("native Windows Setup transaction contract")
-	}
-	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
-	t.Setenv("GEMINI_CLI_HOME", "relative-gemini-home")
-	transaction, err := newSetupTransaction(
-		"install",
-		installRoot,
-		dataRoot,
-		maintenancePath,
-		"",
-		"0.8.6",
-		nil,
-		options{Action: "install", Connector: "none", Mode: "observe"},
-	)
-	if err != nil {
-		t.Fatalf("fresh unrelated setup consulted retired GEMINI_CLI_HOME: %v", err)
-	}
-	for label, value := range map[string]string{
-		"WindsurfUserHome": transaction.WindsurfUserHome,
-		"GeminiCLIHome":    transaction.GeminiCLIHome,
-		"GeminiConfigDir":  transaction.GeminiConfigDir,
-	} {
-		if value != "" {
-			t.Fatalf("fresh unrelated setup created retired %s custody %q", label, value)
-		}
 	}
 }
 
@@ -2062,49 +1781,6 @@ func TestInferManagedOpenCodeHomeRejectsMalformedPluginTarget(t *testing.T) {
 	}
 }
 
-func TestInferManagedGeminiHomeRequiresSettingsTarget(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		filename  string
-		wantError bool
-	}{
-		{name: "canonical settings", filename: "settings.json"},
-		{name: "foreign file", filename: "operator.json", wantError: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			dataRoot := t.TempDir()
-			backupPath := filepath.Join(dataRoot, "connector_backups", "geminicli", "config.json")
-			if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			want := filepath.Join(t.TempDir(), ".gemini")
-			if err := os.WriteFile(
-				backupPath,
-				[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, test.filename))),
-				0o600,
-			); err != nil {
-				t.Fatal(err)
-			}
-
-			got, err := inferManagedConnectorHome(
-				dataRoot, "geminicli", "config", filepath.Join(t.TempDir(), "fallback"),
-			)
-			if test.wantError {
-				if err == nil || !strings.Contains(err.Error(), "invalid settings target path") {
-					t.Fatalf("malformed Gemini backup error = %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !samePath(got, want) {
-				t.Fatalf("inferred Gemini home = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
 func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *testing.T) {
 	for _, test := range []struct {
 		connector, logicalName, legacyBackup string
@@ -2184,73 +1860,6 @@ func TestResolvePreviousConnectorHomePrefersManagedBindingOverInstallState(t *te
 	}
 	if !samePath(got, want) {
 		t.Fatalf("resolved previous connector home = %q, want managed binding %q", got, want)
-	}
-}
-
-func TestResolvePreviousWindsurfUserHomeUsesExactManagedProfileBinding(t *testing.T) {
-	dataRoot := t.TempDir()
-	bindingPath := filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")
-	if err := os.MkdirAll(filepath.Dir(bindingPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(t.TempDir(), "bound-windsurf-profile")
-	if err := os.WriteFile(
-		bindingPath,
-		[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, ".codeium", "windsurf", "hooks.json"))),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	got, err := resolvePreviousWindsurfUserHome(
-		filepath.Join(t.TempDir(), "stale-profile"),
-		[]string{"windsurf"},
-		dataRoot,
-		filepath.Join(t.TempDir(), "ambient-profile"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !samePath(got, want) {
-		t.Fatalf("resolved Windsurf user home = %q, want managed binding %q", got, want)
-	}
-}
-
-func TestResolvePreviousWindsurfUserHomeRejectsUnboundManagedProfile(t *testing.T) {
-	dataRoot := t.TempDir()
-	ambient := filepath.Join(t.TempDir(), "ambient-profile")
-	_, err := resolvePreviousWindsurfUserHome(
-		"",
-		[]string{"windsurf"},
-		dataRoot,
-		ambient,
-	)
-	if err == nil || !strings.Contains(err.Error(), "no bound user profile was persisted") {
-		t.Fatalf("error = %v, want refusal to guess ambient profile %q", err, ambient)
-	}
-}
-
-func TestResolvePreviousWindsurfUserHomeRejectsBindingOutsideVendorConfig(t *testing.T) {
-	dataRoot := t.TempDir()
-	bindingPath := filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")
-	if err := os.MkdirAll(filepath.Dir(bindingPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	foreign := filepath.Join(t.TempDir(), "foreign", "hooks.json")
-	if err := os.WriteFile(
-		bindingPath,
-		[]byte(fmt.Sprintf(`{"path":%q}`, foreign)),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	_, err := resolvePreviousWindsurfUserHome(
-		"",
-		[]string{"windsurf"},
-		dataRoot,
-		filepath.Join(t.TempDir(), "ambient-profile"),
-	)
-	if err == nil || !strings.Contains(err.Error(), "outside the bound user profile") {
-		t.Fatalf("error = %v, want invalid vendor config path refusal", err)
 	}
 }
 
@@ -2502,7 +2111,6 @@ func TestFreshAntigravityUsesOfficialHomeAndScrubsInventedEnvironment(t *testing
 	}
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	t.Setenv("ANTIGRAVITY_CONFIG_DIR", filepath.Join(filepath.Dir(dataRoot), "vendor-decoy"))
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(filepath.Dir(dataRoot), "gemini-decoy"))
 
 	transaction, err := newSetupTransaction(
 		"install",
@@ -2533,7 +2141,7 @@ func TestFreshAntigravityUsesOfficialHomeAndScrubsInventedEnvironment(t *testing
 	if got := envValue(childEnv, "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME"); !samePath(got, officialHome) {
 		t.Fatalf("internal Antigravity custody home = %q, want %q", got, officialHome)
 	}
-	for _, forbidden := range []string{"ANTIGRAVITY_CONFIG_DIR", "GEMINI_CONFIG_DIR"} {
+	for _, forbidden := range []string{"ANTIGRAVITY_CONFIG_DIR"} {
 		if got := envValue(childEnv, forbidden); got != "" {
 			t.Fatalf("%s survived in child environment as %q", forbidden, got)
 		}
@@ -2595,7 +2203,6 @@ func TestModeOnlyMaintenanceMigratesCustomAntigravityHomeToOfficialPath(t *testi
 		t.Fatal(err)
 	}
 	t.Setenv("ANTIGRAVITY_CONFIG_DIR", ambientHome)
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(filepath.Dir(dataRoot), "ambient-gemini"))
 
 	previous := testInstallState(
 		installRoot,
@@ -2649,7 +2256,7 @@ func TestModeOnlyMaintenanceMigratesCustomAntigravityHomeToOfficialPath(t *testi
 	if got := envValue(childEnv, "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME"); !samePath(got, officialHome) {
 		t.Fatalf("current Antigravity custody binding = %q, want %q", got, officialHome)
 	}
-	for _, forbidden := range []string{"ANTIGRAVITY_CONFIG_DIR", "GEMINI_CONFIG_DIR"} {
+	for _, forbidden := range []string{"ANTIGRAVITY_CONFIG_DIR"} {
 		if got := envValue(childEnv, forbidden); got != "" {
 			t.Fatalf("%s survived in child environment as %q", forbidden, got)
 		}

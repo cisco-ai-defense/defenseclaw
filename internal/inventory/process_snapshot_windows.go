@@ -28,6 +28,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// processOwnerUID is needed only where ps truncates user names (Linux).
+func processOwnerUID(int) string { return "" }
+
 func platformProcessSnapshot() ([]processInfo, error) {
 	return collectWindowsSnapshot(nativeWindowsSnapshotReader{})
 }

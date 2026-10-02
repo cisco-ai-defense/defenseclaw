@@ -14,30 +14,30 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Version-specific migrations for DefenseClaw upgrades.
+"""Config and data migrations, run by ``defenseclaw migrate``.
 
-Each migration is keyed to the target version it ships with. During upgrade,
-all migrations between the old version and the new version are applied in
-order via ``run_migrations``.
+The installer runs ``defenseclaw migrate`` from the version it just installed,
+after stopping the gateway, so migrations always execute the new release's
+code. Three kinds of steps exist:
 
-Design contract for every migration:
+* ``CONFIG_MIGRATIONS`` moves ``config.yaml`` from ``config_version`` N to
+  N+1. New keys need only the schema entry and loader defaults; renames and
+  removals need a step (see "Changing the config schema" in
+  docs/RELEASE_RUNBOOK.md for everything a version bump touches).
+* ``MIGRATIONS`` is the frozen 0.x chain. It imports installs older than the
+  0.8.5 schema-v8 hard cut and never grows.
+* The connector roster step (``_migrate_connector_roster``) moves the retired
+  Desktop connector ID to ``devin`` and drops connectors this release does not
+  ship. It has no ``config_version``: it runs whenever ``config.yaml`` still
+  names such a connector.
 
-* **Idempotent** — safe to re-run on an already-migrated install.
-* **Atomic** — mutations write to a temp file and rename, never partial
-  state on a crash.
-* **Fail-safe** — a failure in one step is logged and the migration
-  continues; the upgrade itself never aborts due to a migration error,
-  because a half-upgraded install with a half-applied migration is
-  worse than an upgraded install with stale residue we can clean up
-  later via ``defenseclaw doctor --fix``.
-* **No-touch** — operators do nothing; the migration runs automatically
-  during ``defenseclaw upgrade``.
+Every step is idempotent and writes through temp-file-and-rename.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -45,17 +45,15 @@ import secrets
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import click
 import yaml
 
-from defenseclaw import migration_state as migration_state_helpers
-from defenseclaw import ux
+from defenseclaw import legacy_connector, ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,
@@ -69,8 +67,6 @@ _OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
 
-_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV = "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
-_UPGRADE_MUTATION_TOKEN_ENV = "DEFENSECLAW_UPGRADE_MUTATION_TOKEN"
 _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES = 4 * 1024 * 1024
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x00000400
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -146,47 +142,6 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(out)
 
 
-def _ensure_legacy_openclaw_restart_shim(
-    from_version: str,
-    to_version: str,
-    data_dir: str,
-) -> None:
-    """Prevent pre-0.6.1 upgraders from crashing when ``openclaw`` is absent.
-
-    The 0.4.0-0.6.0 ``cmd_upgrade`` path installs the target wheel, imports
-    this module, runs migrations, and then calls ``subprocess.run(["openclaw",
-    "gateway", "restart"], check=False)``. If ``openclaw`` is not installed,
-    Python raises ``FileNotFoundError`` before ``check=False`` can matter,
-    aborting an otherwise successful upgrade. We cannot patch those already
-    released command modules, but we can provide a process-local PATH shim
-    before their ``finally`` block runs.
-    """
-    if os.name == "nt":
-        return
-    if _ver_tuple(to_version) < _ver_tuple("0.8.0"):
-        return
-    if _ver_tuple(from_version) >= _ver_tuple("0.6.1"):
-        return
-    if shutil.which("openclaw"):
-        return
-
-    shim_dir = os.path.join(data_dir, ".upgrade-shims")
-    shim_path = os.path.join(shim_dir, "openclaw")
-    try:
-        os.makedirs(shim_dir, mode=0o700, exist_ok=True)
-        with open(shim_path, "w", encoding="utf-8") as fh:
-            fh.write(
-                "#!/bin/sh\nprintf '%s\\n' 'openclaw CLI not found; skipping automatic gateway restart' >&2\nexit 127\n"
-            )
-        os.chmod(shim_path, 0o700)
-    except OSError as exc:
-        ux.warn(f"could not create legacy openclaw restart shim: {exc}", indent="    ")
-        return
-
-    path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
-    if shim_dir not in path_parts:
-        os.environ["PATH"] = os.pathsep.join([shim_dir, *path_parts])
-
 
 # ---------------------------------------------------------------------------
 # MigrationContext
@@ -212,7 +167,6 @@ class MigrationContext:
     from_version: str = ""
     to_version: str = ""
     config_path: str = ""
-    upgrade_handles_local_bundle: bool = False
     # changes accumulates a one-line summary per applied step. The
     # upgrade command surfaces these so an operator can audit what the
     # no-touch migration actually changed under their HOME.
@@ -245,56 +199,6 @@ class _PreparedObservabilityV8Migration:
     environment_file_sha256: str = field(repr=False)
 
 
-@dataclass(frozen=True)
-class ObservabilityV8PreflightBinding:
-    """Value-free identity of the source proven safe before mutation."""
-
-    source_sha256: str = field(repr=False)
-    candidate_sha256: str = field(repr=False)
-    environment_file_present: bool
-    environment_file_sha256: str = field(repr=False)
-    environment_dependencies_sha256: str = field(repr=False)
-    environment_edits_sha256: str = field(repr=False)
-
-    def to_payload(self) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "source_sha256": self.source_sha256,
-            "candidate_sha256": self.candidate_sha256,
-            "environment_file_present": self.environment_file_present,
-            "environment_file_sha256": self.environment_file_sha256,
-            "environment_dependencies_sha256": self.environment_dependencies_sha256,
-            "environment_edits_sha256": self.environment_edits_sha256,
-        }
-
-    @classmethod
-    def from_payload(cls, payload: object) -> ObservabilityV8PreflightBinding:
-        fields = {
-            "schema_version",
-            "source_sha256",
-            "candidate_sha256",
-            "environment_file_present",
-            "environment_file_sha256",
-            "environment_dependencies_sha256",
-            "environment_edits_sha256",
-        }
-        if not isinstance(payload, dict) or set(payload) != fields or payload.get("schema_version") != 1:
-            raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
-        present = payload.get("environment_file_present")
-        digests = {key: payload.get(key) for key in fields if key.endswith("_sha256")}
-        if not isinstance(present, bool) or any(
-            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests.values()
-        ):
-            raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
-        return cls(
-            source_sha256=digests["source_sha256"],
-            candidate_sha256=digests["candidate_sha256"],
-            environment_file_present=present,
-            environment_file_sha256=digests["environment_file_sha256"],
-            environment_dependencies_sha256=digests["environment_dependencies_sha256"],
-            environment_edits_sha256=digests["environment_edits_sha256"],
-        )
-
 
 def _prepare_observability_v8_migration(
     *,
@@ -313,8 +217,6 @@ def _prepare_observability_v8_migration(
     environment, environment_file_present, environment_file_sha256 = _observability_v8_upgrade_environment_snapshot(
         environment_path
     )
-    environment.pop(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV, None)
-    environment.pop(_UPGRADE_MUTATION_TOKEN_ENV, None)
     migration = convert_v7_observability_to_v8(
         source,
         environment,
@@ -461,156 +363,31 @@ def _read_stable_observability_v8_upgrade_file(
                 pass
 
 
-def preflight_observability_v8_upgrade(
-    *,
-    data_dir: str,
-    config_path: str,
-    gateway_binary: str,
-    candidate_directory: str,
-) -> ObservabilityV8PreflightBinding | None:
-    """Prove the active v7 source is migratable before stopping its gateway.
-
-    This invokes the same pure conversion implementation later used by the
-    installed migration. The returned value-free binding lets the controller
-    reject config or consulted-environment drift at the mutation boundary.
-    The generated candidate is validated by the authenticated, downloaded
-    target gateway and exists only as an owner-only staging file. No managed
-    state, backup, receipt, service, or installed artifact is changed here.
-    """
-
-    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
-    normalized_config_path = os.path.abspath(os.path.expanduser(config_path))
-    prepared = _prepare_observability_v8_migration(
-        data_dir=normalized_data_dir,
-        config_path=normalized_config_path,
-    )
-    if prepared is None:
-        return None
-
-    validation_environment = dict(prepared.environment)
-    validation_environment.update({edit.name: edit.value for edit in prepared.migration.environment_edits})
-    _validate_observability_v8_candidate(
-        prepared.migration.candidate,
-        validation_environment,
-        data_dir=normalized_data_dir,
-        candidate_directory=candidate_directory,
-        gateway_binary=gateway_binary,
-    )
-    preflight_v8_migration_activation(
-        prepared.migration,
-        data_dir=normalized_data_dir,
-        config_path=normalized_config_path,
-        environment_path=os.path.join(normalized_data_dir, ".env"),
-        tighten_legacy_backup_root=True,
-        environment=prepared.environment,
-    )
-    return _observability_v8_preflight_binding(prepared)
-
-
-def _observability_v8_preflight_binding(
-    prepared: _PreparedObservabilityV8Migration,
-) -> ObservabilityV8PreflightBinding:
-    return ObservabilityV8PreflightBinding(
-        source_sha256=prepared.migration.source_sha256,
-        candidate_sha256=prepared.migration.candidate_sha256,
-        environment_file_present=prepared.environment_file_present,
-        environment_file_sha256=prepared.environment_file_sha256,
-        environment_dependencies_sha256=_observability_v8_binding_rows_sha256(
-            (
-                dependency.name,
-                dependency.present,
-                dependency.value_sha256,
-            )
-            for dependency in prepared.migration.environment_dependencies
-        ),
-        environment_edits_sha256=_observability_v8_binding_rows_sha256(
-            (edit.name, edit.value_sha256, edit.operation) for edit in prepared.migration.environment_edits
-        ),
-    )
-
-
-def _observability_v8_binding_rows_sha256(
-    rows: Iterable[tuple[object, ...]],
-) -> str:
-    """Hash sorted value-free binding rows into one bounded transport value."""
-
-    encoded = json.dumps(
-        sorted(tuple(row) for row in rows),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _valid_upgrade_mutation_token() -> bool:
-    """Return whether the controller supplied one filename-safe capability."""
-
-    token = os.environ.get(_UPGRADE_MUTATION_TOKEN_ENV)
-    return isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
-
-
-def _expected_observability_v8_preflight_binding() -> tuple[bool, ObservabilityV8PreflightBinding | None]:
-    if not _valid_upgrade_mutation_token():
-        return False, None
-    raw = os.environ.get(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV)
-    if raw is None:
-        raise ObservabilityV8UpgradeMigrationError("preflight_binding_missing")
-    if len(raw) > 4_096:
-        raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid") from None
-    if payload is None:
-        return True, None
-    return True, ObservabilityV8PreflightBinding.from_payload(payload)
-
-
-def _controller_has_hard_cut_bundle_custody() -> bool:
-    """Return whether the child received the paired hard-cut capability."""
-
-    if not _valid_upgrade_mutation_token():
-        return False
-    try:
-        binding_present, _binding = _expected_observability_v8_preflight_binding()
-    except ObservabilityV8UpgradeMigrationError:
-        return False
-    return binding_present
-
 
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
-    """Convert, target-validate, and transactionally activate config v8.
+    """Convert, target-validate, and activate config v8 (the 0.8.5 hard cut).
 
-    ``defenseclaw upgrade`` invokes the installed migration registry only
-    after stopping the gateway and installing the target wheel and binary.
-    This callable preserves that ordering and independently rejects a live
-    gateway identified by the active data directory's PID file. The PID check
-    is the enforceable precondition available to the current architecture;
-    the activation transaction's locks and CAS checks protect participating
-    writers after that point.
-
-    The release registry entry is intentionally added only when the shipping
-    version is selected. Reusing an already-published version would cause
-    existing cursors to skip this breaking schema migration.
+    ``defenseclaw migrate`` runs this after the installer has stopped the
+    gateway and installed the new binaries, so validation compiles the
+    candidate with the new gateway. The PID check still rejects a live
+    gateway identified by the active data directory's PID file.
     """
 
     data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
-    expected_binding_present, expected_binding = _expected_observability_v8_preflight_binding()
+    # 0.4.x and 0.5.0 wrote guardrail.*_enforcement_enabled, which v8 rejects.
+    # The step that strips them is keyed 0.5.0 but first shipped in 0.6.0, so
+    # the chain skips it for an install at 0.5.0. It is idempotent.
+    _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
     prepared = _prepare_observability_v8_migration(
         data_dir=data_dir,
         config_path=config_path,
     )
-    if expected_binding_present:
-        current_binding = _observability_v8_preflight_binding(prepared) if prepared is not None else None
-        if current_binding != expected_binding:
-            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed")
     if prepared is None:
         return
     environment = prepared.environment
-    migration = prepared.migration
 
     def validate_candidate(candidate: bytes, protected_overrides: Mapping[str, str]) -> None:
         validation_environment = dict(environment)
@@ -621,105 +398,44 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
             data_dir=data_dir,
         )
 
-    locked_binding = None
-    if expected_binding is not None:
-        locked_binding = (
-            expected_binding.source_sha256,
-            expected_binding.environment_file_present,
-            expected_binding.environment_file_sha256,
-        )
-    from defenseclaw.observability.v8_activation import V8ActivationError as _V8ActivationError
-
-    try:
-        activation = activate_v8_migration(
-            migration,
-            validator=validate_candidate,
-            data_dir=data_dir,
-            config_path=config_path,
-            environment_path=environment_path,
-            tighten_legacy_backup_root=True,
-            environment=environment,
-            preflight_source_binding=locked_binding,
-        )
-    except _V8ActivationError as exc:
-        # The bridge's public migration contract is intentionally independent
-        # of target-private exception classes. Preserve the value-free refusal
-        # code used by the controller when a source changed after preflight.
-        if getattr(exc, "code", None) == "preflight_source_changed":
-            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed") from None
-        raise
-    _refresh_observability_v8_bundle_for_legacy_upgrader(ctx, data_dir, activation)
+    activation = activate_v8_migration(
+        prepared.migration,
+        validator=validate_candidate,
+        data_dir=data_dir,
+        config_path=config_path,
+        environment_path=environment_path,
+        tighten_legacy_backup_root=True,
+        environment=environment,
+    )
     if activation.activated:
         ctx.changes.append("activated observability configuration schema v8")
 
 
-def preflight_required_migrations(
-    from_version: str,
-    to_version: str,
-    openclaw_home: str,
-    data_dir: str,
-    required_versions: list[str] | tuple[str, ...],
+def _preflight_observability_v8(
+    ctx: MigrationContext,
     scratch_dir: str,
-) -> int:
-    """Exercise required target migrations without mutating live state.
+    *,
+    gateway_binary: str | None = None,
+) -> None:
+    """Convert and target-validate a read-only snapshot in a scratch directory.
 
-    Native Setup calls this from the staged target interpreter while the old
-    runtime is still live.  Each supported preflight may read a bounded secure
-    snapshot, but candidate files are confined to ``scratch_dir`` and no
-    migration cursor, config, environment, service, or connector state is
-    published.
+    The source config is only read, so a ``DEFENSECLAW_CONFIG`` outside the data
+    directory is checked the same way the real migration later activates it.
     """
-
-    del openclaw_home  # Reserved for future required-migration preflights.
-    if not isinstance(required_versions, (list, tuple)) or any(
-        not isinstance(version, str) for version in required_versions
-    ):
-        raise ObservabilityV8UpgradeMigrationError("preflight_manifest_invalid")
-    scratch = os.path.abspath(os.path.expanduser(scratch_dir))
-    if not os.path.isabs(scratch_dir) or not os.path.isdir(scratch):
-        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
-    scratch_metadata = os.lstat(scratch)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if stat.S_ISLNK(scratch_metadata.st_mode) or (
-        getattr(scratch_metadata, "st_file_attributes", 0) & reparse_flag
-    ):
-        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
-
-    selected = [
-        version
-        for version in dict.fromkeys(required_versions)
-        if _ver_tuple(from_version) < _ver_tuple(version) <= _ver_tuple(to_version)
-    ]
-    for version in selected:
-        if version != "0.8.5":
-            raise ObservabilityV8UpgradeMigrationError("required_preflight_unsupported")
-        ctx = MigrationContext(
-            openclaw_home="",
-            data_dir=data_dir,
-            from_version=from_version,
-            to_version=to_version,
-            config_path=os.path.join(data_dir, "config.yaml"),
-            upgrade_handles_local_bundle=True,
-        )
-        _preflight_observability_v8(ctx, scratch)
-    return len(selected)
-
-
-def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None:
-    """Convert and target-validate a read-only snapshot in staged custody."""
 
     data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
-    try:
-        common = os.path.commonpath((os.path.normcase(data_dir), os.path.normcase(config_path)))
-    except ValueError:
-        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape") from None
-    if common != os.path.normcase(data_dir):
-        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape")
     source = _read_observability_v8_upgrade_source(config_path)
     if source is None:
         return
+    # The real migration strips these first (see _migrate_observability_v8).
+    try:
+        stripped, removed = _strip_legacy_guardrail_enforcement_keys(source.decode("utf-8"))
+    except UnicodeDecodeError:
+        removed = []
+    if removed:
+        source = stripped.encode("utf-8")
     environment = _observability_v8_upgrade_environment(environment_path)
     migration = convert_v7_observability_to_v8(
         source,
@@ -734,48 +450,9 @@ def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None
         protected,
         data_dir=data_dir,
         candidate_directory=scratch_dir,
+        gateway_binary=gateway_binary,
     )
 
-
-def _refresh_observability_v8_bundle_for_legacy_upgrader(
-    ctx: MigrationContext,
-    data_dir: str,
-    activation,
-    *,
-    restart_intent_receipt: str | None = None,
-) -> None:
-    """Bridge released upgrade clients to the target bundle transaction.
-
-    Upgrade commands released before 0.8.4 know how to invoke target-wheel
-    migrations but do not know about the later local-observability refresh
-    phase.  Run that phase from the required migration in a clean target
-    interpreter.  Current upgrade clients declare that they own the phase and
-    execute it after all required migrations, avoiding a duplicate restart.
-    """
-
-    if ctx.upgrade_handles_local_bundle:
-        return
-    destination = os.path.join(data_dir, "observability-stack")
-    if not os.path.lexists(destination):
-        return
-    backup_directory = getattr(activation, "backup_directory", None)
-    if not isinstance(backup_directory, str) or not backup_directory:
-        backup_directory = _allocate_observability_v8_bundle_backup(data_dir)
-    result = _run_observability_v8_bundle_upgrade_in_target(
-        data_dir,
-        backup_directory,
-        ctx.to_version,
-        restart_intent_receipt=restart_intent_receipt,
-    )
-    if result.get("installed") is True:
-        ctx.changes.append("refreshed local observability bundle for the target release")
-    degraded = result.get("degraded_errors")
-    if isinstance(degraded, list) and degraded:
-        ux.warn(
-            "local observability bundle refreshed but restart/readiness is degraded; "
-            "run 'defenseclaw setup local-observability status' after upgrade",
-            indent="    ",
-        )
 
 
 def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
@@ -828,111 +505,6 @@ def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
         if data_descriptor >= 0:
             os.close(data_descriptor)
 
-
-def _run_observability_v8_bundle_upgrade_in_target(
-    data_dir: str,
-    backup_directory: str,
-    target_version: str,
-    *,
-    restart_intent_receipt: str | None = None,
-) -> dict[str, object]:
-    """Refresh/restart through a clean interpreter from the installed wheel."""
-
-    fd, result_path = tempfile.mkstemp(prefix="defenseclaw-v8-bundle-", suffix=".json")
-    os.close(fd)
-    script = """
-import json
-import sys
-from pathlib import Path
-
-from defenseclaw.bundle_refresh import (
-    LocalObservabilityUpgradeError,
-    restart_upgraded_local_observability_stack,
-    upgrade_local_observability_stack,
-)
-from defenseclaw.upgrade_receipt import (
-    clear_local_bundle_restart_intent,
-    record_local_bundle_restart_intent,
-)
-
-try:
-    receipt = Path(sys.argv[4]) if sys.argv[4] else None
-    result = upgrade_local_observability_stack(
-        sys.argv[1],
-        sys.argv[2],
-        bundle_version=sys.argv[3],
-        restart_intent_recorder=(
-            None
-            if receipt is None
-            else lambda required: record_local_bundle_restart_intent(
-                receipt,
-                restart_required=required,
-            )
-        ),
-    )
-    payload = result.to_dict()
-    payload["ok"] = True
-    restart_succeeded = not result.restart_required
-    if result.restart_required:
-        try:
-            restarted = restart_upgraded_local_observability_stack(sys.argv[1])
-            payload["restarted"] = restarted.restarted
-            payload["degraded_errors"] = list(restarted.degraded_errors)
-            restart_succeeded = restarted.restarted and not restarted.degraded_errors
-        except LocalObservabilityUpgradeError as exc:
-            payload["degraded_errors"] = [f"{exc.code}:{exc.phase}"]
-    if receipt is not None and restart_succeeded:
-        try:
-            clear_local_bundle_restart_intent(receipt)
-        except Exception:
-            degraded_errors = payload.setdefault("degraded_errors", [])
-            if isinstance(degraded_errors, list):
-                degraded_errors.append("restart_intent_cleanup_failed")
-            else:
-                payload["degraded_errors"] = ["restart_intent_cleanup_failed"]
-except LocalObservabilityUpgradeError as exc:
-    payload = {"ok": False, "code": exc.code, "phase": exc.phase}
-except Exception:
-    payload = {"ok": False, "code": "unexpected_failure", "phase": "invoke"}
-
-with open(sys.argv[5], "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, sort_keys=True)
-sys.exit(0 if payload["ok"] else 1)
-"""
-    try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                "-c",
-                script,
-                data_dir,
-                backup_directory,
-                target_version,
-                restart_intent_receipt or "",
-                result_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=360,
-            check=False,
-        )
-        try:
-            with open(result_path, encoding="utf-8") as result_file:
-                payload = json.load(result_file)
-        except (OSError, json.JSONDecodeError):
-            payload = None
-        if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
-            raise ObservabilityV8UpgradeMigrationError("local_bundle_refresh_failed")
-        return payload
-    except subprocess.TimeoutExpired:
-        raise ObservabilityV8UpgradeMigrationError("local_bundle_refresh_timeout") from None
-    finally:
-        try:
-            os.remove(result_path)
-        except OSError:
-            pass
 
 
 def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
@@ -2015,7 +1587,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     tmp_path: str | None = None
     try:
         fd, tmp_path = tempfile.mkstemp(
-            prefix=f".tmp.{migration_state_helpers.upgrade_mutation_temp_suffix()}",
+            prefix=".tmp.",
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
@@ -2495,6 +2067,35 @@ _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS: tuple[str, ...] = (
 )
 
 
+def _strip_legacy_guardrail_enforcement_keys(text: str) -> tuple[str, list[str]]:
+    """Return ``text`` without the guardrail.*_enforcement_enabled lines, and which were removed."""
+
+    block_match = _find_top_level_block(text, "guardrail")
+    if not block_match:
+        return text, []
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    new_body = block_match.group("body")
+
+    removed: list[str] = []
+    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
+        # Delete the whole line carrying the legacy key (with its
+        # terminator). The pattern accepts any value form (quoted /
+        # unquoted bool, optional inline comment) and any leading
+        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
+        # CRLF terminator with the line (no orphaned ``\r`` left behind)
+        # and also matches a final key line with no trailing newline.
+        pattern = re.compile(
+            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
+            flags=re.MULTILINE,
+        )
+        new_body, count = pattern.subn("", new_body)
+        if count:
+            removed.append(key)
+    return text[:body_start] + new_body + text[body_end:], removed
+
+
 def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     """Drop legacy guardrail.*_enforcement_enabled keys from config.yaml.
 
@@ -2527,36 +2128,8 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     if text is None:
         return
 
-    block_match = _find_top_level_block(text, "guardrail")
-    if not block_match:
-        return
-
-    body_start = block_match.start("body")
-    body_end = block_match.end("body")
-    body = block_match.group("body")
-
-    removed: list[str] = []
-    new_body = body
-    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
-        # Delete the whole line carrying the legacy key (with its
-        # terminator). The pattern accepts any value form (quoted /
-        # unquoted bool, optional inline comment) and any leading
-        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
-        # CRLF terminator with the line (no orphaned ``\r`` left behind)
-        # and also matches a final key line with no trailing newline.
-        pattern = re.compile(
-            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
-            flags=re.MULTILINE,
-        )
-        new_body, count = pattern.subn("", new_body)
-        if count:
-            removed.append(key)
-
+    new_text, removed = _strip_legacy_guardrail_enforcement_keys(text)
     if not removed:
-        return
-
-    new_text = text[:body_start] + new_body + text[body_end:]
-    if new_text == text:
         return
 
     if not _atomic_write_text(cfg_path, new_text):
@@ -3145,13 +2718,603 @@ def _line_ending(line: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Migration: retired Desktop connector ID → devin
+# ---------------------------------------------------------------------------
+
+
+def _migrate_retired_desktop_connector(ctx: MigrationContext) -> None:
+    """Persist the move of the retired Desktop connector ID to ``devin``.
+
+    Both config loaders already apply the rename in memory
+    (``legacy_connector.migrate_raw_config`` and the Go
+    ``legacyconnector.MigrateConnectorKeys``); this step writes it to
+    ``config.yaml`` so the file matches what runs. The gateway removes the
+    DefenseClaw hook entries an older release left on the host on its next
+    start.
+
+    The rewrite is surgical (values and one map key, comments kept) and is
+    accepted only when the result parses to exactly the migrated document;
+    otherwise the migrated document is written in full. A failure never
+    aborts ``defenseclaw migrate``: the in-memory rename keeps both loaders
+    working.
+
+    This is not a schema step (the loaders read both IDs at the same
+    ``config_version``), so ``migrate`` runs it whenever the config still
+    holds the retired ID; see :func:`_connector_roster_pending`.
+    """
+    try:
+        _persist_retired_desktop_connector(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort migrate on this step
+        ux.warn(f"retired connector ID migration step failed: {exc}", indent="    ")
+
+
+def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
+    cfg_path = ctx.active_config_path()
+    if not os.path.isfile(cfg_path):
+        return
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    raw = yaml.safe_load(text)
+    migrated, notices = legacy_connector.migrated_copy(raw, cfg_path)
+    if not notices:
+        return
+    new_text = _rewrite_retired_desktop_connector_text(text)
+    try:
+        surgical_ok = new_text != text and yaml.safe_load(new_text) == migrated
+    except yaml.YAMLError:
+        surgical_ok = False
+    if not surgical_ok:
+        new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+    ctx.changes.extend(notices)
+
+
+def _rewrite_retired_desktop_connector_text(text: str) -> str:
+    """Rename the retired ID in ``claw.mode``, ``guardrail.connector``, the
+    per-connector map keys (``legacy_connector.CONNECTOR_MAP_BLOCKS`` and
+    ``TOP_LEVEL_CONNECTOR_MAPS``), the connector name lists
+    (``legacy_connector.CONNECTOR_NAME_LISTS``), asset_policy rule
+    connectors and observability route selectors, keeping every other
+    byte."""
+    retired = re.escape(legacy_connector.RETIRED_DESKTOP_ID)
+    replacement = legacy_connector.REPLACEMENT
+    for block_key, field_name in (("claw", "mode"), ("guardrail", "connector")):
+        text = _replace_block_scalar_text(text, block_key, field_name, retired, replacement)
+
+    def plan(keys: list[str]) -> tuple[dict[str, str], set[str]]:
+        _, rename, dropped = legacy_connector.migrate_connector_keys("", keys)
+        return rename, set(dropped)
+
+    for block_key in legacy_connector.CONNECTOR_MAP_BLOCKS:
+        text = _edit_connector_map_keys(text, block_key, plan)
+    for map_key in legacy_connector.TOP_LEVEL_CONNECTOR_MAPS:
+        text = _edit_top_level_map_keys(text, map_key, plan)
+    for path in legacy_connector.CONNECTOR_NAME_LISTS:
+        text = _replace_connector_list_text(text, path, retired, replacement)
+    # asset_policy rule entries (``connector: <id>``) and observability route
+    # selectors (``connectors: [...]`` lists under ``observability``).
+    text = _replace_nested_scalar_text(text, "asset_policy", "connector", retired, replacement)
+    text = _replace_connector_list_text(text, ("observability", "connectors"), retired, replacement)
+    return text
+
+
+def _replace_nested_scalar_text(text: str, block_key: str, field_name: str, value_re: str, new_value: str) -> str:
+    """Replace every ``<field_name>: <value>`` line (a mapping row or a block
+    list item's first row) inside the column-0 block *block_key* whose scalar
+    matches *value_re* (case-insensitive, optionally quoted), keeping quotes,
+    inline comments and every other byte. Flow-style mappings are left alone;
+    callers compare the result with the migrated document."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    pattern = re.compile(
+        r"(?P<prefix>^[ \t]+(?:-[ \t]+)?" + re.escape(field_name) + r":[ \t]*)(?P<quote>[\"']?)"
+        + value_re
+        + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    body = pattern.sub(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}{new_value}{m.group('quote')}{m.group('suffix')}",
+        block.group("body"),
+    )
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _replace_block_scalar_text(text: str, block_key: str, field_name: str, value_re: str, new_value: str) -> str:
+    """Replace ``<block_key>.<field_name>`` when its scalar value matches
+    *value_re* (case-insensitive, optionally quoted), keeping quotes, inline
+    comments and every other byte."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    pattern = re.compile(
+        r"(?P<prefix>^[ \t]+" + re.escape(field_name) + r":[ \t]*)(?P<quote>[\"']?)"
+        + value_re
+        + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    body = pattern.sub(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}{new_value}{m.group('quote')}{m.group('suffix')}",
+        block.group("body"),
+    )
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _yaml_indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _yaml_is_blank(line: str) -> bool:
+    return not line.strip() or line.lstrip().startswith("#")
+
+
+def _edit_mapping_rows(
+    lines: list[str],
+    start: int,
+    end: int,
+    plan: Callable[[list[str]], tuple[dict[str, str], set[str]]],
+) -> str | None:
+    """Rename or drop the keys of the block mapping in ``lines[start:end]``.
+
+    Returns the edited lines joined, or ``None`` when *plan* changes nothing.
+    """
+    children = [i for i in range(start, end) if not _yaml_is_blank(lines[i])]
+    if not children:
+        return None
+    child = _yaml_indent_of(lines[children[0]])
+    key_re = re.compile(r"^[ \t]*(?P<quote>[\"']?)(?P<key>[^:\"'#]+)(?P=quote)[ \t]*:")
+    keyed = [i for i in children if _yaml_indent_of(lines[i]) == child and key_re.match(lines[i])]
+    keys = {i: key_re.match(lines[i]).group("key").strip() for i in keyed}
+    rename, drop_keys = plan([keys[i] for i in keyed])
+    if not rename and not drop_keys:
+        return None
+    drop: set[int] = set()
+    for row in keyed:
+        key = keys[row]
+        if key in drop_keys:
+            stop = row + 1
+            while stop < end and (_yaml_is_blank(lines[stop]) or _yaml_indent_of(lines[stop]) > child):
+                stop += 1
+            drop.update(range(row, stop))
+        elif key in rename:
+            match = key_re.match(lines[row])
+            lines[row] = lines[row][: match.start("key")] + rename[key] + lines[row][match.end("key") :]
+    return "".join(line for i, line in enumerate(lines) if i not in drop)
+
+
+def _edit_connector_map_keys(
+    text: str,
+    block_key: str,
+    plan: Callable[[list[str]], tuple[dict[str, str], set[str]]],
+) -> str:
+    """Rename or drop keys of ``<block_key>.connectors`` as *plan* decides,
+    keeping every other byte.
+
+    *plan* receives the map's keys and returns ``(rename, drop)``. Only a
+    block-style ``connectors:`` mapping that is a direct child of the block is
+    touched; nested selector lists of the same name and flow-style maps are
+    left alone (callers verify the result and fall back to a full rewrite)."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+    first = next((i for i, line in enumerate(lines) if not _yaml_is_blank(line)), None)
+    if first is None:
+        return text
+    block_child = _yaml_indent_of(lines[first])
+    header = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if _yaml_indent_of(line) == block_child and re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)
+        ),
+        None,
+    )
+    if header is None:
+        return text
+    parent = _yaml_indent_of(lines[header])
+    end = header + 1
+    while end < len(lines) and (_yaml_is_blank(lines[end]) or _yaml_indent_of(lines[end]) > parent):
+        end += 1
+    body = _edit_mapping_rows(lines, header + 1, end, plan)
+    if body is None:
+        return text
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _edit_top_level_map_keys(
+    text: str,
+    block_key: str,
+    plan: Callable[[list[str]], tuple[dict[str, str], set[str]]],
+) -> str:
+    """Rename or drop keys of the column-0 block mapping ``<block_key>`` (for
+    example ``connector_hooks``) as *plan* decides, keeping every other byte.
+    A flow-style map is left alone (callers verify the result)."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+    body = _edit_mapping_rows(lines, 0, len(lines), plan)
+    if body is None:
+        return text
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _replace_connector_list_text(text: str, path: tuple[str, ...], value_re: str, new_value: str) -> str:
+    """Replace list entries matching *value_re* (case-insensitive, optionally
+    quoted) in the list ``path[-1]`` inside the column-0 block ``path[0]``,
+    keeping every other byte. Handles a one-line flow list and a block list.
+    Entries are replaced, not deduplicated; callers compare the result with
+    the migrated document and fall back to a full rewrite when they differ."""
+    block = _find_top_level_block(text, path[0])
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+    header_re = re.compile(r"^(?P<head>[ \t]+" + re.escape(path[-1]) + r":)(?P<rest>[^\r\n]*)")
+    flow_re = re.compile(
+        r"(?P<lead>[\[,][ \t]*)(?P<quote>[\"']?)" + value_re + r"(?P=quote)(?=[ \t]*[,\]])",
+        flags=re.IGNORECASE,
+    )
+    item_re = re.compile(
+        r"^(?P<prefix>[ \t]*-[ \t]+)(?P<quote>[\"']?)"
+        + value_re
+        + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\r\n]*)?\r?\n?)$",
+        flags=re.IGNORECASE,
+    )
+    changed = False
+    index = 0
+    while index < len(lines):
+        header = header_re.match(lines[index])
+        index += 1
+        if not header:
+            continue
+        rest = header.group("rest")
+        if "[" in rest:
+            new_rest = flow_re.sub(lambda m: f"{m.group('lead')}{m.group('quote')}{new_value}{m.group('quote')}", rest)
+            if new_rest != rest:
+                line = lines[index - 1]
+                lines[index - 1] = line[: header.start("rest")] + new_rest + line[header.end("rest") :]
+                changed = True
+            continue
+        indent = _yaml_indent_of(lines[index - 1])
+        while index < len(lines):
+            line = lines[index]
+            if not _yaml_is_blank(line):
+                level = _yaml_indent_of(line)
+                if level < indent or (level == indent and not line.lstrip().startswith("-")):
+                    break
+                item = item_re.match(line)
+                if item:
+                    quote = item.group("quote")
+                    lines[index] = f"{item.group('prefix')}{quote}{new_value}{quote}{item.group('suffix')}"
+                    changed = True
+            index += 1
+    if not changed:
+        return text
+    return text[: block.start("body")] + "".join(lines) + text[block.end("body") :]
+
+
+# ---------------------------------------------------------------------------
+# Migration: drop connectors this release does not ship
+# ---------------------------------------------------------------------------
+
+
+def _migrate_connector_roster(ctx: MigrationContext) -> None:
+    """Connector name changes: rename the retired Desktop ID first (so it is
+    already ``devin``), then drop any name this release does not ship.
+
+    Not a schema step: ``migrate`` runs it whenever
+    :func:`_connector_roster_pending` finds work, at any ``config_version``.
+    """
+    _migrate_retired_desktop_connector(ctx)
+    _migrate_unshipped_connectors(ctx)
+
+
+def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
+    """Report whether ``config_path`` still names the retired Desktop
+    connector ID or a connector this release does not ship."""
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None:
+        return False
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if legacy_connector.migrated_copy(raw, config_path)[1]:
+        return True
+    try:
+        return bool(_unshipped_connector_names(raw, data_dir))
+    except RuntimeError:
+        return False
+
+
+_REMOVED_CONNECTORS_DOC = (
+    "see Upgrade → Renamed and removed connectors "
+    "(https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/#renamed-and-removed-connectors)"
+)
+
+
+def _migrate_unshipped_connectors(ctx: MigrationContext) -> None:
+    """Drop connector names this release does not ship from ``config.yaml``.
+
+    A connector an older release shipped and this one removed stays named in
+    ``guardrail.connectors`` / ``guardrail.connector`` / ``claw.mode`` after
+    an upgrade, and the gateway refuses to boot while config names a
+    connector it cannot resolve, leaving every other connector on the host
+    unprotected. This step removes such names without knowing them: a name is
+    unshipped when it is neither a built-in connector
+    (``connector_paths.KNOWN_CONNECTORS``) nor declared by a plugin directory
+    under ``plugin_dir``. The primary and ``claw.mode`` mirror move to the
+    first remaining connector.
+
+    When no shipped connector would remain, the file is left unchanged and
+    the operator is told to choose one: defaulting to another connector
+    silently would be worse than the loud boot failure. The agent's own
+    config files are never touched (the gateway removes DefenseClaw's hook
+    scripts for the dropped names on its next start). A failure never aborts
+    ``defenseclaw migrate``.
+    """
+    try:
+        _drop_unshipped_connectors(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort migrate on this step
+        ux.warn(f"unshipped connector cleanup step failed: {exc}", indent="    ")
+
+
+def _shipped_connector_names(raw: dict, data_dir: str) -> tuple[set[str], bool]:
+    """Return ``(shipped names, open_ended)``.
+
+    *open_ended* is true while ``plugin_dir`` holds a plugin manifest the
+    gateway would load: the gateway registers that plugin under the name its
+    code reports, which need not match the directory or manifest name, so no
+    name can be ruled out without loading it. Raises RuntimeError when the
+    plugin directory cannot be read.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, scan_plugin_connectors
+
+    plugin_dir = raw.get("plugin_dir") if isinstance(raw.get("plugin_dir"), str) else ""
+    plugin_dir = (plugin_dir or "").strip() or os.path.join(data_dir, "plugins")
+    try:
+        declared, open_ended = scan_plugin_connectors(plugin_dir)
+    except OSError as exc:
+        # Cannot tell which plugins exist: treat nothing as unshipped.
+        raise RuntimeError(f"cannot read plugin directory {plugin_dir}: {exc}") from exc
+    return set(KNOWN_CONNECTORS) | declared, open_ended
+
+
+def _configured_connector_fields(raw: dict) -> tuple[dict, dict, str, str]:
+    """``(guardrail, guardrail.connectors, guardrail.connector, claw.mode)``
+    from a parsed config, each empty when absent or of the wrong type."""
+    guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), dict) else {}
+    claw = raw.get("claw") if isinstance(raw.get("claw"), dict) else {}
+    connectors = guardrail.get("connectors") if isinstance(guardrail.get("connectors"), dict) else {}
+    primary = guardrail.get("connector") if isinstance(guardrail.get("connector"), str) else ""
+    mode = claw.get("mode") if isinstance(claw.get("mode"), str) else ""
+    return guardrail, connectors, primary, mode
+
+
+# ``defenseclaw-gateway connector verify`` exits 2, naming "unknown
+# connector", for a name its registry (built-in and loaded plugins) cannot
+# resolve and no plugin directory declares.
+_GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2
+
+
+def _gateway_reports_unknown_connector(gateway_binary: str, name: str, data_dir: str) -> bool:
+    """Ask *gateway_binary* whether it can resolve connector *name*. Only an
+    explicit "unknown connector" verdict returns True; any other outcome
+    (a launch failure, a time-out, residue, a config it cannot read) keeps
+    the name, as when no gateway is given."""
+    try:
+        proc = subprocess.run(
+            [gateway_binary, "connector", "verify", "--connector", name, "--data-dir", data_dir],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == _GATEWAY_UNKNOWN_CONNECTOR_EXIT and "unknown connector" in (proc.stderr or "")
+
+
+def _unshipped_predicate(raw: dict, data_dir: str, gateway_binary: str | None = None) -> Callable[[object], bool]:
+    """Return a test for connector names this release does not ship. Raises
+    RuntimeError when the plugin directory cannot be read.
+
+    While ``plugin_dir`` holds a plugin the gateway could load, a name no
+    built-in connector or plugin directory declares may still be the name
+    that plugin registers. Offline such a name is kept; with *gateway_binary*
+    (the staged gateway the installer passes to ``migrate --check``) the
+    gateway is asked, and a name it reports unknown is unshipped."""
+    from defenseclaw.connector_contracts import normalize_connector
+
+    shipped, open_ended = _shipped_connector_names(raw, data_dir)
+    verdicts: dict[str, bool] = {}
+
+    def unshipped(name: object) -> bool:
+        value = normalize_connector(str(name or ""))
+        if not value or value in shipped or legacy_connector.is_retired(value):
+            return False
+        if not open_ended:
+            return True
+        if not gateway_binary:
+            return False
+        if value not in verdicts:
+            verdicts[value] = _gateway_reports_unknown_connector(gateway_binary, value, data_dir)
+        return verdicts[value]
+
+    return unshipped
+
+
+def _unshipped_connector_names(raw: object, data_dir: str) -> list[str]:
+    """Connector names ``raw`` configures that this release does not ship."""
+    if not isinstance(raw, dict):
+        return []
+    _guardrail, connectors, primary, mode = _configured_connector_fields(raw)
+    unshipped = _unshipped_predicate(raw, data_dir)
+    return sorted({*(str(key) for key in connectors if unshipped(key)), *(n.strip() for n in (primary, mode) if unshipped(n))})
+
+
+def _unshipped_roster(
+    raw: dict, data_dir: str, gateway_binary: str | None = None
+) -> tuple[list[str], list[str], list[str]]:
+    """``(unshipped names, remaining shipped names, removable names)`` for a
+    parsed config. *removable* are the unshipped names ``setup remove``
+    accepts (``guardrail.connectors`` keys, or the primary when that map is
+    empty). Raises RuntimeError when the plugin directory cannot be read."""
+    _guardrail, connectors, primary, mode = _configured_connector_fields(raw)
+    unshipped = _unshipped_predicate(raw, data_dir, gateway_binary)
+    names = sorted(
+        {*(str(key) for key in connectors if unshipped(key)), *(n.strip() for n in (primary, mode) if unshipped(n))}
+    )
+    remaining = sorted(str(key) for key in connectors if not unshipped(key))
+    if not connectors and primary and not unshipped(primary):
+        remaining = [primary.strip()]
+    if connectors:
+        removable = sorted(str(key) for key in connectors if unshipped(key))
+    else:
+        removable = [primary.strip()] if primary and unshipped(primary) else []
+    return names, remaining, removable
+
+
+# ``defenseclaw setup remove`` first shipped in 0.7.0.
+_SETUP_REMOVE_SINCE = (0, 7, 0)
+
+
+def _version_before(version: str, floor: tuple[int, ...]) -> bool:
+    """Report whether *version* (``X.Y.Z``, an optional ``v`` and suffix) is
+    older than *floor*; an unknown or unparsable version is not."""
+    match = re.match(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?", version or "")
+    if not match:
+        return False
+    parsed = tuple(int(part or 0) for part in match.groups())
+    return parsed < floor
+
+
+def _remove_or_replace_hint(removable: list[str], *, force: bool, can_remove: bool = True) -> str:
+    setup = "`defenseclaw setup <connector>`"
+    if not can_remove:
+        return f"set up a supported connector ({setup}) or edit config.yaml so it names one"
+    if not removable:
+        return f"set up a supported connector ({setup})"
+    flags = " --yes --force" if force else " --yes"
+    remove = " and ".join(f"`defenseclaw setup remove {name}{flags}`" for name in removable)
+    return f"remove it ({remove}) or set up another connector ({setup})"
+
+
+def _check_connector_roster(
+    config_path: str,
+    data_dir: str,
+    version: str,
+    *,
+    gateway_binary: str | None = None,
+    from_version: str = "",
+) -> None:
+    """Fail ``migrate --check`` when no configured connector would remain.
+
+    The installer runs the check before it swaps anything. Upgrading anyway
+    would leave config.yaml naming only connectors the new gateway cannot
+    load, so the new gateway would not start (and the installer would roll
+    back a running install). The fix has to happen on the installed release,
+    so the message gives commands that release accepts: ``setup remove``
+    refuses the last connector there without ``--force``, and releases
+    before 0.7.0 (*from_version*) have no ``setup remove``. With
+    *gateway_binary* the staged gateway settles names a loadable plugin
+    might register.
+    """
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None:
+        return
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return
+    if not isinstance(raw, dict):
+        return
+    # The roster step renames the retired Desktop ID before it drops names.
+    raw, _notices = legacy_connector.migrated_copy(raw)
+    try:
+        names, remaining, removable = _unshipped_roster(raw, data_dir, gateway_binary)
+    except RuntimeError:
+        return
+    if not names or remaining:
+        return
+    listed = ", ".join(repr(n) for n in names)
+    hint = _remove_or_replace_hint(
+        removable, force=True, can_remove=not _version_before(from_version, _SETUP_REMOVE_SINCE)
+    )
+    raise MigrationError(
+        f"connector {listed} is not shipped by DefenseClaw {version} and no other connector is configured, "
+        f"so the gateway could not start after the upgrade; nothing was changed. With the DefenseClaw you have "
+        f"now, {hint}, then upgrade again; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
+    cfg_path = ctx.active_config_path()
+    if not os.path.isfile(cfg_path):
+        return
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    raw = yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        return
+    guardrail, connectors, primary, mode = _configured_connector_fields(raw)
+    unshipped = _unshipped_predicate(raw, ctx.data_dir)
+    dropped_keys = [str(key) for key in connectors if unshipped(key)]
+    names, remaining, removable = _unshipped_roster(raw, ctx.data_dir)
+    if not names:
+        return
+    listed = ", ".join(repr(n) for n in names)
+    if not remaining:
+        message = (
+            f"connector {listed} is not shipped by this release and is the only connector configured; "
+            f"config.yaml was left unchanged and the gateway will not start until you "
+            f"{_remove_or_replace_hint(removable, force=False)}; {_REMOVED_CONNECTORS_DOC}"
+        )
+        ux.warn(message, indent="    ")
+        ctx.changes.append(message)
+        return
+    new_primary = primary.strip() if primary and not unshipped(primary) else remaining[0]
+    migrated = copy.deepcopy(raw)
+    if dropped_keys:
+        migrated["guardrail"]["connectors"] = {
+            key: value for key, value in connectors.items() if str(key) not in dropped_keys
+        }
+    if primary and unshipped(primary):
+        migrated["guardrail"]["connector"] = new_primary
+    if mode and unshipped(mode):
+        migrated["claw"]["mode"] = new_primary
+
+    new_text = text
+    if primary and unshipped(primary):
+        new_text = _replace_block_scalar_text(new_text, "guardrail", "connector", re.escape(primary.strip()), new_primary)
+    if mode and unshipped(mode):
+        new_text = _replace_block_scalar_text(new_text, "claw", "mode", re.escape(mode.strip()), new_primary)
+    drop = set(dropped_keys)
+    new_text = _edit_connector_map_keys(new_text, "guardrail", lambda keys: ({}, {k for k in keys if k in drop}))
+    try:
+        surgical_ok = new_text != text and yaml.safe_load(new_text) == migrated
+    except yaml.YAMLError:
+        surgical_ok = False
+    if not surgical_ok:
+        new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+    ctx.changes.append(
+        f"removed connector {listed} (not shipped by this release) from config.yaml; primary connector is "
+        f"{new_primary!r}. DefenseClaw did not change those agents' config files; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
-# Target-wheel compatibility contract read by the old upgrader before it
-# replaces any installed artifact. Keep this literal so a verified wheel can
-# be inspected without importing or executing its code.
-SUPPORTED_CONFIG_VERSIONS: tuple[int, ...] = (8,)
 
 # Ordered list of (version, description, callable). Each callable
 # takes a :class:`MigrationContext` and mutates it (appending to
@@ -3210,299 +3373,312 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
 ]
 
 
-def run_migrations(
-    from_version: str,
-    to_version: str,
-    openclaw_home: str,
-    data_dir: str | None = None,
+
+
+# ---------------------------------------------------------------------------
+# defenseclaw migrate
+# ---------------------------------------------------------------------------
+
+# Steps that move config.yaml from ``config_version`` N to N+1, keyed by N.
+# Empty at 1.0.0. Adding a key only needs a loader default; renaming or
+# removing one needs a step here plus a bump of
+# ``config.CURRENT_CONFIG_VERSION`` and the Go gateway's
+# MaxSupportedConfigVersion.
+CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {}
+
+# The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
+# that the frozen ``MIGRATIONS`` chain imports.
+_FIRST_V8_CONFIG_VERSION = 8
+# The 0.x chain step that converts a config to v8.
+_V8_IMPORT_VERSION = "0.8.5"
+_LEGACY_STATE_FILE = ".migration_state.json"
+_CONFIG_VERSION_LINE = re.compile(r"^config_version[ \t]*:[^\r\n]*", re.MULTILINE)
+
+
+class MigrationError(RuntimeError):
+    """The data directory could not be brought to the current schema."""
+
+
+class ConfigTooNewError(MigrationError):
+    """config.yaml was written by a newer DefenseClaw than this one."""
+
+
+@dataclass
+class MigrateResult:
+    """What ``migrate`` found and did."""
+
+    from_config_version: int | None
+    to_config_version: int
+    applied: list[str] = field(default_factory=list)
+    changed: bool = False
+
+
+def migrate(
+    data_dir: str,
     *,
-    upgrade_handles_local_bundle: bool = False,
-    strict_required: tuple[str, ...] = (),
-    controller_owns_local_bundle_transaction: bool = False,
-) -> int:
-    """Run all applicable migrations up to ``to_version``.
+    openclaw_home: str | None = None,
+    from_version: str | None = None,
+    check: bool = False,
+    gateway_binary: str | None = None,
+) -> MigrateResult:
+    """Bring ``data_dir`` to the config schema this build reads.
 
-    Source of truth for "what has run" is the per-host migration
-    cursor at ``<data_dir>/.migration_state.json`` (see
-    ``defenseclaw.migration_state`` for the schema). The
-    ``from_version`` argument is now advisory — it only matters on
-    the very first call after a host upgrades to a build that
-    persists the cursor (the bootstrap path).
+    ``from_version`` is the DefenseClaw version that wrote the data. It only
+    matters for installs older than 0.8.5, whose chain position the config
+    alone cannot tell, and only when the install has no 0.x migration cursor:
+    the cursor records which steps actually ran (a step that failed on an
+    earlier upgrade is retried), so it wins over a version number.
 
-    Why we moved from "version-range" to "cursor-driven":
-
-    * Version-range gates re-fired migrations whenever the author
-      forgot to bump ``__version__`` before tagging a release —
-      because ``current_version`` lagged the actual installed bits.
-    * Partial failures (one migration in a batch raised) were
-      indistinguishable from "never ran" — operators who re-ran the
-      upgrade hit the failed step, but the SUCCESSFUL earlier ones
-      ran AGAIN against state they had already mutated.
-    * Operators restoring from backup snapshots quietly drifted out
-      of sync because nothing on disk recorded which migrations had
-      observably executed.
-
-    The cursor's ``applied`` set fixes all three: each migration is
-    only run once per host, full stop, and a partial-failure batch
-    leaves successful entries marked and failed entries unmarked so
-    re-running picks up exactly where it left off.
-
-    Backward-compat preserved on purpose:
-
-    * The ``from_version`` / ``to_version`` API is unchanged.
-    * ``from_version == to_version`` (the same-version reapply
-      escape hatch used by ``defenseclaw upgrade --version <same>``)
-      still re-runs the migration at exactly ``to_version`` even
-      when the cursor says applied. That's a documented operator
-      tool for "I think this migration didn't take, please force
-      it"; without it, the only recovery would be ``defenseclaw
-      doctor migration-state --unmark X.Y.Z`` followed by upgrade,
-      which is more friction than the historical UX warrants.
-
-    ``data_dir`` defaults to ``$DEFENSECLAW_HOME`` or
-    ``~/.defenseclaw`` when not supplied. The optional argument lets
-    ``cmd_upgrade.py`` thread the loaded ``Config.data_dir`` through
-    so that operators with a non-default ``DEFENSECLAW_HOME`` get
-    their migration applied at the right path.
-
-    ``strict_required`` is reserved for authenticated upgrade controllers.
-    A listed migration retains its bounded exception instead of being reduced
-    to a later missing-cursor error, so native Setup can roll back before it
-    commits an unusable target runtime. Ordinary CLI callers preserve the
-    historical continue-and-retry behavior.
-
-    ``controller_owns_local_bundle_transaction`` is a capability handshake,
-    not a release-version check. Controllers that advertise it reconcile the
-    installed local-observability bundle after migrations. A controller that
-    only advertises the older ``upgrade_handles_local_bundle`` boolean is the
-    published v8 controller whose normal v8-to-v8 path skipped that phase; the
-    target wheel repairs the omission after the migration loop. Authenticated
-    hard-cut controllers retain exclusive rollback custody and are never
-    repaired from inside the migration runner.
-
-    Returns the number of migrations actually executed (excludes
-    cursor-skipped ones). Failures don't increment the counter and
-    don't leave a cursor entry — the next upgrade will retry them.
+    ``check`` changes nothing: it reports the pending steps and raises
+    :class:`ConfigTooNewError` for a config from a newer release, and
+    :class:`MigrationError` when every configured connector is one this
+    release does not ship (the upgrade would leave a gateway that cannot
+    start). For a 0.x
+    install with ``gateway_binary`` set, it also converts a scratch copy with
+    that (staged) gateway so a conversion failure surfaces before the
+    installer swaps anything.
     """
-    from defenseclaw import migration_state
 
-    required_state_apis = (
-        "detect_schema",
-        "is_future_schema",
-        "FutureSchemaError",
-        "upgrade_mutation_temp_suffix",
+    from defenseclaw import __version__
+    from defenseclaw.config import CURRENT_CONFIG_VERSION, ConfigVersionError, source_config_version
+
+    data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    ctx = MigrationContext(
+        openclaw_home="",
+        data_dir=data_dir,
+        from_version=from_version or "",
+        to_version=__version__,
     )
-    if not all(hasattr(migration_state, attr) for attr in required_state_apis):
-        migration_state = importlib.reload(migration_state)
-    import defenseclaw as defenseclaw_pkg
-
-    if getattr(defenseclaw_pkg, "__version__", "") != to_version:
-        importlib.reload(defenseclaw_pkg)
-    cmd_version = sys.modules.get("defenseclaw.commands.cmd_version")
-    if cmd_version is not None:
-        importlib.reload(cmd_version)
-
-    if data_dir is None:
-        data_dir = os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
-
-    _ensure_legacy_openclaw_restart_shim(from_version, to_version, data_dir)
-
-    from_t = _ver_tuple(from_version)
-    to_t = _ver_tuple(to_version)
-    strict = frozenset(strict_required)
-    if any(not isinstance(version, str) for version in strict_required):
-        raise ValueError("strict required migrations must be version strings")
-    same_version_reapply = from_t == to_t
-    applied_count = 0
-    migration_failed = False
-
-    # Load the cursor; treat "missing" / "unparseable" / "future
-    # schema" as "first upgrade on this host" and bootstrap from
-    # ``from_version``. Bootstrap is conservative — it pre-marks
-    # every registry entry whose version is at or below
-    # ``from_version`` so we don't replay history on a host that's
-    # already in steady state.
-    state = migration_state.load(data_dir)
-    deferred_strict_bootstrap = state is None and bool(strict)
-    if state is None:
-        # ``load`` collapses several cases to ``None``. Most of them
-        # (missing / empty / corrupt cursor) are safe to bootstrap. But a
-        # cursor written by a NEWER build — schema greater than this
-        # build understands — must NOT be treated as a fresh host:
-        # bootstrapping would overwrite it with a stale schema-N cursor
-        # and erase the newer build's migration history (F-0081). Refuse
-        # so the operator can run ``defenseclaw doctor migration-state
-        # --reset`` instead of silently downgrading their state.
-        if migration_state.is_future_schema(data_dir):
-            raise migration_state.FutureSchemaError(
-                "migration cursor at "
-                f"{migration_state.state_path(data_dir)} was written by a "
-                "newer DefenseClaw build (schema "
-                f"{migration_state.detect_schema(data_dir)} > "
-                f"{migration_state.CURRENT_SCHEMA_VERSION}); refusing to "
-                "overwrite it. Run 'defenseclaw doctor migration-state "
-                "--reset' if you intend to run this older build."
-            )
-        state = migration_state.bootstrap(
-            None,
-            from_version=from_version,
-            package_version=to_version,
-            registry_versions=[v for v, _, _ in MIGRATIONS],
+    config_path = ctx.active_config_path()
+    try:
+        version = source_config_version(path=config_path)
+    except ConfigVersionError as exc:
+        raise MigrationError(str(exc)) from exc
+    if version is None:
+        return MigrateResult(None, CURRENT_CONFIG_VERSION)
+    if version > CURRENT_CONFIG_VERSION:
+        raise ConfigTooNewError(
+            f"{config_path} has config_version {version}, but DefenseClaw {__version__} "
+            f"reads up to {CURRENT_CONFIG_VERSION}. It was written by a newer DefenseClaw; "
+            "install that version again or run 'defenseclaw rollback'."
         )
-        # Ordinary CLI upgrades persist the bootstrap snapshot eagerly so a
-        # crash mid-run leaves a usable cursor. A strict native-Setup run must
-        # not write even this metadata before its required migration succeeds:
-        # a candidate refusal must leave the old runtime's data byte-identical.
-        if not strict:
+    ctx.openclaw_home = os.path.expanduser(openclaw_home or _configured_openclaw_home(config_path))
+
+    steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
+    names = [name for name, _step in steps]
+    if check:
+        _check_connector_roster(
+            config_path, data_dir, __version__, gateway_binary=gateway_binary, from_version=from_version or ""
+        )
+        # The v8 conversion reads the config as it is now, so the preflight is
+        # only meaningful when no earlier 0.x step would change it first; the
+        # real migration still validates and the installer rolls back on failure.
+        v8_first = bool(names) and names[0].startswith(f"0.x import {_V8_IMPORT_VERSION}:")
+        if version < _FIRST_V8_CONFIG_VERSION and gateway_binary and v8_first:
             try:
-                migration_state.save(data_dir, state)
-            except OSError as exc:
-                ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
-
-    for ver, desc, fn in MIGRATIONS:
-        ver_t = _ver_tuple(ver)
-
-        # Never run a registry entry past the operator's target.
-        # This guards the "registry has 0.6.0 but operator is
-        # upgrading to 0.5.0" case (e.g. cherry-picked downgrade).
-        if ver_t > to_t:
-            continue
-
-        already_applied = migration_state.is_applied(state, ver)
-
-        # In the upgrade case, exclude entries strictly below
-        # ``from_version`` ONLY when the cursor already records them as
-        # applied. A lower-version migration that is MISSING from the
-        # cursor (e.g. one that failed on an earlier upgrade and was
-        # therefore never marked applied) must still be retried on a
-        # later upgrade rather than being skipped by the version
-        # comparison alone (F-0681). The cursor — not ``from_version`` —
-        # is the source of truth for what has run; migrations are
-        # idempotent, so re-attempting an unapplied lower version is safe.
-        if not same_version_reapply and ver_t < from_t and already_applied:
-            continue
-
-        # Same-version reapply intentionally bypasses the cursor for
-        # the matching version — see backward-compat note in the
-        # docstring. All OTHER versions still respect the cursor
-        # even on same-version reapply (don't accidentally re-run
-        # historical migrations).
-        if already_applied and not (same_version_reapply and ver_t == to_t):
-            continue
-
-        click.echo(f"  {ux.dim('→')} Migration {ver}: {desc}")
-        ctx = MigrationContext(
-            openclaw_home=openclaw_home,
-            data_dir=data_dir,
-            from_version=from_version,
-            to_version=to_version,
-            upgrade_handles_local_bundle=(upgrade_handles_local_bundle or controller_owns_local_bundle_transaction),
-        )
-        try:
-            fn(ctx)
-            ux.ok(f"Migration {ver} applied.", indent="    ")
-        except Exception as exc:  # noqa: BLE001 - strict native setup must retain exact refusal
-            migration_failed = True
-            ux.err(f"migration {ver} failed: {exc}", indent="    ")
-            if ver in strict:
+                with tempfile.TemporaryDirectory(prefix=".migrate-check-", dir=data_dir) as scratch:
+                    _preflight_observability_v8(ctx, scratch, gateway_binary=gateway_binary)
+            except MigrationError:
                 raise
-            ux.subhead(
-                "upgrade will continue; run 'defenseclaw doctor --fix' afterwards",
-                indent="    ",
-            )
-            # Don't mark applied: next upgrade retries this exact
-            # migration. Continue with the rest of the batch so a
-            # single broken migration doesn't strand the host on
-            # otherwise-applicable later ones.
-            continue
+            except Exception as exc:  # noqa: BLE001 - reported like a failed step
+                raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
+        return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
 
-        migration_state.mark_applied(
-            state,
-            ver,
-            package_version=to_version,
-        )
-        applied_count += 1
-
-        # Persist after every successful migration so a crash
-        # halfway through a multi-migration batch loses at most one
-        # migration's worth of "we just ran this" knowledge. The
-        # cursor file is sub-kilobyte; the IO cost is negligible.
+    if steps:
+        _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
+    for name, step in steps:
+        click.echo(f"  {ux.dim('→')} {name}")
         try:
-            migration_state.save(data_dir, state)
+            step(ctx)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the installer, which rolls back
+            raise MigrationError(f"{name} failed: {exc}") from exc
+    for change in ctx.changes:
+        ux.ok(change, indent="    ")
+    try:
+        reached = source_config_version(path=config_path)
+    except ConfigVersionError as exc:
+        raise MigrationError(str(exc)) from exc
+    if reached != CURRENT_CONFIG_VERSION:
+        raise MigrationError(
+            f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
+        )
+    _refresh_local_observability_bundle(data_dir, __version__)
+    if version < _FIRST_V8_CONFIG_VERSION:
+        _select_windows_agents(data_dir)
+    return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _select_windows_agents(data_dir: str) -> None:
+    """Record the agent executables a 0.x Windows install's connectors run.
+
+    On Windows the gateway runs an agent such as codex.exe only from a
+    setup-selected, hashed executable, which 0.x never recorded, so the first
+    1.x gateway start would refuse the imported connectors. The selection is
+    what ``defenseclaw setup`` records. An agent that is not installed is
+    reported, not fatal: its connector then needs ``defenseclaw setup``.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw import config as config_module
+    from defenseclaw.agent_selection import record_setup_agent_selections, setup_agent_selection_connectors
+
+    try:
+        connectors = setup_agent_selection_connectors(config_module.load(data_dir=data_dir).active_connectors())
+        if not connectors:
+            # Nothing to select, so no receipt: the installer starts the new
+            # gateway only to seal one.
+            return
+        selections, errors = record_setup_agent_selections(data_dir, connectors)
+        if errors and selections:
+            # A failed probe records nothing; keep the agents that were found.
+            selections, retry_errors = record_setup_agent_selections(data_dir, list(selections))
+            if retry_errors:
+                errors.update(retry_errors)
+                selections = {}
+    except Exception as exc:  # noqa: BLE001 - the gateway start reports what it needs
+        ux.warn(f"could not record the agent executables for the imported connectors: {exc}", indent="    ")
+        return
+    for name, selection in sorted(selections.items()):
+        ux.ok(f"selected {selection.executable} for the {name} connector", indent="    ")
+    for name, detail in sorted(errors.items()):
+        ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
+
+
+def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:
+    """Make config files that group or others can write private (0600).
+
+    0.x releases wrote them with the process umask, so on distributions whose
+    default umask is 002 they are group-writable, which the v8 activation
+    refuses. Only files this user owns are changed.
+    """
+
+    if os.name != "posix":
+        return
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or not info.st_mode & 0o022:
+            continue
+        try:
+            os.chmod(path, 0o600)
         except OSError as exc:
-            if ver in strict:
-                raise
-            ux.warn(f"could not persist migration cursor after {ver}: {exc}", indent="    ")
+            raise MigrationError(f"could not make {path} private: {exc}") from exc
+        ctx.changes.append(f"made {os.path.basename(path)} private ({oct(stat.S_IMODE(info.st_mode))} → 0o600)")
 
-    if deferred_strict_bootstrap:
-        missing_required = sorted(
-            version for version in strict if not migration_state.is_applied(state, version)
-        )
-        if missing_required:
-            raise RuntimeError(
-                "required migrations are missing: " + ", ".join(missing_required)
+
+def _pending_migration_steps(
+    version: int,
+    from_version: str | None,
+    data_dir: str,
+    config_path: str,
+    current: int,
+) -> list[tuple[str, Callable[[MigrationContext], None]]]:
+    steps: list[tuple[str, Callable[[MigrationContext], None]]] = []
+    if version < _FIRST_V8_CONFIG_VERSION:
+        applied = _legacy_applied_versions(data_dir)
+        if applied is None and not from_version:
+            raise MigrationError(
+                "this is a DefenseClaw 0.x install older than 0.8.5 and its version is unknown; "
+                "re-run with --from-version X.Y.Z"
             )
-        # Strict native Setup must preserve refusal atomicity, including for a
-        # host with no prior cursor. Persist the bootstrap only after every
-        # required migration has either completed or been conservatively
-        # recorded by bootstrap. This also covers a same-version packaged run
-        # where no registry callable executes and therefore cannot save state.
-        migration_state.save(data_dir, state)
+        for ver, desc, fn in MIGRATIONS:
+            # The v8 conversion is what makes the config v8, so a pre-v8 config
+            # always needs it, whatever the cursor or --from-version claims.
+            if ver != _V8_IMPORT_VERSION:
+                if applied is not None:
+                    if ver in applied:
+                        continue
+                elif _ver_tuple(ver) <= _ver_tuple(from_version or "0"):
+                    continue
+            steps.append((f"0.x import {ver}: {desc}", fn))
+        version = _FIRST_V8_CONFIG_VERSION
+    for number in range(version, current):
+        step = CONFIG_MIGRATIONS.get(number)
+        if step is None:
+            raise MigrationError(f"no migration from config_version {number} to {number + 1}")
+        steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
+    if _connector_roster_pending(config_path, data_dir):
+        steps.append(("update renamed and removed connectors", _migrate_connector_roster))
+    return steps
 
-    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
-    local_bundle_installed = os.path.lexists(os.path.join(normalized_data_dir, "observability-stack"))
-    if (
-        upgrade_handles_local_bundle
-        and not controller_owns_local_bundle_transaction
-        and not _controller_has_hard_cut_bundle_custody()
-        and not migration_failed
-        and local_bundle_installed
-    ):
-        # Compatibility with the immutable first v8 controller. It claimed
-        # ownership of bundle refresh but only executed that phase for a
-        # hard-cut rollback plan, so ordinary v8-to-v8 upgrades left the
-        # installed bundle stamped at the source release. Reconcile from the
-        # authenticated target wheel without naming either release. The
-        # mutation token suppresses this fallback during a staged hard cut,
-        # where the bridge controller owns the recovery journal and performs
-        # the refresh after required migrations.
-        legacy_context = MigrationContext(
-            openclaw_home=openclaw_home,
-            data_dir=normalized_data_dir,
-            from_version=from_version,
-            to_version=to_version,
-        )
-        try:
-            from defenseclaw.upgrade_receipt import find_resumable_upgrade_receipt
 
-            restart_intent_receipt = find_resumable_upgrade_receipt(
-                normalized_data_dir,
-                target_version=to_version,
-            )
-        except (OSError, ValueError):
-            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_invalid") from None
-        if restart_intent_receipt is None:
-            # Every published controller that advertises the legacy bundle
-            # ownership flag creates this authenticated receipt before target
-            # mutation. Older pre-receipt controllers do not advertise the
-            # flag and run the migration-owned refresh path above instead.
-            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_missing")
-        _refresh_observability_v8_bundle_for_legacy_upgrader(
-            legacy_context,
-            normalized_data_dir,
-            None,
-            restart_intent_receipt=os.fspath(restart_intent_receipt),
-        )
-    elif (
-        migration_failed
-        and upgrade_handles_local_bundle
-        and not controller_owns_local_bundle_transaction
-        and not _controller_has_hard_cut_bundle_custody()
-        and local_bundle_installed
-    ):
+def _config_version_step(
+    step: Callable[[MigrationContext], None],
+    target: int,
+    config_path: str,
+) -> Callable[[MigrationContext], None]:
+    def run(ctx: MigrationContext) -> None:
+        step(ctx)
+        text = _read_config_text(config_path)
+        if text is None or _CONFIG_VERSION_LINE.search(text) is None:
+            raise MigrationError(f"{config_path} has no top-level config_version")
+        if not _atomic_write_text(config_path, _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1)):
+            raise MigrationError(f"could not write config_version {target} to {config_path}")
+
+    return run
+
+
+def _legacy_applied_versions(data_dir: str) -> set[str] | None:
+    """Return the 0.x cursor's applied versions, read-only; ``None`` if absent."""
+
+    try:
+        with open(os.path.join(data_dir, _LEGACY_STATE_FILE), encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    applied = payload.get("applied") if isinstance(payload, dict) else None
+    if isinstance(applied, dict):
+        return {str(version) for version in applied}
+    if isinstance(applied, list):
+        return {str(item.get("version") if isinstance(item, dict) else item) for item in applied}
+    return None
+
+
+def _configured_openclaw_home(config_path: str) -> str:
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raw = None
+    claw = raw.get("claw") if isinstance(raw, dict) else None
+    home = claw.get("home_dir") if isinstance(claw, dict) else None
+    return home if isinstance(home, str) and home.strip() else "~/.openclaw"
+
+
+def _refresh_local_observability_bundle(data_dir: str, bundle_version: str) -> None:
+    """Refresh an installed local observability stack to this release's files.
+
+    Best effort: a failure leaves the previous bundle running and prints how
+    to retry, because the gateway itself does not depend on the stack.
+    """
+
+    if not os.path.lexists(os.path.join(data_dir, "observability-stack")):
+        return
+    from defenseclaw.bundle_refresh import (
+        LocalObservabilityUpgradeError,
+        restart_upgraded_local_observability_stack,
+        upgrade_local_observability_stack,
+    )
+
+    try:
+        if os.name == "posix":
+            backup_dir = _allocate_observability_v8_bundle_backup(data_dir)
+        else:
+            os.makedirs(os.path.join(data_dir, "backups"), exist_ok=True)
+            backup_dir = tempfile.mkdtemp(prefix="observability-bundle-", dir=os.path.join(data_dir, "backups"))
+        result = upgrade_local_observability_stack(data_dir, backup_dir, bundle_version=bundle_version)
+        if result.restart_required:
+            restarted = restart_upgraded_local_observability_stack(data_dir)
+            if restarted.degraded_errors:
+                raise LocalObservabilityUpgradeError("restart_degraded", "restart")
+        if result.installed:
+            ux.ok("Refreshed the local observability bundle", indent="    ")
+    except (LocalObservabilityUpgradeError, ObservabilityV8UpgradeMigrationError, OSError) as exc:
         ux.warn(
-            "local observability bundle refresh was deferred because a target migration failed",
+            f"local observability bundle was not refreshed ({exc}); "
+            "run 'defenseclaw setup local-observability status' to check it",
             indent="    ",
         )
-
-    return applied_count

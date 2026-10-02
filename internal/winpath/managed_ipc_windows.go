@@ -10,12 +10,24 @@
 
 package winpath
 
-import "path/filepath"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // ManagedIPCRelativeDir is where managed-enterprise local IPC sockets live,
 // relative to the trusted Program Files root.
 var ManagedIPCRelativeDir = filepath.Join(
 	"Cisco", "Cisco Secure Client", "DefenseClaw", "ipc",
+)
+
+// StandaloneManagedIPCRelativeDir is the standalone enterprise profile's
+// socket directory, relative to the trusted Program Files root. The
+// standalone lifecycle creates and ACLs it exactly like the Secure Client
+// one.
+var StandaloneManagedIPCRelativeDir = filepath.Join(
+	"Cisco", "DefenseClaw", "ipc",
 )
 
 // ManagedIPCDir is the trusted directory local IPC sockets bind in.
@@ -27,6 +39,10 @@ var ManagedIPCRelativeDir = filepath.Join(
 // reconstructed the path from %ProgramData% would land outside it and be
 // refused, for reasons that look nothing like the mistake.
 //
+// A process whose administrator-owned service environment pins the
+// standalone profile resolves the standalone directory; every other process
+// keeps the Secure Client path unchanged.
+//
 // Returns "" when the trusted root cannot be resolved. A caller must treat
 // that as "no managed location", never as licence to improvise one.
 func ManagedIPCDir() string {
@@ -34,5 +50,13 @@ func ManagedIPCDir() string {
 	if err != nil || programFiles == "" {
 		return ""
 	}
-	return filepath.Clean(filepath.Join(programFiles, ManagedIPCRelativeDir))
+	relative := ManagedIPCRelativeDir
+	if standaloneProfilePinned() {
+		relative = StandaloneManagedIPCRelativeDir
+	}
+	return filepath.Clean(filepath.Join(programFiles, relative))
+}
+
+func standaloneProfilePinned() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(EnterpriseProfileEnv)), EnterpriseProfileStandalone)
 }

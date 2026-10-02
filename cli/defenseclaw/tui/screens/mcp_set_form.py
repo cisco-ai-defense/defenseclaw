@@ -132,7 +132,10 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
 
     #mcp-set-dialog {{
         width: 90;
+        max-width: 96%;
         height: auto;
+        max-height: 96%;
+        overflow-y: auto;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
         background: {DEFAULT_TOKENS.surface_panel};
@@ -199,7 +202,9 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
             yield Input(id="mcp-env")
             yield Static(MCP_FIELD_LABELS[6], classes="mcp-set-label")
             yield Checkbox("Skip scan before adding", id="mcp-skip-scan")
-            yield Static("", id="mcp-set-status")
+            # Validation errors echo what was typed (``env [/]``); never parse
+            # them as markup or the modal crashes the app.
+            yield Static("", id="mcp-set-status", markup=False)
             with Horizontal(id="mcp-set-buttons"):
                 yield Button("Cancel", id="mcp-set-cancel", variant="default")
                 yield Button("Set MCP", id="mcp-set-submit", variant="success")
@@ -228,7 +233,10 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
         try:
             result = self.values().build_result()
         except MCPSetValidationError as exc:
-            self.query_one("#mcp-set-status", Static).update(str(exc))
+            status = self.query_one("#mcp-set-status", Static)
+            status.update(str(exc))
+            # On short terminals the form scrolls; show why Enter did nothing.
+            status.scroll_visible(animate=False)
             return
         self.dismiss(result)
 

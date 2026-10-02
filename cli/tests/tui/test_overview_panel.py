@@ -901,18 +901,15 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     codex_home = tmp_path / "codex-home"
     opencode_home = tmp_path / "opencode-home"
     devin_config = tmp_path / "devin-config"
-    gemini_home = tmp_path / "gemini-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
     monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
         "devin": "Devin",
-        "geminicli": "Gemini CLI (deprecated; use Antigravity)",
         "copilot": "GitHub Copilot CLI",
     }
     for wire, want in cases.items():
@@ -937,10 +934,6 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert "./.devin/hooks.v1.json" in connector_source_label("devin", "config")
     assert str(devin_config / "mcp_config.json") in connector_source_label("devin", "mcps")
     assert "closed beta" in connector_source_label("devin", "plugins")
-    gemini_guidance = connector_paths.cleanup_only_guidance("geminicli")
-    for category in ("skills", "plugins", "mcps", "config"):
-        assert connector_source_label("geminicli", category) == gemini_guidance
-    assert "Antigravity" in gemini_guidance
     assert ".github/mcp.json" in connector_source_label("copilot", "mcps")
     # opencode MCP is now managed by DefenseClaw (read+write via the bridge
     # path layer), so the source label points at its real config and no longer
@@ -1095,3 +1088,15 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     # Malformed entries degrade gracefully instead of raising.
     assert format_scanner_overrides_summary((("", "high", "file", "block"),)) == ""
     assert format_scanner_overrides_summary((("secrets", "low", "file"),)) == ""  # wrong arity
+
+
+def test_guardrail_detail_names_the_rule_pack_not_a_placeholder_strategy() -> None:
+    def detail(pack_dir: str) -> str:
+        cfg = OverviewConfig(
+            guardrail_enabled=True, guardrail_mode="observe", guardrail_port=4000, guardrail_rule_pack_dir=pack_dir
+        )
+        return OverviewPanelModel(cfg, version="test").guardrail_detail()
+
+    assert detail("/p/guardrail/strict") == "observe, port 4000, strict pack"
+    assert detail("/p/guardrail/protected-codex/default") == "observe, port 4000, protected-codex pack"
+    assert detail("") == "observe, port 4000"

@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
 // enterpriseWindowsEnumerateDefaultInterval is the SCM-service
@@ -53,6 +54,11 @@ const enterpriseWindowsEnumerateInitialCycleDelay = 30 * time.Second
 // cycle so a wedged registry walk / IO can't starve subsequent
 // ticks. Spec 005 REQ-19.
 const enterpriseWindowsEnumerateCycleTimeout = 60 * time.Second
+
+// enterpriseWindowsEnumerateSessionSettle delays the extra cycle a sign-in
+// triggers (standalone profile only) so Windows finishes creating a first
+// profile, and a burst of session events runs one cycle.
+var enterpriseWindowsEnumerateSessionSettle = 15 * time.Second
 
 // enterpriseWindowsEnumerateOptions carries the CLI flags for the
 // `enterprise windows enumerate` subcommand. Parsed in
@@ -96,7 +102,8 @@ func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 		Use:   "enumerate",
 		Short: "Publish Windows managed-enterprise hook enrollment on every tick",
 		Long: `Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList to
-discover local user profiles, filter to interactive users (S-1-5-21-…), and
+discover local user profiles, filter to interactive users (S-1-5-21-…; the
+standalone profile also admits Microsoft Entra ID users, S-1-12-1-…), and
 publish an updated hook-guardian targets.yaml.
 
 Two modes:
@@ -217,11 +224,36 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return runEnterpriseWindowsEnumerateAuditCycle(cycleCtx, stderr, cfg, manifestPath, start)
 	}
 
+	if reason := standaloneWindowsEnumerateIdleReason(cfg); reason != "" {
+		fmt.Fprintf(stderr, "[hook-enumerator] cycle idle: %s\n", reason)
+		// The administrator's targets still need the gateway's inventory
+		// read access; the pass only adds that grant and never publishes.
+		if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
+			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", enumerationLoggerForStderr(stderr)); grantErr != nil {
+				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
+			}
+		}
+		return nil
+	}
 	logf := enumerationLoggerForStderr(stderr)
-	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enterprisehooks.EnumerateOptions{
+	enumerateOpts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               logf,
 	})
+	standalone := cfg.StandaloneEnterprise()
+	var unprotected []enterprisehooks.UnprotectedAgent
+	if standalone {
+		cache, cacheErr := enterpriseWindowsEnumerateGroupCacheLoader(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath))
+		if cacheErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN enrollment group cache is unreadable; starting from signed-in sessions only: %v\n", cacheErr)
+			cache = enterprisehooks.NewWindowsEnrollmentGroupCache()
+		}
+		enumerateOpts.GroupCache = cache
+		enumerateOpts.ReportUnprotected = func(agent enterprisehooks.UnprotectedAgent) {
+			unprotected = append(unprotected, agent)
+		}
+	}
+	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
@@ -229,6 +261,20 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
+	}
+	if standalone {
+		// The cache keeps signed-out users' last seen group membership;
+		// the record lets status and verify name every agent found
+		// installed but not enrollable, so none is a silent gap.
+		if _, cacheErr := enterpriseWindowsEnumerateGroupCacheWriter(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath), enumerateOpts.GroupCache); cacheErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", cacheErr)
+		}
+		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
+		}
+		for _, agent := range unprotected {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
+		}
 	}
 	// Sibling pass: ensure the CertGateway service SID has Read+Execute on
 	// each enrolled user's inventory dotdirs (~/.claude, ~/.codex, …). The
@@ -268,10 +314,10 @@ func runEnterpriseWindowsEnumerateAuditCycle(
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: authenticate committed manifest: %w", err)
 	}
-	discovered, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, enterprisehooks.EnumerateOptions{
+	discovered, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               enumerationAuditLoggerForStderr(stderr),
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: audit profiles: %w", err)
 	}
@@ -383,10 +429,33 @@ func runEnterpriseWindowsEnumerateInterval(
 
 	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
+	// A sign-in (forwarded by the standalone service host through
+	// internal/winsession; never fires otherwise) runs one extra cycle after
+	// a settle delay, so a newly signed-in user is enrolled without waiting
+	// for the next interval tick.
+	session := time.NewTimer(time.Hour)
+	if !session.Stop() {
+		<-session.C
+	}
+	defer session.Stop()
+	sessionPending := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-winsession.Logons():
+			if !sessionPending {
+				session.Reset(enterpriseWindowsEnumerateSessionSettle)
+				sessionPending = true
+			}
+		case <-session.C:
+			sessionPending = false
+			fmt.Fprintf(stderr, "[hook-enumerator] session sign-in: running an extra cycle\n")
+			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
+				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
+					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
+				}
+			}
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
@@ -443,6 +512,11 @@ var (
 	enterpriseWindowsEnumerateManifestLoader    = loadWindowsTargetRuntimeManifest
 	enterpriseWindowsEnumerateProfileEnumerator = enterprisehooks.EnumerateWindows
 	enterpriseWindowsEnumerateManifestWriter    = enterprisehooks.WriteTargetsManifestAtomic
+	// Standalone only: the enrollment group cache and the unprotected-agents
+	// record beside the manifest.
+	enterpriseWindowsEnumerateGroupCacheLoader  = enterprisehooks.LoadWindowsEnrollmentGroupCache
+	enterpriseWindowsEnumerateGroupCacheWriter  = enterprisehooks.SaveWindowsEnrollmentGroupCache
+	enterpriseWindowsEnumerateUnprotectedWriter = enterprisehooks.WriteWindowsUnprotectedAgents
 )
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific
@@ -471,4 +545,35 @@ func isEnterpriseWindowsEnumerateConfigMissing(err error) bool {
 	return strings.Contains(msg, "no such file or directory") ||
 		strings.Contains(msg, "cannot find the file specified") ||
 		strings.Contains(msg, "The system cannot find the file specified")
+}
+
+// standaloneWindowsEnumerateOptions adds the standalone profile's enrollment
+// filters to an enumeration: include_users is additive, exclude_users drops
+// a profile, and exempt_users keeps only its machine-policy rows so it is
+// inspected instead of failing closed as unregistered. Secure Client options
+// are returned unchanged.
+func standaloneWindowsEnumerateOptions(cfg *config.Config, opts enterprisehooks.EnumerateOptions) enterprisehooks.EnumerateOptions {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return opts
+	}
+	enrollment := cfg.Enterprise.Enrollment
+	opts.IncludeUsers = append([]string(nil), enrollment.IncludeUsers...)
+	opts.ExcludeUsers = append([]string(nil), enrollment.ExcludeUsers...)
+	opts.ExemptUsers = append([]string(nil), enrollment.ExemptUsers...)
+	opts.IncludeGroups = append([]string(nil), enrollment.IncludeGroups...)
+	opts.ExcludeGroups = append([]string(nil), enrollment.ExcludeGroups...)
+	return opts
+}
+
+// standaloneWindowsEnumerateIdleReason reports why a standalone enumerator
+// cycle must not publish: enterprise.enrollment.mode manifest hands
+// targets.yaml to the administrator, as on Linux and macOS.
+func standaloneWindowsEnumerateIdleReason(cfg *config.Config) string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		return "enterprise.enrollment.mode is manifest; the administrator publishes targets"
+	}
+	return ""
 }

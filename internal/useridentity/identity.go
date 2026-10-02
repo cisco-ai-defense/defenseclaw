@@ -97,6 +97,17 @@ func HomeForID(id string) string {
 	return homeForID(id)
 }
 
+// NameForID reports the bare OS account name of a uid or SID, or "" when it
+// does not resolve. Like the other lookups here it never returns
+// DOMAIN\user.
+func NameForID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || len(id) > maxIDLength || KindForID(id) == "" {
+		return ""
+	}
+	return nameForID(id)
+}
+
 // KindForID classifies an OS identifier after its caller has established
 // trusted provenance, such as a hook's DefenseClaw identity header or an OS
 // profile lookup. Shape is validation, not provenance: callers must not use

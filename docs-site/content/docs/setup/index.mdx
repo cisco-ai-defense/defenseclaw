@@ -1,6 +1,6 @@
 ---
 title: Setup
-description: DefenseClaw setup and configuration surfaces in one place — from the central guardrail wizard to keys, webhooks, registries, observability, sandboxing, and per-connector hooks.
+description: DefenseClaw setup and configuration surfaces in one place — from the central guardrail wizard to keys, webhooks, registries, observability, legacy sandbox cleanup, and per-connector hooks.
 keywords:
   - defenseclaw setup
   - DefenseClaw configuration
@@ -16,14 +16,13 @@ keywords:
 DefenseClaw from "binary on disk" to "actively defending an agent". Mutating
 commands update only the configuration or owned integration surface they
 manage; restart, prompting, and audit behavior is command-specific. The
-top-level `keys`, `registry`, and experimental `sandbox` groups are included
-here because they are part of the same operator workflow.
+top-level `keys`, `registry`, and `sandbox` groups are included here because
+they are part of the same operator workflow.
 
 <Callout title="The one-line summary">
 Run `defenseclaw setup guardrail` once. Reach for the auxiliary surfaces when
-you want to wire a chat notifier, registry, observability destination, custom
-LLM key, or the experimental Linux OpenShell sandbox into a guardrail that is
-already running.
+you want to wire a chat notifier, registry, observability destination, or
+custom LLM key into a guardrail that is already running.
 </Callout>
 
 ## The central command
@@ -114,11 +113,25 @@ which ones are interactive and which ones are designed for scripts.
     description="Wire the cisco-ai-mcp-scanner SDK into admission. Behavioral introspection of MCP servers before they're added."
   />
   <Card
-    title="defenseclaw sandbox"
+    title="defenseclaw sandbox legacy-cleanup"
     href="/docs/setup/sandbox"
-    description="Experimental Linux-only OpenClaw/OpenShell isolation. Review the current endpoint-wiring limitation and pass the sandbox-originated acceptance gate before treating it as enforcement."
+    description="Linux-only removal of the retired standalone OpenShell sandbox (openshell-sandbox 0.0.x). Restores host OpenClaw networking, ownership, and config."
   />
 </Cards>
+
+### OpenShell sandbox
+
+`defenseclaw sandbox setup` prepares a Linux machine or an Apple-silicon Mac
+to run Claude Code and Codex inside NVIDIA OpenShell 0.1 sandboxes, and
+`defenseclaw sandbox run claude` starts one on the current project folder.
+On a Mac, sandboxes are OpenShell MicroVMs and every run works on a copy (see
+[macOS](/docs/setup/sandbox#macos)).
+The same setup is the **Sandboxes (OpenShell)** wizard in the TUI's Setup
+and the Sandbox wizard in the macOS app; the TUI Sandboxes panel (key 7) shows live activity. Run
+`defenseclaw sandbox --help` for every command.
+`defenseclaw sandbox legacy-cleanup` removes the retired `openshell-sandbox`
+0.0.x install from Linux hosts. The [sandbox guide](/docs/setup/sandbox)
+covers setup, runs and legacy cleanup.
 
 ## Deployment and policy references
 
@@ -130,6 +143,11 @@ than the command cards above.
     title="Enterprise hardening"
     href="/docs/setup/enterprise-deployment"
     description="Provision the managed OS service, guardian, trust boundaries, scoped credentials, and tamper-repair controls."
+  />
+  <Card
+    title="Sandbox policy packs"
+    href="/docs/setup/sandbox-policy"
+    description="The open, balanced, and strict OpenShell sandbox packs, custom packs, openshell.admin limits, and sandbox policy explain."
   />
   <Card
     title="Redaction profiles"
@@ -157,7 +175,8 @@ below is the canonical mapping for their interactive and scripted forms.
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
 | `setup redaction` | yes (bare command) | subcommands + flags | Simple choices lead into **Show advanced settings?** for all 14 buckets, custom profiles, destinations, and ordered routes. Mutations support `--dry-run`, `--json`, `--yes`, and optional restart. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
-| `sandbox init` / `sandbox setup` | yes | `sandbox setup --non-interactive` | Experimental top-level Linux/OpenClaw group. `init` creates prerequisites and then runs setup; the current generated endpoint wiring must pass the documented acceptance gate. |
+| `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon (OpenShell MicroVMs). Run it again at any time; the [sandbox guide](/docs/setup/sandbox) covers the other `sandbox` commands. |
+| `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. |
 
 <Callout title="Redaction is a v8 policy editor, not an on/off toggle">
 Run `defenseclaw setup redaction` for the guided workflow, or use subcommands

@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -304,5 +306,85 @@ func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
 	}
 	if structured["schema"] != "defenseclaw.hook.v1" || structured["connector"] != "codex" {
 		t.Fatalf("structured payload mismatch: %#v", structured)
+	}
+}
+
+// managedAuditTestDatabase creates an initialized audit store with one row
+// and returns its path.
+func managedAuditTestDatabase(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store, err := audit.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.LogEvent(audit.Event{Action: "scan", Target: "/tmp/skill", Severity: "INFO", Details: "connector=codex"}); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// On a standalone host the audit commands open the gateway service's store
+// read-only after its ownership check, instead of refusing it as an
+// untrusted owner or migrating it beside the running gateway.
+func TestManagedAuditStoreOpensReadOnly(t *testing.T) {
+	path := managedAuditTestDatabase(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := managedAuditStoreTrustCheck
+	t.Cleanup(func() { managedAuditStoreTrustCheck = restore })
+	var checked string
+	managedAuditStoreTrustCheck = func(candidate string) error {
+		checked = candidate
+		return nil
+	}
+
+	store, err := openManagedAuditStoreReadOnly(path)
+	if err != nil {
+		t.Fatalf("openManagedAuditStoreReadOnly: %v", err)
+	}
+	if checked != path {
+		t.Fatalf("trust check saw %q, want %q", checked, path)
+	}
+	if err := store.LogEvent(audit.Event{Action: "scan", Target: "/tmp/other", Severity: "INFO"}); err == nil {
+		t.Fatal("the managed audit store accepted a write")
+	}
+	_ = store.Close()
+
+	previousConfig := cfg
+	previousOut, previousConnector, previousLimit, previousActivity := auditExportOut, auditExportConnector, auditExportLimit, auditExportIncludeActivity
+	t.Cleanup(func() {
+		cfg = previousConfig
+		auditExportOut, auditExportConnector, auditExportLimit, auditExportIncludeActivity = previousOut, previousConnector, previousLimit, previousActivity
+	})
+	cfg = &config.Config{AuditDB: path}
+	auditExportOut = filepath.Join(t.TempDir(), "out.jsonl")
+	auditExportConnector, auditExportLimit, auditExportIncludeActivity = "", 0, false
+	if err := runAuditExport(nil, nil); err != nil {
+		t.Fatalf("runAuditExport: %v", err)
+	}
+	exported, err := os.ReadFile(auditExportOut)
+	if err != nil || !strings.Contains(string(exported), `"action":"scan"`) {
+		t.Fatalf("export = %q, %v; want the stored row", exported, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("the read-only review changed the managed audit database")
+	}
+
+	managedAuditStoreTrustCheck = func(string) error { return errors.New("owner uid 1000 is not trusted") }
+	if _, err := openManagedAuditStoreReadOnly(path); err == nil || !strings.Contains(err.Error(), "managed audit store") {
+		t.Fatalf("an untrusted managed audit store opened: %v", err)
 	}
 }

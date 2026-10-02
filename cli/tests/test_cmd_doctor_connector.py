@@ -96,6 +96,14 @@ from defenseclaw.file_permissions import (
 
 
 class TestCodexOtelAlignment(unittest.TestCase):
+    def setUp(self) -> None:
+        trusted = patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     def _cfg(self, environment: str = "windows") -> MagicMock:
         cfg = MagicMock()
         cfg.environment = environment
@@ -943,7 +951,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired):
             _run_cursor_windows_runtime_process(
-                ["powershell.exe"],
+                [sys.executable],
                 env={},
                 timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
             )
@@ -991,7 +999,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         job.terminate_sync.side_effect = terminate_sync
 
         result = _run_cursor_windows_runtime_process(
-            ["powershell.exe"],
+            [sys.executable],
             env={},
             timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )
@@ -1779,7 +1787,7 @@ class TestDoctorActiveConnectors(unittest.TestCase):
 
 class TestCheckHookHealth(unittest.TestCase):
     """D4: generic hook-health rows for connectors that previously had no
-    Services check (hermes/cursor/windsurf/geminicli/opencode). The check
+    Services check (hermes/cursor/opencode). The check
     prefers the gateway's recorded ``hook_contract_lock.json`` paths and is
     format-agnostic (YAML for hermes, flat ``.js`` for opencode).
     """
@@ -1940,9 +1948,25 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_hook_health(cfg, "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
-        self.assertIn("does not revalidate the Windows DACL", r.checks[-1]["detail"])
+        # Windows wording only on Windows.
+        self.assertEqual("Windows DACL" in r.checks[-1]["detail"], os.name == "nt")
         self.assertIn("not tamper-proof", r.checks[-1]["detail"])
         self.assertIn("authenticated load heartbeat is fresh", r.checks[-1]["detail"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
+        # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
+        # gateway would not start and doctor only said the hook file is missing.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            plugins = Path(tmp) / ".config" / "opencode" / "plugins"
+            plugins.mkdir(parents=True)
+            plugins.chmod(0o775)
+            r = _DoctorResult()
+            cfg = self._cfg(tmp, "opencode", [str(plugins / "defenseclaw.js")])
+            _check_hook_health(cfg, "opencode", r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(f"chmod go-w {os.path.realpath(plugins)}", r.checks[-1]["detail"])
 
     def test_opencode_missing_load_heartbeat_is_unverified_without_guessing_pure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3228,16 +3252,6 @@ class TestCheckHookHealth(unittest.TestCase):
             self.assertTrue(r.checks, msg=connector)
             self.assertIn(label, {check["label"] for check in r.checks}, msg=connector)
 
-    def test_dispatch_reports_gemini_deprecation_instead_of_hook_health(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._cfg(tmp, "geminicli", [os.path.join(tmp, "missing")])
-            r = _DoctorResult()
-            _check_connector_hooks(cfg, "geminicli", r)
-        self.assertEqual(r.checks[-1]["status"], "warn")
-        self.assertEqual(r.checks[-1]["reason_code"], "connector_deprecated")
-        self.assertIn("use Antigravity", r.checks[-1]["detail"])
-
-
 class TestConnectorEnabled(unittest.TestCase):
     """N1 — doctor must not render an operator-disabled connector as active.
 
@@ -3470,12 +3484,42 @@ if __name__ == "__main__":
 
 
 class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
-    """Kiro discovers hooks only from ``.kiro/hooks/*.json`` relative to the
-    project root and documents no user-level location, so a global-only
-    install enforces nothing. Reporting that as a pass is how an operator
-    ends up believing an unguarded Kiro is guarded: the connector reports
-    healthy and the gateway keeps recording findings, but no hook ever runs.
+    """Kiro merges hooks from every scope. Kiro IDE 1.0.182+ and
+    ``kiro-cli --v3`` read the global ``~/.kiro/hooks/defenseclaw.json`` that
+    setup writes, so a global install with that registration passes (naming
+    the older IDE builds that read only the project's ``.kiro/hooks``).
+    Without the global registration and without claw.workspace_dir no
+    DefenseClaw hook runs, and that still fails.
     """
+
+    def setUp(self) -> None:
+        self._kiro_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._kiro_home.cleanup)
+        patcher = patch(
+            "defenseclaw.commands.cmd_doctor.connector_home",
+            side_effect=lambda name, **_: self._kiro_home.name if name == "kiro" else "",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_global_hooks(self, command: str, name: str = "defenseclaw-pre-tool") -> str:
+        path = os.path.join(self._kiro_home.name, "hooks", "defenseclaw.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": "v1",
+                    "hooks": [
+                        {
+                            "name": name,
+                            "trigger": "PreToolUse",
+                            "action": {"type": "command", "command": command},
+                        }
+                    ],
+                },
+                fh,
+            )
+        return path
 
     def _cfg(self, workspace: str) -> MagicMock:
         cfg = MagicMock()
@@ -3496,12 +3540,25 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         self.assertEqual(len(rows), 1, "expected exactly one scope row")
         return rows[0]
 
-    def test_kiro_without_workspace_fails(self) -> None:
+    def test_kiro_without_workspace_or_global_hooks_fails(self) -> None:
         row = self._scope_row("kiro", "")
         self.assertEqual(row["status"], "fail")
-        self.assertIn("project root", row["detail"])
+        self.assertIn("claw.workspace_dir is unset", row["detail"])
         self.assertEqual(row["reason_code"], "kiro_hooks_not_workspace_scoped")
-        self.assertIn("claw.workspace_dir", row["remediation"])
+        self.assertIn("defenseclaw setup kiro", row["remediation"])
+
+    def test_kiro_global_hooks_without_workspace_pass(self) -> None:
+        path = self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "pass")
+        self.assertIn(path, row["detail"])
+        self.assertIn("claw.workspace_dir", row["detail"])
+
+    def test_kiro_global_file_without_defenseclaw_hooks_fails(self) -> None:
+        self._write_global_hooks("/usr/local/bin/other-audit-hook", name="team-audit")
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "fail")
+        self.assertEqual(row["reason_code"], "kiro_hooks_not_workspace_scoped")
 
     def test_kiro_with_workspace_passes(self) -> None:
         row = self._scope_row("kiro", "/repo")

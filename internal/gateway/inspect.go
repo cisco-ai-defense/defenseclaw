@@ -34,7 +34,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -137,6 +136,13 @@ type ToolInspectVerdict struct {
 	// a timed-out request that the connector fails closed cannot be counted as
 	// a fail-open allow decision. It is never serialized.
 	managedAIDFailOpenReason string
+	// laneVerdict reports that a scan lane (Cisco AI Defense, the LLM
+	// judge) returned a verdict of its own that is not a plain allow. A
+	// lane may block or raise the severity without naming a rule, so the
+	// rule IDs and findings alone cannot show that it took part; the
+	// sandbox unblock lift (liftUnblockedDestinations) must keep such a
+	// verdict. Never serialized.
+	laneVerdict bool
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -215,7 +221,7 @@ func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction stri
 // bypassed. Boot- and reload-reliable: a.scannerCfg.DeploymentMode is
 // the config the APIServer was constructed / reloaded with.
 func (a *APIServer) managedAIDOnly() bool {
-	return a != nil && a.scannerCfg != nil && managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode)
+	return a != nil && a.scannerCfg != nil && a.scannerCfg.ManagedAIDOnly()
 }
 
 // aidToolCall is a tool invocation for the managed lane.
@@ -406,6 +412,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	// "createJiraIssue") have it visible. AID's /inspect/chat reads
 	// content as a free-text user message; the structured tool name
 	// would otherwise be lost on the wire.
+	defer yieldHookRunSlot(ctx)()
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
 		{Role: "user", Content: hookAIDToolText(toolName, content)},
 	})
@@ -481,6 +488,7 @@ func (a *APIServer) hookAIDInspectToolCall(
 	if err != nil {
 		return nil
 	}
+	defer yieldHookRunSlot(ctx)()
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
 		{Role: "user", Content: hookAIDToolText(name, content)},
 		{Role: "assistant", ToolCalls: toolCalls},
@@ -558,6 +566,9 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 	}
 	if local == nil {
 		local = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	}
+	if rank(aid.Action) > 0 || sevRank(aid.Severity) > 0 || len(aid.Findings) > 0 {
+		local.laneVerdict = true
 	}
 	// AID-only escalation path: escalate the action when AID is
 	// stricter, escalate the severity when AID is stricter, append
@@ -652,7 +663,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		action.Input = actionfacts.Input{
 			Tool:       req.Tool,
 			Argv:       argv,
-			ActiveHome: trustedSameHostHome(),
+			ActiveHome: hookActiveHome(ctx),
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
 		action.EnforcementCapable = true
@@ -836,11 +847,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := guardrailRuntimeActionForFindings(
+		runtimeAction := guardrailToolCallActionForFindings(
 			a.scannerCfg, req.Connector, ruleFindings, true,
 		)
 		if enforceableSeverity != "NONE" {
-			codeGuardAction := guardrailRuntimeActionForConnector(
+			codeGuardAction := guardrailToolCallActionForConnector(
 				a.scannerCfg, req.Connector, enforceableSeverity, true,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
@@ -1116,7 +1127,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
+		action = guardrailToolCallActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
@@ -1443,11 +1454,13 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 		toolName = ""
 	}
 	var v *ScanVerdict
+	resume := yieldHookRunSlot(ctx)
 	if strings.EqualFold(strategyDirection, "tool_call") {
 		v = a.hookJudge.RunToolJudge(jctx, toolName, content)
 	} else {
 		v = a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
 	}
+	resume()
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather
@@ -1623,7 +1636,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
+	_ = a.logger.LogEventCtx(r.Context(), a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails))
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 
@@ -1656,6 +1669,31 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
 
+// inspectToolAuditEvent is the inspect-tool-* audit row. It names the
+// connector the request was authenticated for (the configured connector when
+// the request carries none), the route, and the caller, so an administrator
+// can attribute direct inspect calls to the account that made them.
+func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
+	ctx := r.Context()
+	connectorName := authenticatedInspectConnector(ctx)
+	if connectorName == "" {
+		connectorName = a.connectorName()
+	}
+	structured := map[string]any{"route": "/api/v1/inspect/tool"}
+	if connectorName != "" {
+		structured["connector"] = connectorName
+	}
+	auditCallerIdentity(ctx).addTo(structured)
+	return audit.Event{
+		Action:     action,
+		Target:     tool,
+		Details:    details,
+		Severity:   "INFO",
+		Connector:  connectorName,
+		Structured: structured,
+	}
+}
+
 func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *ToolInspectRequest, verdict *ToolInspectVerdict) {
 	if verdict == nil || verdict.Action != guardrailActionConfirm {
 		return
@@ -1678,8 +1716,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	if !strings.EqualFold(a.connectorName(), "openclaw") {
 		verdict.Action = guardrailActionBlock
 		verdict.WouldBlock = true
-		verdict.Reason = appendVerdictReason(verdict.Reason,
-			"human approval unsupported on this connector surface; failing closed")
+		verdict.Reason = appendVerdictReason(verdict.Reason, approvalUnsupportedNote)
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
 		}
@@ -1691,8 +1728,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 
 	verdict.Action = guardrailActionBlock
 	verdict.WouldBlock = true
-	verdict.Reason = appendVerdictReason(verdict.Reason,
-		"human approval requires native OpenClaw approval; failing closed")
+	verdict.Reason = appendVerdictReason(verdict.Reason, approvalNativeOpenClawNote)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
 	}
@@ -1724,7 +1760,7 @@ func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdic
 		return v
 	}
 	cp := *v
-	cp.Reason = defaultSinkDisplayReason(v.Reason, policy)
+	cp.Reason = agentVerdictReason(v.Action, v.Reason, defaultSinkDisplayReason(v.Reason, policy), policy)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}

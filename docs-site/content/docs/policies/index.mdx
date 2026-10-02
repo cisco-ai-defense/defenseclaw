@@ -11,7 +11,7 @@ keywords:
   - first-party allow list
 ---
 
-DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission, firewall, sandbox, and asset-policy evaluations have their own domain-specific outputs.
+DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission, firewall, and asset-policy evaluations have their own domain-specific outputs.
 
 <DefenseClawDemo scenario="policy-decision-trace" />
 
@@ -93,7 +93,7 @@ patterns such as the lethal trifecta. Separately, fixed ordered tool-call
 chains join exact authenticated hook events before the verdict; only an
 enforcement-safe synchronous pre-tool final step can deny, and only when the
 active profile maps the chain's severity to `block`. OPA/Rego continues to
-power admission, firewall, sandbox, audit, and direct guardrail-policy evaluation.
+power admission, firewall, audit, and direct guardrail-policy evaluation.
 
 ## Layer 1 — Repo policies (OPA / Rego)
 
@@ -135,7 +135,6 @@ firewall:
 | `admission` | `defenseclaw.admission` | `verdict`, `reason` |
 | `guardrail` | `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
 | `firewall` | `defenseclaw.firewall` | `action`, `rule_name` |
-| `sandbox` | `defenseclaw.sandbox` | allowed/denied endpoints, permissions, skills |
 | `audit` | `defenseclaw.audit` | `retain`, `retain_reason`, `export_to` |
 | `skill_actions` | `defenseclaw.skill_actions` | runtime/file/install actions and boolean helpers |
 
@@ -167,8 +166,8 @@ The guardrail rule pack is the *content* the gateway evaluates against — the
 [tool-call CEL expressions](/docs/policies/cel/authoring) and bounded regex fallbacks,
 judge prompts, and category taxonomies. Three packs ship out of the box:
 
-The balanced/default enabled catalog currently contains 237 local rules across
-seven families, including 133 CEL declarations and 120 tool-call-only rules.
+The balanced/default enabled catalog currently contains 239 local rules across
+seven families, including 134 CEL declarations and 122 tool-call-only rules.
 Exact ActionFacts validators, 26 bounded tool-call chains, ten YARA
 description signatures, two post-event correlator patterns, and high-assurance
 policy packs extend that base. See the
@@ -203,13 +202,15 @@ policies/guardrail/<pack>/
   suppressions.yaml           # the suppression layer (see below)
 ```
 
-Pick a pack at setup time:
+Switch packs with `use-pack`. It validates the pack first and writes nothing if the pack is invalid:
 
 ```bash
-defenseclaw setup guardrail --rule-pack strict
+defenseclaw guardrail use-pack strict                    # every connector
+defenseclaw guardrail use-pack strict --connector codex  # one connector
+defenseclaw guardrail list-packs                         # presets, custom packs, and who uses which
 ```
 
-`--rule-pack` only accepts the three bundled profiles (`default`, `strict`, `permissive`). To run a custom pack from your own directory, point `guardrail.rule_pack_dir` at it in `~/.defenseclaw/config.yaml` — see [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full workflow.
+`use-pack` accepts a bundled profile (`default`, `strict`, `permissive`), the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory path. A global switch removes per-connector overrides; `--clear --connector X` returns one connector to the global pack. `defenseclaw setup guardrail --rule-pack` still works at setup time. See [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full custom-pack workflow.
 
 ### Rule shape
 
@@ -506,15 +507,17 @@ the expression schema and authoring examples.
   </Step>
   <Step>
     **Apply the validated directory and verify the effective connector packs.**
-    The setup command writes `rule_pack_dir` and restarts the gateway so it
-    rebuilds the local rules and judge:
+    `use-pack` validates the directory again and writes `rule_pack_dir`; the
+    gateway notices the change in `config.yaml` and rebuilds the local rules
+    and judge:
 
     ```bash
-    defenseclaw setup guardrail \
-      --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
-      --restart
+    defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
+    defenseclaw guardrail list-packs
     defenseclaw doctor
     ```
+
+    Add `--connector X` to switch only one connector.
 
     DefenseClaw does not watch rule-pack files for live changes.
     `defenseclaw-gateway policy reload` recompiles OPA modules under

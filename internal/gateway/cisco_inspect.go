@@ -129,6 +129,10 @@ type inspectCall struct {
 	payload        map[string]interface{}     // mutated on 400 retry (delete "config")
 	setAuth        func(req *http.Request)    // set auth header on each attempt
 	onUnauthorized func(context.Context) bool // nil: 401 is terminal (opensource default)
+	// onOutcome receives the call's final outcome: nil for a verdict, the
+	// failure otherwise. nil: nothing is reported (every client but the
+	// standalone AI Defense client, whose outcomes feed /health).
+	onOutcome func(error)
 }
 
 // doInspectHTTP executes an AID inspection HTTP call, applying the shared
@@ -150,9 +154,18 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// report publishes the final outcome to call.onOutcome. A request the
+	// caller abandoned says nothing about the service, so it is dropped.
+	report := func(err error) {
+		if call.onOutcome == nil || (err != nil && errors.Is(ctx.Err(), context.Canceled)) {
+			return
+		}
+		call.onOutcome(err)
+	}
 	if call.client == nil || call.setAuth == nil {
 		EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "inspection client is unavailable")
 		recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+		report(errors.New("inspection client is unavailable"))
 		return nil
 	}
 	url := call.endpoint + call.urlPath
@@ -168,6 +181,7 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 		if err != nil {
 			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "request encoding failed")
 			recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			report(errors.New("request encoding failed"))
 			return nil
 		}
 
@@ -175,6 +189,7 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 		if err != nil {
 			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "request construction failed")
 			recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			report(errors.New("request construction failed"))
 			return nil
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -193,6 +208,7 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 			}
 			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError, err.Error())
 			recordCiscoInspectV8(ctx, runtime, time.Since(start), outcome, gatewaylog.ErrCodeUpstreamError)
+			report(fmt.Errorf("endpoint or egress proxy unreachable: %w", err))
 			return nil
 		}
 
@@ -208,6 +224,7 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				responseTruncated: responseTruncated,
 			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			report(fmt.Errorf("HTTP %d response could not be read: %w", resp.StatusCode, readErr))
 			return nil
 		}
 		if responseTruncated && resp.StatusCode == http.StatusOK {
@@ -219,6 +236,7 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				responseTruncated: true,
 			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			report(errors.New("response exceeded the size limit"))
 			return nil
 		}
 
@@ -268,6 +286,7 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				responseTruncated: responseTruncated,
 			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			report(ciscoInspectStatusError(resp.StatusCode))
 			return nil
 		}
 
@@ -281,12 +300,28 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				parseOffset:    ciscoInspectJSONErrorOffset(err),
 			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			report(errors.New("response is not valid JSON"))
 			return nil
 		}
 		recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeCompleted, "")
+		report(nil)
 		return normalizeCiscoResponse(data)
 	}
+	report(errors.New("no verdict after retrying"))
 	return nil
+}
+
+// ciscoInspectStatusError describes a final non-200 inspection reply for
+// /health. A rejected key and a proxy that wants credentials name the
+// setting to fix; any other status is reported as is.
+func ciscoInspectStatusError(status int) error {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("the API key was rejected (HTTP %d)", status)
+	case http.StatusProxyAuthRequired:
+		return fmt.Errorf("the egress proxy requires authentication (HTTP %d)", status)
+	}
+	return fmt.Errorf("inspection failed (HTTP %d)", status)
 }
 
 // CiscoInspectClient calls the Cisco AI Defense Chat Inspection API using
@@ -306,6 +341,32 @@ type CiscoInspectClient struct {
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   hookLifecycleMetricV8Runtime
+
+	// availabilityObserver receives every inspection's outcome (see
+	// inspectCall.onOutcome). Only the standalone AI Defense client binds
+	// one; opensource clients leave it nil and report nothing.
+	availabilityMu       sync.RWMutex
+	availabilityObserver func(error)
+}
+
+// bindAvailabilityObserver installs the callback that receives every
+// inspection's outcome: nil after a verdict, the failure otherwise.
+func (c *CiscoInspectClient) bindAvailabilityObserver(observer func(error)) {
+	if c == nil {
+		return
+	}
+	c.availabilityMu.Lock()
+	c.availabilityObserver = observer
+	c.availabilityMu.Unlock()
+}
+
+func (c *CiscoInspectClient) availabilityCallback() func(error) {
+	if c == nil {
+		return nil
+	}
+	c.availabilityMu.RLock()
+	defer c.availabilityMu.RUnlock()
+	return c.availabilityObserver
 }
 
 // bindObservabilityV8 replaces the old Provider pointer with the
@@ -443,6 +504,7 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		setAuth: func(req *http.Request) {
 			req.Header.Set("X-Cisco-AI-Defense-API-Key", c.apiKey)
 		},
+		onOutcome: c.availabilityCallback(),
 	})
 }
 

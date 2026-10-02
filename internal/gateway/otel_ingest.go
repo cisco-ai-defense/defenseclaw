@@ -121,7 +121,7 @@ func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) 
 	// authenticates a *specific* connector source via the URL, so
 	// the authenticated source is the one parsed from the path.
 	// The previous implementation only filled the header when it
-	// was empty, which let a loopback caller present the geminicli
+	// was empty, which let a loopback caller present one connector's
 	// path token while setting `x-defenseclaw-source: codex` and
 	// have telemetry attributed to codex. Always overwrite so the
 	// audited Actor / AgentName / metrics labels match the
@@ -530,12 +530,10 @@ func agentIdentityForOTLPSource(source string) AgentIdentity {
 
 func normalizeConnectorTelemetrySource(source string) string {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "kiro":
+	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "kiro":
 		return strings.ToLower(strings.TrimSpace(source))
 	case "claude-code", "claude_code":
 		return "claudecode"
-	case "gemini-cli", "gemini_cli", "gemini":
-		return "geminicli"
 	case "agy":
 		return "antigravity"
 	default:
@@ -1027,8 +1025,8 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 	}
 	user := resolveHTTPUserIdentity(r, nil)
 	promptID := firstNonEmpty(
-		a.lastHookPromptIDForTurn("codex", sessionID, turnID),
-		a.lastHookPromptID("codex", sessionID),
+		a.lastHookPromptIDForTurn(ctx, "codex", sessionID, turnID),
+		a.lastHookPromptID(ctx, "codex", sessionID),
 		promptIDForTurn("codex", sessionID, turnID),
 	)
 	meta := llmEventMeta{
@@ -1049,7 +1047,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		emittedPromptID := a.emitLLMPromptEventV8(ctx, meta, prompt, nil)
 		if emittedPromptID != "" {
 			meta.PromptID = emittedPromptID
-			a.rememberHookPromptID("codex", sessionID, turnID, emittedPromptID)
+			a.rememberHookPromptID(ctx, "codex", sessionID, turnID, emittedPromptID)
 		}
 		spanMeta := meta
 		spanMeta.Source = "codex"

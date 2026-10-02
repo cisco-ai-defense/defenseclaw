@@ -64,7 +64,6 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "hermes",
                 "cursor",
                 "devin",
-                "geminicli",
                 "copilot",
                 "openhands",
         "antigravity",

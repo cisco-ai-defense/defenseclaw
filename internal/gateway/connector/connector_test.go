@@ -360,13 +360,8 @@ func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 			t.Errorf("default registry missing %q", name)
 		}
 	}
-	// Gemini CLI remains internally resolvable only for teardown of older
-	// managed state; it is not part of the active connector matrix.
-	if _, ok := r.Get("geminicli"); !ok {
-		t.Error("default registry missing Gemini CLI cleanup connector")
-	}
-	if r.Len() != len(active)+1 {
-		t.Errorf("registry has %d connectors, want %d active plus one cleanup-only", r.Len(), len(active))
+	if r.Len() != len(active) {
+		t.Errorf("registry has %d connectors, want %d", r.Len(), len(active))
 	}
 }
 
@@ -744,7 +739,12 @@ func TestClaudeCode_ComponentAndWatchTargetsIncludeRecursiveAncestorAgents(t *te
 }
 
 func TestClaudeCode_ComponentAndWatchTargetsIncludeEffectiveAutoMemory(t *testing.T) {
-	root := t.TempDir()
+	// The settings reader refuses a file under a linked parent, and the
+	// default macOS temporary folder is under /var -> /private/var.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	configDir := filepath.Join(root, "claude-home")
 	project := filepath.Join(root, "project")
 	memory := filepath.Join(root, "custom-memory")
@@ -2915,6 +2915,9 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if conn.Name() == "hermes" {
 				opts = prepareHermesSetupAdmissionFixture(t, opts)
 			}
+			if conn.Name() == "openhands" {
+				opts = prepareOpenHandsSetupAdmissionFixture(t, opts)
+			}
 			return conn, opts
 		}
 	}
@@ -2963,6 +2966,27 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 					DataDir:   dir,
 					ProxyAddr: "127.0.0.1:4000",
 					APIAddr:   "127.0.0.1:18970",
+				}
+			},
+		},
+		{
+			name:       "kiro",
+			hookScript: "kiro-hook.sh",
+			hookAPI:    "/api/v1/kiro/hook",
+			setup: func(t *testing.T) (Connector, SetupOpts) {
+				t.Helper()
+				home := t.TempDir()
+				prevHome, prevHooks := KiroHomeOverride, KiroHooksPathOverride
+				KiroHomeOverride = home
+				KiroHooksPathOverride = filepath.Join(home, "hooks", kiroManagedHooksName)
+				t.Cleanup(func() {
+					KiroHomeOverride, KiroHooksPathOverride = prevHome, prevHooks
+				})
+				return NewKiroConnector(), SetupOpts{
+					DataDir:      t.TempDir(),
+					APIAddr:      "127.0.0.1:18970",
+					APIToken:     "tok-test",
+					WorkspaceDir: t.TempDir(),
 				}
 			},
 		},
@@ -6968,14 +6992,13 @@ func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
 // --- Subprocess policy tests ---
 
 func TestResolveSubprocessPolicy(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		if got := ResolveSubprocessPolicy(SubprocessSandbox); got != SubprocessSandbox {
-			t.Errorf("linux: expected sandbox, got %q", got)
-		}
-	} else {
-		if got := ResolveSubprocessPolicy(SubprocessSandbox); got != SubprocessShims {
-			t.Errorf("non-linux: expected shims fallback, got %q", got)
-		}
+	// The legacy openshell-sandbox tier is gone on every platform; a sandbox
+	// preference must never resolve to a tier nothing enforces.
+	if got := ResolveSubprocessPolicy(SubprocessSandbox); got != SubprocessShims {
+		t.Errorf("sandbox preference resolved to %q, want shims", got)
+	}
+	if got := ResolveSubprocessPolicy(SubprocessShims); got != SubprocessShims {
+		t.Errorf("expected shims, got %q", got)
 	}
 	if got := ResolveSubprocessPolicy(SubprocessNone); got != SubprocessNone {
 		t.Errorf("expected none, got %q", got)
@@ -7398,8 +7421,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 15 {
-		t.Errorf("HookScripts() returned %d scripts, want 15", len(scripts))
+	if len(scripts) != 13 {
+		t.Errorf("HookScripts() returned %d scripts, want 13", len(scripts))
 	}
 }
 
@@ -7533,26 +7556,37 @@ func runHookAndReturnCurlArgsWithHome(t *testing.T, scriptPath, dcHome string, e
 	return string(data)
 }
 
-func TestWriteSandboxPolicy(t *testing.T) {
+func TestSandboxPreferenceWritesShimsWithoutPolicyFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
-	if err := WriteSandboxPolicy(dir, "127.0.0.1:4000", "127.0.0.1:18970"); err != nil {
-		t.Fatalf("WriteSandboxPolicy failed: %v", err)
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
+	if err := SetupSubprocessEnforcement(SubprocessSandbox, opts); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "shims", "curl")); err != nil {
+		t.Fatalf("sandbox preference did not install shims: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "policies", "defenseclaw-policy.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("legacy sandbox policy file was written (stat err=%v)", err)
+	}
+}
 
-	path := filepath.Join(dir, "policies", "defenseclaw-policy.yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("sandbox policy not created: %v", err)
+func TestTeardownRemovesStaleLegacySandboxPolicy(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policies", "defenseclaw-policy.yaml")
+	if err := os.MkdirAll(filepath.Dir(policyPath), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	content := string(data)
-	if !strings.Contains(content, "127.0.0.1:4000") {
-		t.Error("policy missing proxy addr")
+	if err := os.WriteFile(policyPath, []byte("sandbox:\n  mode: enforce\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(content, "127.0.0.1:18970") {
-		t.Error("policy missing API addr")
+	if err := TeardownSubprocessEnforcement(SetupOpts{DataDir: dir}); err != nil {
+		t.Fatalf("teardown: %v", err)
 	}
-	if !strings.Contains(content, "enforce") {
-		t.Error("policy missing enforce mode")
+	if _, err := os.Stat(policyPath); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy sandbox policy survived teardown (stat err=%v)", err)
 	}
 }
 
@@ -7677,8 +7711,8 @@ func TestSecuritySurfaceCoverage(t *testing.T) {
 	}
 
 	expectations := []expectation{
-		{"openclaw", ToolModeBoth, ResolveSubprocessPolicy(SubprocessSandbox)},
-		{"zeptoclaw", ToolModeBoth, ResolveSubprocessPolicy(SubprocessSandbox)},
+		{"openclaw", ToolModeBoth, SubprocessShims},
+		{"zeptoclaw", ToolModeBoth, SubprocessShims},
 		{"claudecode", ToolModeBoth, SubprocessNone},
 		{"codex", ToolModeBoth, SubprocessNone},
 	}
@@ -7927,8 +7961,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 15 {
-		t.Errorf("expected 15 built-in connectors, got %d", r.Len())
+	if r.Len() != 14 {
+		t.Errorf("expected 14 built-in connectors, got %d", r.Len())
 	}
 }
 

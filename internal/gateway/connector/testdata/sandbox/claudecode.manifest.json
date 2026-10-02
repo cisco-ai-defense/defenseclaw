@@ -1,0 +1,93 @@
+{
+  "connector": "claudecode",
+  "hook_contract": "claudecode-hooks-v1",
+  "tamper_tier": "managed",
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_INSTALLATION_CHECKS": "1",
+    "DISABLE_UPDATES": "1"
+  },
+  "binaries": [
+    "bash (runtime)",
+    "chmod (runtime)",
+    "claude (harness)",
+    "curl (runtime)",
+    "date (runtime)",
+    "find (runtime)",
+    "head (runtime)",
+    "id (runtime)",
+    "jq (runtime)",
+    "mkdir (runtime)",
+    "mktemp (runtime)",
+    "od (runtime)",
+    "readlink (runtime)",
+    "rm (runtime)",
+    "sed (runtime)",
+    "tail (runtime)",
+    "tr (runtime)"
+  ],
+  "files": {
+    "/etc/claude-code/managed-settings.d/50-defenseclaw.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 8921,
+      "sha256": "d1f0de4ac5b4e26534863d5273d336cd8a53d3b459c0c4b8f788d73d9e3e7f14"
+    },
+    "/sandbox/.claude.json": {
+      "mode": "-rw-------",
+      "owner": "user",
+      "size": 197,
+      "sha256": "d51797498ade9543b5e40810495d871afd9e89fd6cbce714c4c66a6603c99198"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 45111,
+      "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 8119,
+      "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
+    },
+    "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 10727,
+      "sha256": "c335978bccfe4c006cd5ce4f2d14daf971ed2ee259d430c5190fcf73b7353651"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 6081,
+      "sha256": "00719f8f413aa60fc156be9350a5e5727027d200248edb935e256a6e59f2785a"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 5349,
+      "sha256": "a1e91831b60998a3f2d62322f723aeecf918ead37f6fc869891039a1d7f499da"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 5599,
+      "sha256": "9595a03b052126c4e172e7694cc9b52e53587adde55652ff0343255e5e37b407"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 6038,
+      "sha256": "f531de55381193c87cfa7048678bde0f21816a6ed1fbdc5cac3a8b2d89523f70"
+    },
+    "/usr/local/lib/defenseclaw/otel-headers.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 657,
+      "sha256": "11eb3b200712620c8908410f4ed36d54ad911c470d2d4df60b441cc0e8849ace"
+    }
+  }
+}

@@ -428,7 +428,7 @@ enum PluginScanner {
         case "zeptoclaw": return [p(".zeptoclaw", "plugins"), p(".zeptoclaw", "plugins", "cache")]
         case "hermes": return [p(".hermes", "plugins")]
         case "openclaw": return [p(".openclaw", "extensions")]
-        default: return [] // cursor, devin (closed beta), copilot, openhands, antigravity, deprecated Gemini CLI
+        default: return [] // cursor, devin (closed beta), copilot, openhands, antigravity
         }
     }
 

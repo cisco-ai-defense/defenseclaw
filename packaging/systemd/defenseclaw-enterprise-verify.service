@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify the DefenseClaw managed deployment
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+# Exit 75: another lifecycle run was still changing the deployment, and
+# this run skipped its checks. It is not a failed verify.
+SuccessExitStatus=75

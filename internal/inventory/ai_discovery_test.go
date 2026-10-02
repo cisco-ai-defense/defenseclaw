@@ -20,10 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +34,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -164,8 +167,8 @@ func TestLoadAISignatures_DevinUsesNativeCLIContractOnly(t *testing.T) {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
 	for _, sig := range sigs {
-		if sig.ID == "windsurf" {
-			t.Fatal("retired Windsurf signature remains public")
+		if legacyconnector.IsRetired(sig.ID) {
+			t.Fatal("the retired Desktop connector signature remains public")
 		}
 		if sig.ID != "devin" {
 			continue
@@ -1040,6 +1043,121 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	}
 	if got := report.Signals[0].Source; got != AISourceExternal {
 		t.Errorf("signal.source = %q, want %q", got, AISourceExternal)
+	}
+}
+
+// The standalone gateway cannot see user homes or other accounts'
+// processes. It ingests the guardian's per-user scans instead: each signal
+// belongs to the account the guardian's record names (not to anything the
+// scan reported), identical files of two users stay distinct, and the
+// gateway's own process detector is reported as covered, not failed.
+func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "alice")
+	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
+	mustWrite(t, filepath.Join(home, ".lmstudio", "models", "example", "tiny", "tiny.gguf"), "GGUF\x03\x00\x00\x00"+strings.Repeat("\x00", 4096))
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	catalog := []AISignature{signature}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: 10, User: "alice", Comm: "shadowai"}, {PID: 11, User: "bob", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), home, "alice", 1001, UserScanOptions{Mode: "enhanced"}, catalog)
+	for i := range report.Signals {
+		report.Signals[i].UserName = "mallory"
+	}
+	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
+		t.Fatalf("SanitizeUserScanReport: %v", err)
+	}
+	spool := filepath.Join(tmp, "spool")
+	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: report})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(spool, fmt.Sprintf("%d.json", uid)), string(data))
+	}
+	previousTrust := userScanFileTrustCheck
+	userScanFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { userScanFileTrustCheck = previousTrust })
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, DataDir: filepath.Join(tmp, "data"), HomeDir: filepath.Join(tmp, "gateway"), UserScanDir: spool,
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+	got, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if got.Summary.Result != "ok" || got.Summary.DetectorNotes["process"] != userScanProcessNote {
+		t.Fatalf("summary = %+v, want ok with the process detector covered by per-user scans", got.Summary)
+	}
+	fingerprints := map[string]string{}
+	processes := 0
+	for _, sig := range got.Signals {
+		if sig.Source != AISourceUserScan {
+			t.Fatalf("the gateway's own scan reported %+v", sig)
+		}
+		want := map[string]string{"1001": "alice", "1002": "bob"}[sig.UserID]
+		if want == "" || sig.UserName != want {
+			t.Fatalf("signal attributed to %q/%q, want the record's account: %+v", sig.UserID, sig.UserName, sig)
+		}
+		if sig.Runtime != nil {
+			processes++
+			if sig.Runtime.PID != 10 || sig.Runtime.User != want {
+				t.Fatalf("process signal %+v, want alice's own process attributed to %s", sig.Runtime, want)
+			}
+		}
+		if other, dup := fingerprints[sig.Fingerprint]; dup {
+			t.Fatalf("users %s and %s share fingerprint %s", other, sig.UserName, sig.Fingerprint)
+		}
+		fingerprints[sig.Fingerprint] = sig.UserName
+	}
+	if processes != 2 || len(got.Signals) != 6 {
+		t.Fatalf("signals = %+v, want a config, a process and a model file signal per user", got.Signals)
+	}
+	if raw, _ := json.Marshal(got); strings.Contains(string(raw), tmp) {
+		t.Fatalf("report leaked a raw path: %s", raw)
+	}
+}
+
+// Linux ps prints a user name longer than eight characters truncated
+// ("longname+"). A per-user scan still keeps its account's own processes.
+func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux ps truncates user names")
+	}
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "firstna+", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "firstname.lastname", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want the account's own process", report.Signals)
+}
+
+// A partial per-user scan names the detector that failed. Only the process
+// and model file scans used to, so a package manifest walk error on macOS
+// reached the gateway as "partial scan: " with no cause.
+func TestScanUserHomeNamesAFailingPackageManifestWalk(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder this account cannot read")
+	}
+	home := t.TempDir()
+	locked := filepath.Join(home, "project")
+	if err := os.Mkdir(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	opts := UserScanOptions{Mode: "enhanced", IncludePackageManifests: true}
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), opts, []AISignature{testAISignature()})
+	if report.Summary.Result != "partial" || report.Summary.DetectorErrors["package_manifest"] == "" {
+		t.Fatalf("summary = %+v, want partial naming package_manifest", report.Summary)
 	}
 }
 

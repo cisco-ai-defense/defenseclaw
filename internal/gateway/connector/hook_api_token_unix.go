@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
@@ -177,10 +178,39 @@ func hookAPITrustedOwner(uid uint32) bool {
 	if runtimeowner.Trusted(uid) {
 		return true
 	}
-	serviceUser, err := user.Lookup("defenseclaw")
-	if err != nil {
-		return false
+	for _, name := range hookAPIServiceAccounts(runtime.GOOS) {
+		serviceUser, err := hookAPILookupUser(name)
+		if err != nil || serviceUser == nil {
+			continue
+		}
+		serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
+		if err == nil && uid == uint32(serviceUID) {
+			return true
+		}
 	}
-	serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
-	return err == nil && uid == uint32(serviceUID)
+	return false
+}
+
+var hookAPILookupUser = user.Lookup
+
+// hookAPIServiceAccounts names the gateway service accounts whose data
+// directories hold hook tokens: "defenseclaw" everywhere, plus the hidden
+// "_defenseclaw" account the standalone macOS deployment runs the gateway as.
+func hookAPIServiceAccounts(goos string) []string {
+	if goos == "darwin" {
+		return []string{managed.StandaloneLinuxServiceUser, managed.StandaloneDarwinServiceUser}
+	}
+	return []string{managed.StandaloneLinuxServiceUser}
+}
+
+// hookAPIValidateOwnerFor matches the Windows signature; Unix guardians act
+// with the target user's own credentials, so no extra owner is trusted.
+func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
+	return hookAPIValidateOwner(path, info)
+}
+
+// hookAPIValidateDirectoryFor matches the Windows signature (see
+// hookAPIValidateOwnerFor).
+func hookAPIValidateDirectoryFor(path, _ string) error {
+	return hookAPIValidateDirectory(path)
 }

@@ -135,18 +135,54 @@ func dispatchTrustedAction(
 		return findings
 	}
 
+	// A partial action whose only uncertainty is a runtime-expanded redirect
+	// target ("> ~/out.txt", "> $HOME/out.txt") still has a static, provable
+	// argv. Semantic rules run on the complete analysis of a static-target
+	// twin without those redirects, but only a match counts there, and only
+	// for a rule that match cannot depend on the dropped redirect and path
+	// facts (redirectReductionCandidate). A code-owned prerequisite is a Go
+	// check written for complete facts, so it must also hold on the twin
+	// with its static targets (staticTargetTwin). A non-match or a skipped
+	// rule never suppresses its legacy fallback, which, like every recovery
+	// lane below, still sees the whole action.
+	//
+	// A partial action with && or || lists is judged as if every command of
+	// each list runs: a block stops the whole call before any of it runs, so
+	// a rule that blocks `a; b` also blocks `a && b` and `a || b`. Semantic
+	// rules that do not read how complete the analysis is
+	// (listReductionCandidate) and the context checks run on the complete
+	// analysis of the list read as a sequence, which has every fact of the
+	// action, so there a non-match counts as it does for `a; b`. A fallback
+	// finding that analysis proves may block too. A list with a
+	// runtime-expanded redirect target is read as a sequence inside the
+	// redirect-target view.
+	semanticFacts := facts
+	// viewCandidate is set when semanticFacts is a view, and reports whether
+	// a rule's result on that view may stand for the whole action.
+	var viewCandidate func(compiledSemanticRule) bool
+	// staticTargetTwin is the complete analysis a redirect-target view was
+	// cut from, with the placeholder targets' redirect and path facts.
+	var staticTargetTwin *actionfacts.Facts
 	if !facts.Authoritative() {
-		var fallbackTelemetry trustedActionTelemetry
-		findings, fallbackTelemetry = dispatchTrustedFallback(
-			generation,
-			request,
-			facts,
-			options,
-		)
-		telemetry.merge(fallbackTelemetry)
-		return findings
+		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
+		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else {
+			var fallbackTelemetry trustedActionTelemetry
+			findings, fallbackTelemetry = dispatchTrustedFallback(
+				generation,
+				request,
+				facts,
+				options,
+			)
+			telemetry.merge(fallbackTelemetry)
+			return findings
+		}
 	}
-	fullProjection, projectionCode := semantic.Project(facts)
+	// matchOnly is set when only a match on the view counts.
+	matchOnly := staticTargetTwin != nil
+	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
 		findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -176,11 +212,17 @@ func dispatchTrustedAction(
 		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 			continue
 		}
-		if !candidate.owner.eligible(facts) {
-			if candidate.owner.suppressFallback != nil &&
-				candidate.owner.suppressFallback(facts) {
+		if viewCandidate != nil && !viewCandidate(candidate) {
+			continue
+		}
+		if !candidate.owner.eligible(semanticFacts) {
+			if !matchOnly && candidate.owner.suppressFallback != nil &&
+				candidate.owner.suppressFallback(semanticFacts) {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
+			continue
+		}
+		if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 			continue
 		}
 		result, evalCode := candidate.program.EvalBool(ctx, fullProjection)
@@ -195,12 +237,14 @@ func dispatchTrustedAction(
 			continue
 		}
 		if !result.Matched {
-			excludeSemanticOwner(excluded, candidate.owner, false)
+			if !matchOnly {
+				excludeSemanticOwner(excluded, candidate.owner, false)
+			}
 			continue
 		}
 
 		if !enforcementProjected {
-			enforcementFacts = facts.EnforcementProjection()
+			enforcementFacts = semanticFacts.EnforcementProjection()
 			enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
 			enforcementProjected = true
 		}
@@ -248,7 +292,7 @@ func dispatchTrustedAction(
 			newActionFactsSemanticFindingProof(
 				candidate.rule.ID,
 				actionFactsSemanticProofInput{
-					FactsAuthoritative:  facts.Authoritative(),
+					FactsAuthoritative:  semanticFacts.Authoritative(),
 					EnforcementEligible: enforcementFacts.EnforcementEligible(),
 					ProjectionComplete:  projectionCode == semantic.ProjectionOK,
 					EvaluationComplete:  enforcementCode == semantic.EvalOK,
@@ -285,65 +329,123 @@ func dispatchTrustedAction(
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
 	}
 	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
-	legacyFindings := scanRuleGeneration(
+	scanned := scanRuleGeneration(
 		generation,
 		legacyText,
 		request.Input.Tool,
 		options,
 	)
-	legacyFindings = appendTrustedFIFOListenerBindShellFinding(
-		legacyFindings,
-		generation,
-		request.Input,
+	fallbackLanes := func(
+		legacyFindings []RuleFinding,
+		facts actionfacts.Facts,
+	) ([]RuleFinding, trustedActionTelemetry) {
+		legacyFindings = appendTrustedFIFOListenerBindShellFinding(
+			legacyFindings,
+			generation,
+			request.Input,
+			facts,
+		)
+		legacyFindings = appendTrustedBoundedExactFallbackFindings(
+			legacyFindings,
+			generation,
+			request.Input,
+			facts,
+		)
+		legacyFindings = appendTrustedWindowsPathFactFindings(
+			legacyFindings,
+			facts,
+			request.Input.Tool,
+			options,
+		)
+		legacyFindings = appendTrustedEmbeddedCommandFindings(
+			legacyFindings,
+			generation,
+			request.Input.Tool,
+			facts,
+			options,
+		)
+		legacyFindings, laneTelemetry := appendTrustedBashFallbackFindings(
+			legacyFindings,
+			generation,
+			request.Input,
+			request.Input.Tool,
+			facts,
+			options,
+			request.EnforcementCapable,
+			request.DowngradeReadOnlyDataArgs,
+		)
+		legacyFindings = filterTrustedLegacyActionContext(
+			generation,
+			legacyFindings,
+			request.Input,
+			request.Input.Tool,
+			facts,
+			request.DowngradeReadOnlyDataArgs,
+		)
+		legacyFindings = filterExactFallbackFindings(
+			legacyFindings,
+			request.Input,
+			facts,
+			request.EnforcementCapable,
+		)
+		return legacyFindings, laneTelemetry
+	}
+	legacyFindings, fallbackTelemetry := fallbackLanes(
+		append([]RuleFinding(nil), scanned...),
 		facts,
-	)
-	legacyFindings = appendTrustedBoundedExactFallbackFindings(
-		legacyFindings,
-		generation,
-		request.Input,
-		facts,
-	)
-	legacyFindings = appendTrustedWindowsPathFactFindings(
-		legacyFindings,
-		facts,
-		request.Input.Tool,
-		options,
-	)
-	legacyFindings = appendTrustedEmbeddedCommandFindings(
-		legacyFindings,
-		generation,
-		request.Input.Tool,
-		facts,
-		options,
-	)
-	var fallbackTelemetry trustedActionTelemetry
-	legacyFindings, fallbackTelemetry = appendTrustedBashFallbackFindings(
-		legacyFindings,
-		generation,
-		request.Input,
-		request.Input.Tool,
-		facts,
-		options,
-		request.EnforcementCapable,
-		request.DowngradeReadOnlyDataArgs,
 	)
 	telemetry.merge(fallbackTelemetry)
-	legacyFindings = filterTrustedLegacyActionContext(
-		generation,
-		legacyFindings,
-		request.Input,
-		request.Input.Tool,
-		facts,
-		request.DowngradeReadOnlyDataArgs,
-	)
-	legacyFindings = filterExactFallbackFindings(
-		legacyFindings,
-		request.Input,
-		facts,
-		request.EnforcementCapable,
-	)
+	// A list read as a sequence has every fact of the action, so the checks
+	// that decide whether a fallback, content or path finding may block judge
+	// it as that sequence too. A redirect-target view lacks the target's facts.
+	contextFacts := facts
+	if viewCandidate != nil && !matchOnly {
+		contextFacts = semanticFacts
+		sequenceFindings, _ := fallbackLanes(scanned, semanticFacts)
+		legacyFindings = withSequenceProvenFindings(legacyFindings, sequenceFindings)
+	}
 	findings = append(semanticFindings, legacyFindings...)
-	return finalizeTrustedActionFindings(generation, request, facts, findings)
+	return finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+}
+
+// withSequenceProvenFindings returns findings, the fallback findings checked
+// against the whole action, with each finding of sequence, the same findings
+// checked against a list read as a sequence, that may block there in place of
+// its rule's finding. A finding only the whole action proves stays as it was.
+func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding {
+	for _, proven := range sequence {
+		if !proven.contributesToEnforcement() ||
+			!proven.proof.authorizes(proven.RuleID) {
+			continue
+		}
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return finding.RuleID == proven.RuleID
+		})
+		if index < 0 {
+			findings = append(findings, proven)
+		} else {
+			findings[index] = proven
+		}
+	}
+	return findings
+}
+
+// redirectReductionCandidate reports whether a match of candidate on the view
+// from actionfacts.DynamicRedirectTargetReduction may stand for the
+// whole action: the expression must be one that more redirects cannot turn
+// off (semantic.Program.RedirectReductionSafe). Other rules keep their legacy
+// fallback, as for any other partial action.
+func redirectReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.program.RedirectReductionSafe()
+}
+
+// listReductionCandidate reports whether a result of candidate on the view
+// from actionfacts.ShortCircuitListReduction may stand for the whole action:
+// the expression must not read how complete the analysis is
+// (semantic.Program.ListReductionSafe). Other rules keep their legacy
+// fallback.
+func listReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.program.ListReductionSafe()
 }
 
 func excludeSemanticOwner(
@@ -520,7 +622,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"credential.directory_credential_acquisition": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return actionfacts.ExactDirectoryCredentialAcquisition(facts)
+			return actionfacts.ExactDirectoryCredentialCompromise(facts)
+		},
+	},
+	"credential.directory_ticket_request": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactDirectoryCredentialTicketRequest(facts)
 		},
 	},
 	"credential.pkcs12_private_key_extract": {
@@ -1024,10 +1131,38 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 	},
 	"persistence.ssh_authorized_keys_command": {
-		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return sshAuthorizedKeysCommandPrerequisite(facts)
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return sshAuthorizedKeysCommandPrerequisite(facts) ||
+				homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite)
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite)
 		},
 	},
+}
+
+// homeResolvedTwinProves reports whether check holds on the enforcement
+// projection of the home-resolved twin of a partial action: the same command
+// with its ~/ and $HOME/ paths (> ~/.ssh/authorized_keys, tee -a
+// "$HOME/.ssh/authorized_keys") resolved under the caller's home. The shell
+// expands those at run time, so the action's own analysis has no path fact
+// for them and a rule about that exact path never matched: the write was
+// allowed with no finding while the absolute path blocked. Only a check that
+// holds counts; a check that fails on the twin proves nothing.
+func homeResolvedTwinProves(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+	check func(actionfacts.Facts) bool,
+) bool {
+	if facts.Authoritative() {
+		return false
+	}
+	twin, ok := actionfacts.HomeResolvedTwin(input)
+	if !ok {
+		return false
+	}
+	enforcement := twin.EnforcementProjection()
+	return enforcement.EnforcementEligible() && check(enforcement)
 }
 
 func exactUnboundedCPUFanoutAction(
@@ -2108,7 +2243,7 @@ func trustedReadOnlyInspectionAction(
 
 	commandText := trustedActionInputText(input, "")
 	if powerShellFacts, candidate := codexStaticPowerShellReaderFacts(
-		commandText, facts, input.CWD, input.Tool,
+		commandText, facts, input.CWD, input.Tool, input.ActiveHome,
 	); candidate {
 		return trustedReadOnlyPowerShellInspection(powerShellFacts)
 	}
@@ -4210,6 +4345,8 @@ func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
 func trustedBashExecutionTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "bash", "zsh", "ksh", "shell", "shell_command", "terminal",
+		// Amp runs background commands through async_shell_command.
+		"async_shell_command",
 		"run_command", "run_shell", "run_shell_command", "runshellcommand",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
@@ -5688,6 +5825,56 @@ func alertOnlyRuleFindings(findings []RuleFinding) []RuleFinding {
 		}
 	}
 	return alerts
+}
+
+// trustedActiveHome is the home directory action analysis resolves "~" and
+// $HOME against for this request. A standalone gateway runs as a service
+// account on behalf of many users, so it is the verified caller's home:
+// the kernel-verified hook-socket peer's, or on the TCP API the home of the
+// account a per-user credential is bound to. It is never the service
+// account's own home. When the caller's home cannot be resolved it is
+// unresolvedCallerHome, so home-relative and suffix rules (~/.aws/
+// credentials, ~/.kube/config) still match. Everywhere else the gateway
+// runs as the user and its own home is the caller's.
+func trustedActiveHome(ctx context.Context) string {
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		if peer.Home != "" {
+			return peer.Home
+		}
+		return unresolvedCallerHome
+	}
+	if serviceAccountGatewayFromContext(ctx) {
+		if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+			if home := userScopedIdentityHome(identity); home != "" {
+				return home
+			}
+		}
+		return unresolvedCallerHome
+	}
+	return trustedSameHostHome()
+}
+
+// unresolvedCallerHome stands in for a standalone caller whose home cannot
+// be resolved (a directory lookup that failed, a home of "/", or an
+// unclean home path, or a TCP request with no per-user credential). It is
+// absolute and does not exist, so "~" paths resolve to a path no real file
+// has while keeping the ".aws/credentials"-style suffix the rules match on.
+const unresolvedCallerHome = "/nonexistent-home"
+
+type serviceAccountGatewayContextKey struct{}
+
+// withServiceAccountGateway marks requests served by a standalone gateway,
+// which runs as a service account on behalf of many users.
+func withServiceAccountGateway(ctx context.Context) context.Context {
+	return context.WithValue(ctx, serviceAccountGatewayContextKey{}, true)
+}
+
+func serviceAccountGatewayFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	marked, _ := ctx.Value(serviceAccountGatewayContextKey{}).(bool)
+	return marked
 }
 
 func trustedSameHostHome() string {

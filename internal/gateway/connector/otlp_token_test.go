@@ -40,24 +40,24 @@ func TestIsValidOTLPScope_NegativeCases(t *testing.T) {
 	}{
 		{"empty", "", false},
 		{"validCodex", OTLPScopeCodex, true},
-		{"validGemini", OTLPScopeGeminiCLI, true},
+		{"validOmnigent", OTLPScopeOmnigent, true},
 		{"validCodex", OTLPScopeCodex, true},
 		{"validClaude", OTLPScopeClaude, true},
 		{"validOpenHands", OTLPScopeOpenHands, true},
-		{"upper", "GEMINICLI", false},
-		{"trailingSpace", "geminicli ", false},
-		{"leadingSpace", " geminicli", false},
+		{"upper", "OMNIGENT", false},
+		{"trailingSpace", "omnigent ", false},
+		{"leadingSpace", " omnigent", false},
 		{"pathTraversal", "../etc/passwd", false},
-		{"forwardSlash", "geminicli/extra", false},
-		{"newline", "geminicli\nclaude", false},
+		{"forwardSlash", "omnigent/extra", false},
+		{"newline", "omnigent\nclaude", false},
 		{"nul", "\x00", false},
-		{"nulSuffix", "geminicli\x00", false},
-		{"unicodeHomoglyph", "geminіcli", false}, // contains Cyrillic 'і' (U+0456)
-		{"plus", "gemini+cli", false},
+		{"nulSuffix", "omnigent\x00", false},
+		{"unicodeHomoglyph", "omnіgent", false}, // contains Cyrillic 'і' (U+0456)
+		{"plus", "omni+gent", false},
 		{"unknownVendor", "openai", false},
 		{"length128", OTLPPathTokenScope(repeat('a', 128)), false},
-		{"underscore", "gemini_cli", false}, // underscore not in scope list
-		{"dotPrefix", ".geminicli", false},
+		{"underscore", "open_hands", false}, // underscore not in scope list
+		{"dotPrefix", ".omnigent", false},
 		{"dashOnly", "-", false},
 		{"singleChar", "g", false},
 	}
@@ -79,14 +79,14 @@ func TestEnsureOTLPPathToken_IsolatesConnectorScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureOTLPPathToken(codex): %v", err)
 	}
-	gemini, err := EnsureOTLPPathToken(dir, OTLPScopeGeminiCLI)
+	omnigent, err := EnsureOTLPPathToken(dir, OTLPScopeOmnigent)
 	if err != nil {
-		t.Fatalf("EnsureOTLPPathToken(geminicli): %v", err)
+		t.Fatalf("EnsureOTLPPathToken(omnigent): %v", err)
 	}
-	if codex == "" || gemini == "" || codex == gemini {
+	if codex == "" || omnigent == "" || codex == omnigent {
 		t.Fatal("connector OTLP scopes did not receive distinct non-empty credentials")
 	}
-	for _, scope := range []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeGeminiCLI} {
+	for _, scope := range []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeOmnigent} {
 		path, err := OTLPPathTokenFilePath(dir, scope)
 		if err != nil {
 			t.Fatalf("OTLPPathTokenFilePath(%s): %v", scope, err)
@@ -479,7 +479,7 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			if err := os.MkdirAll(hooks, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			path, err := OTLPPathTokenFilePath(dir, OTLPScopeGeminiCLI)
+			path, err := OTLPPathTokenFilePath(dir, OTLPScopeOmnigent)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -488,10 +488,10 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read unsafe token before provisioning attempt: %v", err)
 			}
-			if got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
+			if got, err := LoadOTLPPathToken(dir, OTLPScopeOmnigent); err == nil {
 				t.Fatalf("LoadOTLPPathToken succeeded with token %q, want error", got)
 			}
-			if got, err := EnsureOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
+			if got, err := EnsureOTLPPathToken(dir, OTLPScopeOmnigent); err == nil {
 				t.Fatalf("EnsureOTLPPathToken succeeded with token %q, want error", got)
 			}
 			after, err := os.ReadFile(path)
@@ -508,7 +508,7 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path, err := OTLPPathTokenFilePath(dir, OTLPScopeGeminiCLI)
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeOmnigent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI)
+	got, err := LoadOTLPPathToken(dir, OTLPScopeOmnigent)
 	if err != nil {
 		t.Fatalf("LoadOTLPPathToken: %v", err)
 	}
@@ -586,7 +586,6 @@ func TestOTLPPathTokenScopeForConnector(t *testing.T) {
 	}{
 		{name: "codex", scope: OTLPScopeCodex, ok: true},
 		{name: " ClaudeCode ", scope: OTLPScopeClaude, ok: true},
-		{name: "geminicli", scope: OTLPScopeGeminiCLI, ok: true},
 		{name: "omnigent", scope: OTLPScopeOmnigent, ok: true},
 		{name: "openhands", scope: OTLPScopeOpenHands, ok: true},
 		{name: "cursor", ok: false},

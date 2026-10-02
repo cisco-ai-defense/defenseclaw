@@ -8,9 +8,9 @@ import re
 from pathlib import Path
 
 import yaml
+from defenseclaw import legacy_connector
 from defenseclaw.platform_support import (
     ACP_ONLY_CONNECTORS,
-    DEPRECATED_CONNECTORS,
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_CONNECTOR_SUPPORT,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
@@ -61,7 +61,6 @@ def test_windows_release_metadata_is_exact() -> None:
     assert WINDOWS_PREVIEW_CONNECTORS == set()
     assert WINDOWS_NOT_CERTIFIED_CONNECTORS == set()
     assert WINDOWS_UNSUPPORTED_CONNECTORS == {
-        "geminicli",
         "openhands",
         "openclaw",
         "zeptoclaw",
@@ -103,7 +102,7 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
 
 def test_connector_pages_are_the_canonical_cross_platform_support_source() -> None:
     connector_docs = _active_connector_docs()
-    expected_connector_ids = set(WINDOWS_CONNECTOR_SUPPORT) - DEPRECATED_CONNECTORS
+    expected_connector_ids = set(WINDOWS_CONNECTOR_SUPPORT)
     assert set(connector_docs) == expected_connector_ids
 
     status_labels = {
@@ -197,8 +196,6 @@ def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> 
     assert "Native Windows supports Amp plus Codex, Claude Code, Cursor" in cli_reference
     assert "remain previews or not-certified choices" not in cli_reference
     assert "Preview user-hook alias for Cursor" not in cli_reference
-    assert "Gemini CLI setup is deprecated on every platform" in cli_reference
-    assert "use `defenseclaw setup antigravity`" in cli_reference
     assert (
         "Native Windows x64 release certification currently covers Claude Code"
         not in live_workflow
@@ -214,42 +211,6 @@ def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> 
     assert "Git for Windows" not in lifecycle
 
 
-def test_gemini_deprecation_is_global_and_preserves_safe_cleanup() -> None:
-    from defenseclaw.commands.cmd_setup import (
-        _CONNECTOR_CHANGE_SURFACES,
-        _CONNECTOR_META,
-    )
-
-    connector_page = (
-        ROOT / "docs-site/content/docs/connectors/geminicli.mdx"
-    ).read_text(encoding="utf-8")
-    acceptance = (
-        ROOT / "docs/research/NATIVE-WINDOWS-CONNECTOR-ACCEPTANCE.md"
-    ).read_text(encoding="utf-8")
-    surfaces = "\n".join(_CONNECTOR_CHANGE_SURFACES["geminicli"])
-    metadata = _CONNECTOR_META["geminicli"]["description"]
-
-    assert "retired integration" in metadata
-    assert "New setup is disabled on every platform" in surfaces
-    assert "use the Antigravity connector" in surfaces
-    assert "safe teardown" in metadata
-    assert "exact restore or surgical cleanup" in surfaces
-
-    normalized_page = " ".join(connector_page.split())
-    assert "Deprecated on every platform" in normalized_page
-    assert "no longer offers new Gemini CLI setup" in normalized_page
-    assert "removed from installers, setup pickers, the TUI" in normalized_page
-    assert "defenseclaw setup remove geminicli --yes" in normalized_page
-    assert "defenseclaw setup antigravity" in normalized_page
-
-    gemini_rows = "\n".join(
-        line for line in acceptance.splitlines() if line.startswith("| Gemini CLI")
-    )
-    assert "deprecated" in gemini_rows.lower()
-    assert "Antigravity" in gemini_rows
-    assert "teardown" in gemini_rows.lower()
-
-
 def test_claude_windows_docs_use_official_config_override() -> None:
     claude_docs = (
         ROOT / "docs/reference/CLAUDE-CODE-WINDOWS.md",
@@ -262,61 +223,60 @@ def test_claude_windows_docs_use_official_config_override() -> None:
         assert "$CLAUDE_HOME" not in text, path
 
 
-def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64() -> None:
+def test_release_builds_only_the_four_supported_targets_with_flat_names() -> None:
     release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     builds = {build["id"]: build for build in release["builds"]}
 
     assert set(builds) == {
         "defenseclaw",
         "defenseclaw-windows-amd64",
-        "defenseclaw-windows-arm64",
         "defenseclaw-hook",
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
-        "defenseclaw-acp-windows-arm64",
+        "defenseclaw-hook-posix",
+        "defenseclaw-sensor-helper-posix",
     }
-    assert builds["defenseclaw"]["goos"] == ["linux", "darwin"]
-    assert builds["defenseclaw"]["goarch"] == ["amd64", "arm64"]
-    assert builds["defenseclaw-windows-amd64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-windows-amd64"]["goarch"] == ["amd64"]
-    assert builds["defenseclaw-windows-arm64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-windows-arm64"]["goarch"] == ["arm64"]
-    assert builds["defenseclaw-hook"]["goos"] == ["windows"]
-    assert builds["defenseclaw-hook"]["goarch"] == ["amd64"]
-    assert builds["defenseclaw-acp-posix"]["goos"] == ["linux", "darwin"]
-    assert builds["defenseclaw-acp-posix"]["goarch"] == ["amd64", "arm64"]
-    assert builds["defenseclaw-acp-windows-amd64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-acp-windows-amd64"]["goarch"] == ["amd64"]
-    assert builds["defenseclaw-acp-windows-arm64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-acp-windows-arm64"]["goarch"] == ["arm64"]
+    assert builds["defenseclaw"]["binary"] == "defenseclaw-gateway"
+    assert builds["defenseclaw-windows-amd64"]["binary"] == "defenseclaw-gateway"
+    for posix in ("defenseclaw", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
+        assert builds[posix]["goos"] == ["linux", "darwin"]
+        assert builds[posix]["goarch"] == ["amd64", "arm64"]
+        assert {"goos": "darwin", "goarch": "amd64"} in builds[posix]["ignore"]
+    for windows in ("defenseclaw-windows-amd64", "defenseclaw-hook", "defenseclaw-acp-windows-amd64"):
+        assert builds[windows]["goos"] == ["windows"]
+        assert builds[windows]["goarch"] == ["amd64"]
 
     archives = {archive["id"]: archive for archive in release["archives"]}
-    canonical_name = "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    assert set(archives) == {"default", "windows-amd64", "windows-arm64"}
+    flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    assert set(archives) == {"default", "enterprise-posix", "windows-amd64"}
     assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix"]
+    # The standalone managed-enterprise payload is its own flat asset family;
+    # per-user installers never fetch it.
+    enterprise = archives.pop("enterprise-posix")
+    assert enterprise["ids"] == [
+        "defenseclaw",
+        "defenseclaw-hook-posix",
+        "defenseclaw-sensor-helper-posix",
+        "defenseclaw-acp-posix",
+    ]
+    assert enterprise["formats"] == ["tar.gz"]
+    assert enterprise["name_template"] == "{{ .ProjectName }}-enterprise-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     assert archives["default"]["formats"] == ["tar.gz"]
-    assert archives["default"]["name_template"] == canonical_name
     assert archives["windows-amd64"]["ids"] == [
         "defenseclaw-windows-amd64",
         "defenseclaw-hook",
         "defenseclaw-acp-windows-amd64",
     ]
     assert archives["windows-amd64"]["formats"] == ["zip"]
-    assert archives["windows-amd64"]["name_template"] == canonical_name
-    assert archives["windows-arm64"]["ids"] == [
-        "defenseclaw-windows-arm64",
-        "defenseclaw-acp-windows-arm64",
-    ]
-    assert archives["windows-arm64"]["formats"] == ["zip"]
-    assert archives["windows-arm64"]["name_template"] == canonical_name
-    assert all(
-        "defenseclaw-hook" not in archive["ids"]
-        for archive_id, archive in archives.items()
-        if archive_id != "windows-amd64"
-    )
+    assert all(archive["name_template"] == flat_name for archive in archives.values())
+    # The Release workflow writes and signs the one checksums.txt users verify.
+    assert release["checksum"] == {"disable": True}
+    assert "signs" not in release
 
+
+def test_windows_installer_tracks_supported_connectors() -> None:
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
-    assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
+    assert '"ARM64" { Die "Windows ARM64 is not certified, including x64 emulation' in installer
     choices_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", installer, re.DOTALL)
     assert choices_match is not None
     choices = tuple(re.findall(r'"([^"]+)"', choices_match.group(1)))
@@ -357,7 +317,7 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         assert f'<ConnectorLabel id="{connector_id}" />' in compatibility
 
 
-def test_public_docs_expose_devin_and_no_windsurf_setup_surface() -> None:
+def test_public_docs_expose_devin_and_no_retired_desktop_setup_surface() -> None:
     docs_root = ROOT / "docs-site"
     public_sources = [
         *sorted((docs_root / "content").rglob("*.mdx")),
@@ -367,17 +327,22 @@ def test_public_docs_expose_devin_and_no_windsurf_setup_surface() -> None:
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in public_sources)
 
-    assert "defenseclaw setup windsurf" not in combined
-    assert "/docs/connectors/windsurf" not in combined
-    assert '<ConnectorLabel id="windsurf"' not in combined
-    assert '"id": "windsurf"' not in combined
-    assert "id: 'windsurf'" not in combined
-    assert "legacy Cascade" not in combined
-    assert "Devin Desktop" not in combined
+    retired = legacy_connector.RETIRED_DESKTOP_ID
+    assert f"defenseclaw setup {retired}" not in combined
+    assert f"/docs/connectors/{retired}" not in combined
+    assert f'<ConnectorLabel id="{retired}"' not in combined
+    assert f'"id": "{retired}"' not in combined
+    assert f"id: '{retired}'" not in combined
     assert "defenseclaw setup devin" in combined
     assert "/docs/connectors/devin" in combined
     assert '<ConnectorLabel id="devin" />' in combined
     assert '"id": "devin"' in combined
+
+    # Devin Desktop coverage is claimed only for its Devin Local agent, only on
+    # vendor documentation until a live run is recorded, and never for Cascade.
+    devin_page = (docs_root / "content/docs/connectors/devin.mdx").read_text(encoding="utf-8")
+    assert "**Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation**" in devin_page
+    assert "legacy **Cascade** agent | **No**" in devin_page
 
 
 def test_codex_compatibility_docs_list_current_versioned_contracts() -> None:
@@ -542,7 +507,6 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     assert "PreInvocation`, `PreToolUse" not in combined
     assert ".antigravitycli/hooks.json" not in combined
     assert "ANTIGRAVITY_CONFIG_DIR" not in combined
-    assert "GEMINI_CONFIG_DIR" not in combined
 
 
 def test_hermes_latest_source_recheck_matches_the_pinned_contract() -> None:

@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,17 @@ func TestAMPEventsEnterCorrectGuardrailLanes(t *testing.T) {
 		"block", "action", "tool.result", profile.Capabilities, profile, req.Payload,
 	); action != "block" || wouldBlock {
 		t.Fatalf("tool.result block verdict=(%q,%v), want enforced block", action, wouldBlock)
+	}
+	// Amp cannot block a prompt: in action mode the agent.start notice is
+	// how DefenseClaw acts on the blocking rule, not observe-mode text.
+	for _, mode := range []string{"action", "observe"} {
+		action, wouldBlock := mapHookActionForProfile("block", mode, "agent.start", profile.Capabilities, profile, nil)
+		notice := agentHookResponseForProfile(profile, agentHookRequest{ConnectorName: "amp", HookEventName: "agent.start"},
+			action, "block", "HIGH", "marker rule", nil, mode, wouldBlock, profile.Capabilities).AdditionalContext
+		enforced := strings.Contains(notice, "must not be carried out") && !strings.Contains(notice, "would block")
+		if action != "allow" || !strings.Contains(notice, "a HIGH amp hook finding") || enforced != (mode == "action") {
+			t.Fatalf("%s-mode agent.start action=%q notice=%q", mode, action, notice)
+		}
 	}
 }
 
@@ -256,8 +268,13 @@ func TestAMPFiveEventCanonicalObservability(t *testing.T) {
 			for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
 				eventCounts[logStringAttribute(record.Attributes, "defenseclaw.event.name")]++
 			}
+			// Wait for every span the assertions below count: the second
+			// agent-invoke span could still be in flight once the tool and
+			// model spans were in (seen on the Windows CI runner).
 			if familyCounts[observability.TelemetryFamilyToolExecute] == 1 &&
 				familyCounts[observability.TelemetryFamilyModelChat] == 1 &&
+				familyCounts[observability.TelemetryFamilyAgentInvoke] == 2 &&
+				familyCounts[observability.TelemetryFamilyAgentTransition] == 3 &&
 				eventCounts[observability.TelemetryEventModelResponse] == 1 {
 				break
 			}

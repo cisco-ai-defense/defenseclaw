@@ -231,6 +231,9 @@ class AuditPanelModel:
         # by the app from the active connector count; single-connector
         # installs leave them at the defaults so the table is unchanged.
         self.connector_filter = ""
+        # Routine rows the default view leaves out, counted by the store (None:
+        # count the loaded rows instead).
+        self._routine_count: int | None = None
         self.show_connector_column = False
         self._detail_cache: AuditDetailInfo | None = None
         self._detail_cache_cursor = -1
@@ -254,8 +257,14 @@ class AuditPanelModel:
         if filter_label:
             filtered_label = filter_label
             filter_label = f"Showing {len(self.filtered)} of {len(self.items)}: {filter_label}"
+        summary = f"{len(self.filtered)} shown of {len(self.items)} events"
+        hidden = self.hidden_routine_count()
+        if hidden:
+            # The default view hides routine events (gateway starts, reloads,
+            # migrations); say so, or a table of zero rows looks broken.
+            summary += f" · {hidden} routine hidden, 1 shows all"
         return AuditToolbarState(
-            summary_label=f"{len(self.filtered)} shown of {len(self.items)} events",
+            summary_label=summary,
             filter_label=filter_label,
             filtered_label=filtered_label,
             search_prompt=f"/ {self.filter_text}" if self.filtering else "",
@@ -350,10 +359,12 @@ class AuditPanelModel:
         if self.store is None:
             return
         try:
+            self._routine_count = None
             if not self.show_all_events and not self.filter_text and not self.common_filter and hasattr(
                 self.store, "list_actionable_event_summaries"
             ):
                 self.items = list(self.store.list_actionable_event_summaries(500))  # type: ignore[attr-defined]
+                self._count_routine()
             elif hasattr(self.store, "list_event_summaries"):
                 self.items = list(self.store.list_event_summaries(500))  # type: ignore[attr-defined]
             else:
@@ -382,6 +393,8 @@ class AuditPanelModel:
         if connector == self.connector_filter:
             return
         self.connector_filter = connector
+        if self._routine_count is not None:
+            self._count_routine()
         self.apply_filter()
 
     def apply_filter(self) -> None:
@@ -511,6 +524,30 @@ class AuditPanelModel:
     @property
     def filtered_count(self) -> int:
         return len(self.filtered)
+
+    def _count_routine(self) -> None:
+        # The actionable query already leaves the routine rows out, so the
+        # store counts them for the "N routine hidden" hint.
+        counter = getattr(self.store, "count_routine_events", None)
+        try:
+            self._routine_count = int(counter(self.connector_filter)) if callable(counter) else None
+        except Exception:  # noqa: BLE001 - the hint is best-effort
+            self._routine_count = None
+
+    def hidden_routine_count(self) -> int:
+        """Events the default view leaves out as routine (0 once any filter or "all" is on)."""
+        if self.show_all_events or self.common_filter or self.filter_text:
+            return 0
+        if self.correlation_target or self.correlation_run_id:
+            return 0
+        if self._routine_count is not None:
+            return self._routine_count
+        return sum(
+            1
+            for event in self.items
+            if _is_low_signal_event(event)
+            and (not self.connector_filter or self.connector_filter in event_connector(event).lower())
+        )
 
     def get_detail_info(self) -> AuditDetailInfo | None:
         selected = self.selected()
@@ -667,7 +704,11 @@ class AuditPanelModel:
             prefix.append(f"/ {self.filter_text}")
         header = "\n".join(prefix)
         if not self.filtered and not self.filter_text:
-            body = "No audit events yet. Events are recorded when you scan, block, allow, or configure DefenseClaw."
+            hidden = self.hidden_routine_count()
+            if hidden:
+                body = f"{hidden} routine events are hidden (gateway starts, reloads). Press 1 to show all events."
+            else:
+                body = "No audit events yet. Events are recorded when you scan, block, allow, or configure DefenseClaw."
             return f"{header}\n{body}".strip()
         if not self.filtered:
             return f"{header}\nNo events match the filter.".strip()

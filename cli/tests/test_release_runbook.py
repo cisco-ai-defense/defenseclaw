@@ -14,129 +14,64 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""The release runbook's rules must match the code they protect."""
+
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = ROOT / "docs" / "RELEASE_RUNBOOK.md"
 
 
-def _text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+def _text(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def _words(path: Path) -> str:
-    return " ".join(_text(path).split())
+def test_runbook_documents_release_draft_and_yank() -> None:
+    runbook = _text("docs/RELEASE_RUNBOOK.md")
+
+    assert "gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main -f version=X.Y.Z" in runbook
+    assert "gh release edit X.Y.Z --draft=false --latest" in runbook
+    assert "gh release edit X.Y.Z --prerelease" in runbook
+    assert "never delete" in runbook.lower()
+    assert "operation: legacy-channel" in runbook
 
 
-def test_release_runbook_covers_both_operator_flows() -> None:
-    runbook = _words(RUNBOOK)
-    raw_runbook = _text(RUNBOOK)
+def test_permanent_asset_names_are_what_the_release_publishes_and_clients_fetch() -> None:
+    runbook = _text("docs/RELEASE_RUNBOOK.md")
+    workflow = _text(".github/workflows/release.yaml")
+    shim = _text("cli/defenseclaw/upgrade_shim.py")
 
-    assert "-f operation=release" in runbook
-    assert "-f operation=repair-channel" in runbook
-    assert "gh workflow run release.yaml" in runbook
-    assert "--repo cisco-ai-defense/defenseclaw" in runbook
-    assert "--ref main" in runbook
-    assert '-f version="$RELEASE_VERSION"' in runbook
-    assert "GitHub automatically freezes the dispatch's exact `github.sha`" in runbook
-    assert "Operators do not copy a commit SHA or attest to repository settings." in runbook
-    assert "Repair never builds, edits, uploads, or replaces a tagged asset." in runbook
-    assert "expected_commit" not in raw_runbook
-    assert "immutable_releases_confirmed" not in raw_runbook
-    assert "release-preflight.py operator" not in raw_runbook
+    for asset in ("install.sh", "install.ps1", "defenseclaw-upgrade.sh"):
+        assert f"`{asset}`" in runbook
+        assert f"  {asset.replace('.', chr(92) + '.')}$" in workflow
+    assert '"install.ps1" if os.name == "nt" else "install.sh"' in shim
+    assert "releases/download/{version}" in shim
 
 
-def test_release_runbook_preserves_signed_channel_and_immutability_contracts() -> None:
-    runbook = _words(RUNBOOK)
+def test_permanent_installer_flags_are_documented_and_accepted() -> None:
+    runbook = _text("docs/RELEASE_RUNBOOK.md")
+    install_sh = _text("scripts/install.sh")
 
-    assert "Immutable tagged releases." in runbook
-    assert "A mutable, signed stable channel." in runbook
-    assert "A ruleset on `release-channel` is optional repository hardening" in runbook
-    assert "not a release prerequisite or part of client trust" in runbook
-    assert "protected `main`, required checks" in runbook
-    assert "a channel ruleset alone cannot defend against an administrator" in runbook
-    assert "Sigstore authenticates the channel" in runbook
-    assert "its digests bind the immutable versioned assets" in runbook
-    assert "Never manually create, push, move, or delete a release tag." in runbook
-    assert "publish a new patch version" in runbook
-    assert "release-channel-ruleset-policy.json" not in runbook
-    assert "ruleset-admin-audit" not in runbook
+    for flag in ("--yes", "--version", "--local", "--rollback"):
+        assert f"`{flag}`" in runbook
+        assert re.search(rf"^\s+{re.escape(flag)}[)|]", install_sh, re.MULTILINE), flag
+    assert '*) warn "Ignoring unknown option: $1" ;;' in install_sh
 
 
-def test_release_runbook_preserves_install_upgrade_and_unsigned_scope() -> None:
-    runbook = _words(RUNBOOK)
+def test_handoff_marker_in_runbook_matches_the_script() -> None:
+    runbook = _text("docs/RELEASE_RUNBOOK.md")
+    handoff_last_line = _text("scripts/defenseclaw-upgrade.sh").splitlines()[-1]
 
-    for baseline in ("`0.8.6`", "`0.8.5`", "`0.8.4`", "`0.7.x`", "`0.6.x`", "`0.5.x`"):
-        assert baseline in runbook
-    for asset in (
-        "install.sh",
-        "install.ps1",
-        "DefenseClawSetup-x64.exe",
-        "checksums.txt",
-        "defenseclaw-rescue.sh",
-        "defenseclaw-rescue.ps1",
-    ):
-        assert asset in runbook
-    assert "defenseclaw upgrade --yes" in runbook
-    assert "Get-AuthenticodeSignature" in runbook
-    assert "`-unverified`" in runbook
-    assert "Authenticode `NotSigned`" in runbook
-    assert "Missing platform credentials do not block an otherwise valid release" in runbook
-    assert "Use disposable, clean hosts" in runbook
+    assert f"`{handoff_last_line}`" in runbook
 
 
-def test_windows_public_install_authenticates_saved_script_before_execution() -> None:
-    runbook = _text(RUNBOOK)
-    start = runbook.index("On a disposable native Windows x64 host")
-    end = runbook.index("The installed CLI and gateway must report", start)
-    windows = runbook[start:end]
+def test_config_schema_rule_names_real_code() -> None:
+    runbook = _text("docs/RELEASE_RUNBOOK.md")
 
-    download = windows.index("gh release download")
-    authenticate = windows.index("scripts/verify-sigstore-blob.py")
-    bind_installer_digest = windows.index("Get-FileHash -LiteralPath $Installer")
-    bind_setup_digest = windows.index("Get-FileHash -LiteralPath $Setup")
-    inspect_signature = windows.index("Get-AuthenticodeSignature $Setup")
-    inspect_publisher = windows.index("$SetupSignature.SignerCertificate.GetNameInfo")
-    execute = windows.index("& $Installer")
-
-    assert (
-        download
-        < authenticate
-        < bind_installer_digest
-        < bind_setup_digest
-        < inspect_signature
-        < inspect_publisher
-        < execute
-    )
-    assert "checksums.txt.pem" in windows
-    assert "checksums.txt.sig" in windows
-    assert "release.yaml@refs/heads/main" in windows
-    assert "^[0-9a-f]{64}  install\\.ps1$" in windows
-    assert "^[0-9a-f]{64}  DefenseClawSetup-x64\\.exe$" in windows
-    assert ".\\install.ps1 -Version" not in windows
-    assert "$ExpectUnsignedSetup" in windows
-    assert '"NotSigned"' in windows
-    assert '"Valid"' in windows
-    assert '"Cisco Systems, Inc."' in windows
-    assert "$SetupSignature.Status.ToString()" in windows
-
-
-def test_release_docs_route_to_canonical_runbook_and_preflight() -> None:
-    validation_path = ROOT / "docs" / "RELEASE_VALIDATION.md"
-    validation = _words(validation_path)
-    channel = _words(ROOT / "docs" / "RELEASE_CHANNEL.md")
-
-    assert "RELEASE_RUNBOOK.md" in validation
-    assert "--repo cisco-ai-defense/defenseclaw" in validation
-    assert "-f operation=release" in validation
-    assert "-f version=0.8.8" in validation
-    assert "exact `github.sha`" in validation
-    assert "expected_commit" not in validation
-    assert "immutable_releases_confirmed" not in validation
-    assert "scripts/release-preflight.py operator" not in validation
-    assert "Windows acceptance is explicitly fresh-install-only" in validation
-    assert "no historical Windows baseline is inferred or required" in validation
-    assert "RELEASE_RUNBOOK.md" in channel
-    assert "no copied commit SHA, repository-setting confirmation, or local preflight is required" in channel
+    assert "CONFIG_MIGRATIONS" in runbook and "CONFIG_MIGRATIONS:" in _text("cli/defenseclaw/migrations.py")
+    assert "CURRENT_CONFIG_VERSION" in runbook and "CURRENT_CONFIG_VERSION = " in _text("cli/defenseclaw/config.py")
+    go_config = "".join(path.read_text(encoding="utf-8") for path in (ROOT / "internal/config").glob("*.go"))
+    assert "MaxSupportedConfigVersion" in runbook and "MaxSupportedConfigVersion" in go_config

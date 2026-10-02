@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -45,8 +47,10 @@ from defenseclaw.observability.v8_redaction_policy import (
 from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.platform_support import (
     LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
+    host_os,
     local_observability_stack_supported,
     local_splunk_stack_supported,
+    openshell_sandboxes_supported,
 )
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
@@ -78,7 +82,9 @@ from defenseclaw.tui.services.cli_choices import (
 from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
+from defenseclaw.tui.services.sandbox_state import DEFAULT_SANDBOX_HARNESSES, SANDBOX_HARNESS_SPECS, compute_driver
 from defenseclaw.tui.services.setup_state import (
+    OPENSHELL_INHERIT_CHOICE,
     ConfigDiffEntry,
     ConfigField,
     ConfigSection,
@@ -89,9 +95,11 @@ from defenseclaw.tui.services.setup_state import (
     SetupPreviewRisk,
     ValidationResult,
     apply_config_field,
+    blocking_validation_errors,
     build_readiness_checks,
     config_diff,
     get_config_value,
+    is_python_modeled,
     looks_like_secret_value,
     mask_secret,
     split_csv,
@@ -182,6 +190,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.SPLUNK: ("setup", "splunk"),
     SetupWizard.OBSERVABILITY: ("setup", "observability", "add"),
     SetupWizard.WEBHOOKS: ("setup", "webhook", "add"),
+    # OpenShell 0.1 sandboxes (slot 13 held the removed legacy wizard).
     SetupWizard.SANDBOX: ("sandbox", "setup"),
     SetupWizard.REGISTRIES: ("registry", "add"),
     # NOTIFICATIONS_ROUTING fan-outs to multiple
@@ -203,6 +212,36 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
 
+# First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
+# …): a finished or failed command of one of these clears a task's
+# "running" badge (``mark_wizard_complete``).
+WIZARD_COMMAND_FAMILIES: frozenset[str] = frozenset(command[0] for command in WIZARD_COMMANDS.values() if command)
+
+
+def _wizard_action_family(wizard: SetupWizard) -> tuple[str, ...]:
+    """The argv prefix a wizard's sibling actions share (``()``: no fallback).
+
+    Its WIZARD_COMMANDS entry without the action word: ``agent discovery``
+    for ``agent discovery enable``, ``guardrail`` for ``guardrail status``.
+    A bare ``setup`` family is shared by most tasks, so it never matches, and
+    the Sandbox task finishes only on its own setup and doctor runs.
+    """
+
+    command = WIZARD_COMMANDS.get(wizard, ())
+    family = command[:-1] if len(command) >= 2 else command
+    if wizard == SetupWizard.SANDBOX or family in {(), ("setup",)}:
+        return ()
+    return family
+
+# The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
+ADMIN_POLICY_MESSAGE = "blocked by your organization's DefenseClaw policy"
+# Choice value for pack-governed openshell keys left unset.
+OPENSHELL_INHERIT = OPENSHELL_INHERIT_CHOICE
+
+SANDBOX_WIZARD_UNSUPPORTED_REASON = (
+    "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported."
+)
+
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
     # (slot id, label, default state)
     ("block_enforced", "Block (enforced)", "yes"),
@@ -214,28 +253,28 @@ NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
 )
 
 WIZARD_DESCRIPTIONS: tuple[str, ...] = (
-    "Run first-class setup for any connector.",
-    "List, check, fill, or set env-backed credentials.",
-    "Configure the unified LLM block non-interactively.",
-    "Inspect and manage the bundled local observability stack.",
-    "Transactionally rotate the gateway and connector-scoped hook credentials.",
-    "Manage the custom provider overlay.",
-    "Configure skill scanner analyzers and policy.",
-    "Configure MCP scanner analyzers and scan targets.",
-    "Configure gateway host, ports, TLS, and auth.",
-    "Configure the LLM guardrail proxy and judge.",
-    "Configure Splunk HEC or local Splunk integration.",
-    "Add and manage canonical v8 observability destinations.",
-    "Add chat or incident notifier webhooks.",
-    "Initialize and configure OpenShell sandbox policy.",
-    "Register an external skill or MCP catalog source.",
-    "Toggle notification categories and event sources.",
-    "Enable or tune the sidecar AI Discovery service.",
-    "Apply or destroy Splunk O11y dashboards.",
-    "Manage trusted connector-binary discovery prefixes.",
-    "Run connector-scoped guardrail status and policy quick actions.",
-    "Inspect or change canonical v8 bucket, profile, destination, and route redaction.",
-    "Configure a guarded ACP agent for Zed or JetBrains.",
+    "Add, switch or remove the agents DefenseClaw protects.",
+    "See which API keys are missing and set them.",
+    "Pick the model and API key the scanners and judge use.",
+    "Start, stop or reset the bundled local dashboards (Docker).",
+    "Replace the gateway and hook tokens in one step.",
+    "Add or remove LLM providers the guardrail should recognize.",
+    "Choose how skills are scanned and which analyzers run.",
+    "Choose how MCP servers are scanned and what gets checked.",
+    "Set the gateway host, ports, TLS and token.",
+    "Turn on the LLM guardrail and choose observe or block.",
+    "Send events to Splunk HEC or a local Splunk.",
+    "Send logs, traces and metrics to an observability vendor.",
+    "Post alerts to Slack, PagerDuty, Webex or any URL.",
+    "Run coding agents in OpenShell sandboxes.",
+    "Add a skill or MCP catalog you trust.",
+    "Choose which events send you notifications.",
+    "Find the AI tools in use on this machine.",
+    "Create or remove the Splunk Observability dashboards.",
+    "List the folders where agent binaries are trusted.",
+    "Turn the guardrail on or off, set fail mode and approvals.",
+    "Choose what is hidden from logs and exports.",
+    "Protect an ACP agent in Zed or JetBrains.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -254,7 +293,8 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
     "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
-    "Runs: defenseclaw sandbox setup. Need OpenShell policy choices and optional sandbox home/network settings.",
+    "Runs: defenseclaw sandbox setup --non-interactive in this terminal (sudo prompts and image builds show), "
+    "or defenseclaw sandbox doctor. Needs Docker; installs OpenShell only when you tick it.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
     "Runs one defenseclaw setup notifications-set <slot> on|off per changed toggle. No credentials required.",
     "Runs: defenseclaw agent discovery enable --yes (or disable). Mirrors cadence, scope, and privacy toggles.",
@@ -391,6 +431,15 @@ class SetupPanelAction:
     refresh_credentials: bool = False
     clear_restart_queue: bool = False
     open_model_picker: bool = False
+    # Open the text editor modal for the focused row: "form" (wizard form
+    # field) or "config" (config editor field). ``field_editor_value`` seeds
+    # it (the current value plus the key that was pressed); None means the
+    # current value.
+    open_field_editor: str = ""
+    field_editor_value: str | None = None
+    # Setup navigation pickers: "detail" (readiness + task detail),
+    # "sections" (grouped config sections) or "fields" (config field finder).
+    open_picker: str = ""
 
 
 @dataclass(frozen=True)
@@ -460,6 +509,12 @@ class SetupSaveRestartHints:
     restart_hint: str = ""
     saved_hint: str = ""
     action_bar: tuple[str, ...] = ()
+    # ``issues`` counts every validation error in the draft (untouched rows
+    # included, for display); ``blocking`` counts only errors on changed
+    # fields, which are the ones that stop a save.
+    issues: int = 0
+    blocking: int = 0
+    blocking_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -552,6 +607,8 @@ class SetupPanelModel:
         )
         self.wizard_status: dict[SetupWizard, str] = {}
         self._wizard_run_started: dict[SetupWizard, datetime] = {}
+        # A check-only run (the Sandbox wizard's doctor) puts back the status it found.
+        self._status_before_check: dict[SetupWizard, str] = {}
         self.form_fields: list[WizardFormField] = []
         self.form_cursor = 0
         self.form_active = False
@@ -568,6 +625,9 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
+        # What ``sandbox doctor --json`` found (the app runs it when the
+        # Sandbox wizard opens); None until it answers.
+        self.sandbox_machine: SandboxMachineCheck | None = None
 
     def set_config(
         self,
@@ -576,6 +636,8 @@ class SetupPanelModel:
         external: bool = False,
     ) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
+        active_field = self.current_field()
+        active_key = active_field.key if active_field is not None else ""
         preserve_config_draft = external and self.mode == "config" and self.has_changes()
         preserve_wizard_draft = external and self.form_active
         self.config = cfg
@@ -589,7 +651,9 @@ class SetupPanelModel:
                         self.active_section = index
                         break
             self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
-            self.active_line = self.first_editable_line()
+            # Keep the cursor on the field just saved rather than jumping to
+            # the top of the section.
+            self.active_line = self._line_for_key(active_key)
             self.config_scroll = 0
         self.disk_change_pending = preserve_config_draft or preserve_wizard_draft
         # Readiness rows depend on cfg.gateway / cfg.guardrail / cfg.audit /
@@ -721,13 +785,17 @@ class SetupPanelModel:
         )
 
     def wizard_available(self, wizard: SetupWizard | int) -> bool:
-        return not (
-            SetupWizard(wizard) == SetupWizard.LOCAL_OBSERVABILITY
-            and not local_observability_stack_supported(self.os_name)
-        )
+        wizard = SetupWizard(wizard)
+        if wizard == SetupWizard.SANDBOX:
+            return openshell_sandboxes_supported(self.os_name)
+        return not (wizard == SetupWizard.LOCAL_OBSERVABILITY and not local_observability_stack_supported(self.os_name))
 
     def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
-        return "" if self.wizard_available(wizard) else LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+        if self.wizard_available(wizard):
+            return ""
+        if SetupWizard(wizard) == SetupWizard.SANDBOX:
+            return SANDBOX_WIZARD_UNSUPPORTED_REASON
+        return LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
         return tuple(
@@ -887,11 +955,14 @@ class SetupPanelModel:
     def validation_errors(self) -> tuple[str, ...]:
         return validation_errors(self.sections)
 
+    def blocking_validation_errors(self) -> tuple[str, ...]:
+        return blocking_validation_errors(self.sections)
+
     def has_changes(self) -> bool:
         return bool(self.config_diff())
 
     def review_save_action(self) -> SetupPanelAction:
-        errors = self.validation_errors()
+        errors = self.blocking_validation_errors()
         if errors:
             return SetupPanelAction(True, hint="Fix config validation: " + errors[0])
         changes = len(self.config_diff())
@@ -905,11 +976,12 @@ class SetupPanelModel:
 
     def save_restart_hints(self) -> SetupSaveRestartHints:
         errors = self.validation_errors()
+        blocking = self.blocking_validation_errors()
         changes = len(self.config_diff())
         field = self.current_field()
         save_hint = "No config changes to save."
-        if errors:
-            save_hint = "Fix config validation before saving: " + errors[0]
+        if blocking:
+            save_hint = "Fix config validation before saving: " + blocking[0]
         elif changes:
             save_hint = "Review and save applies changed fields, then queues a gateway restart when needed."
         restart_hint = ""
@@ -934,6 +1006,9 @@ class SetupPanelModel:
             restart_hint=restart_hint,
             saved_hint=saved_hint,
             action_bar=tuple(actions),
+            issues=len(errors),
+            blocking=len(blocking),
+            blocking_errors=blocking,
         )
 
     def focused_row_action(self) -> SetupFocusedRowAction:
@@ -948,7 +1023,7 @@ class SetupPanelModel:
                 return SetupFocusedRowAction("form", "toggle", "Enter/Space", "Toggle this setup option.")
             if field.options:
                 return SetupFocusedRowAction("form", "cycle", "Left/Right", "Cycle through available choices.")
-            return SetupFocusedRowAction("form", "edit", "Type", "Edit this setup value.")
+            return SetupFocusedRowAction("form", "edit", "Enter", "Edit this setup value.")
         if self.mode == "config":
             field = self.current_field()
             section = self.current_section()
@@ -969,12 +1044,12 @@ class SetupPanelModel:
                     "Open the interactive Webhooks editor for list entries.",
                 )
             if not field.interactive:
-                return SetupFocusedRowAction("config", "read_only", "", "This config row is read-only.")
+                return SetupFocusedRowAction("config", "read_only", "", field.hint or "This config row is read-only.")
             if field.kind == "bool":
                 return SetupFocusedRowAction("config", "toggle", "Enter/Space", "Toggle true or false.")
             if field.kind == "choice":
                 return SetupFocusedRowAction("config", "cycle", "Enter/Space", "Cycle through allowed choices.")
-            return SetupFocusedRowAction("config", "edit", "Type", "Edit this config value.")
+            return SetupFocusedRowAction("config", "edit", "Enter", "Edit this config value.")
         info = self.active_wizard_info()
         return SetupFocusedRowAction(
             "wizard",
@@ -1057,6 +1132,14 @@ class SetupPanelModel:
                 for section in self.sections
             )
 
+    def _line_for_key(self, key: str) -> int:
+        section = self.current_section()
+        if key and section is not None:
+            for index, field in enumerate(section.fields):
+                if field.kind != "header" and field.key == key:
+                    return index
+        return self.first_editable_line()
+
     def first_editable_line(self) -> int:
         if not self.sections:
             return 0
@@ -1134,7 +1217,7 @@ class SetupPanelModel:
         if not self.wizard_available(self.active_wizard):
             self.form_active = False
             self.goal_active = False
-            self.form_error = LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+            self.form_error = self.wizard_unavailable_reason(self.active_wizard)
             return False
         self.goals = wizard_goals(self.active_wizard, self.config)
         if len(self.goals) <= 1:
@@ -1184,6 +1267,9 @@ class SetupPanelModel:
                 base = list(rebuild(merged, self.config))
             else:
                 base = list(_overlay_field_overrides(base, presets))
+        if self.active_wizard == SetupWizard.SANDBOX:
+            # Built with the machine check, when there is one.
+            base = list(self._sandbox_form_fields(presets))
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
         self.form_fields = base
@@ -1204,6 +1290,10 @@ class SetupPanelModel:
                 return
 
     def close_wizard_form(self) -> None:
+        if self.active_wizard == SetupWizard.SANDBOX:
+            # Setup, or the operator, may change the machine before the
+            # wizard opens again: check it again then.
+            self.sandbox_machine = None
         self.form_fields = []
         self.form_cursor = 0
         self.form_active = False
@@ -1276,7 +1366,10 @@ class SetupPanelModel:
         if self.active_goal is not None:
             for key, value in self.active_goal.presets.items():
                 overrides.setdefault(key, value)
-        fields = list(rebuild(overrides, self.config))
+        if self.active_wizard == SetupWizard.SANDBOX:
+            fields = list(self._sandbox_form_fields(overrides))
+        else:
+            fields = list(rebuild(overrides, self.config))
         if self.active_goal is not None:
             fields = list(_filter_fields_for_goal(fields, self.active_goal))
         self.form_fields = fields
@@ -1290,6 +1383,34 @@ class SetupPanelModel:
                         break
         else:
             self.form_cursor = 0
+
+    def _sandbox_form_fields(self, overrides: Mapping[str, str]) -> tuple[WizardFormField, ...]:
+        return _apply_dynamic_fields(
+            sandbox_wizard_fields(self.config, machine=self.sandbox_machine, os_name=self.os_name),
+            overrides,
+            {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
+        )
+
+    def sandbox_machine_wanted(self) -> bool:
+        """Whether the open Sandbox wizard is waiting for the machine check."""
+        return self.form_active and self.active_wizard == SetupWizard.SANDBOX and self.sandbox_machine is None
+
+    def apply_sandbox_machine_check(self, check: SandboxMachineCheck) -> None:
+        """Take the machine check and refresh an open Sandbox form.
+
+        Install OpenShell follows the check unless the operator already
+        changed it; every other answer stays as entered.
+        """
+        before = next((f for f in self.form_fields if f.flag == "--install-openshell"), None)
+        self.sandbox_machine = check
+        if not (self.form_active and self.active_wizard == SetupWizard.SANDBOX):
+            return
+        overrides = _field_value_overrides(self.form_fields)
+        if before is not None and before.value == before.default:
+            overrides.pop("--install-openshell", None)
+        self.form_fields = list(self._sandbox_form_fields(overrides))
+        if self.form_fields:
+            self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
 
     def toggle_form_reveal(self) -> bool:
         if not any(field.kind == "password" for field in self.form_fields):
@@ -1317,11 +1438,16 @@ class SetupPanelModel:
         except Exception:  # noqa: BLE001
             command = WIZARD_COMMANDS.get(self.active_wizard, ())
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
-        masked = mask_wizard_secret_values(self.form_fields, args)
-        return "defenseclaw " + " ".join(masked) if masked else "defenseclaw"
+        from defenseclaw.tui.command_line import display_argv  # the CLI tree; keep it off the model import
 
-    def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
+        masked = mask_wizard_secret_values(self.form_fields, args)
+        return "defenseclaw " + display_argv(masked) if masked else "defenseclaw"
+
+    def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True, cancelled: bool = False) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
+
+        ``cancelled`` (the preview or the run was cancelled) puts back the
+        status the row had before, rather than "failed".
 
         Maps the executed argv back to the matching wizard so the Setup
         panel reflects the real state instead of a permanently-spinning
@@ -1351,8 +1477,51 @@ class SetupPanelModel:
             if len(command) > best_len:
                 best = wizard
                 best_len = len(command)
+        if (
+            best is None
+            and tuple(args[:2]) == ("sandbox", "doctor")
+            and self.wizard_status.get(SetupWizard.SANDBOX) == "running..."
+        ):
+            # The Sandbox wizard's doctor action; other sandbox commands
+            # (enable, disable, ...) never mark the wizard.
+            best = SetupWizard.SANDBOX
+        # A wizard with several actions runs sibling commands its
+        # WIZARD_COMMANDS prefix doesn't cover (Guardrail actions runs
+        # guardrail block-message / hilt / fail-mode, AI discovery runs
+        # disable, Splunk dashboards runs destroy): the one running wizard
+        # whose action family matches more of the argv than any prefix did
+        # finishes, or its row spins forever.
+        running = [
+            (wizard, len(family))
+            for wizard, status in self.wizard_status.items()
+            if status == "running..."
+            and (family := _wizard_action_family(wizard))
+            and tuple(args[: len(family)]) == family
+        ]
+        if len(running) == 1 and running[0][1] > best_len:
+            best = running[0][0]
         if best is None:
             return
+        if cancelled:
+            before = self._status_before_check.pop(best, "")
+            if before and before != "running...":
+                self.wizard_status[best] = before
+            else:
+                self.wizard_status.pop(best, None)
+            self._wizard_run_started.pop(best, None)
+            return
+        if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
+            # Only a check: the wizard's setup status stays what it was.
+            before = self._status_before_check.pop(best)
+            if not success:
+                self.wizard_status[best] = "check failed"
+            elif before and before != "running...":
+                self.wizard_status[best] = before
+            else:
+                self.wizard_status[best] = "checked"
+            self._wizard_run_started.pop(best, None)
+            return
+        self._status_before_check.pop(best, None)
         self.wizard_status[best] = "done" if success else "failed"
         self._wizard_run_started.pop(best, None)
 
@@ -1411,20 +1580,33 @@ class SetupPanelModel:
             if self.active_wizard == SetupWizard.REDACTION and redaction_action == "interactive"
             else "read-only"
         )
+        # Sandbox setup may call sudo (the OpenShell installer) and builds
+        # images for minutes: it runs in the real terminal (App.suspend).
+        terminal = self.active_wizard == SetupWizard.SANDBOX and tuple(args[:2]) == ("sandbox", "setup")
+        if terminal:
+            risk = "setup"
+        # The Sandbox wizard's doctor action only reads this machine: its
+        # toast says doctor, and it leaves the wizard's status as it was.
+        doctor = tuple(args[:2]) == ("sandbox", "doctor")
+        category = "info" if doctor else "setup"
+        label = "sandbox doctor" if doctor else "setup " + name
+        # A cancelled run (or a finished check) puts this status back.
+        self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
         return SetupPanelAction(
             True,
             SetupCommandIntent(
-                label="setup " + name,
+                label=label,
                 args=args,
                 binary="defenseclaw",
-                category="setup",
+                category=category,
                 origin="setup-wizard",
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
                 risk=risk,
+                terminal=terminal,
             ),
         )
 
@@ -1569,12 +1751,12 @@ def build_setup_sections(
         ),
         ConfigSection(
             "Agent Hooks",
-            (*_agent_hook_fields(cfg, "Claude Code", "claude_code"), *_agent_hook_fields(cfg, "Codex", "codex")),
+            _agent_hook_summary_fields(),
             "Dedicated agent hook policy: when scans run, fail behavior, and watched paths.",
         ),
         ConfigSection(
             "Connector Hooks",
-            tuple(_connector_hook_map_fields(cfg)),
+            _connector_hook_summary_fields(cfg),
             "Advanced connector_hooks map for configured and future agent connectors.",
         ),
         ConfigSection(
@@ -1663,7 +1845,34 @@ def build_setup_sections(
             "manage via 'defenseclaw setup trusted-paths'.",
         ),
     ]
-    return tuple(sections)
+    return tuple(_lock_unmodeled_fields(section) for section in sections)
+
+
+UNMODELED_CONFIG_HINT = "Edit this in config.yaml"
+READ_ONLY_VALUE = "read-only"
+
+
+def _lock_unmodeled_fields(section: ConfigSection) -> ConfigSection:
+    """Turn rows ``Config.save()`` can't persist into read-only rows.
+
+    Editing such a row would look saved but be dropped on write, so it is
+    shown read-only with where to change it instead.
+    """
+
+    fields = tuple(
+        _read_only_row(field, UNMODELED_CONFIG_HINT)
+        if field.kind != "header" and field.key and not is_python_modeled(None, field.key)
+        else field
+        for field in section.fields
+    )
+    if fields == section.fields:
+        return section
+    return ConfigSection(section.name, fields, section.summary, section.help)
+
+
+def _read_only_row(field: ConfigField, hint: str) -> ConfigField:
+    shown = field.value or READ_ONLY_VALUE
+    return ConfigField(label=field.label, key=field.key, kind="header", value=shown, original=shown, hint=hint)
 
 
 def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
@@ -2642,26 +2851,6 @@ def wizard_form_defs(
         return observability_wizard_fields("splunk-o11y", cfg)
     if wizard == SetupWizard.WEBHOOKS:
         return webhook_wizard_fields("slack")
-    if wizard == SetupWizard.SANDBOX:
-        return (
-            WizardFormField("Sandbox IP", "string", "--sandbox-ip", value="10.200.0.2", default="10.200.0.2"),
-            WizardFormField("Host IP", "string", "--host-ip", value="10.200.0.1", default="10.200.0.1"),
-            WizardFormField("Sandbox Home", "string", "--sandbox-home", value="/home/sandbox", default="/home/sandbox"),
-            WizardFormField("OpenClaw Port", "int", "--openclaw-port", value="18789", default="18789"),
-            WizardFormField(
-                "Policy",
-                "choice",
-                "--policy",
-                value="permissive",
-                default="permissive",
-                options=("default", "strict", "permissive"),
-            ),
-            WizardFormField("DNS", "string", "--dns", value="8.8.8.8,1.1.1.1", default="8.8.8.8,1.1.1.1"),
-            WizardFormField("No Auto Pair", "bool", "--no-auto-pair", value="no", default="no"),
-            WizardFormField("No Host Networking", "bool", "--no-host-networking", value="no", default="no"),
-            WizardFormField("No Guardrail", "bool", "--no-guardrail", value="no", default="no"),
-            WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
-        )
     return ()
 
 
@@ -2688,6 +2877,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
     SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
+    SetupWizard.SANDBOX: lambda cfg=None: sandbox_wizard_fields(cfg),
 }
 
 
@@ -2710,6 +2900,11 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda overrides, cfg: _guardrail_actions_wizard_fields(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
     SetupWizard.REDACTION: lambda overrides, _cfg: _redaction_wizard_fields_for(overrides),
+    SetupWizard.SANDBOX: lambda overrides, cfg: _apply_dynamic_fields(
+        sandbox_wizard_fields(cfg),
+        overrides,
+        {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
+    ),
 }
 
 
@@ -3383,37 +3578,6 @@ def _webhooks_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal,
     )
 
 
-def _sandbox_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
-    del cfg
-    return (
-        WizardGoal(
-            "init",
-            "Initialize the sandbox (defaults)",
-            summary="Set up the OpenShell sandbox with a policy.",
-            fields=("Policy",),
-        ),
-        WizardGoal(
-            "network",
-            "Set the sandbox network (IPs / DNS)",
-            summary="Configure sandbox/host IPs and DNS.",
-            fields=("Sandbox IP", "Host IP", "DNS", "No Host Networking"),
-        ),
-        WizardGoal(
-            "policy",
-            "Change the sandbox policy",
-            summary="Switch the sandbox enforcement policy.",
-            fields=("Policy",),
-        ),
-        WizardGoal(
-            "disable",
-            "Disable the sandbox",
-            summary="Turn the sandbox off.",
-            presets={"--disable": "yes"},
-            fields=("Disable",),
-        ),
-    )
-
-
 def _registries_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
     del cfg
     return (
@@ -3738,7 +3902,6 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.SPLUNK: _splunk_goals,
     SetupWizard.OBSERVABILITY: _observability_goals,
     SetupWizard.WEBHOOKS: _webhooks_goals,
-    SetupWizard.SANDBOX: _sandbox_goals,
     SetupWizard.REGISTRIES: _registries_goals,
     SetupWizard.NOTIFICATIONS_ROUTING: _notifications_routing_goals,
     SetupWizard.AI_DISCOVERY: _ai_discovery_goals,
@@ -4456,6 +4619,548 @@ def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tupl
     return WIZARD_COMMANDS[SetupWizard.NOTIFICATIONS_ROUTING]
 
 
+# --- Sandbox wizard (slot 13) ---------------------------------------------
+
+# (connector name, wizard label, command) for every harness the Go tree runs
+# (harness.Names()); with openshell.harnesses empty, setup's defaults are on.
+SANDBOX_WIZARD_HARNESSES: tuple[tuple[str, str, str], ...] = SANDBOX_HARNESS_SPECS
+
+
+# sandboxcli.consentGatewayRestart: a bind-mount or telemetry change restarts
+# the shared OpenShell gateway, and --non-interactive restarts it only while
+# no sandbox runs on it.
+_GATEWAY_RESTART_NOTE = (
+    "restarts the OpenShell gateway, which drops the connections of every running sandbox; "
+    "while sandboxes run, setup skips the restart (apply it later with: defenseclaw sandbox doctor --fix)."
+)
+# The gateway of an OpenShell installed another way than the one whose
+# service DefenseClaw restarts it through: setup writes the change, and its
+# user restarts it (DoctorReport.GatewayUnmanaged).
+_GATEWAY_MANUAL_RESTART_NOTE = (
+    "is written to the gateway's configuration; DefenseClaw cannot restart this gateway, "
+    "so you restart it yourself, the way you started it, to apply it."
+)
+
+# The largest auth.json sandboxcli.codexAuthKey reads.
+_CODEX_AUTH_MAX_BYTES = 1 << 20
+
+
+def _codex_auth_key_source(env: Mapping[str, str], home: str) -> str:
+    """Where ``codex login --with-api-key`` stored an API key, or "".
+
+    Mirrors ``sandboxcli.codexAuthKey``: $CODEX_HOME (when absolute, else
+    ~/.codex)/auth.json, a regular file of at most 1 MiB whose
+    ``OPENAI_API_KEY`` is a non-empty string. A ChatGPT login (tokens only)
+    is not shared.
+    """
+
+    codex_home = str(env.get("CODEX_HOME", "")).strip()
+    label = "$CODEX_HOME/auth.json"
+    if not codex_home or not os.path.isabs(codex_home):
+        codex_home, label = os.path.join(home, ".codex"), "~/.codex/auth.json"
+    path = os.path.join(codex_home, "auth.json")
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CODEX_AUTH_MAX_BYTES:
+            return ""
+        with open(path, encoding="utf-8") as handle:
+            auth = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    key = auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None
+    return label if isinstance(key, str) and key.strip() else ""
+
+
+def _sandbox_credential_summary(
+    env: Mapping[str, str] | None = None, home: str | None = None, llm: str = ""
+) -> str:
+    """Which model credential each harness would share (names only, never values).
+
+    Mirrors ``sandboxcli.runLLM`` and ``detectLLM`` for a run without
+    ``--llm``, which takes ``openshell.llm`` (*llm*): under ``auto`` (the
+    default) environment variables, and for Codex the API key in auth.json,
+    with an Amazon Bedrock key (``AWS_BEARER_TOKEN_BEDROCK``) last; ``none``
+    shares nothing; a provider shares only its own key, and a run without it
+    is refused. A provider the harness has no credential for gives way to
+    ``auto``.
+    """
+
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    choice = str(llm or "").strip().lower() or "auto"
+
+    def first(*names: str) -> str:
+        return next((name for name in names if str(env.get(name, "")).strip()), "")
+
+    bedrock = ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", lambda: first("AWS_BEARER_TOKEN_BEDROCK"))
+    # (openshell.llm choice, the variable a refusal names, the source found)
+    harnesses = (
+        (
+            "Claude Code",
+            (
+                ("anthropic", "ANTHROPIC_API_KEY", lambda: first("ANTHROPIC_API_KEY")),
+                ("claude-oauth", "CLAUDE_CODE_OAUTH_TOKEN", lambda: first("CLAUDE_CODE_OAUTH_TOKEN")),
+                bedrock,
+            ),
+        ),
+        (
+            "Codex",
+            (
+                (
+                    "openai",
+                    "OPENAI_API_KEY",
+                    lambda: first("OPENAI_API_KEY", "CODEX_API_KEY") or _codex_auth_key_source(env, home),
+                ),
+                bedrock,
+            ),
+        ),
+    )
+    parts = []
+    for label, candidates in harnesses:
+        if choice == "none":
+            parts.append(f"{label}: none shared (openshell.llm none; log in inside the sandbox)")
+            continue
+        chosen = [c for c in candidates if c[0] == choice]
+        found = ""
+        for _llm, _name, value in chosen or candidates:
+            found = value()
+            if found:
+                break
+        if found:
+            parts.append(f"{label}: {found} found")
+        elif chosen:
+            parts.append(
+                f"{label}: none found (openshell.llm {choice}: runs are refused until you set {chosen[0][1]})"
+            )
+        elif choice != "auto":
+            # A provider the harness has no credential for gives way to auto.
+            parts.append(
+                f"{label}: none found (openshell.llm {choice} does not apply to {label}, so auto; "
+                "log in inside the sandbox)"
+            )
+        else:
+            parts.append(f"{label}: none found (log in inside the sandbox)")
+    return " · ".join(parts)
+
+
+@dataclass(frozen=True)
+class SandboxMachineCheck:
+    """What ``defenseclaw sandbox doctor --json`` says about this machine, for the wizard."""
+
+    summary: str  # one line per check
+    openshell_needed: bool = False
+    openshell_detail: str = ""
+    error: str = ""
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux), whose gateway
+    # DefenseClaw cannot start or restart (DoctorReport.GatewayUnmanaged):
+    # setup uses it while it answers and writes a gateway change for the
+    # user to restart it on. Installing OpenShell would change nothing.
+    openshell_unmanaged: bool = False
+    # With OpenShell installed (a supported CLI, or one newer than
+    # supported), the failing check whose doctor's fix openshell_detail
+    # gives: installing OpenShell would change nothing. Setup stops on a
+    # CLI or gateway one before it installs anything; a "vm-driver" one it
+    # fixes with the install's consent (e2fsprogs) or stops on.
+    openshell_attention: str = ""
+
+
+_DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+# The checks setup stops on, in its order, when it does not install
+# OpenShell (sandboxcli/setup.go, after step 3).
+_SETUP_STOPS = ("openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-service")
+
+
+def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> SandboxMachineCheck:
+    """Summarize a ``sandbox doctor --json`` report (or why it did not run).
+
+    OpenShell counts as needed exactly when ``sandbox setup`` offers to
+    install it: where its install step runs NVIDIA's installer, for a CLI
+    missing or one it upgrades (the report's ``openshell_install``,
+    DoctorReport.OpenShellInstallNeeded). With OpenShell installed, any
+    other failing check is not the install's (it would install nothing):
+    the first one setup stops on, a gateway's before a MicroVM driver's,
+    is shown with the doctor's fix (``openshell_attention``). On a MicroVM
+    (vm) gateway, or a Mac whose docker driver has no Landlock (which setup
+    switches to MicroVMs), that includes a failed ``vm-driver`` check. A
+    MicroVM mounts no host folders, so the bind-mount check is left out
+    there. An OpenShell installed another way than the Homebrew formula
+    (macOS) or without the openshell-gateway user unit (Linux) is marked,
+    as setup marks it: setup uses its gateway while it answers (the user
+    restarts it after a gateway change) and stops, with the doctor's fix,
+    where that gateway does not answer. A gateway service that warns is
+    shown with its detail.
+    """
+
+    if not isinstance(report, Mapping):
+        why = error or "the sandbox doctor did not answer"
+        return SandboxMachineCheck(summary=f"not checked: {why}", error=why)
+    checks: dict[str, Mapping[str, Any]] = {}
+    for item in report.get("checks") or ():
+        if isinstance(item, Mapping) and item.get("id"):
+            checks[str(item["id"])] = item
+
+    def status(check_id: str) -> str:
+        return str((checks.get(check_id) or {}).get("status") or "").lower()
+
+    def detail(check_id: str) -> str:
+        return str((checks.get(check_id) or {}).get("detail") or "").strip()
+
+    def fix_of(check_id: str) -> str:
+        """The doctor's fix of a check, as setup prints it, else its detail."""
+        fix = (checks.get(check_id) or {}).get("fix")
+        fix = fix if isinstance(fix, Mapping) else {}
+        summary, command = str(fix.get("summary") or "").strip(), str(fix.get("command") or "").strip()
+        if not summary:
+            return detail(check_id)
+        return summary + (f" (`{command}`)" if command else "")
+
+    # The driver the gateway runs, else the one its files configure
+    # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
+    # one). On a Mac whose docker driver has no Landlock (Docker Desktop's
+    # VM) setup switches the gateway to MicroVMs, which is its default
+    # (sandboxcli/setup.go): the MicroVM driver's needs count then, and no
+    # bind mounts do.
+    driver = str(report.get("driver") or report.get("configured_driver") or "").strip()
+    on_microvm = not compute_driver(driver).host_mounts
+    mac = detail("platform").startswith("darwin/")
+    microvm = on_microvm or (mac and status("landlock") != "pass")
+    parts: list[str] = []
+    docker = status("docker")
+    if docker:
+        version = str(report.get("docker_version") or "").strip()
+        text = f"Docker {version}".strip() if docker == "pass" else f"Docker: {detail('docker') or docker}"
+        parts.append(f"{_DOCTOR_GLYPHS.get(docker, '·')} {text}")
+    landlock = status("landlock")
+    if landlock in _DOCTOR_GLYPHS and on_microvm:
+        # The MicroVM's own kernel enforces it (sandboxcli.machineLine).
+        parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock (MicroVM)")
+    elif landlock in _DOCTOR_GLYPHS:
+        parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock" + (f" {detail('landlock')}" if landlock == "pass" else ""))
+    cli = status("openshell-cli")
+    service = report.get("service")
+    service = service if isinstance(service, Mapping) else {}
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux) whose service runs
+    # the gateway (DoctorReport.GatewayUnmanaged): setup uses its gateway
+    # while it answers, and stops on the doctor's fix where it does not.
+    # Its install step would find the CLI and install nothing.
+    without_service = cli not in {"", "fail"} and not service.get("installed")
+    manager = service.get("manager")
+    unmanaged = without_service and manager in {"systemd", "brew"}
+    # A doctor older than openshell_install: a failed CLI check.
+    install = report.get("openshell_install")
+    needed = not unmanaged and (install if isinstance(install, bool) else cli in {"", "fail"})
+    # Else the first failing check setup stops on, with the doctor's fix.
+    attention = "" if needed else next((i for i in _SETUP_STOPS if status(i) == "fail"), "")
+    version = str(report.get("cli_version") or "").strip()
+    name = f"OpenShell {version}" if version else "OpenShell"
+    if unmanaged:
+        # As setup's machine line marks it (sandboxcli/setup.go), and says
+        # what it does with its gateway, naming where that OpenShell is.
+        where = str(report.get("cli_path") or "").strip()
+        if manager == "systemd":
+            parts.append(f"⚠ {name} has no openshell-gateway user service")
+            how = ", without the openshell-gateway user service DefenseClaw starts and restarts the gateway through on Linux"
+        else:
+            parts.append(f"⚠ {name} is not from Homebrew's nvidia/openshell formula")
+            how = (
+                " than the nvidia/openshell/openshell Homebrew formula, whose service DefenseClaw starts "
+                "and restarts the gateway through"
+            )
+        openshell = (
+            f"{name}{f' at {where}' if where else ''} was installed another way{how}: setup uses its gateway "
+            "as it runs, but DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, "
+            "the way you started it"
+        )
+    if attention == "openshell-cli":
+        # One newer than supported, which the install step does not downgrade.
+        openshell = f"OpenShell needs attention: {fix_of(attention) or 'not supported'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not supported"))
+    elif attention:
+        # A stopped gateway service is started, a gateway of another
+        # release than the CLI restarted through its service.
+        openshell = f"the OpenShell gateway needs attention: {fix_of(attention) or 'not answering'}"
+        gateway = str(report.get("gateway_version") or "").strip()
+        if attention == "gateway-version" and gateway and gateway != version:
+            parts.append(f"✗ {name}, but the gateway runs {gateway}")
+        elif status("gateway-service") == "fail":
+            # A gateway that answers while the service is stopped is run
+            # by something else.
+            parts.append("✗ OpenShell gateway service stopped" if gateway else "✗ OpenShell gateway not running")
+        else:
+            parts.append("✗ OpenShell gateway needs attention")
+    elif unmanaged:
+        pass
+    elif not needed:
+        openshell = f"{name} is installed"
+        if status("gateway-service") == "warn":
+            parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
+        else:
+            parts.append(f"✓ {name}")
+    elif "not on PATH" in detail("openshell-cli"):
+        openshell = "OpenShell is not installed"
+        parts.append("✗ OpenShell not installed")
+    else:
+        openshell = f"OpenShell needs attention: {detail('openshell-cli') or 'not found'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not found"))
+    vm_driver = status("vm-driver") if microvm else ""
+    if vm_driver == "pass":
+        parts.append("✓ MicroVM driver")
+    elif vm_driver in {"warn", "fail"}:
+        parts.append(f"{_DOCTOR_GLYPHS[vm_driver]} MicroVM driver: {detail('vm-driver') or vm_driver}")
+    # Setup gets to the MicroVM driver past the gateway checks only.
+    if vm_driver == "fail" and not needed and not attention:
+        attention = "vm-driver"
+        openshell = f"the MicroVM driver needs attention: {fix_of('vm-driver') or 'not ready'}"
+    mounts = "" if microvm else status("bind-mounts")
+    if mounts == "pass":
+        parts.append("✓ bind mounts")
+    elif mounts in {"warn", "fail"}:
+        off = detail("bind-mounts").startswith("disabled")
+        parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
+    # One check per line: joined on one line, the checks after the first
+    # few were cut off at 80 columns.
+    return SandboxMachineCheck(
+        summary="\n".join(parts),
+        openshell_needed=needed,
+        openshell_detail=openshell,
+        openshell_unmanaged=unmanaged,
+        openshell_attention=attention,
+    )
+
+
+def _sandbox_allowed_harnesses(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """openshell.admin.allowed_harnesses (empty: any harness)."""
+    admin = _openshell_admin(cfg)
+    return tuple(str(h).strip() for h in (_admin_value(admin, "allowed_harnesses", ()) or ()) if str(h).strip())
+
+
+def sandbox_wizard_fields(
+    cfg: object | Mapping[str, Any] | None = None,
+    *,
+    machine: SandboxMachineCheck | None = None,
+    os_name: str | None = None,
+) -> tuple[WizardFormField, ...]:
+    """The OpenShell sandbox setup wizard (``defenseclaw sandbox setup``).
+
+    Every consent the interactive command asks for is a field here, so the
+    wizard runs the command with ``--non-interactive`` and explicit flags:
+    the answers are the consent. ``machine`` is the doctor's check of this
+    machine; until it answers, Install OpenShell stays off. On macOS there is
+    no telemetry question: the Homebrew gateway does not read gateway.env,
+    so setup cannot turn OpenShell's telemetry off there. Nor is there a
+    mounts question: setup runs macOS sandboxes in OpenShell MicroVMs, which
+    mount no host folders, so every run there works on a copy.
+    """
+
+    configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
+    allowed = _sandbox_allowed_harnesses(cfg)
+    harnesses = [entry for entry in SANDBOX_WIZARD_HARNESSES if not allowed or entry[0] in allowed]
+
+    def is_setup(values: Mapping[str, str]) -> bool:
+        return (values.get("action") or "setup") == "setup"
+
+    fields: list[WizardFormField] = [
+        WizardFormField(
+            "Action",
+            "choice",
+            value="setup",
+            default="setup",
+            options=("setup", "doctor"),
+            hint="setup: the one-time sandbox setup. doctor: only check this machine.",
+        ),
+        WizardFormField(
+            "Harnesses",
+            "section",
+            value="" if harnesses else f"none may run: {ADMIN_POLICY_MESSAGE}",
+            hint="The harnesses that run in sandboxes."
+            + (f" Your organization allows: {', '.join(allowed)}." if allowed else ""),
+            visible_when=is_setup,
+        ),
+    ]
+    # As setup does: the configured harnesses, else its defaults (the first
+    # the organization allows when it allows none of them).
+    defaults = {name for name, _label, _command in harnesses if name in DEFAULT_SANDBOX_HARNESSES} or {
+        name for name, _label, _command in harnesses[:1]
+    }
+    for name, label, command in harnesses:
+        on = "yes" if (name in configured if configured else name in defaults) else "no"
+        fields.append(
+            WizardFormField(
+                label,
+                "bool",
+                value=on,
+                default=on,
+                hint=f"Run `{command}` in a sandbox (--harness {name}).",
+                visible_when=is_setup,
+            )
+        )
+    macos = (host_os() if os_name is None else os_name).strip().lower() == "darwin"
+    # On macOS the installer installs a Homebrew formula, without sudo.
+    installer = "NVIDIA's pinned, sha256-verified installer " + (
+        "(it installs the nvidia/openshell Homebrew formula; no sudo)"
+        if macos
+        else "(uses sudo; the terminal asks for your password)"
+    )
+    # On macOS setup installs e2fsprogs, which the MicroVM driver formats
+    # its disks with, under the same consent as OpenShell (sandboxcli/setup.go).
+    e2fsprogs = " Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
+    if machine is None:
+        machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
+        install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
+    elif machine.error:
+        machine_line = machine.summary
+        install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_needed:
+        machine_line = machine.summary
+        install = "yes"
+        install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_attention == "vm-driver":
+        # Under the install's consent setup installs e2fsprogs and signs
+        # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
+        machine_line = machine.summary
+        install = "no"
+        install_hint = (
+            f"{machine.openshell_detail}; OpenShell is installed, and yes lets setup install e2fsprogs "
+            "(brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
+        )
+    elif machine.openshell_attention:
+        # The doctor's fix: installing OpenShell would change nothing.
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; installing OpenShell would change nothing."
+    else:
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
+    # Setup gets to e2fsprogs only past the OpenShell and gateway checks: not
+    # where it stops on a gateway fix.
+    stops = machine is not None and machine.openshell_attention != ""
+    if macos and not stops:
+        install_hint += e2fsprogs
+    # A gateway no gateway service runs is its user's to restart
+    # (DoctorReport.GatewayUnmanaged): setup writes the change.
+    unmanaged = machine is not None and machine.openshell_unmanaged
+    restart_note = _GATEWAY_MANUAL_RESTART_NOTE if unmanaged else _GATEWAY_RESTART_NOTE
+    microvm_restart = (
+        "; you restart the gateway yourself, the way you started it" if unmanaged else " and restarts it once"
+    )
+    fields += [
+        WizardFormField(
+            "Credentials",
+            "section",
+            hint=_sandbox_credential_summary(llm=str(get_config_value(cfg, "openshell.llm", "") or "")),
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "This machine",
+            "section",
+            value=machine_line,
+            hint="Your answers here are the consent: setup runs without asking again "
+            "(only sudo may ask for your password).",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Install OpenShell",
+            "bool",
+            "--install-openshell",
+            value=install,
+            default=install,
+            hint=install_hint,
+            visible_when=is_setup,
+        ),
+    ]
+    if macos:
+        # Setup on macOS asks no mounts question: it runs sandboxes in
+        # MicroVMs, which mount no host folders (--no-mounts would do nothing).
+        fields.append(
+            WizardFormField(
+                "MicroVMs",
+                "section",
+                value="every run works on a copy",
+                hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
+                'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
+                + microvm_restart
+                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
+                "and 5 GB).",
+                visible_when=is_setup,
+            )
+        )
+    else:
+        fields += [
+            WizardFormField(
+                "Mount Project Folder",
+                "bool",
+                no_flag="--no-mounts",
+                value="yes",
+                default="yes",
+                hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
+                "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
+                "Turning bind mounts on " + restart_note,
+                visible_when=is_setup,
+            ),
+            WizardFormField(
+                "Disable OpenShell Telemetry",
+                "bool",
+                no_flag="--upstream-telemetry",
+                value="yes",
+                default="yes",
+                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + restart_note,
+                visible_when=is_setup,
+            ),
+        ]
+    fields += [
+        WizardFormField(
+            "Shell Wrappers",
+            "bool",
+            "--wrappers",
+            "--no-wrappers",
+            value="no",
+            default="no",
+            hint="Make the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them "
+            "(a marked block in your shell rc; undo any time with defenseclaw sandbox disable <harness>).",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Build Images Now",
+            "bool",
+            no_flag="--skip-images",
+            value="yes",
+            default="yes",
+            hint="Build the harness images now (the first build is about 3 GB). No: the first run builds them.",
+            visible_when=is_setup,
+        ),
+    ]
+    return tuple(fields)
+
+
+def _sandbox_selected_harnesses(fields: Sequence[WizardFormField]) -> list[str]:
+    return [
+        name
+        for name, label, _command in SANDBOX_WIZARD_HARNESSES
+        if wizard_bool_value(fields, label, "no") == "yes"
+    ]
+
+
+def _build_sandbox_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    if (wizard_field_value(fields, "Action") or "setup") == "doctor":
+        return ("sandbox", "doctor")
+    args = ["sandbox", "setup", "--non-interactive"]
+    for name in _sandbox_selected_harnesses(fields):
+        args.extend(("--harness", name))
+    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
+        args.append("--install-openshell")
+    if wizard_bool_value(fields, "Mount Project Folder", "yes") == "no":
+        args.append("--no-mounts")
+    if wizard_bool_value(fields, "Disable OpenShell Telemetry", "yes") == "no":
+        args.append("--upstream-telemetry")
+    args.append("--wrappers" if wizard_bool_value(fields, "Shell Wrappers", "no") == "yes" else "--no-wrappers")
+    if wizard_bool_value(fields, "Build Images Now", "yes") == "no":
+        args.append("--skip-images")
+    return tuple(args)
+
+
 def _build_acp_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     args = ["acp", "setup"]
     for label, flag in (("Client", "--client"), ("Agent", "--agent"), ("Profile", "--profile")):
@@ -4651,6 +5356,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CUSTOM_PROVIDERS: lambda fields: _build_custom_provider_args(fields),
     SetupWizard.OBSERVABILITY: lambda fields: _build_observability_args(fields),
     SetupWizard.WEBHOOKS: lambda fields: _build_webhook_args(fields),
+    SetupWizard.SANDBOX: lambda fields: _build_sandbox_args(fields),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda fields: _build_notifications_routing_args(fields),
     SetupWizard.AI_DISCOVERY: lambda fields: _build_ai_discovery_args(fields),
     SetupWizard.SPLUNK_DASHBOARDS: lambda fields: _build_splunk_dashboards_args(fields),
@@ -4681,6 +5387,16 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
             missing.append("Directory")
+    if wizard == SetupWizard.SANDBOX and (wizard_field_value(fields, "Action") or "setup") == "setup":
+        if not _sandbox_selected_harnesses(fields):
+            labels = {field.label for field in fields}
+            offered = [label for _name, label, _command in SANDBOX_WIZARD_HARNESSES if label in labels]
+            if not offered:
+                missing.append(f"a harness ({ADMIN_POLICY_MESSAGE})")
+            elif len(offered) <= 2:
+                missing.append(f"a harness ({' or '.join(offered)})")
+            else:
+                missing.append("a harness (turn one on under Harnesses)")
     if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
         for label in ("Runtime Data Dir", "Token File"):
             if not wizard_field_value(fields, label):
@@ -5348,9 +6064,15 @@ def _guardrail_wizard_fields_for(
         if connector_policy and connector
         else str(get_config_value(cfg, "guardrail.rule_pack_dir", "") or "")
     )
-    rule_pack = os.path.basename(rule_pack_dir.rstrip("/\\")).strip().lower() if rule_pack_dir else "default"
-    if rule_pack not in {"default", "strict", "permissive"}:
-        rule_pack = "default"
+    rule_pack_options: tuple[str, ...] = ("default", "strict", "permissive")
+    pack_name = os.path.basename(rule_pack_dir.rstrip("/\\")).strip() if rule_pack_dir else ""
+    rule_pack = pack_name.lower() or "default"
+    if rule_pack not in rule_pack_options:
+        # A custom pack is active. Show it as the untouched value so the form
+        # never emits ``--rule-pack default`` over it; picking a preset still
+        # emits that preset.
+        rule_pack = f"custom ({pack_name})"
+        rule_pack_options = (rule_pack, *rule_pack_options)
     judge_provider = "bedrock"
     judge_model = ""
     judge_provider_default = "bedrock"
@@ -5502,7 +6224,7 @@ def _guardrail_wizard_fields_for(
             "--rule-pack",
             value=rule_pack,
             default=rule_pack,
-            options=("default", "strict", "permissive"),
+            options=rule_pack_options,
         ),
         WizardFormField(
             "Block Message",
@@ -6188,10 +6910,12 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         args = ["keys", "set"]
         if env_name := wizard_field_value(fields, "Env Name"):
             args.append(env_name)
+        args.append("--value-stdin")
         # The secret value is intentionally NOT placed in argv (it would be
-        # visible in process listings). ``keys set`` reads it from a hidden
-        # stdin prompt instead; the value is carried on the intent's
-        # ``secret_stdin`` and written by the executor. See F-0801.
+        # visible in process listings). ``--value-stdin`` makes ``keys set``
+        # read one line from stdin instead of the terminal; the value is
+        # carried on the intent's ``secret_stdin`` and written (then stdin
+        # closed) by the executor. See F-0801.
         return tuple(args)
     return ("keys", "list", "--json")
 
@@ -6704,6 +7428,22 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "Tool-call override; blank=inherit.",
         ),
         _field(cfg, "Rule Pack Dir", "guardrail.rule_pack_dir", hint="Path to active rule pack."),
+        _field(
+            cfg,
+            "Tool Calls Block At",
+            "guardrail.block_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity a tool call blocks at; blank=the rule pack's level.",
+        ),
+        _field(
+            cfg,
+            "Tool Calls Alert At",
+            "guardrail.alert_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity a tool call alerts at; blank=the rule pack's level.",
+        ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),
         _field(cfg, "Judge Enabled", "guardrail.judge.enabled", "bool", hint="Enable LLM-as-judge scanner."),
@@ -6888,40 +7628,285 @@ def _watch_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     )
 
 
+def _openshell_admin(cfg: object | Mapping[str, Any] | None) -> Any:
+    return get_config_value(cfg, "openshell.admin", None)
+
+
+def _admin_value(admin: Any, name: str, default: Any = None) -> Any:
+    if admin is None:
+        return default
+    if isinstance(admin, Mapping):
+        return admin.get(name, default)
+    return getattr(admin, name, default)
+
+
+def openshell_managed(cfg: object | Mapping[str, Any] | None) -> bool:
+    """Whether config.yaml is administrator-owned (managed_enterprise)."""
+    mode = str(get_config_value(cfg, "deployment_mode", "") or "").strip().lower()
+    return mode in {"managed_enterprise", "managed"}
+
+
+# openshell.admin.locked entries and the config keys they pin.
+_OPENSHELL_LOCKED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "pack": ("openshell.pack", "openshell.pack_dir"),
+    "profile": ("openshell.profile",),
+    "yolo": ("openshell.yolo",),
+    "workdir.mode": ("openshell.workdir.mode",),
+    "workdir.unmask": ("openshell.workdir.unmask",),
+    "mcp.import": ("openshell.mcp.import",),
+    "mcp.host_ports": ("openshell.mcp.host_ports",),
+    "resources": ("openshell.resources.cpu", "openshell.resources.memory"),
+}
+
+
+def openshell_admin_locks(cfg: object | Mapping[str, Any] | None) -> dict[str, str]:
+    """The ``openshell.*`` keys an administrator constrains, with the reason.
+
+    Mirrors the openshell.admin switches the Go resolver (internal/openshell/
+    packs) enforces; the config editor shows these keys read-only. In
+    managed_enterprise the whole file is administrator-owned, which
+    :func:`_openshell_section` handles separately.
+    """
+
+    admin = _openshell_admin(cfg)
+    locks: dict[str, str] = {}
+    if admin is None:
+        return locks
+
+    def lock(keys: Sequence[str], reason: str) -> None:
+        for key in keys:
+            locks.setdefault(key, reason)
+
+    required = str(_admin_value(admin, "required_pack", "") or "").strip()
+    if required:
+        lock(("openshell.pack", "openshell.pack_dir"), f"your organization requires the {required} pack")
+    if _admin_value(admin, "allow_yolo") is False:
+        lock(("openshell.yolo",), "skip-permissions mode is not allowed")
+    if _admin_value(admin, "allow_mount") is False:
+        lock(("openshell.workdir.mode",), "your organization requires copy mode")
+    if _admin_value(admin, "allow_host_ports") is False:
+        lock(("openshell.mcp.host_ports",), "opening host ports is not allowed")
+    if _admin_value(admin, "allow_unblock") is False:
+        reason = "unblocking and allow entries are not allowed"
+        lock(("openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"), reason)
+    if _admin_value(admin, "block_large_uploads") is True:
+        lock(("openshell.egress.block_large_uploads",), "your organization blocks large uploads to first-seen hosts")
+    for entry in _admin_value(admin, "locked", ()) or ():
+        keys = _OPENSHELL_LOCKED_CONFIG_KEYS.get(str(entry).strip())
+        if keys:
+            lock(keys, f"locked by your organization (openshell.admin.locked: {str(entry).strip()})")
+    return locks
+
+
+def _openshell_inherit_value(cfg: object | Mapping[str, Any] | None, key: str) -> str:
+    raw = _openshell_raw(cfg, key)
+    if raw is None or raw == "":
+        return OPENSHELL_INHERIT
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    return str(raw)
+
+
+def _openshell_raw(cfg: object | Mapping[str, Any] | None, key: str) -> Any:
+    if key == "openshell.mcp.import":
+        mcp = get_config_value(cfg, "openshell.mcp", None)
+        if isinstance(mcp, Mapping):
+            return mcp.get("import", mcp.get("import_"))
+        return getattr(mcp, "import_", None) if mcp is not None else None
+    return get_config_value(cfg, key, None)
+
+
+def _openshell_admin_summary(cfg: object | Mapping[str, Any] | None) -> str:
+    admin = _openshell_admin(cfg)
+    if admin is None:
+        return "none"
+    parts: list[str] = []
+    for name in ("required_pack", "required_pack_digest", "min_profile"):
+        value = str(_admin_value(admin, name, "") or "").strip()
+        if value:
+            parts.append(f"{name}={value}")
+    for name in ("allow_yolo", "allow_mount", "allow_host_ports", "allow_unblock", "allow_learn_mode"):
+        value = _admin_value(admin, name)
+        if isinstance(value, bool):
+            parts.append(f"{name}={'true' if value else 'false'}")
+    if _admin_value(admin, "block_large_uploads") is True:
+        parts.append("block_large_uploads=true")
+    for name in ("allowed_harnesses", "egress_block", "egress_allow_only", "require_copy_for", "locked"):
+        values = [str(item) for item in (_admin_value(admin, name, ()) or ()) if str(item).strip()]
+        if values:
+            parts.append(f"{name}={','.join(values)}")
+    resources = _admin_value(admin, "max_resources")
+    for name in ("cpu", "memory"):
+        value = str(_admin_value(resources, name, "") or "").strip()
+        if value:
+            parts.append(f"max_{name}={value}")
+    return "; ".join(parts) or "none"
+
+
+def _openshell_locked_value(cfg: object | Mapping[str, Any] | None, key: str, value: str) -> str:
+    """A locked key's value as it takes effect: the admin switches clamp these three."""
+    shown = value or "(unset)"
+    admin = _openshell_admin(cfg)
+    if key == "openshell.yolo" and _admin_value(admin, "allow_yolo") is False and value != "false":
+        return f"{shown} → off by policy"
+    if key == "openshell.workdir.mode" and _admin_value(admin, "allow_mount") is False and value != "copy":
+        return f"{shown} → copy by policy"
+    if key == "openshell.mcp.host_ports" and _admin_value(admin, "allow_host_ports") is False and value:
+        return f"{shown} → none by policy"
+    if (
+        key == "openshell.egress.block_large_uploads"
+        and _admin_value(admin, "block_large_uploads") is True
+        and value != "true"
+    ):
+        return f"{shown} → on by policy"
+    return f"{shown} (locked)"
+
+
 def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
-    return ConfigSection(
-        "OpenShell",
-        (
-            _field(cfg, "Binary", "openshell.binary", hint="Path to openshell executable."),
-            _field(cfg, "Policy Dir", "openshell.policy_dir", hint="OpenShell policy YAML directory."),
-            _field(
-                cfg,
-                "Mode",
-                "openshell.mode",
-                "choice",
-                ("", "docker", "standalone"),
-                "docker, standalone, or blank auto-detect.",
-            ),
-            _field(cfg, "Version", "openshell.version", hint="Pinned OpenShell version."),
-            _field(cfg, "Sandbox Home", "openshell.sandbox_home", hint="Root of per-sandbox state."),
-            _field(
-                cfg,
-                "Auto Pair (tristate)",
-                "openshell.auto_pair",
-                "choice",
-                ("", "true", "false"),
-                "Blank=default true.",
-            ),
-            _field(
-                cfg,
-                "Host Networking (tristate)",
-                "openshell.host_networking",
-                "choice",
-                ("", "true", "false"),
-                "Blank=default false.",
-            ),
+    """The ``openshell:`` keys (OpenShell 0.1 sandboxes).
+
+    Keys the selected sandbox policy pack governs stay "inherit" unless set.
+    Keys an administrator constrains (openshell.admin) are read-only with the
+    reason; in managed_enterprise every key is (the file is administrator-owned).
+    """
+
+    managed = openshell_managed(cfg)
+    locks = openshell_admin_locks(cfg)
+    min_profile = str(_admin_value(_openshell_admin(cfg), "min_profile", "") or "").strip()
+    profile_rank = {name: index for index, name in enumerate(dc_config.OPENSHELL_PROFILES)}
+    profiles = tuple(
+        name
+        for name in dc_config.OPENSHELL_PROFILES
+        if not min_profile or profile_rank.get(name, 0) >= profile_rank.get(min_profile, 0)
+    )
+
+    def field(label: str, key: str, kind: str = "string", options: Sequence[str] = (), hint: str = "") -> ConfigField:
+        inherit = kind == "choice" and OPENSHELL_INHERIT in options
+        value = _openshell_inherit_value(cfg, key) if inherit else _value(cfg, key)
+        reason = "config.yaml is administrator-owned (managed_enterprise)" if managed else locks.get(key, "")
+        if reason:
+            # A short value that fits the column; the sentence is the row's
+            # hint (the focused-field line, and the status on Enter).
+            shown = _openshell_locked_value(cfg, key, value)
+            return ConfigField(
+                label=label,
+                key=key,
+                kind="header",
+                value=shown,
+                original=shown,
+                hint=f"Read-only: {ADMIN_POLICY_MESSAGE}; {reason}.",
+            )
+        return ConfigField(
+            label=label, key=key, kind=kind, value=value, original=value, options=tuple(options), hint=hint
+        )
+
+    inherit_bool = (OPENSHELL_INHERIT, "true", "false")
+    fields: list[ConfigField] = [
+        field("Enabled", "openshell.enabled", "bool", hint="Sandbox listeners and API on the daemon (sandbox setup turns it on)."),
+        field("OpenShell Binary", "openshell.binary", hint="The upstream openshell CLI."),
+        field("Gateway Name", "openshell.gateway.name", hint="OpenShell gateway registration; empty uses the active one."),
+        field("Gateway Workspace", "openshell.gateway.workspace", hint="OpenShell workspace; empty is default."),
+        field("Ingress Port", "openshell.ingress_port", "int", hint="Sandbox hook ingress; 0 is api_port+1."),
+        field("Egress Port", "openshell.egress_port", "int", hint="DefenseClaw egress proxy; 0 is api_port+2."),
+        field("Pack", "openshell.pack", hint="Policy pack: open, balanced, strict, a custom pack, or a path."),
+        field("Pack Dir", "openshell.pack_dir", hint="Custom packs as <name>/pack.yaml."),
+        field(
+            "Profile",
+            "openshell.profile",
+            "choice",
+            (OPENSHELL_INHERIT, *profiles),
+            hint="Network profile; inherit takes the pack's."
+            + (f" Your organization requires at least {min_profile}." if min_profile else ""),
         ),
-        "NVIDIA OpenShell sandbox integration.",
+        field("Skip-permissions (yolo)", "openshell.yolo", "choice", inherit_bool, hint="--dangerously-skip-permissions by default."),
+        field(
+            "Model Credential",
+            "openshell.llm",
+            "choice",
+            dc_config.OPENSHELL_LLM_CHOICES,
+            hint="What a run shares (sandbox run --llm; the wrappers, TUI and app too). auto: the first key found, Bedrock last.",
+        ),
+        field(
+            "Keep Headless Sandboxes",
+            "openshell.keep_headless",
+            "bool",
+            hint="Keep a --prompt run's sandbox (sandbox run --keep); off deletes it when nothing is left to bring back or undo.",
+        ),
+        field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder (Docker driver); copy: untrusted repos, and every run on a MicroVM (vm) gateway."),
+        field("Secret Masks", "openshell.workdir.masks", hint="Extra secret-file globs, comma-separated."),
+        field("Unmask", "openshell.workdir.unmask", hint="Masked paths to share, comma-separated."),
+        field("Max Upload MB", "openshell.workdir.max_upload_mb", "int", hint="Copy-mode upload cap; 0 inherits."),
+        field("Git Depth", "openshell.workdir.git_depth", "int", hint="Copy-mode history depth."),
+        field("On Exit", "openshell.workdir.on_exit", "choice", ("ask", "keep", "undo"), hint="End-of-session default."),
+        field(
+            "Undo Restores Ignored Dirs",
+            "openshell.workdir.undo_ignored.enabled",
+            "bool",
+            hint="Keep a copy of node_modules/.venv with each undo point so undo restores them (Linux mount mode).",
+        ),
+        field(
+            "Undo Ignored Max MB",
+            "openshell.workdir.undo_ignored.max_mb",
+            "int",
+            hint="Cap on one undo point's copies; a directory past it is only reported. 0 is 500.",
+        ),
+        field(
+            "Undo Ignored Dirs",
+            "openshell.workdir.undo_ignored.dirs",
+            hint="Directory names kept at any depth, comma-separated; empty is node_modules, .venv, venv.",
+        ),
+        field("Egress Block", "openshell.egress.block", hint="Blocked hosts, comma-separated."),
+        field("Egress Allow", "openshell.egress.allow", hint="Allowlist for balanced/strict, comma-separated."),
+        field("Egress Unblocked", "openshell.egress.unblocked", hint="'Always' unblocks the daemon wrote, comma-separated."),
+        field("Egress Ports", "openshell.egress.ports", hint="Proxy ports, comma-separated; empty inherits."),
+        field("Large Upload MB", "openshell.egress.large_upload_mb", "int", hint="First-seen-host upload alert; 0 inherits."),
+        field(
+            "Block Large Uploads",
+            "openshell.egress.block_large_uploads",
+            "bool",
+            hint="Also cut that upload and refuse the host until it is unblocked; off follows the pack.",
+        ),
+        field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
+        field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
+        field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),
+        field("Agent Proposals", "openshell.approvals.agent_proposals", "choice", inherit_bool, hint="Let the agent propose rules (default on)."),
+        field("CPU", "openshell.resources.cpu", hint="Per-sandbox CPU, for example 2 or 500m."),
+        field("Memory", "openshell.resources.memory", hint="Per-sandbox memory, for example 4Gi."),
+        field("Harnesses", "openshell.harnesses", hint="claudecode, codex (feeds the policy connectors)."),
+        _header(
+            "Shell Wrappers",
+            "openshell.wrappers",
+            (_value(cfg, "openshell.wrappers") or "none")
+            + "  — change with: defenseclaw sandbox enable|disable <harness> (Sandboxes panel: w)",
+        ),
+        field("MCP Import", "openshell.mcp.import", "choice", inherit_bool, hint="Bring the harness's MCP servers along."),
+        field("MCP Host Ports", "openshell.mcp.host_ports", hint="Localhost ports opened for host MCP servers, comma-separated."),
+        field("Upstream Telemetry", "openshell.upstream_telemetry", "bool", hint="Keep OpenShell's anonymous usage telemetry."),
+        field("Token Delivery", "openshell.token_delivery", "choice", ("provider", "env"), hint="How the sandbox token reaches hooks."),
+        field("Middleware (experimental)", "openshell.middleware.enabled", "bool", hint="Supervisor middleware; Phase 3."),
+        _header(
+            "Organization Policy",
+            "openshell.admin",
+            _openshell_admin_summary(cfg)
+            + ("  — administrator-owned (managed_enterprise)" if managed else "  — edit config.yaml directly"),
+        ),
+    ]
+    legacy_mode = _value(cfg, "openshell.mode")
+    if legacy_mode:
+        fields.append(
+            _header("Legacy Mode", "openshell.mode", f"{legacy_mode}  — run: defenseclaw sandbox legacy-cleanup --dry-run")
+        )
+    summary = "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
+    if managed:
+        summary += " Administrator-owned (managed_enterprise): read-only."
+    elif locks:
+        summary += f" {len(locks)} key(s) are set by your organization's policy."
+    return ConfigSection(
+        "OpenShell Sandboxes",
+        tuple(fields),
+        summary,
+        "Pack-governed keys show 'inherit' until set. Run 'defenseclaw sandbox policy explain' to see every "
+        "resolved setting and where it comes from.",
     )
 
 
@@ -7092,43 +8077,36 @@ def _per_connector_asset_policy_fields(cfg: object | Mapping[str, Any] | None) -
     return rows
 
 
-def _agent_hook_fields(cfg: object | Mapping[str, Any] | None, label: str, prefix: str) -> tuple[ConfigField, ...]:
+def _hook_summary_row(label: str, key: str, connector: str) -> ConfigField:
+    alias = _connector_setup_alias(connector)
+    hint = f"Set by defenseclaw setup {alias}" if alias else UNMODELED_CONFIG_HINT
+    return ConfigField(label=label, key=key, kind="header", value=READ_ONLY_VALUE, original=READ_ONLY_VALUE, hint=hint)
+
+
+def _agent_hook_summary_fields() -> tuple[ConfigField, ...]:
+    """Read-only summary of the legacy ``claude_code`` / ``codex`` hook blocks.
+
+    The Python config doesn't model these blocks, so edits here could never
+    be saved; the connector setup commands own them.
+    """
+
     return (
-        _header(f".. {label} .."),
-        _field(cfg, "Enabled", prefix + ".enabled", "bool", hint=f"{label} hooks master switch."),
-        _field(
-            cfg, "Mode", prefix + ".mode", "choice", ("", "observe", "action"), "Blank inherits connector defaults."
-        ),
-        _field(cfg, "Fail Mode", prefix + ".fail_mode", "choice", ("", "open", "closed"), "Legacy policy-layer hint."),
-        _field(
-            cfg,
-            "Scan on Session Start",
-            prefix + ".scan_on_session_start",
-            "bool",
-            hint="Run checks when session begins.",
-        ),
-        _field(cfg, "Scan on Stop", prefix + ".scan_on_stop", "bool", hint="Run checks when session stops."),
-        _field(cfg, "Scan Paths", prefix + ".scan_paths", hint="CSV extra paths scanned by hooks."),
-        _field(
-            cfg,
-            "Component Scan Interval (min)",
-            prefix + ".component_scan_interval_minutes",
-            "int",
-            hint="Minimum minutes between repeated scans.",
-        ),
+        _hook_summary_row("Claude Code", "claude_code", "claudecode"),
+        _hook_summary_row("Codex", "codex", "codex"),
     )
 
 
-def _connector_hook_map_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+def _connector_hook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+    """One read-only row per connector for the ``connector_hooks`` map."""
+
     names = list(CONNECTORS)
     hooks = get_config_value(cfg, "connector_hooks", {}) or {}
     if isinstance(hooks, Mapping):
         names.extend(str(name) for name in hooks if str(name).strip())
-    unique = sorted(dict.fromkeys(names))
-    out: list[ConfigField] = []
-    for name in unique:
-        out.extend(_agent_hook_fields(cfg, _connector_hook_label(name), "connector_hooks." + name))
-    return tuple(out)
+    return tuple(
+        _hook_summary_row(_connector_hook_label(name), "connector_hooks." + name, name)
+        for name in sorted(dict.fromkeys(names))
+    )
 
 
 def _v8_observability_fields(
@@ -7389,6 +8367,7 @@ def _connector_setup_alias(wire: str) -> str:
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }:
         return normalized
     return ""

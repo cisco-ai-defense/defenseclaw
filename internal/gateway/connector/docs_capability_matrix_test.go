@@ -27,6 +27,9 @@ type documentedCapabilityMatrix struct {
 			SupportsFailClosed bool     `json:"supportsFailClosed"`
 			Scope              string   `json:"scope"`
 		} `json:"hooks"`
+		Sandbox struct {
+			Status string `json:"status"`
+		} `json:"sandbox"`
 	} `json:"connectors"`
 }
 
@@ -52,7 +55,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		family, toolInspection, subprocessPolicy string
 		canBlock, canAskNative, failClosed       bool
 		askEvents, blockEvents                   []string
-		scope                                    string
+		scope, sandboxStatus                     string
 	}, len(documented.Connectors))
 	for _, row := range documented.Connectors {
 		if _, exists := rows[row.ID]; exists {
@@ -62,7 +65,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			family, toolInspection, subprocessPolicy string
 			canBlock, canAskNative, failClosed       bool
 			askEvents, blockEvents                   []string
-			scope                                    string
+			scope, sandboxStatus                     string
 		}{
 			row.Family,
 			row.ToolInspection,
@@ -73,16 +76,12 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			row.Hooks.AskEvents,
 			row.Hooks.BlockEvents,
 			row.Hooks.Scope,
+			row.Sandbox.Status,
 		}
 	}
 
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir()}
 	for _, conn := range newBuiltinConnectors() {
-		if conn.Name() == "geminicli" {
-			// Gemini CLI remains constructible only for legacy teardown. The
-			// operator-facing capability matrix intentionally omits it.
-			continue
-		}
 		row, exists := rows[conn.Name()]
 		if !exists {
 			t.Errorf("connector %q is missing from docs capability matrix", conn.Name())
@@ -105,11 +104,19 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		if row.toolInspection != wantToolInspection {
 			t.Errorf("%s toolInspection=%q want %q", conn.Name(), row.toolInspection, wantToolInspection)
 		}
+		// The OpenShell sandbox column: "artifacts" exactly for the
+		// connectors that render overlay-image files, "pending" for the rest.
+		// internal/openshell/harness checks the tier, hook file and pin.
+		wantSandbox := "pending"
+		if SandboxArtifactsSupported(conn) {
+			wantSandbox = "artifacts"
+		}
+		if row.sandboxStatus != wantSandbox {
+			t.Errorf("%s sandbox.status=%q want %q", conn.Name(), row.sandboxStatus, wantSandbox)
+		}
+
 		actualSubprocess := string(conn.SubprocessPolicy())
-		// Proxy connectors prefer sandbox but resolve to shims off Linux. The
-		// docs describe that configured policy rather than the host fallback.
-		subprocessMatches := row.subprocessPolicy == actualSubprocess || (row.subprocessPolicy == "sandbox" && actualSubprocess == "shims")
-		if !subprocessMatches {
+		if row.subprocessPolicy != actualSubprocess {
 			t.Errorf("%s subprocessPolicy=%q want %q", conn.Name(), row.subprocessPolicy, conn.SubprocessPolicy())
 		}
 

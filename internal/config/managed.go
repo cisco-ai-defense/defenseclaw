@@ -12,8 +12,6 @@ package config
 
 import (
 	"runtime"
-
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // ManagedIPCConfig controls the local UDS gRPC server that external
@@ -92,7 +90,9 @@ func (c *Config) ManagedIPCEnabled() bool {
 	if c == nil {
 		return false
 	}
-	return managed.IsManagedEnterprise(c.DeploymentMode)
+	// The Secure Client GUI is the only consumer; a standalone deployment
+	// has no GUI and exposes no IPC surface.
+	return c.SecureClientIntegration()
 }
 
 // SecureClientTeamID is the Cisco Team Identifier under which the

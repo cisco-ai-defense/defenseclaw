@@ -96,10 +96,29 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
 @keys_cmd.command("set")
 @click.argument("env_name")
 @click.option("--value", "value", default=None, help="Value to store; prompts if omitted.")
+@click.option(
+    "--value-stdin",
+    "value_stdin",
+    is_flag=True,
+    help="Read the value from the first line of stdin (not echoed); for scripts and the TUI.",
+)
 @pass_ctx
-def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
-    """Set a credential and persist it to ``~/.defenseclaw/.env``."""
+def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: bool) -> None:
+    """Set a credential and persist it to ``~/.defenseclaw/.env``.
+
+    The value comes from ``--value``, ``--value-stdin`` (first line of
+    standard input, trailing newline removed), or a hidden prompt.
+    """
     import os
+
+    if value_stdin and value is not None:
+        raise click.UsageError("--value and --value-stdin are mutually exclusive")
+    if value_stdin:
+        line = click.get_text_stream("stdin").readline()
+        value = line.rstrip("\r\n")
+        if not value:
+            ux.err("No value on stdin — nothing saved.")
+            raise SystemExit(1)
 
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
@@ -144,22 +163,32 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
 
     _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
     if app.logger:
-        app.logger.log_activity(
-            actor="cli:operator",
-            action=ACTION_CONFIG_UPDATE,
-            target_type="config",
-            target_id=f"dotenv:{env_name}",
-            before={"env": env_name, "had_value": had},
-            after={"env": env_name, "had_value": True},
-            diff=[
-                {
-                    "path": f"/.env/{env_name}",
-                    "op": "replace",
-                    "before": "set" if had else "unset",
-                    "after": "set",
-                },
-            ],
-        )
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        try:
+            app.logger.log_activity(
+                actor="cli:operator",
+                action=ACTION_CONFIG_UPDATE,
+                target_type="config",
+                target_id=f"dotenv:{env_name}",
+                before={"env": env_name, "had_value": had},
+                after={"env": env_name, "had_value": True},
+                diff=[
+                    {
+                        "path": f"/.env/{env_name}",
+                        "op": "replace",
+                        "before": "set" if had else "unset",
+                        "after": "set",
+                    },
+                ],
+            )
+        except CanonicalObservabilityUnavailableError:
+            # Same offline rule as policy activate: the key is saved, only the
+            # audit event can't be admitted while the gateway is down.
+            click.echo(
+                "  ⚠ Key saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+                err=True,
+            )
     ux.ok(f"Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
 
