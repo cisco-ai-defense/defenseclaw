@@ -1850,11 +1850,13 @@ def _set_mcp_via_connector(cfg, name: str, entry: dict, connector: str | None = 
     )
 
 
-def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> None:
+def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> str | None:
     """Dispatch ``mcp unset`` to a connector's write surface.
-    Symmetric with :func:`_set_mcp_via_connector`.
+    Symmetric with :func:`_set_mcp_via_connector`; returns
+    :data:`connector_paths.MCP_PRIOR_RESTORED` when the user's own entry was
+    put back.
     """
-    connector_paths.unset_mcp_server(
+    return connector_paths.unset_mcp_server(
         connector or cfg.active_connector(),
         name,
         workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
@@ -2254,6 +2256,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
 
     connectors = resolve_list_connectors(app, connector_flag)
     removed: list[str] = []
+    restored: list[str] = []  # the user's own entry of that name was put back
     skipped: list[str] = []
     not_removed: list[str] = []  # the connector kept an entry DefenseClaw no longer owns
     write_failed: list[tuple[str, Exception]] = []  # unexpected write error
@@ -2261,8 +2264,10 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
         if not any(s.name == name for s in app.cfg.mcp_servers(c)):
             continue
         try:
-            _unset_mcp_via_connector(app.cfg, name, connector=c)
+            outcome = _unset_mcp_via_connector(app.cfg, name, connector=c)
             removed.append(c)
+            if outcome == connector_paths.MCP_PRIOR_RESTORED:
+                restored.append(c)
         except connector_paths.MCPServerNotRemovedError as exc:
             click.secho(f"  not removed [{c}]: {exc}", fg="red")
             not_removed.append(c)
@@ -2305,25 +2310,36 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             app.logger.log_action("mcp-unset", name, f"result=noop connectors={','.join(connectors)}")
         return
 
-    if len(removed) > 1:
-        click.secho(f"Removed MCP server: {name} from {', '.join(removed)}", fg="yellow")
-    elif skipped:
+    # GAP-1846: name the connectors whenever the removal was not complete and
+    # uniform, and never call a restored user entry "removed".
+    gone = [c for c in removed if c not in restored]
+    skipped_note = f" ({len(skipped)} skipped: {', '.join(skipped)})" if skipped else ""
+    if gone:
+        if len(gone) == 1 and len(connectors) == 1:
+            click.secho(f"Removed MCP server: {name}", fg="yellow")
+        else:
+            click.secho(f"Removed MCP server: {name} from {', '.join(gone)}{skipped_note}", fg="yellow")
+    for c in restored:
         click.secho(
-            f"Removed MCP server: {name} from {removed[0]} "
-            f"({len(skipped)} skipped: {', '.join(skipped)})",
+            f"Restored your previous {name} entry on {c} (DefenseClaw's version removed); "
+            f"{name} is still configured there",
             fg="yellow",
         )
-    else:
-        click.secho(f"Removed MCP server: {name}", fg="yellow")
 
     if app.logger:
         app.logger.log_action("mcp-unset", name, f"connectors={','.join(removed)}")
 
     # Surface an unexpected per-connector removal failure, or an entry a
-    # connector kept, with a non-zero exit so scripts/CI notice the partial
-    # removal, while peers that were cleaned up are kept.
+    # connector kept, with a non-zero exit and a closing error line so
+    # scripts/CI notice the partial removal, while peers that were cleaned up
+    # are kept.
     if write_failed or not_removed:
         if app.logger:
             failed = [c for c, _ in write_failed] + not_removed
             app.logger.log_action("mcp-unset", name, f"result=failed connectors={','.join(failed)}")
-        raise SystemExit(1)
+        problems = []
+        if not_removed:
+            problems.append(f"was not removed from: {', '.join(not_removed)}")
+        if write_failed:
+            problems.append(f"removal failed on: {', '.join(c for c, _ in write_failed)}")
+        raise click.ClickException(f"MCP server {name!r} {'; '.join(problems)}.")

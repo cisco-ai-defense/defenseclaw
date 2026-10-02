@@ -344,6 +344,41 @@ def infer_mcp_transport(
     return "stdio"
 
 
+# Transport names a connector may store under ``type`` (Claude Code, Cursor).
+# Other ``type`` values (OpenCode ``local``/``remote``, Copilot ``local``) are
+# not transports, so they are left to ``infer_mcp_transport``.
+_MCP_TYPE_TRANSPORTS = frozenset({"stdio", "http", "sse", "ws", "streamable-http"})
+
+
+def _mcp_entry_transport(cfg: dict[str, Any]) -> str:
+    explicit = str(cfg.get("transport", "") or "").strip()
+    if explicit:
+        return explicit
+    kind = str(cfg.get("type", "") or "").strip().lower()
+    return kind if kind in _MCP_TYPE_TRANSPORTS else ""
+
+
+def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map a generic MCP entry to Claude Code's ``mcpServers`` schema.
+
+    Claude Code names the transport ``type`` and skips a ``url`` entry that
+    has none ("has a \"url\" but no \"type\"", GAP-1837). A remote server
+    therefore gets ``type`` (``http`` unless ``sse`` or ``ws`` was asked for)
+    and the generic ``transport`` key is not written.
+    """
+    out = {k: v for k, v in entry.items() if k != "transport"}
+    if str(out.get("type", "") or "").strip():
+        return out
+    transport = str(entry.get("transport", "") or "").strip().lower()
+    if str(out.get("url", "") or "").strip():
+        kind = transport if transport in {"sse", "ws"} else "http"
+    elif transport == "stdio":
+        kind = "stdio"
+    else:
+        return out
+    return {"type": kind, **out}
+
+
 # ---------------------------------------------------------------------------
 # Connector-name normalization
 # ---------------------------------------------------------------------------
@@ -4799,7 +4834,7 @@ def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
                 cwd=cfg.get("cwd", "") or "",
                 url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                 transport=infer_mcp_transport(
-                    cfg.get("transport", ""),
+                    _mcp_entry_transport(cfg),
                     url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                     command=cfg.get("command", "") or "",
                 ),
@@ -4831,7 +4866,7 @@ def _parse_mcp_servers_list(servers: list[Any]) -> list[MCPServerEntry]:
                 cwd=cfg.get("cwd", "") or "",
                 url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                 transport=infer_mcp_transport(
-                    cfg.get("transport", ""),
+                    _mcp_entry_transport(cfg),
                     url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                     command=cfg.get("command", "") or "",
                 ),
@@ -4939,7 +4974,7 @@ def set_mcp_server(
     if name_n == "claudecode":
         path = claude_mcp_state_path()
         try:
-            _set_claudecode_mcp_server(path, name, entry)
+            _set_claudecode_mcp_server(path, name, _claude_mcp_entry(entry))
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
         return
@@ -5019,19 +5054,26 @@ def set_mcp_server(
     )
 
 
+MCP_PRIOR_RESTORED = "prior-restored"
+
+
 def unset_mcp_server(
     connector: str | None,
     name: str,
     *,
     workspace_dir: str | None = None,
     openclaw_config_unsetter: Any = None,
-) -> None:
+) -> str | None:
     """Remove an MCP server from the active connector's registry.
 
     Mirrors :func:`set_mcp_server` and uses the connector's native JSON or TOML
     format; OpenClaw delegates to the injected
     *openclaw_config_unsetter*; ZeptoClaw raises
     :class:`MCPWriteUnsupportedError`.
+
+    Returns ``None``, or :data:`MCP_PRIOR_RESTORED` when the removal put back
+    the entry of the same name that was there before DefenseClaw replaced it,
+    so the name is still configured (GAP-1846).
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -5046,10 +5088,10 @@ def unset_mcp_server(
     if name_n == "claudecode":
         path = claude_mcp_state_path()
         try:
-            _unset_claudecode_mcp_server(path, name)
+            outcome = _unset_claudecode_mcp_server(path, name)
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
-        return
+        return MCP_PRIOR_RESTORED if outcome == MCP_PRIOR_RESTORED else None
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
         path = (
@@ -5569,8 +5611,7 @@ def _unset_opencode_mcp_server(
         data["mcp"] = mcp
         updates.append((path, data))
     for path, data in updates:
-        _capture_managed_mcp_backup(path)
-        _atomic_write_json(path, data)
+        _write_json_after_mcp_delete(path, data, "mcp")
     return bool(updates)
 
 
@@ -6393,7 +6434,7 @@ def _locked_claude_file_update(path: str, *, label: str):
     make_private_directory(directory)
     lock_path = os.path.abspath(path + ".lock")
     if not os.path.lexists(lock_path):
-        atomic_write_private_bytes(lock_path, b"")
+        _write_private_config(lock_path, b"")
     _validate_claude_private_file(lock_path, label=label)
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags)
@@ -6435,7 +6476,7 @@ def _locked_claude_mcp_mutation(path: str):
     metadata_path = _claude_mcp_ownership_path(path)
     lock_path = metadata_path + ".lock"
     if not os.path.lexists(lock_path):
-        atomic_write_private_bytes(lock_path, b"")
+        _write_private_config(lock_path, b"")
     _validate_claude_private_file(lock_path, label="ownership lock")
     with _locked_claude_file_update(
         metadata_path,
@@ -7756,7 +7797,7 @@ def _raise_claude_mcp_not_removed(path: str, name: str, data: dict[str, Any]) ->
         )
 
 
-def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
+def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
     with _locked_claude_mcp_mutation(path):
         state, released = _recover_claude_mcp_transaction(
             path,
@@ -7827,16 +7868,18 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
                 released=released,
                 next_released=next_released,
             )
-            return True
+            return MCP_PRIOR_RESTORED if record["prior_present"] else True
 
         next_state = copy.deepcopy(state)
         next_released = set(released)
         changed = False
+        prior_restored = False
         record = next_state["managed"].get(name)
         if record is not None:
             changed = _restore_claude_server_prior(data, name, record)
             if changed and record["prior_present"]:
                 next_released.add(name)
+                prior_restored = True
             del next_state["managed"][name]
         elif not target_was_owned:
             servers = data.get("mcpServers")
@@ -7869,7 +7912,7 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
             released=released,
             next_released=next_released,
         )
-        return True
+        return MCP_PRIOR_RESTORED if prior_restored else True
 
 
 def _reject_symlink_config(path: str) -> None:
@@ -7955,9 +7998,61 @@ def _atomic_json_delete(
     if not isinstance(cursor, dict) or keys[-1] not in cursor:
         return False
     del cursor[keys[-1]]
-    _capture_managed_mcp_backup(path)
-    _atomic_write_json(path, loaded)
+    if len(keys) == 2:
+        _write_json_after_mcp_delete(path, loaded, keys[0])
+    else:
+        _capture_managed_mcp_backup(path)
+        _atomic_write_json(path, loaded)
     return True
+
+
+def _managed_mcp_backup_doc(path: str) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Return the bytes and parsed object of *path*'s pre-DefenseClaw backup."""
+    backup = _registry_backup_for(os.path.abspath(path)) or _managed_mcp_backup_path(path)
+    try:
+        raw = _read_regular_bytes_if_present(backup)
+    except (OSError, ValueError, MCPWriteUnsupportedError, UnsafePathError):
+        return None, None
+    if raw is None:
+        return None, None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None, None
+    doc = _load_json_or_jsonc_content(text) if text.strip() else {}
+    return (raw, doc) if isinstance(doc, dict) else (None, None)
+
+
+def _write_json_after_mcp_delete(path: str, data: dict[str, Any], container: str) -> None:
+    """Write a JSON config after removing one MCP server from *container*.
+
+    GAP-1812: removing the only server DefenseClaw added left an empty
+    container (``"mcp": {}``) and re-serialised keys behind. Drop a container
+    the delete emptied unless the pre-DefenseClaw file had it, and when the
+    result equals that file, put its original bytes back.
+    """
+    raw, original = _managed_mcp_backup_doc(path)
+    if data.get(container) == {} and original is not None and container not in original:
+        data.pop(container, None)
+    if raw is not None and original == data:
+        _write_private_config(path, raw)
+        return
+    _capture_managed_mcp_backup(path)
+    _atomic_write_json(path, data)
+
+
+def _write_private_config(path: str, payload: bytes) -> None:
+    """Atomically write a connector config; name the file in OS errors.
+
+    ``os.write`` errors carry no file name, so a full disk surfaced as a bare
+    "[Errno 28] No space left on device" traceback (GAP-1838).
+    """
+    try:
+        atomic_write_private_bytes(path, payload)
+    except OSError as exc:
+        if exc.filename is None and exc.errno is not None:
+            raise OSError(exc.errno, exc.strerror or str(exc), os.fspath(path)) from exc
+        raise
 
 
 def _yaml_is_content(line: str) -> bool:
@@ -8125,7 +8220,7 @@ def _yaml_edit_in_place(path: str, keys: tuple[str, ...], value: Any = _YAML_DEL
     if not matches:
         raise MCPWriteUnsupportedError(refuse.format("its layout cannot be edited in place without losing comments"))
     _capture_managed_mcp_backup(path)
-    atomic_write_private_bytes(path, (b"\xef\xbb\xbf" if bom else b"") + new_text.encode("utf-8"))
+    _write_private_config(path, (b"\xef\xbb\xbf" if bom else b"") + new_text.encode("utf-8"))
     return True
 
 
@@ -8511,7 +8606,7 @@ def lookup_managed_mcp_backup(path: str) -> str | None:
 
 def _atomic_write_text(path: str, text: str) -> None:
     """Atomically write UTF-8 text with private permissions."""
-    atomic_write_private_bytes(path, text.encode("utf-8"))
+    _write_private_config(path, text.encode("utf-8"))
 
 
 def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
@@ -8522,4 +8617,4 @@ def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
     atomicWriteFile contract for connector config patches.
     """
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
+    _write_private_config(path, payload.encode("utf-8"))
