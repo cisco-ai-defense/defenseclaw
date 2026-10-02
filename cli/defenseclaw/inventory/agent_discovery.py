@@ -1825,6 +1825,7 @@ def _version_for_binary(
     *,
     require_trusted_binary_paths: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
+    timeout_override: float | None = None,
 ) -> tuple[str, str]:
     # M-4: the value of ``binary_path`` is sourced from
     # ``shutil.which(binary_name)`` which honours $PATH — an attacker
@@ -1852,6 +1853,8 @@ def _version_for_binary(
         timeout = 10.0
     if binary_name == "openhands":
         env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
+    if timeout_override is not None:
+        timeout = max(timeout, timeout_override)
 
     try:
         result = subprocess.run(
@@ -1886,8 +1889,14 @@ def _version_for_agent_binary(
     *,
     require_trusted_binary_paths: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
+    timeout_override: float | None = None,
 ) -> tuple[str, str]:
-    """Probe a CLI, or read metadata for a GUI that must not be launched."""
+    """Probe a CLI, or read metadata for a GUI that must not be launched.
+
+    ``timeout_override`` raises the probe budget (never lowers it); setup's
+    protected selection uses it so a busy host does not fail a probe that
+    discovery just passed (GAP-1620).
+    """
 
     spec = _SPECS.get(name)
     bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
@@ -1908,6 +1917,7 @@ def _version_for_agent_binary(
             version_args,
             require_trusted_binary_paths=True,
             data_dir=data_dir,
+            timeout_override=timeout_override,
         )
         if error:
             return version, error
@@ -1926,6 +1936,7 @@ def _version_for_agent_binary(
             True if name == "devin" and _is_windows_host() else require_trusted_binary_paths
         ),
         data_dir=data_dir,
+        timeout_override=timeout_override,
     )
     if name == "devin" and not error:
         version = _normalize_devin_cli_version_output(version)

@@ -120,6 +120,39 @@ def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
         agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
+def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1620: the selection probe reused discovery's 8 s budget and failed
+    # right after discovery had verified the same agent.
+    executable = tmp_path / "amp"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def slow_probe(*_args, **kwargs):
+        seen.update(kwargs)
+        return "", agent_selection.agent_discovery.VERSION_PROBE_TIMED_OUT
+
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(agent_selection.agent_discovery, "_version_for_agent_binary", slow_probe)
+
+    with pytest.raises(OSError, match=r"did not answer its version probe within 90 s .*re-run setup"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "amp")
+    assert seen["timeout_override"] == agent_selection.SELECTION_VERSION_TIMEOUT_SECONDS
+
+    budgets: list[float] = []
+
+    def fake_run(*_args, timeout, **_kwargs):
+        budgets.append(timeout)
+        return subprocess.CompletedProcess([], 0, b"amp 1.0\n", b"")
+
+    monkeypatch.setattr(agent_selection.agent_discovery.subprocess, "run", fake_run)
+    agent_selection.agent_discovery._version_for_binary(str(executable), (), require_trusted_binary_paths=False)
+    agent_selection.agent_discovery._version_for_binary(
+        str(executable), (), require_trusted_binary_paths=False, timeout_override=90.0
+    )
+    assert budgets == [agent_selection.agent_discovery.VERSION_TIMEOUT_SECONDS, 90.0]
+
+
 def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_path: Path, monkeypatch) -> None:
     # GAP-1612: npm's claude.cmd sits in a default-trusted prefix but is a
     # script wrapper; trusted-paths add answered "already trusted".
