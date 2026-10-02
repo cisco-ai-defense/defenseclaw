@@ -42,6 +42,7 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.models import ActionEntry, ActionState, ScanResult
@@ -748,11 +749,11 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
                 )
         return None
 
-    if app.logger:
-        app.logger.log_scan(
-            replace(result, target=audit_target) if audit_target else result,
-            connector=connector or None,
-        )
+    _record_scan(
+        app.logger,
+        replace(result, target=audit_target) if audit_target else result,
+        connector=connector or None,
+    )
     return result
 
 

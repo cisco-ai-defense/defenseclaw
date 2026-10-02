@@ -168,6 +168,42 @@ class TestRestartFailsClosed(unittest.TestCase):
             cmd_setup._restart_restored_connector_runtime(SimpleNamespace(cfg=cfg))
         self.assertEqual(restart.call_args.kwargs["connector"], "")
 
+    def test_gap1702_openclaw_gateway_down_names_it_and_rollback_does_not_wait_again(self):
+        from types import SimpleNamespace
+
+        import click
+        from defenseclaw.commands import cmd_setup
+
+        with self.assertRaises(cmd_setup._OpenClawGatewayNotRunning) as raised:
+            cmd_setup._fail_if_restart_failed(["openclaw-gateway"])
+        cause = raised.exception
+        self.assertIn("openclaw gateway run", cause.message)
+        self.assertNotIn("defenseclaw-gateway start", cause.message)
+
+        cfg = SimpleNamespace(
+            data_dir="/nonexistent",
+            gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+            active_connectors=lambda: ["openclaw"],
+            active_connector=lambda: "openclaw",
+        )
+        app = SimpleNamespace(cfg=cfg)
+        with patch.object(cmd_setup, "_restart_services") as restart:
+            cmd_setup._restart_restored_connector_runtime(app, skip_openclaw=True)
+        self.assertEqual(restart.call_args.kwargs["connector"], "")
+
+        with (
+            patch.object(cmd_setup, "_restore_setup_config_snapshot"),
+            patch.object(cmd_setup, "_restart_restored_connector_runtime") as reconcile,
+            self.assertRaises(click.ClickException) as final,
+        ):
+            cmd_setup._rollback_failed_connector_application(app, SimpleNamespace(applied_runtime=None), cause)
+        reconcile.assert_called_once_with(app, skip_openclaw=True)
+        message = final.exception.message
+        self.assertIn("openclaw gateway run", message)
+        self.assertIn("restored the prior connector configuration and runtime", message)
+        self.assertNotIn("rollback was incomplete", message)
+        self.assertNotIn("defenseclaw-gateway start", message)
+
 
 class TestInitDirPermissions(unittest.TestCase):
     """F-0122: first-run init must create operator-private dirs 0700."""

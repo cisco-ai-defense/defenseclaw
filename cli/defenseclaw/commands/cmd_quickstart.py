@@ -297,7 +297,7 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
 
     if gateway_requested:
         for step in report.setup + report.readiness:
-            if step.name in {"Connector", "Sidecar"} and step.status == "warn":
+            if step.name in {"Connector", "Connector runtime", "Sidecar"} and step.status == "warn":
                 step.status = "fail"
 
     report.status = _rollup_status(report.setup, report.readiness)
