@@ -1392,11 +1392,7 @@ def fail_mode_cmd(
             if _open_names:
                 # GAP-1109: a connector override (or observe mode) keeps these
                 # open although the global default is closed.
-                ux.warn(
-                    "Still fail-open: " + ", ".join(_open_names) + ". Close one with: "
-                    "defenseclaw guardrail fail-mode closed --connector <name>",
-                    indent="  ",
-                )
+                _warn_still_fail_open(gc, _open_names)
             click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
         click.echo()
         ux.subhead(
@@ -1458,9 +1454,19 @@ def fail_mode_cmd(
                 click.echo(f"      - {_connector_label(name)} ({name}): {old} {ux.dim('→')} {ux.accent(mode)}")
             elif not runtime_states[name].current:
                 click.echo(f"      - {_connector_label(name)} ({name}): reconcile stale runtime")
+    elif current == mode:
+        click.echo(f"  {ux.bold('Re-applying hook fail mode:')} {ux.accent(mode)} {ux.dim('(reconcile the installed hooks)')}")
     else:
         click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
+    if mode == "closed":
+        _observe_open = [name for name in active_names if _observe_keeps_fail_open(gc, name)]
+        if _observe_open:
+            ux.warn(
+                f"{', '.join(_observe_open)} stays fail-open while in observe mode. "
+                f"Switch to action with: {_mode_action_command(gc)}",
+                indent="  ",
+            )
     hermes_targeted = any(normalize_connector(name) == "hermes" for name in active_names)
     non_hermes_targeted = any(normalize_connector(name) != "hermes" for name in active_names)
     if mode == "closed" and hermes_targeted and not non_hermes_targeted:
@@ -1518,6 +1524,41 @@ def fail_mode_cmd(
             else f"old={current} new={mode} restart={restart}"
         ),
     )
+
+
+def _observe_keeps_fail_open(gc, name: str) -> bool:
+    """Observe mode keeps a connector fail-open unless it has its own fail mode."""
+    if normalize_connector(name) == "hermes":
+        return False
+    override = gc._connector_override(name) if hasattr(gc, "_connector_override") else None
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return False
+    mode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")
+    return str(mode or "").strip().lower() != "action"
+
+
+def _mode_action_command(gc) -> str:
+    multi = bool(getattr(gc, "connectors", {}) or {})
+    return "defenseclaw guardrail mode action" + (" --connector <name>" if multi else "")
+
+
+def _warn_still_fail_open(gc, open_names: list[str]) -> None:
+    """Name the command that really closes each still-open connector (GAP-1341)."""
+    observe_open = [name for name in open_names if _observe_keeps_fail_open(gc, name)]
+    other_open = [name for name in open_names if name not in observe_open]
+    if observe_open:
+        ux.warn(
+            f"Still fail-open: {', '.join(observe_open)} (observe mode keeps hooks fail-open). "
+            f"Switch to action with: {_mode_action_command(gc)}",
+            indent="  ",
+        )
+    if other_open:
+        fix = (
+            "defenseclaw guardrail fail-mode closed --connector <name>"
+            if getattr(gc, "connectors", {}) or {}
+            else "defenseclaw guardrail fail-mode closed"
+        )
+        ux.warn(f"Still fail-open: {', '.join(other_open)}. Close it with: {fix}", indent="  ")
 
 
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")

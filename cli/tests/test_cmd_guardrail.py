@@ -280,6 +280,22 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("guardrail.hook_fail_mode: closed", result.output)
         self.assertIn("BLOCK", result.output)
 
+    def test_single_connector_observe_mode_names_the_mode_switch(self):
+        # GAP-1341: --connector is refused on a single-connector install, and
+        # observe mode is what keeps the hooks fail-open.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
+        app.cfg.guardrail.connectors = {}
+        app.cfg.guardrail.effective_mode = lambda _name: "observe"
+        app.cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
+        state = SimpleNamespace(current=True, runtime="open", desired="open", drift=())
+        with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("observe mode keeps hooks fail-open", result.output)
+        self.assertIn("defenseclaw guardrail mode action", result.output)
+        self.assertNotIn("--connector <name>", result.output)
+
     def test_show_hermes_closed_provenance_reports_effective_open(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
