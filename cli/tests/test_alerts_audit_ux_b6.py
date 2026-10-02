@@ -26,6 +26,7 @@ ACP_FINDING = {
     "defenseclaw.finding.title": "AWS access key",
     "defenseclaw.finding.target_ref": "opencode:acp",
     "defenseclaw.scan.scanner": "inspect-http",
+    "defenseclaw.finding.location": "<hashed class=path v=1 key=c0c8 len=27 hmac=3fad>",
 }
 ACP_VERDICT = {
     "defenseclaw.guardrail.effective_action": "block",
@@ -94,6 +95,7 @@ class AlertsAuditUxB6Tests(unittest.TestCase):
         show = self._invoke("-n", "10", "--show", "1")
         self.assertIn("Decision:  blocked", show)
         self.assertIn("Route:     ACP session/prompt (client zed)", show)
+        self.assertNotIn("hashed", show)  # GAP-1676
 
         rows = json.loads(self._invoke("--json", "-n", "10"))
         acp = next(row for row in rows if row["connector"] == "opencode")
