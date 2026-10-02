@@ -581,6 +581,38 @@ def _plain_provider_error(exc: BaseException) -> str:
     return text or type(exc).__name__
 
 
+# ping failure classes in user terms; "internal" (any other provider error)
+# reads as the provider rejecting the call (GAP-1673).
+_PING_FAILURE_WORDS = {
+    "auth_failed": "authentication failed",
+    "rate_limited": "rate limited the request",
+    "timeout": "timed out",
+    "network_error": "could not be reached",
+}
+
+_PROVIDER_LABELS = {
+    "bedrock": "Bedrock",
+    "amazon-bedrock": "Bedrock",
+    "openai": "OpenAI",
+    "azure": "Azure OpenAI",
+    "vertex_ai": "Vertex AI",
+    "vertex": "Vertex AI",
+    "openrouter": "OpenRouter",
+    "xai": "xAI",
+    "huggingface": "Hugging Face",
+    "vllm": "vLLM",
+    "lm_studio": "LM Studio",
+}
+
+
+def _provider_label(provider: str) -> str:
+    """The provider's name as users know it ("bedrock" -> "Bedrock")."""
+    name = (provider or "").strip()
+    if not name:
+        return "The LLM provider"
+    return _PROVIDER_LABELS.get(name.lower(), name[:1].upper() + name[1:])
+
+
 def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     """One-shot reachability probe for a resolved :class:`LLMConfig`.
 
@@ -663,7 +695,9 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         if missing is not None:
             return (False, missing)
         st = _classify_llm_exception(exc)
-        return (False, f"{st}: {_plain_provider_error(exc)}"[:240])
+        what = _PING_FAILURE_WORDS.get(st, "rejected the request")
+        label = _provider_label(provider or (model.split("/", 1)[0] if "/" in model else ""))
+        return (False, f"{label} {what}: {_plain_provider_error(exc)}"[:240])
 
     try:
         choices = getattr(resp, "choices", None) or []
