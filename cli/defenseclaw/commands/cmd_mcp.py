@@ -2183,7 +2183,7 @@ def set_server(
         if scan_rejected:
             reasons.append(f"scan-rejected: {', '.join(scan_rejected)}")
         if skipped:
-            reasons.append(f"no MCP write surface: {', '.join(skipped)}")
+            reasons.append(f"skipped (see above): {', '.join(skipped)}")
         if invalid_input:
             reasons.append(f"invalid input: {', '.join(invalid_input)}")
         if write_failed:

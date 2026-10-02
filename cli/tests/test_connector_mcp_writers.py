@@ -952,6 +952,29 @@ class TestClaudeCodeWrites:
         assert settings.read_bytes() == original
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows owner binding contract")
+    def test_new_settings_accept_system_owned_profile_parent(self, tmp_path, monkeypatch):
+        # GAP-1686: C:\Users\<user> is owned by SYSTEM, not the user.
+        from defenseclaw import windows_acl
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
+        settings = tmp_path / ".claude.json"
+        capture = windows_acl.capture_path
+        local_system = bytes([1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0])  # S-1-5-18
+
+        def capture_with_system_settings_parent(path, *, directory=False):
+            security = capture(path, directory=directory)
+            if directory and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                os.path.abspath(settings.parent),
+            ):
+                return replace(security, owner=local_system)
+            return security
+
+        monkeypatch.setattr(windows_acl, "capture_path", capture_with_system_settings_parent)
+        set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+        assert "demo" in json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows owner binding contract")
     def test_new_settings_reject_foreign_owned_parent(self, tmp_path, monkeypatch):
         from defenseclaw import windows_acl
 

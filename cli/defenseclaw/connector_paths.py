@@ -5705,10 +5705,16 @@ def _claude_windows_private_file_security(path: str, destination: str | None = N
         )
     security = windows_acl.capture_path(lock_path)
     parent = os.path.dirname(os.path.abspath(destination or path)) or os.curdir
-    if windows_acl.capture_path(parent, directory=True).owner != security.owner:
-        raise MCPWriteUnsupportedError(
-            f"refusing Claude MCP mutation: settings parent has an unexpected owner: {parent}",
-        )
+    parent_security = windows_acl.capture_path(parent, directory=True)
+    if parent_security.owner != security.owner:
+        # A Windows profile root (C:\Users\<user>) is owned by SYSTEM, not
+        # the user, so accept the trusted system owners too (GAP-1686).
+        try:
+            windows_acl.assert_trusted_owner(parent_security)
+        except windows_acl.WindowsAclError as exc:
+            raise MCPWriteUnsupportedError(
+                f"refusing Claude MCP mutation: settings parent has an unexpected owner: {parent}",
+            ) from exc
     return security
 
 
