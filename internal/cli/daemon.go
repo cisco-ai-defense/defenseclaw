@@ -300,6 +300,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
+	if err := missingObservabilitySecretError("start", cfgLoadErr); err != nil {
+		return err
+	}
 	if rotationTransaction {
 		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
 			return fmt.Errorf("rotation start configuration does not match gateway A: %w", err)
@@ -674,7 +677,11 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return err
 	}
-	cfg, _ := loadDaemonConfig(cmd)
+	cfg, cfgLoadErr := loadDaemonConfig(cmd)
+	// Refuse before stopping anything: the new gateway could not start.
+	if err := missingObservabilitySecretError("restart", cfgLoadErr); err != nil {
+		return err
+	}
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
@@ -880,6 +887,25 @@ type daemonReadinessRequirements struct {
 	// guardrail that stopped only because the hook-contract admission gate
 	// refused upstream agent drift. Every other subsystem must still be ready.
 	allowHookContractAdmissionRefusal bool
+}
+
+// missingObservabilitySecretError explains a configuration that does not load
+// because an observability destination's secret is unavailable. The gateway
+// refuses such a configuration, and the default configuration loadDaemonConfig
+// falls back to would point start at the default port and blame its holder.
+func missingObservabilitySecretError(verb string, err error) error {
+	var secretErr *config.V8SecretReferenceError
+	if !errors.As(err, &secretErr) {
+		return nil
+	}
+	if secretErr.Credential {
+		return fmt.Errorf("cannot %s the gateway: %w", verb, secretErr)
+	}
+	return fmt.Errorf(
+		"cannot %s the gateway: observability destination %q needs %s, which is not set. "+
+			"Set it with: defenseclaw keys set %s (or disable that destination), then run: defenseclaw-gateway %s",
+		verb, secretErr.Destination, secretErr.Reference, secretErr.Reference, verb,
+	)
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
