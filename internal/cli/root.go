@@ -427,7 +427,13 @@ func ExecuteContext(ctx context.Context) int {
 	}
 	addManagedWindowsSetupAnswer(rootCmd)
 	addManagedHostHelp(rootCmd)
+	installUsageArgChecks(rootCmd)
+	pendingUnknownSubcommand = nil
 	err := rootCmd.ExecuteContext(ctx)
+	if err == nil && pendingUnknownSubcommand != nil {
+		err, pendingUnknownSubcommand = pendingUnknownSubcommand, nil
+		rootCmd.PrintErrln(rootCmd.ErrPrefix(), err.Error())
+	}
 	if err == nil {
 		return 0
 	}
@@ -441,7 +447,15 @@ func ExecuteContext(ctx context.Context) int {
 		return rc
 	}
 	// integration-branch withExitCode helper.
-	return commandExitCode(err)
+	if rc := commandExitCode(err); rc != 1 {
+		return rc
+	}
+	// An unknown top-level command is a usage error, as in the Python CLI
+	// (GAP-1549).
+	if isUnknownRootCommand(rootCmd, err) {
+		return 2
+	}
+	return 1
 }
 
 // exitCodeFor is the pure error-to-int mapping for the scrub subcommand.

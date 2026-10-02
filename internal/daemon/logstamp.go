@@ -55,6 +55,25 @@ func StampChildLog() (restore func()) {
 	return stampLog(os.Stderr, os.Stdout, time.Now)
 }
 
+// EnvStampLog marks a detached helper (the background watchdog) whose
+// stdout and stderr are its log file, so it stamps its lines like the
+// gateway does.
+const EnvStampLog = "DEFENSECLAW_STAMP_LOG"
+
+// StampDetachedLog prefixes every line a detached helper started with
+// EnvStampLog=1 writes with an RFC 3339 UTC time (GAP-1578), the same way
+// StampChildLog stamps gateway.log. The marker is cleared so the helper's own
+// children do not inherit it. It does nothing without the marker or when
+// DEFENSECLAW_LOG_TIMESTAMPS=0.
+func StampDetachedLog() (restore func()) {
+	marked := os.Getenv(EnvStampLog) == "1"
+	_ = os.Unsetenv(EnvStampLog)
+	if !marked || os.Getenv(EnvLogTimestamps) == "0" {
+		return func() {}
+	}
+	return stampLog(os.Stderr, os.Stdout, time.Now)
+}
+
 func stampLog(file, stdout *os.File, now func() time.Time) func() {
 	r, w, err := os.Pipe()
 	if err != nil {

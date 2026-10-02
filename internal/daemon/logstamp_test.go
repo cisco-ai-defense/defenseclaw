@@ -63,3 +63,39 @@ func TestStampChildLogIsANoOpOutsideTheDaemonChild(t *testing.T) {
 		t.Fatal("stderr changed outside a daemon child")
 	}
 }
+
+// GAP-1578: the background watchdog (started with EnvStampLog=1) stamps its
+// watchdog.log lines; without the marker nothing changes.
+func TestStampDetachedLogNeedsTheMarker(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "watchdog.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	origStderr, origStdout := os.Stderr, os.Stdout
+	t.Cleanup(func() { os.Stderr, os.Stdout = origStderr, origStdout })
+	os.Stderr = f
+
+	t.Setenv(EnvStampLog, "")
+	StampDetachedLog()()
+	if os.Stderr != f {
+		t.Fatal("no marker must leave os.Stderr alone")
+	}
+
+	t.Setenv(EnvStampLog, "1")
+	restore := StampDetachedLog()
+	if _, set := os.LookupEnv(EnvStampLog); set {
+		t.Fatal("the marker must not reach the watchdog's children")
+	}
+	fmt.Fprintln(os.Stderr, "[watchdog] stopped")
+	restore()
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp, rest, _ := strings.Cut(strings.TrimSpace(string(raw)), " ")
+	if _, err := time.Parse(time.RFC3339, stamp); err != nil || rest != "[watchdog] stopped" {
+		t.Fatalf("watchdog.log = %q, want an RFC 3339 time then the line", raw)
+	}
+}

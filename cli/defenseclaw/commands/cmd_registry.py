@@ -813,11 +813,10 @@ def sync_cmd(  # noqa: PLR0913
       defenseclaw registry sync corp-mcp --scan-stdio      # opt-in stdio scan
 
     \b
-    F-0541: scanning a stdio MCP entry inherently SPAWNS the
-    publisher-controlled package. Routine ``sync`` therefore does NOT
-    auto-scan stdio entries unless ``--scan-stdio`` is passed; skipped
-    entries emit a one-line notice so the coverage loss is not silent.
-    Remote/URL MCP entries (no local process spawn) are always scanned.
+    Scanning a stdio MCP entry starts the publisher's package on this
+    machine, so sync scans stdio entries only with --scan-stdio and
+    prints a one-line notice for each entry it skipped.
+    Remote (URL) MCP entries start no local process and are always scanned.
     """
     cfg = _require_cfg(app)
 

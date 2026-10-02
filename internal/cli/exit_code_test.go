@@ -9,6 +9,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -72,5 +73,50 @@ func TestUnknownFlagIsAUsageError(t *testing.T) {
 	root.AddCommand(hook)
 	if out := usageFlagError(hook, parseErr); out != parseErr {
 		t.Fatalf("hook tree must keep its own flag error, got %v", out)
+	}
+}
+
+// GAP-1549: a stray argument or an unknown subcommand is a usage error with
+// rc 2; hook trees and the enterprise leaves keep cobra's own handling.
+func TestStrayArgumentsAreUsageErrors(t *testing.T) {
+	installUsageArgChecks(rootCmd)
+	for _, path := range [][]string{{"status"}, {"watchdog"}, {"policy", "show"}} {
+		cmd, _, err := rootCmd.Find(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := cmd.ValidateArgs([]string{"bogus"})
+		if commandExitCode(got) != 2 || !strings.Contains(fmt.Sprint(got), "Usage: ") {
+			t.Fatalf("%v bogus: rc %d, %v", path, commandExitCode(got), got)
+		}
+		if err := cmd.ValidateArgs(nil); err != nil {
+			t.Fatalf("%v without arguments: %v", path, err)
+		}
+	}
+	for _, path := range [][]string{{"connector", "launch"}, {"enterprise", "hooks", "status"}} {
+		cmd, _, err := rootCmd.Find(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.ValidateArgs([]string{"x"}); err != nil {
+			t.Fatalf("%v must keep accepting arguments: %v", path, err)
+		}
+	}
+
+	var stderr strings.Builder
+	rootCmd.SetErr(&stderr)
+	t.Cleanup(func() { rootCmd.SetArgs(nil); rootCmd.SetErr(nil) })
+	rootCmd.SetArgs([]string{"rulepack", "bogus"})
+	if rc := ExecuteContext(context.Background()); rc != 2 {
+		t.Fatalf("rulepack bogus: rc %d, want 2", rc)
+	}
+	want := "unknown command \"bogus\" for \"defenseclaw-gateway rulepack\""
+	if !strings.Contains(stderr.String(), want) || !strings.Contains(stderr.String(), "rulepack --help") {
+		t.Fatalf("rulepack bogus stderr = %q", stderr.String())
+	}
+	stderr.Reset()
+	rootCmd.SetArgs([]string{"bogus-cmd"})
+	if rc := ExecuteContext(context.Background()); rc != 2 {
+		t.Fatalf("bogus-cmd: rc %d, want 2 (%s)", rc, stderr.String())
 	}
 }

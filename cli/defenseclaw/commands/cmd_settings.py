@@ -16,7 +16,7 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group("settings")
 def settings_cmd() -> None:
-    """Operator settings (parity with the TUI setup panel save path)."""
+    """Save the DefenseClaw configuration (as the TUI Setup panel does)."""
 
 
 @settings_cmd.command("save")

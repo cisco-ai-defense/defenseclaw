@@ -48,8 +48,12 @@ def _walk(command: click.Command, ctx: click.Context):
 
 
 def test_help_has_no_rst_markup_internals_or_undocumented_options() -> None:
-    # GAP-1171 / GAP-1123: help is for users, not for the code.
-    internals = re.compile(r"``|/api/v1/|P\d-#\d|Round-\d|fu/[a-z]|Go wiring")
+    # GAP-1171 / GAP-1123: help is for users, not for the code. GAP-1515 /
+    # GAP-1557: no internal finding ids or implementation remarks either.
+    internals = re.compile(
+        r"``|/api/v1/|P\d-#\d|Round-\d|fu/[a-z]|Go wiring|\b(?:F|GAP)-\d{3,4}\b"
+        r"|parity with the TUI|CLI parity|Textual|Go provenance"
+    )
     problems = []
     for command, ctx in _walk(cli, click.Context(cli, info_name="defenseclaw")):
         hits = sorted(set(internals.findall(command.get_help(ctx))))

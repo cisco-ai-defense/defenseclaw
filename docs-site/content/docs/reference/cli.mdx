@@ -374,7 +374,7 @@ These list/inventory verbs read across the full active roster:
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw tui` | Interactive Textual dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
+| `defenseclaw tui` | Interactive terminal dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |

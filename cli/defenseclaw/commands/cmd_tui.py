@@ -25,7 +25,7 @@ from defenseclaw import ux
 
 @click.command("tui")
 def tui() -> None:
-    """Launch the DefenseClaw interactive Textual dashboard."""
+    """Open the interactive DefenseClaw dashboard in this terminal."""
     if not ux.terminal_supports_tui():
         raise click.ClickException(ux.TUI_UNAVAILABLE_MESSAGE)
 

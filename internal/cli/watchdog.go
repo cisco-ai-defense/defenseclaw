@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 )
@@ -260,6 +261,8 @@ func loadWatchdogConfig() (*config.Config, error) {
 }
 
 func runWatchdogForeground(_ *cobra.Command, _ []string) error {
+	// A background watchdog's watchdog.log lines carry a time (GAP-1578).
+	defer daemon.StampDetachedLog()()
 	cfg, err := loadWatchdogConfig()
 	if err != nil {
 		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
@@ -724,6 +727,7 @@ func (c *execCommand) start() error {
 	proc, err := os.StartProcess(c.path, append([]string{c.path}, c.args...), &os.ProcAttr{
 		Dir:   watchdogStartDir(c.path),
 		Files: []*os.File{devNull, c.logFile, c.logFile},
+		Env:   append(os.Environ(), daemon.EnvStampLog+"=1"),
 		Sys:   watchdogSysProcAttr(),
 	})
 	_ = devNull.Close()
