@@ -153,3 +153,14 @@ def test_threshold_edit_points_hook_tool_calls_at_block_at(app, reloads) -> None
     assert "defenseclaw guardrail block-at" in result.output
     patterns = _invoke(app, ["edit", "guardrail", "--add-pattern", "injection", "dc-marker"])
     assert "guardrail block-at" not in patterns.output
+
+
+def test_an_edit_names_the_policy_it_changed(app, reloads) -> None:
+    # GAP-1667: the result line said only 'Guardrail updated: block_threshold=3'.
+    result = _invoke(app, EDITS[0])
+    assert result.exit_code == 0, result.output
+    assert "Guardrail of policy 'default' (active) updated: block_threshold=HIGH (3), alert_threshold=LOW (1)" in (
+        result.output
+    )
+    draft = _invoke(app, ["edit", "firewall", "--add-domain", "example.org", "-p", "strict"])
+    assert "Firewall of policy 'strict' (draft) updated: +domain example.org" in draft.output
