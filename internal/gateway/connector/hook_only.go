@@ -1380,7 +1380,17 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
-		return ownedHooksPresentInConfig(c, opts)
+		present, err := ownedHooksPresentInConfig(c, opts)
+		if err != nil || !present || c.name != "hermes" || !opts.ManagedEnterprise {
+			return present, err
+		}
+		// Hermes runs a shell hook only once it is approved, so a managed
+		// registration includes DefenseClaw's approvals: a user who empties
+		// the allowlist and declines the prompt otherwise runs every tool
+		// call unchecked while verify passes and the guardian repairs
+		// nothing.
+		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
+		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfigPath(opts)), hermesAllowlistFileName), command)
 	}
 	path := c.configPath(opts)
 	const maxManagedPluginBytes = 4 << 20
@@ -3715,10 +3725,50 @@ func readHermesAllowlist(path string) (map[string]interface{}, error) {
 	if document == nil {
 		return nil, fmt.Errorf("Hermes shell hook allowlist is not a JSON object")
 	}
-	if _, ok := document["approvals"].([]interface{}); !ok {
+	// Hermes reads a document without approvals ({}) as no approvals, so
+	// repair adds DefenseClaw's to it instead of failing.
+	raw, present := document["approvals"]
+	if !present || raw == nil {
+		document["approvals"] = []interface{}{}
+		return document, nil
+	}
+	if _, ok := raw.([]interface{}); !ok {
 		return nil, fmt.Errorf("Hermes shell hook allowlist approvals is not an array")
 	}
 	return document, nil
+}
+
+// hermesOwnedApprovalsPresent reports whether the allowlist holds
+// DefenseClaw's approval of command for every required Hermes event.
+func hermesOwnedApprovalsPresent(path, command string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	document, err := readHermesAllowlist(path)
+	if err != nil {
+		return false, err
+	}
+	approved := map[string]bool{}
+	for _, raw := range document["approvals"].([]interface{}) {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		event, _ := entry["event"].(string)
+		entryCommand, _ := entry["command"].(string)
+		if owned, _ := entry[hermesAllowlistOwnerField].(bool); owned && entryCommand == command {
+			approved[event] = true
+		}
+	}
+	for _, spec := range hermesRequiredHooks {
+		if !approved[spec.event] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func hermesHookEventSet() map[string]struct{} {
