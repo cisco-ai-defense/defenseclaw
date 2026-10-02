@@ -238,6 +238,15 @@ def test_standalone_default_uninstall_removes_the_machine_state() -> None:
     assert entry.count("$Purge = ") == 1
 
 
+def test_lifecycles_retire_a_stale_committed_journal_through_the_fallback() -> None:
+    # GAP-1322: a journal the installed gateway cannot retire no longer
+    # blocks every later upgrade, ensure and uninstall (behaviour in
+    # enterprise-standalone-stale-lifecycle-journal-smoke.ps1).
+    module = _text(MODULE)
+    for name in ("Invoke-DefenseClawInstallLikeLifecycle", "Invoke-DefenseClawUninstallLifecycle"):
+        assert "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire" in _function_body(module, name)
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).
@@ -255,6 +264,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
     "enterprise-standalone-service-logged-error-smoke.ps1",
+    "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 

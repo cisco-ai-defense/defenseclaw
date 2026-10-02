@@ -93,16 +93,24 @@ var processSnapshotSource = platformProcessSnapshot
 // intentionally narrow; an unrelated command whose arguments mention an AI
 // product is never visible to this classifier. Ambiguous catalog aliases fail
 // closed: for example, a basename-only Claude.exe observation cannot safely
-// distinguish Claude Code from Claude Desktop. A node child may inherit only a
+// distinguish Claude Code from Claude Desktop, so that one basename is settled
+// by its executable path (windowsClaudeCodeImage). A node child may inherit only a
 // Codex or Claude Code parent, which covers managed npm launchers without
 // turning desktop-app helper processes into additional product instances.
 func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 	aliases := windowsProcessAliases(catalog)
+	claudeCode := false
+	for _, sig := range catalog {
+		claudeCode = claudeCode || normalizeAIID(sig.ID) == "claudecode"
+	}
 	byPID := make(map[int]*processInfo, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = &procs[i]
-		if connector := aliases[normalizedWindowsProcessName(procs[i].Comm)]; connector != "" {
+		name := normalizedWindowsProcessName(procs[i].Comm)
+		if connector := aliases[name]; connector != "" {
 			procs[i].Connector = connector
+		} else if name == "claude" && claudeCode && windowsClaudeCodeImage(procs[i].Image) {
+			procs[i].Connector = "claudecode"
 		}
 	}
 	for i := 0; i < len(procs); i++ {
@@ -175,6 +183,20 @@ func windowsProcessAliases(catalog []AISignature) map[string]string {
 		}
 	}
 	return resolved
+}
+
+// windowsClaudeCodeImage resolves the claude.exe basename that Claude Code
+// and Claude Desktop share by the executable path: Claude Code's native
+// installer and its npm package keep claude.exe under these folders, which
+// Claude Desktop never uses. Any other path stays ambiguous and unclassified.
+func windowsClaudeCodeImage(image string) bool {
+	image = strings.ToLower(strings.ReplaceAll(image, "/", `\`))
+	for _, marker := range []string{`\.local\bin\`, `\.local\share\claude\`, `\node_modules\@anthropic-ai\claude-code\`} {
+		if strings.Contains(image, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func windowsNodeParentConnector(connector string) bool {

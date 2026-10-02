@@ -106,6 +106,8 @@ func TestClassifyWindowsProcessesMapsUniqueCatalogAliases(t *testing.T) {
 		{PID: 3, Comm: "LM Studio.exe", Windows: true},
 		{PID: 4, Comm: "Claude.exe", Windows: true},
 		{PID: 5, Comm: "shared-helper.exe", Windows: true},
+		{PID: 6, Comm: "claude.exe", Image: `C:\Users\kevin\.local\bin\claude.exe`, Windows: true},
+		{PID: 7, Comm: "claude.exe", Image: `C:\Users\kevin\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe`, Windows: true},
 	}
 	classifyWindowsProcesses(procs, windowsProcessParityCatalog())
 
@@ -118,6 +120,10 @@ func TestClassifyWindowsProcessesMapsUniqueCatalogAliases(t *testing.T) {
 		4: "",
 		// Every cross-signature collision fails closed.
 		5: "",
+		// Claude Code's native install path settles the shared basename
+		// (GAP-1440); Claude Desktop's own folder stays unclassified.
+		6: "claudecode",
+		7: "",
 	}
 	for _, proc := range procs {
 		if proc.Connector != want[proc.PID] {

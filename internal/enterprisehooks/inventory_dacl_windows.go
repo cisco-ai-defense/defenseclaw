@@ -48,6 +48,24 @@ var inventoryDACLDotdirs = append([]string{
 	`AppData\Local\hermes\plugins`,
 }, legacyconnector.InventoryDotDirs...)
 
+// inventoryDACLGuardianOwnedDotdirs maps a dotdir to the connector whose
+// enrollment puts it on that user's managed hook path. The guardian keeps
+// every element of that path at its exact protected DACL, so an inventory
+// grant there is drift that the next ensure or repair removes, and the
+// protected children (.kiro\settings, \hooks, \agents) never inherit it.
+// Such a dotdir is not granted while the user's row for its connector is
+// enabled (GAP-1210).
+var inventoryDACLGuardianOwnedDotdirs = map[string]string{".kiro": "kiro"}
+
+// inventoryDACLListOnlyDirs are per-user install folders the scanner only
+// needs to see. The service gets list and read-attributes rights on the
+// folder itself, with no inheritance, so it can tell the agent is installed
+// without reading what the folder holds. Kiro CLI installs into
+// %LOCALAPPDATA%\Kiro-Cli, whose data.sqlite3 holds the user's session and
+// sign-in state; this is how a user whose .kiro the guardian protects is
+// still discovered.
+var inventoryDACLListOnlyDirs = []string{`AppData\Local\Kiro-Cli`}
+
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time
 // and shared across CertGateway/CertGuardian/CertEnumerator/CertCMIDBroker.
@@ -97,6 +115,7 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 	}
 
 	granted, skipped, failed := 0, 0, 0
+	guardianOwned := inventoryDACLGuardianOwnedByHome(manifest)
 	seenHome := map[string]struct{}{}
 	for _, target := range manifest.Targets {
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
@@ -108,9 +127,23 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 			continue
 		}
 		seenHome[key] = struct{}{}
+		type grant struct {
+			dir    string
+			ensure func(string, *windows.SID) (inventoryDACLResult, error)
+		}
+		grants := make([]grant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
 		for _, dotdir := range inventoryDACLDotdirs {
+			if _, owned := guardianOwned[key][dotdir]; !owned {
+				grants = append(grants, grant{dotdir, ensureInventoryReadACE})
+			}
+		}
+		for _, dir := range inventoryDACLListOnlyDirs {
+			grants = append(grants, grant{dir, ensureInventoryListACE})
+		}
+		for _, g := range grants {
+			dotdir := g.dir
 			path := filepath.Join(home, dotdir)
-			result, err := ensureInventoryReadACE(path, sid)
+			result, err := g.ensure(path, sid)
 			switch {
 			case err != nil:
 				failed++
@@ -131,6 +164,28 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 	return nil
 }
 
+// inventoryDACLGuardianOwnedByHome returns, per lowercased home, the dotdirs
+// the guardian owns there (inventoryDACLGuardianOwnedDotdirs).
+func inventoryDACLGuardianOwnedByHome(manifest Manifest) map[string]map[string]struct{} {
+	owned := map[string]map[string]struct{}{}
+	for _, target := range manifest.Targets {
+		if target.Enabled != nil && !*target.Enabled {
+			continue
+		}
+		home := strings.ToLower(filepath.Clean(strings.TrimSpace(target.UserHome)))
+		for dotdir, connectorName := range inventoryDACLGuardianOwnedDotdirs {
+			if !strings.EqualFold(strings.TrimSpace(target.Connector), connectorName) {
+				continue
+			}
+			if owned[home] == nil {
+				owned[home] = map[string]struct{}{}
+			}
+			owned[home][dotdir] = struct{}{}
+		}
+	}
+	return owned
+}
+
 type inventoryDACLResult int
 
 const (
@@ -144,6 +199,20 @@ const (
 // or isn't a directory, silently succeed — the user may not have started the
 // corresponding CLI yet; the next tick retries.
 func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, windows.GENERIC_READ|windows.GENERIC_EXECUTE, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+}
+
+// inventoryListMask lets the service list a folder and read its own
+// attributes, and nothing below it.
+const inventoryListMask = windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+
+// ensureInventoryListACE grants `sid` inventoryListMask on `path` alone
+// (inventoryDACLListOnlyDirs).
+func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventoryListMask, windows.NO_INHERITANCE)
+}
+
+func ensureInventoryACE(path string, sid *windows.SID, mask windows.ACCESS_MASK, inheritance uint32) (inventoryDACLResult, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -182,13 +251,17 @@ func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult,
 	if existing == nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("null DACL on %s; refusing to replace with sole gateway-service ACE", path)
 	}
-	if daclContainsInventoryReadACE(existing, sid) {
+	present := daclContainsInventoryReadACE(existing, sid)
+	if inheritance == windows.NO_INHERITANCE {
+		present = daclContainsInventoryListACE(existing, sid)
+	}
+	if present {
 		return inventoryDACLAlreadyPresent, nil
 	}
 	entry := windows.EXPLICIT_ACCESS{
-		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_EXECUTE,
+		AccessPermissions: mask,
 		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Inheritance:       inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -255,6 +328,30 @@ func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// daclContainsInventoryListACE reports whether `acl` already grants `sid`
+// inventoryListMask on the object itself.
+func daclContainsInventoryListACE(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID != nil && windows.EqualSid(aceSID, sid) &&
+			uint32(ace.Mask)&uint32(inventoryListMask) == uint32(inventoryListMask) {
+			return true
+		}
 	}
 	return false
 }

@@ -309,7 +309,10 @@ These per-user scans run on Linux and macOS. On Windows the gateway service
 scans every enrolled user's profile itself: the hook enumerator grants the
 service read access to each user's agent folders (`.claude`, `.codex`,
 `.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others), and
-nothing else in the profile. Each signal found in a profile, and each agent
+nothing else in the profile. A user enrolled for Kiro keeps `.kiro` at the
+guardian's protected permissions, so the service is not granted it; Kiro CLI
+is then found by its install folder `%LOCALAPPDATA%\Kiro-Cli`, which the
+service may list but not read. Each signal found in a profile, and each agent
 process started from one, carries that profile's account (`user.id` is the
 account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 `defenseclaw.user.name` the account name). Folders outside the granted ones,

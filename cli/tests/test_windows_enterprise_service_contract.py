@@ -5363,3 +5363,21 @@ def test_install_after_cli_purge_does_not_return_the_purge_result() -> None:
     ]
     tail = recovery[recovery.rindex("Remove-DefenseClawSelfUninstallEvidence") :]
     assert "if ($Action -eq 'Uninstall' -and\n        [bool]$receipt.purge_requested" in tail
+
+
+def test_self_uninstall_finalizer_helper_keeps_its_call_on_one_line() -> None:
+    # The helper is an expandable here-string, where a backtick before a
+    # newline is an escape, not a continuation. A split call ran
+    # Complete-DefenseClawSelfUninstallRetirement without -ReceiptPath, so
+    # the finalizer exited and left the ARP entry, HKLM key and retired
+    # install root behind (GAP-1373).
+    module = read(MODULE)
+    builder = module[
+        module.index("function Get-DefenseClawSelfUninstallHelperContent") :
+        module.index("function Assert-DefenseClawSelfUninstallHelper")
+    ]
+    helper = builder[builder.index('return @"') : builder.index('\n"@')]
+    assert not [line for line in helper.splitlines() if line.rstrip().endswith("`")]
+    call = next(line for line in helper.splitlines() if "Complete-DefenseClawSelfUninstallRetirement" in line)
+    assert "-ReceiptPath `$ProtectedReceiptPath" in call
+    assert "-WaitForCallerExit" in call

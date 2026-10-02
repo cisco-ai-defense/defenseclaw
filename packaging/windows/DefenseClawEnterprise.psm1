@@ -166,6 +166,10 @@ $script:DefenseClawQuarantinedRoots = @()
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
 $script:DefenseClawRecoveryGatewayRefusal = $null
+# Standalone: the installed gateway's error when this run removed a committed
+# managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
+# lifecycle run.
+$script:DefenseClawStaleLifecycleJournalRemoved = ''
 # Standalone: what the rollback of a failed first install could not remove
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
@@ -14780,6 +14784,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayCandidate = $null
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
+    $script:DefenseClawStaleLifecycleJournalRemoved = ''
     $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
@@ -15286,6 +15291,59 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     $run.outcome = 'succeeded'
     Add-DefenseClawRollbackLeftovers -Report $report
     return $report
+}
+
+function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
+    <#
+        Retires the managed-hook lifecycle journal an earlier, committed
+        lifecycle left behind, with the installed gateway, before a new
+        lifecycle opens its transaction. Standalone only: when that gateway
+        authenticated the journal but refused to collect an old runtime
+        generation (a release before GAP-1322 refuses the contractless Kiro
+        bundles 1.0.1 wrote), this removes the journal itself. No pending
+        transaction depends on it, and the replacement gateway's retire after
+        the commit collects the same generations, because collection covers
+        every target of the protected manifest. Any other failure is thrown.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    try {
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action retire)
+        return
+    }
+    catch {
+        $failure = $_
+    }
+    $message = [string]$failure.Exception.Message
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        -not $message.StartsWith(
+            'managed-hook lifecycle snapshot retire failed: retire ',
+            [StringComparison]::Ordinal
+        ) -or
+        $message.IndexOf(
+            ' managed runtime generations for SID ',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $message.IndexOf(
+            'refusing to collect an invalid managed runtime bundle',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.PendingPath)) {
+        throw $failure
+    }
+    $journalPath = [string]$Layout.ManagedHooksLifecycleJournalPath
+    Assert-DefenseClawNoReparsePath -Path $journalPath
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $journalPath `
+        -Force
+    $script:DefenseClawStaleLifecycleJournalRemoved =
+        ConvertTo-DefenseClawBoundedDiagnostic -Value $message -MaxLength 1024
 }
 
 function Add-DefenseClawRollbackLeftovers {
@@ -18202,6 +18260,10 @@ function Get-DefenseClawLifecycleStatus {
                 $script:DefenseClawRecoveryGatewayRefusal
             )
         }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawStaleLifecycleJournalRemoved)) {
+            $status['stale_lifecycle_journal_removed'] =
+                $script:DefenseClawStaleLifecycleJournalRemoved
+        }
         # What a recovered failed first install's rollback left.
         if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
             $status['rollback_leftovers'] = [string[]]@(
@@ -19711,6 +19773,9 @@ function Get-DefenseClawSelfUninstallHelperContent {
         "'",
         "''"
     )
+    # This is an expandable here-string: a backtick before a newline is an
+    # escape here, not a line continuation, so every generated command must
+    # stay on one line.
     return @"
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
@@ -19741,9 +19806,7 @@ try {
     }
     & `$module {
         param(`$ProtectedReceiptPath)
-        Complete-DefenseClawSelfUninstallRetirement `
-            -ReceiptPath `$ProtectedReceiptPath `
-            -WaitForCallerExit
+        Complete-DefenseClawSelfUninstallRetirement -ReceiptPath `$ProtectedReceiptPath -WaitForCallerExit
     } `$receiptPath
 }
 catch {
@@ -22334,10 +22397,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 # A current journal is owned by the installed schema-4 helper.
                 # Retire it before opening a new transaction; sending it down
                 # the schema-3 adoption lane would reject a valid receipt.
-                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `
                     -Layout $Layout `
-                    -GatewayServiceName $GatewayServiceName `
-                    -Action retire)
+                    -GatewayServiceName $GatewayServiceName
                 if (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath `
                             $Layout.ManagedHooksLifecycleJournalPath) {
@@ -23102,10 +23164,9 @@ function Invoke-DefenseClawUninstallLifecycle {
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
         -PathType Leaf) {
-        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+        Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `
             -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -Action retire)
+            -GatewayServiceName $GatewayServiceName
     }
     $selfUninstallCallerIdentity = $null
     if ($SelfUninstallCallerPID -gt 0) {
