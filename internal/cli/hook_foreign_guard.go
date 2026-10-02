@@ -381,6 +381,19 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		SessionStart: sessionStart,
 		Decision:     decision,
 	}
+	if foreignHookSessionLocal(name) {
+		// No gateway exchange is possible for this connector, so the
+		// session record lives under the account's home, as on hosts
+		// without the standalone gateway path.
+		decision = enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
+			AccountHome:  accountHome,
+			Key:          update.Key,
+			SessionStart: sessionStart,
+			Decision:     decision,
+			Now:          now,
+		})
+		return decision, accountHome
+	}
 	decision, err := hookForeignGuardExchange(name, event, deadline, update)
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
@@ -394,6 +407,20 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		}
 	}
 	return decision, accountHome
+}
+
+// hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
+var hookForeignGuardGOOS = runtime.GOOS
+
+// foreignHookSessionLocal reports a connector whose foreign-hook check cannot
+// reach the gateway's session store. On Windows the Amp plugin calls the
+// gateway with its own per-user token and has no hook-binary runtime
+// generation, so `hook --connector amp --foreign-hook-check` has no
+// credential for the exchange; every check failed closed and blocked each
+// Amp tool call. The plugin itself keeps the session.load
+// decision for the life of the Amp process.
+func foreignHookSessionLocal(name string) bool {
+	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
 }
 
 func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
