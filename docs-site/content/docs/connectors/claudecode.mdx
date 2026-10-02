@@ -257,6 +257,16 @@ block, ask, or decision authority.
   <Edge from="otel" to="gateway" />
 </Flow>
 
+**Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on 127.0.0.1
+directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Claude Code's own OTel
+exporter follows those variables, so its telemetry to the gateway, with its
+OTLP credential, goes to the proxy unless the loopback is excluded, and it is
+lost when the proxy cannot reach your machine's loopback. The exporter has no
+proxy option of its own, so set `NO_PROXY=127.0.0.1,localhost` (and
+`no_proxy`) in the shell that starts Claude Code, for example in `~/.bashrc`
+or `~/.zshrc`. On Windows run
+`setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
+
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell
