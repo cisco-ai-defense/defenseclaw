@@ -1642,22 +1642,22 @@
   "plugin/amp-plugin.ts/managed=0/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 27069,
-      "sha256": "63822d1af054a2ccb979cdfe7fbc46bbd6dc8a198eda7cfccdc6c7f23ed66b61"
+      "size": 27203,
+      "sha256": "9a1635de001cfa58fd1dfbd0319eb845a96fc0933211303274f7ebc3e8819d53"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 27067,
-      "sha256": "41e050886eccc36ecad796ee4bfd9d2642ef1c094ede4c99bc63169c73eebd31"
+      "size": 27201,
+      "sha256": "46e3914eea6329ad9e37bbfecfdbacfbd1407106ef0f30a5649ab55c44b2abb3"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 27069,
-      "sha256": "63822d1af054a2ccb979cdfe7fbc46bbd6dc8a198eda7cfccdc6c7f23ed66b61"
+      "size": 27203,
+      "sha256": "9a1635de001cfa58fd1dfbd0319eb845a96fc0933211303274f7ebc3e8819d53"
     }
   },
   "plugin/opencode-plugin.js/managed=0/fail=closed": {
