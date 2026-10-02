@@ -228,6 +228,8 @@ defenseclaw skill info my-skill                       # detailed view
 
 Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.
 
+`skill list`, `skill info`, `skill scan` and the AIBOM inventory report the same policy verdict: `blocked`, `quarantined` or `allowed` from an explicit action, otherwise `rejected`, `warning` or `clean` from the latest scan and the `skill_actions` mapping. The list's Status column only says whether the skill is loaded (`ready`), removed from disk (`removed`) or missing. A `rejected` verdict means the policy refuses the skill at install time. A copy that is already on disk stays loaded until you run `skill block`, `skill disable` or `skill quarantine`, or accept it with `skill allow`.
+
 Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
 
 ## See also

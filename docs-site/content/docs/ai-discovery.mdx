@@ -862,6 +862,13 @@ Windows. A capture that cannot start is degraded coverage rather than fatal:
 the reverse resolver still names peers, less confidently, and the snapshot says
 so.
 
+`dns_capture` is off by default. While it is off (or cannot start), `runtime
+status` and `selftest` show the shadow egress mechanism as, for example,
+`lsof(8); peers named by reverse DNS (dns_capture off)`, and `runtime
+permissions` lists the DNS naming grant as `[off]` rather than `[MISSING]`.
+Turn it on with `defenseclaw agent discovery runtime enable --dns-capture`. It
+needs root on macOS (for `/dev/bpf`) and `CAP_NET_RAW` on Linux.
+
 ### Every host-plane signal is gated on agent lineage
 
 Not one Plane C signal fires for a process without an AI agent above it in the

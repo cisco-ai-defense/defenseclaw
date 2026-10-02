@@ -122,7 +122,9 @@ def install_codeguard_asset(
         )
         _replace_path(status.path, replace=replace)
         os.makedirs(os.path.dirname(status.path), exist_ok=True)
-        shutil.copytree(source_dir, status.path)
+        # The installed package byte-compiles main.py; a copied __pycache__
+        # is noise in the skill and fails DefenseClaw's own skill scan.
+        shutil.copytree(source_dir, status.path, ignore=_BYTECODE_IGNORE)
         if status.connector == "openclaw":
             _enable_codeguard_in_openclaw(_expand(cfg.claw.config_file))
         suffix = f" (previous content archived to {archived})" if archived else ""
@@ -362,12 +364,16 @@ def _is_codeguard_skill_dir(path: str) -> bool:
             return False
         return _looks_like_codeguard(text)
     installed_sig = _dir_signature(path)
-    canonical_sig = _dir_signature(source)
-    return (
-        installed_sig is not None
-        and canonical_sig is not None
-        and installed_sig == canonical_sig
-    )
+    if installed_sig is None:
+        return False
+    # The installed tree must equal the shipped tree exactly, either with its
+    # bytecode cache (installs made before the cache was skipped) or without
+    # it (current installs). A cache that appears only in the installed copy
+    # still fails the comparison.
+    return installed_sig in {
+        _dir_signature(source),
+        _dir_signature(source, skip_bytecode=True),
+    }
 
 
 def _is_codeguard_rule_file(path: str) -> bool:
@@ -408,7 +414,10 @@ def _normalize_bytes(data: bytes) -> bytes:
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").strip()
 
 
-def _dir_signature(root: str) -> str | None:
+_BYTECODE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
+
+
+def _dir_signature(root: str, *, skip_bytecode: bool = False) -> str | None:
     """SHA-256 over every (relative-path, normalized-content) under *root*.
 
     Returns ``None`` when *root* is not a directory or a file cannot be
@@ -422,8 +431,12 @@ def _dir_signature(root: str) -> str | None:
         return None
     entries: list[tuple[str, bytes]] = []
     for dirpath, dirnames, filenames in os.walk(root):
+        if skip_bytecode:
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         dirnames.sort()
         for name in sorted(filenames):
+            if skip_bytecode and name.endswith(".pyc"):
+                continue
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root).replace(os.sep, "/")
             try:

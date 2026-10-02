@@ -1086,7 +1086,12 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
     actions = CatalogActionState.from_mapping(_mapping_or_none(raw.get("actions")))
     severity = scan.max_severity if scan is not None else ""
     scan_mismatch = ""
-    if scan is not None and not scan.clean:
+    if "verdict" in raw:
+        # `skill list` reports the admission policy's verdict; use it so the
+        # Skills panel agrees with the CLI and the Inventory.
+        if str(raw.get("verdict") or "") in {"rejected", "warning"}:
+            scan_mismatch = str(raw["verdict"])
+    elif scan is not None and not scan.clean:
         severity_upper = severity.upper()
         if severity_upper in {"CRITICAL", "HIGH"}:
             scan_mismatch = "rejected"

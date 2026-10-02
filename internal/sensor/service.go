@@ -579,6 +579,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// is reported, never implied.
 				limits = append(limits, unprivilegedEgressLimit)
 			}
+			entry.Mechanism = s.egressMechanism(entry.Mechanism)
 			if reason := s.dnsCaptureStatus(); reason != "" {
 				// The plane still runs on reverse DNS; naming is just less
 				// direct, and saying so beats silently downgrading confidence.
@@ -616,6 +617,21 @@ func planeIdleReason(health PlaneHealth) string {
 		return reason
 	}
 	return "not started"
+}
+
+// egressMechanism names how plane B names peers, so status never claims a
+// DNS capture that is off or failed to start.
+func (s *Service) egressMechanism(base string) string {
+	if !s.options.Config.DNSCapture || s.dnsCap == nil {
+		return base + "; peers named by reverse DNS (dns_capture off)"
+	}
+	s.mu.RLock()
+	captureErr := s.dnsCaptureErr
+	s.mu.RUnlock()
+	if captureErr != "" {
+		return base + "; peers named by reverse DNS (dns capture unavailable)"
+	}
+	return base + " and DNS capture (" + s.dnsCap.Mechanism() + ")"
 }
 
 // dnsCaptureStatus reports what DNS capture is or is not contributing.

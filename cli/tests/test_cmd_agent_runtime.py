@@ -418,6 +418,23 @@ def test_runtime_permissions_reports_state_not_just_requirements():
     assert by_state.get(True, 0) + by_state.get(False, 0) > 0, payload
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no DNS naming grant")
+def test_runtime_permissions_marks_dns_naming_off_when_capture_is_off(monkeypatch):
+    """With dns_capture off, the DNS naming grant is unused, not missing."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    cfg = SimpleNamespace(ai_discovery=SimpleNamespace(runtime=SimpleNamespace(dns_capture=False)))
+    monkeypatch.setattr(cmd_agent, "_load_config_best_effort", lambda app: cfg)
+    result = CliRunner().invoke(runtime_permissions, [])
+    assert result.exit_code == 0, result.output
+    assert "[off] shadow egress (B), DNS naming" in result.output
+    assert "[MISSING] shadow egress (B), DNS naming" not in result.output
+    assert "--dns-capture" in result.output
+
+
 def test_runtime_permissions_does_not_probe_another_host_os():
     """Asking about a platform you are not on must not report its state.
 

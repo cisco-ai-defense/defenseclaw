@@ -523,3 +523,18 @@ func TestFindingIDsDistinguishEpisodesOnAReusedPid(t *testing.T) {
 		}
 	})
 }
+
+// A plane B mechanism must not claim DNS capture when dns_capture is off.
+func TestEgressMechanismWithoutDNSCaptureSaysReverseDNS(t *testing.T) {
+	service := newTestService(t, config.AIRuntimeConfig{Enabled: true}, nil)
+	for _, health := range service.planeHealth(time.Now(), true, true) {
+		if health.Plane != platform.PlaneB {
+			continue
+		}
+		if !strings.Contains(health.Mechanism, "reverse DNS") || strings.Contains(health.Mechanism, "DNS capture (") {
+			t.Fatalf("plane B mechanism = %q, want reverse-DNS naming", health.Mechanism)
+		}
+		return
+	}
+	t.Fatal("plane B missing from planeHealth")
+}

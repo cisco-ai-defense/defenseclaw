@@ -124,6 +124,41 @@ def test_codeguard_skill_install_is_idempotent(tmp_path, monkeypatch):
     assert second.startswith("already installed at ")
 
 
+def test_codeguard_skill_install_skips_bytecode_cache(tmp_path, monkeypatch):
+    import shutil
+
+    from defenseclaw import codeguard_skill
+
+    source = tmp_path / "pkg" / "codeguard"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "skills" / "codeguard", source)
+    (source / "__pycache__").mkdir()
+    (source / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"cache")
+    monkeypatch.setattr(codeguard_skill, "_find_skill_source", lambda: str(source))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cfg = _cfg("claudecode", tmp_path)
+
+    first = install_codeguard_asset(cfg, connector="claudecode", target="skill")
+    assert first.startswith("installed to ")
+    installed = Path(first.removeprefix("installed to ").split(" (")[0])
+    assert not (installed / "__pycache__").exists()
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "installed"
+
+    # A cache that only the installed copy has is not the shipped skill.
+    (installed / "__pycache__").mkdir()
+    (installed / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"other")
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "conflict"
+
+
+def test_bundled_codeguard_skill_declares_license_and_network():
+    manifest = (Path(__file__).resolve().parents[2] / "skills" / "codeguard" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    front = manifest.split("---", 2)[1]
+    assert "license: Apache-2.0" in front
+    assert "compatibility:" in front and "network" in front
+
+
 def test_amp_codeguard_skill_uses_pinned_workspace_write_scope(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     workspace = tmp_path / "repo"

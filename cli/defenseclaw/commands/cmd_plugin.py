@@ -2584,6 +2584,34 @@ def _scan_plugin_dir(
     return out
 
 
+def _list_hermes_plugins() -> list[dict[str, Any]]:
+    """Hermes plugins with the activation state Hermes itself applies.
+
+    Uses the same enumeration as the AIBOM, so ``plugin list`` and
+    ``aibom scan`` count the same plugins with the same enabled state
+    instead of listing the category folders under hermes-agent/plugins.
+    """
+    from defenseclaw.inventory.claw_inventory import _enumerate_hermes_plugins
+
+    rows: list[dict[str, Any]] = []
+    for row in _enumerate_hermes_plugins():
+        source = str(row.get("source") or "")
+        is_path = row.get("source_kind") != "entrypoint" and os.path.isabs(source)
+        rows.append(
+            {
+                "id": str(row["id"]),
+                "name": str(row.get("name") or row["id"]),
+                "description": str(row.get("description") or ""),
+                "version": str(row.get("version") or ""),
+                "origin": str(row.get("source_kind") or "host"),
+                "enabled": bool(row.get("enabled")),
+                "source": "host:hermes",
+                "host_path": source if is_path else "",
+            }
+        )
+    return rows
+
+
 def _list_host_plugins(
     connector: str,
     cfg,
@@ -2613,6 +2641,10 @@ def _list_host_plugins(
             data_dir=getattr(cfg, "data_dir", None),
             workspace_dir=workspace_dir,
         )
+    if name == "hermes":
+        hermes_rows = _list_hermes_plugins()
+        if hermes_rows:
+            return hermes_rows
     workspace_resolver = getattr(cfg, "connector_workspace_dir", None)
     workspace_dir = workspace_resolver() if callable(workspace_resolver) else ""
     try:

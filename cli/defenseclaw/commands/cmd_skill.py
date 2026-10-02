@@ -918,6 +918,14 @@ def _skill_info_card(
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
     info_map["disabled"] = _skill_effectively_disabled(info_map, action_entry)
+    if scan_entry is not None or action_entry is not None:
+        label, _, reason = _skill_policy_verdict(
+            app, skill_name, skill=info_map, scan_entry=scan_entry,
+            action_entry=action_entry, connector=connector or "",
+        )
+        info_map["verdict"] = label
+        if reason:
+            info_map["verdict_detail"] = reason
     return info_map
 
 
@@ -956,11 +964,21 @@ def _print_skill_info_card(
             sev_color = {
                 "CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan",
             }.get(sev, "white")
+            noun = "finding" if n == 1 else "findings"
             click.echo(
-                f"  {ux.bold('Verdict:')}  {n} findings "
+                f"  {ux.bold('Findings:')} {n} {noun} "
                 f"(max severity: {ux._style(sev, fg=sev_color, bold=True)})"
             )
         click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
+
+    verdict = info_map.get("verdict")
+    if verdict and verdict != "-":
+        style = _POLICY_VERDICT_STYLES.get(verdict, "white")
+        click.echo()
+        click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
+        note = _skill_policy_note(info_map.get("name", skill_name), verdict)
+        if note:
+            click.echo(f"  {note}")
 
     actions_data = info_map.get("actions")
     if actions_data or info_map.get("connector"):
@@ -973,6 +991,87 @@ def _print_skill_info_card(
 # ---------------------------------------------------------------------------
 # skill list
 # ---------------------------------------------------------------------------
+
+_POLICY_VERDICT_STYLES = {
+    "blocked": "red",
+    "rejected": "red",
+    "quarantined": "red",
+    "disabled": "red",
+    "warning": "yellow",
+    "allowed": "green",
+    "clean": "green",
+}
+
+
+def _skill_policy_verdict(
+    app: AppContext,
+    name: str,
+    *,
+    skill: dict[str, Any] | None = None,
+    scan_entry: Any = None,
+    action_entry: Any = None,
+    connector: str = "",
+    pe: Any = None,
+) -> tuple[str, str, str]:
+    """Return ``(label, style, reason)`` from the admission policy.
+
+    ``skill list``, ``skill info``, ``skill scan`` and the AIBOM inventory all
+    report this one verdict, so a skill never reads "rejected" in one view and
+    "allowed" or "warning" in another.
+    """
+    if action_entry is not None and not action_entry.actions.is_empty():
+        label, style = _compute_verdict(action_entry, scan_entry)
+        if label != "-":
+            return label, style, ""
+    store = getattr(app, "store", None)
+    cfg = getattr(app, "cfg", None)
+    if store is None or cfg is None:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        return label, style, ""
+    skill = skill or {}
+    source_path = str(
+        skill.get("baseDir")
+        or skill.get("filePath")
+        or (scan_entry.get("target") if isinstance(scan_entry, dict) else "")
+        or ""
+    )
+    try:
+        from defenseclaw.enforce import PolicyEngine
+        from defenseclaw.enforce.admission import evaluate_admission
+        from defenseclaw.inventory.claw_inventory import _source_allows_first_party
+
+        decision = evaluate_admission(
+            pe if pe is not None else PolicyEngine(store),
+            policy_dir=cfg.policy_dir,
+            target_type="skill",
+            name=name,
+            source_path=source_path,
+            connector=connector,
+            scan_result=scan_entry,
+            action_entry=action_entry,
+            fallback_actions=cfg.skill_actions,
+            include_quarantine=True,
+            allow_first_party=_source_allows_first_party(skill.get("source")),
+        )
+    except Exception:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        return label, style, ""
+    label = "-" if decision.verdict == "scan" else decision.verdict
+    return label, _POLICY_VERDICT_STYLES.get(label, ""), decision.reason or ""
+
+
+def _skill_policy_note(name: str, label: str) -> str:
+    """One line on what a policy verdict means for an installed copy."""
+    if label == "rejected":
+        return (
+            "the policy refuses this skill at install; the copy already on disk "
+            f"stays loaded until you act. Block it: defenseclaw skill block {name}  "
+            f"Accept it: defenseclaw skill allow {name}"
+        )
+    if label == "warning":
+        return f"allowed with findings. Block it: defenseclaw skill block {name}"
+    return ""
+
 
 def _skill_status(s: dict[str, Any]) -> str:
     if s.get("disabled"):
@@ -1012,12 +1111,8 @@ def _skill_status_display(
             return "✗ disabled"
         if a.install == "allow":
             return "✓ allowed"
-    if scan_entry:
-        sev = scan_entry.get("max_severity", "CLEAN")
-        if sev in ("CRITICAL", "HIGH"):
-            return "✗ rejected"
-        if sev in ("MEDIUM", "LOW"):
-            return "⚠ warning"
+    # Scan findings are a policy verdict (the Verdict column), not a state:
+    # a skill with findings is still loaded, and a deleted one is removed.
     if s.get("eligible"):
         return "✓ ready"
     if s.get("source") in ("enforcement", "scan-history"):
@@ -1077,13 +1172,15 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
             for c in connectors:
                 scan_map = _build_scan_map_for_connector(app, c)
                 actions_map = _build_actions_map(app.store, c)
+                c_skills = _collect_skills_for_connector(app, c, scan_map, actions_map)
                 groups.append({
                     "connector": c,
                     "skills": _skill_list_json_items(
-                        _collect_skills_for_connector(app, c, scan_map, actions_map),
+                        c_skills,
                         scan_map,
                         actions_map,
                         connector=c,
+                        verdicts=_skill_policy_verdicts(app, c_skills, scan_map, actions_map, c),
                     ),
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -1100,6 +1197,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 scan_map,
                 actions_map,
                 connector=connectors[0] if connector_flag and connector_flag.strip() else "",
+                verdicts=_skill_policy_verdicts(app, skills, scan_map, actions_map, connectors[0]),
             )
             payload = (
                 {"connector": connectors[0], "skills": items}
@@ -1127,12 +1225,40 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     f"{ux.dim('(checked the connector-specific skill directories).')}",
                 )
             continue
-        _print_skill_list_table(skills, scan_map, actions_map, connector)
+        _print_skill_list_table(
+            skills, scan_map, actions_map, connector,
+            verdicts=_skill_policy_verdicts(app, skills, scan_map, actions_map, connector),
+        )
         shown_any = True
 
     if shown_any:
         from defenseclaw.commands import hint
         hint("Scan all skills:  defenseclaw skill scan all")
+
+
+def _skill_policy_verdicts(
+    app: AppContext,
+    skills: list[dict[str, Any]],
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+    connector: str,
+) -> dict[str, tuple[str, str, str]]:
+    pe = None
+    if getattr(app, "store", None) is not None:
+        try:
+            from defenseclaw.enforce import PolicyEngine
+
+            pe = PolicyEngine(app.store)
+        except Exception:
+            pe = None
+    out: dict[str, tuple[str, str, str]] = {}
+    for s in skills:
+        name = s.get("name", "")
+        out[name] = _skill_policy_verdict(
+            app, name, skill=s, scan_entry=scan_map.get(name),
+            action_entry=actions_map.get(name), connector=connector, pe=pe,
+        )
+    return out
 
 
 def _collect_skills_for_connector(
@@ -1205,6 +1331,7 @@ def _skill_list_json_items(
     actions_map: dict[str, Any],
     *,
     connector: str = "",
+    verdicts: dict[str, tuple[str, str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     items = []
     for s in skills:
@@ -1229,7 +1356,12 @@ def _skill_list_json_items(
             ae = actions_map[name]
             if not ae.actions.is_empty():
                 item["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(actions_map.get(name), scan_map.get(name))
+        if verdicts is not None and name in verdicts:
+            verdict_label, _, verdict_reason = verdicts[name]
+            if verdict_reason:
+                item["verdict_detail"] = verdict_reason
+        else:
+            verdict_label, _ = _compute_verdict(actions_map.get(name), scan_map.get(name))
         item["verdict"] = verdict_label
         items.append(item)
     return items
@@ -1254,6 +1386,7 @@ def _print_skill_list_table(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdicts: dict[str, tuple[str, str, str]] | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -1303,9 +1436,12 @@ def _print_skill_list_table(
         if name in actions_map:
             actions_str = actions_map[name].actions.summary()
 
-        verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(name), scan_map.get(name),
-        )
+        if verdicts is not None and name in verdicts:
+            verdict_label, verdict_style, _ = verdicts[name]
+        else:
+            verdict_label, verdict_style = _compute_verdict(
+                actions_map.get(name), scan_map.get(name),
+            )
 
         status_style = ""
         if "✗" in status_display:
@@ -1379,6 +1515,38 @@ def _build_skill_scanner(
         connector,
         pack_cache=pack_cache,
     )
+
+
+def _print_skill_scan_policy(
+    app: AppContext,
+    name: str,
+    path: str,
+    result: Any,
+    *,
+    connector: str = "",
+    pe: Any = None,
+) -> None:
+    """Under a non-clean scan line, say what the policy makes of it.
+
+    Without this the scan read "[WARN] ... blocked=0" while ``skill list``
+    said "rejected" for the same skill.
+    """
+    label, _, reason = _skill_policy_verdict(
+        app,
+        name,
+        skill={"baseDir": path},
+        scan_entry={
+            "target": path,
+            "finding_count": len(result.findings),
+            "max_severity": str(result.max_severity()),
+        },
+        connector=connector,
+        pe=pe,
+    )
+    if label in ("-", "clean"):
+        return
+    note = _skill_policy_note(name, label) or reason
+    click.echo(f"        policy: {label}" + (f" — {note}" if note else ""))
 
 
 def _skill_scan_findings_verdict(result: Any, *, blocked: bool = False) -> str:
@@ -1921,6 +2089,8 @@ def _scan_one_local_skill(
                 detail=f"max severity: {result.max_severity()}",
                 findings=len(result.findings),
             )
+            if not enforcement_blocks:
+                _print_skill_scan_policy(app, name, scan_dir, result, connector=connector or "", pe=pe)
         click.echo()
         _print_result(name, result)
         _scan_ui.render_summary(
@@ -2489,6 +2659,10 @@ def _scan_all(
                     detail=f"max severity: {result.max_severity()}",
                     findings=len(result.findings),
                 )
+                if not enforcement_blocks:
+                    _print_skill_scan_policy(
+                        app, name, base_dir, result, connector=connector or "", pe=pe,
+                    )
             v = verdicts[-1]
             v["blocked"] = bool(enforcement_blocks)
             v["findings"] = len(result.findings)
