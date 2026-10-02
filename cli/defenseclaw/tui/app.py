@@ -4510,7 +4510,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l or Tab", "Switch sub-tab"),
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
-                ("1 / 2-4", "Show all / filter the Skills and Plugins sub-tabs"),
+                ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
                 ("o", "Toggle a faster scan of skills and plugins only"),
                 ("r", "Scan inventory"),
             ],

@@ -494,3 +494,27 @@ def test_inventory_load_intent_for_targets_connector_and_restores() -> None:
     # Prior single-connector state is untouched.
     assert panel.connector == "codex"
     assert panel.connector_focus_enabled is False
+
+
+def test_inventory_all_summary_names_every_connector_and_digits_fall_through() -> None:
+    """GAP-1156: the All summary is not one connector's Source/Home/Config,
+    and digits only filter on the Skills and Plugins sub-tabs."""
+
+    panel = InventoryPanelModel()
+    panel.show_connector_column = True
+    amp = json.dumps({"connector": "amp", "connector_home": "/home/amp", "skills": [{"id": "a"}]})
+    codex = json.dumps({"connector": "codex", "connector_home": "/home/cx", "skills": [{"id": "c"}]})
+    panel.apply_merged([("amp", amp), ("codex", codex)])
+
+    panel.set_connector_filter("")
+    rows = dict(panel.summary_table_rows())
+    assert rows["Source"].startswith("All 2 connectors")
+    assert "Home" not in rows
+    panel.set_connector_filter("codex")
+    assert dict(panel.summary_table_rows())["Home"] == "/home/cx"
+
+    panel.set_active_subtab("summary")
+    assert panel.handle_key("3").handled is False
+    panel.set_active_subtab("plugins")
+    action = panel.handle_key("3")
+    assert action.handled is True and "Ctrl+P" in action.hint

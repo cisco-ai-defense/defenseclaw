@@ -227,7 +227,7 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         return (
-            "KEYS  h/l sub-tab | j/k move | Enter detail | 1 all, 2-4 filter Skills/Plugins | "
+            "KEYS  h/l sub-tab | j/k move | Enter detail | 1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."
         )
 
