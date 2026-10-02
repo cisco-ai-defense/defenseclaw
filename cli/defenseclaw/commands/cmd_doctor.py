@@ -490,6 +490,11 @@ def _emit(
             # connection between the two halves.
             line += "  " + ux.dim("—") + f"  {detail}"
         ux.echo(line)
+        # A warn/fail row names its next step. Rows that already spell the
+        # step out in their detail stay one line.
+        hint = remediation.strip()
+        if tag in {"warn", "fail"} and hint and hint not in detail:
+            _emit_hint(f"Next step: {hint}")
     if r is not None:
         r.record(
             tag,
@@ -1122,8 +1127,6 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             reason_code=f"sandbox-{check_id}" if check_id and tag != "pass" else "",
             remediation=remediation if tag != "pass" else "",
         )
-        if tag in {"warn", "fail"} and remediation:
-            _emit_hint(remediation)
 
 
 def _check_config(cfg, r: _DoctorResult) -> None:
@@ -1274,10 +1277,22 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
     except ConfigInspectError as exc:
         # ConfigInspectError text is bounded and display-safe; it names the
         # real problem (for example the folder that fails the custody check).
-        reason = (
-            f"configuration check failed: {exc}; "
-            "run `defenseclaw config validate` before applying repairs"
-        )
+        field_path = getattr(exc, "field_path", None)
+        field_reason = str(getattr(exc, "reason", "") or "")
+        if field_path and field_reason:
+            field_reason = field_reason.replace(
+                "; inspect the canonical v8 schema or generated reference and correct this field", ""
+            )
+            reason = (
+                f"{config_path}: {field_path} is invalid ({field_reason}); Doctor repairs nothing until "
+                "config.yaml is valid. Correct that field, check it with `defenseclaw config validate`, "
+                "then rerun `defenseclaw doctor --fix`"
+            )
+        else:
+            reason = (
+                f"configuration check failed: {exc}; "
+                "run `defenseclaw config validate` before applying repairs"
+            )
         return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
     except (OSError, ValueError):
         reason = (
@@ -1673,6 +1688,17 @@ def _configured_local_retention_days(cfg) -> int:
     return days if days >= 0 else 7
 
 
+def _human_size(num_bytes: int) -> str:
+    """Render a file size so a small non-empty file never reads as 0 MiB."""
+    size = max(int(num_bytes), 0)
+    if size < 1024:
+        return f"{size} bytes"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f} KiB"
+    mib = size / (1024 * 1024)
+    return f"{mib:.1f} MiB" if mib < 10 else f"{mib:.0f} MiB"
+
+
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     _check_audit_db_store(cfg, r)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
@@ -1698,13 +1724,13 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     if not moved:
         return
     newest = moved[-1]
-    size_mib = sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()) // (1024 * 1024)
+    size = _human_size(sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()))
     count = f"{len(moved)} corrupt audit stores were" if len(moved) > 1 else "the audit store was corrupt and was"
     _emit(
         "warn",
         "Audit store moved aside",
         f"{count} moved aside by the gateway, which started a new store and kept the block/allow lists; "
-        f"older audit records stay in {newest} ({size_mib} MiB). Recover them with: sqlite3 {newest} .recover; "
+        f"older audit records stay in {newest} ({size}). Recover them with: sqlite3 {newest} .recover; "
         f"delete {newest} and its -wal/-shm files when they are no longer needed",
         r=r,
         check_id="doctor.state.audit-db-moved-aside",
@@ -1743,7 +1769,11 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
             remediation = "defenseclaw-gateway restart"
         elif reason == "audit-db-corrupt":
             detail = "SQLite quick_check reported corruption"
-            remediation = "restore the audit database from a trusted backup"
+            remediation = (
+                "run 'defenseclaw-gateway restart': the gateway moves the corrupt store aside, starts a new "
+                "one and keeps the block/allow lists; or stop the gateway and restore "
+                f"{db_path} from a trusted backup"
+            )
         elif reason in {
             "audit-db-integrity-unavailable",
             "audit-db-changed-during-inspection",
@@ -1786,6 +1816,18 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     retention_days = _configured_local_retention_days(cfg)
     if health.file_bytes >= 1024 * 1024 * 1024:
         reclaim_mib = max(health.freelist_bytes, 0) // (1024 * 1024)
+        quoted_db = shlex.quote(db_path)
+        if reclaim_mib >= 64:
+            size_remediation = (
+                f"to give back the {reclaim_mib} MiB: run 'defenseclaw-gateway stop', then "
+                f"sqlite3 {quoted_db} 'VACUUM;', then 'defenseclaw-gateway start'"
+            )
+        else:
+            size_remediation = (
+                f"nothing to reclaim yet; the {retention_days}-day retention deletes older events as they "
+                "age out. To keep less history, lower observability.local.retention_days in config.yaml "
+                "and run 'defenseclaw-gateway restart'"
+            )
         _emit(
             "warn",
             "Audit database size",
@@ -1795,10 +1837,7 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.state.audit-storage-size",
             reason_code="audit-storage-unreclaimed",
-            remediation=(
-                f"let the gateway finish the {retention_days}-day retention pass, then compact "
-                "with a one-time VACUUM after stopping the gateway"
-            ),
+            remediation=size_remediation,
         )
     if (
         retention_days > 0
@@ -2008,6 +2047,15 @@ def _check_component_connector_compatibility(
             tag = "fail"
         else:
             tag = "warn"
+        remediation = _health_remediation_text(finding.remediations)
+        if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
+            # A slow or failed version probe leaves the connector in observe.
+            # Refreshing discovery and rerunning setup restores the mode.
+            steps = [_health_remediation_text((choice,)) for choice in finding.remediations[:2]]
+            steps = [step for step in steps if step]
+            if steps:
+                remediation = "run " + ", then ".join(f"'{step}'" for step in steps)
+                remediation += " to verify the version and restore the requested mode"
         _emit(
             tag,
             f"Connector compatibility: {finding.connector}",
@@ -2015,7 +2063,7 @@ def _check_component_connector_compatibility(
             r=r,
             check_id=f"doctor.connector.{finding.connector}.compatibility",
             reason_code=finding.reason_code,
-            remediation=_health_remediation_text(finding.remediations),
+            remediation=remediation,
         )
 
 
@@ -4204,6 +4252,9 @@ def _windows_native_hook_check(
     )
 
 
+_CLAUDECODE_HOOKS_FIX = "re-register the hooks: defenseclaw setup claude-code --yes, then restart Claude Code"
+
+
 def _check_claudecode_hooks(
     cfg,
     r: _DoctorResult,
@@ -4232,7 +4283,7 @@ def _check_claudecode_hooks(
     # CLAUDE_CONFIG_DIR while validating a project or alternate home.
     settings_path = config_path or connector_config_files("claudecode")[0]
     if not os.path.isfile(settings_path):
-        _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
+        _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r, remediation=_CLAUDECODE_HOOKS_FIX)
         return
     try:
         with open(settings_path, encoding="utf-8") as fh:
@@ -4242,7 +4293,13 @@ def _check_claudecode_hooks(
         return
     hooks = settings.get("hooks", {})
     if not hooks:
-        _emit("fail", "Claude Code hooks", "no hooks registered in settings.json", r=r)
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            "no hooks registered in settings.json",
+            r=r,
+            remediation=_CLAUDECODE_HOOKS_FIX,
+        )
         return
     hook_script_paths = _registered_hook_script_paths(settings, "claude-code-hook.sh")
     dc_hooks = 0
@@ -4265,7 +4322,13 @@ def _check_claudecode_hooks(
             hook_script_paths=hook_script_paths,
         )
     else:
-        _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            "no DefenseClaw hooks found in settings.json",
+            r=r,
+            remediation=_CLAUDECODE_HOOKS_FIX,
+        )
 
 
 def _check_codex_hooks(
@@ -5747,7 +5810,7 @@ def _omnigent_local_server_pid() -> tuple[int, str]:
     from defenseclaw.process_liveness import pid_alive
 
     if not pid_alive(pid):
-        return 0, f"{_omnigent_path_ref('omnigent-server-record', pid_path)} is stale"
+        return 0, "OmniGent server is not running (its server record is stale)"
     return pid, f"recorded live OmniGent server pid={pid} port={port}"
 
 
@@ -6085,12 +6148,17 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
             _emit("fail", "OmniGent policy", drift, r=r)
             return
     live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
+    # The module and .pth shim were verified above, so the row names only the
+    # live-server state and what to do about it.
     _emit(
         "warn" if live_status == "bound" else live_status,
         "OmniGent policy",
-        f"native-degraded; {live_detail}; {_omnigent_path_ref('managed-module-artifact', module_path)}; "
-        f"{_omnigent_path_ref('managed-pth-artifact', pth_path)}",
+        f"native-degraded; {live_detail}",
         r=r,
+        remediation=(
+            "start or restart the OmniGent server so it loads the DefenseClaw policy, then rerun "
+            "'defenseclaw doctor'; if it still warns, run 'defenseclaw setup omnigent'"
+        ),
     )
 
 
@@ -6180,12 +6248,28 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         r=r,
                     )
                     return
+                if r.passive:
+                    # --passive does not list processes, so an idle Hermes is
+                    # unknown here, not a failure (the full doctor checks it).
+                    _emit(
+                        "warn",
+                        label,
+                        f"on-disk registration is present at {path}; running Hermes hosts are unverified "
+                        "because --passive does not check processes; live=false",
+                        r=r,
+                        remediation=(
+                            "run 'defenseclaw doctor' without --passive to check for running Hermes hosts; "
+                            "restart any running Hermes host so it loads the hooks"
+                        ),
+                    )
+                    return
                 _emit(
                     "fail",
                     label,
                     f"on-disk registration is present at {path}, but running Hermes hosts "
                     "are unverified; reload or restart every Hermes CLI/TUI/gateway/desktop/service host; live=false",
                     r=r,
+                    remediation="restart every running Hermes host, then rerun 'defenseclaw doctor'",
                 )
             elif connector == "amp":
                 _emit(
@@ -7761,6 +7845,18 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     )
 
 
+def _native_drop_remediation(connector: str, state: str) -> str:
+    """Next step for a connector whose native OTLP batches were dropped."""
+    if state not in {"partial_drop_only", "all_drop_only"}:
+        return ""
+    connector = "claude-code" if connector == "claudecode" else connector
+    return (
+        "the gateway dropped those records as invalid or unattributed (hook telemetry is not affected); "
+        f"if it keeps growing, run 'defenseclaw setup {connector}' to rewrite the native exporter "
+        "and 'defenseclaw observability plan' to review the routes"
+    )
+
+
 def _check_connector_export_custody(report, r: _DoctorResult) -> None:
     """Render per-instance custody and bounded native-ingest evidence.
 
@@ -7811,6 +7907,10 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
                 label,
                 "custody=external; " + "; ".join(conditions),
                 r=r,
+                remediation=(
+                    "to send it through DefenseClaw, run 'defenseclaw setup "
+                    f"{'claude-code' if item.connector == 'claudecode' else item.connector}'"
+                ),
             )
             continue
         if item.custody == "hook_only":
@@ -7863,6 +7963,7 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             label,
             f"custody=defenseclaw; profile={item.profile_version}; " + "; ".join(conditions),
             r=r,
+            remediation=_native_drop_remediation(item.connector, delivery.state),
         )
 
     if report.unattributed_authentication_failures:
@@ -8044,8 +8145,58 @@ def _check_observability_v8_status(
         f"version={status.bucket_catalog_version}; collected={collected}/{len(status.buckets)}",
         r=r,
     )
+    endpoints = {destination.name: str(destination.endpoint or "") for destination in status.destinations}
     for code, path, summary in status.warnings:
-        _emit("warn", f"Observability warning: {code}", f"{path}: {summary}", r=r)
+        if code in _LOCAL_COLLECTOR_OPT_INS:
+            match = re.search(r"destinations\[([^\]]+)\]", str(path))
+            if match and _endpoint_is_loopback(endpoints.get(match.group(1), "")):
+                # The operator chose this for a collector on this machine
+                # (--plaintext / --allow-private-networks): not a warning.
+                _emit(
+                    "pass",
+                    f"Observability option: {code}",
+                    f"{path}: set on purpose for a collector on this machine; no action needed",
+                    r=r,
+                )
+                continue
+        _emit(
+            "warn",
+            f"Observability warning: {code}",
+            f"{path}: {summary}",
+            r=r,
+            remediation=_LOCAL_COLLECTOR_OPT_INS.get(code, ""),
+        )
+
+
+_LOCAL_COLLECTOR_OPT_INS = {
+    "tls_verification_disabled": (
+        "if the collector is not on this machine, add the destination again without --plaintext "
+        "(defenseclaw setup observability add ...)"
+    ),
+    "private_export_network_allowed": (
+        "if this was not intended, add the destination again without --allow-private-networks "
+        "(defenseclaw setup observability add ...)"
+    ),
+}
+
+
+def _endpoint_is_loopback(endpoint: str) -> bool:
+    """Whether an exporter endpoint names this machine (127.0.0.0/8, ::1, localhost)."""
+    text = endpoint.strip()
+    if not text:
+        return False
+    if "://" not in text:
+        text = "//" + text
+    try:
+        host = urllib.parse.urlsplit(text).hostname or ""
+    except ValueError:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _check_webhooks(cfg, r: _DoctorResult) -> None:
@@ -9897,6 +10048,9 @@ def _run_fixers(
     outcomes: dict[str, str] = {}
     outcome_state_keys: dict[str, str] = {}
     platform_name = _doctor_platform_name()
+    # Repairs that never ran because config.yaml failed its preflight are
+    # summarized in one row instead of one red row each.
+    config_blocked: list[str] = []
     for spec in ordered_specs:
         started = time.monotonic()
         unsupported_platform = platform_name not in spec.platforms
@@ -10081,12 +10235,27 @@ def _run_fixers(
         outcomes[spec.repair_id] = record.state
         if dry_run and record.state == "applicable" and decision.state_key:
             outcome_state_keys[spec.repair_id] = decision.state_key
-        if not json_out:
+        if (
+            not json_out
+            and record.state == "blocked"
+            and unsatisfied_dependencies
+            and _CONFIG_PREFLIGHT_REPAIR_ID in unsatisfied_dependencies
+            and not graph_blockers
+        ):
+            config_blocked.append(spec.label)
+        elif not json_out:
             _emit(
                 _repair_display_tag(record.state),
                 f"fix: {spec.label} [{spec.repair_id}]",
                 detail=record.detail,
             )
+    if config_blocked:
+        _emit(
+            "skip",
+            "fix: other repairs",
+            f"{len(config_blocked)} repairs were not attempted because config.yaml is invalid; "
+            "fix config.yaml first, then rerun `defenseclaw doctor --fix`",
+        )
 
 
 def _run_fixers_with_lock(
@@ -10472,7 +10641,9 @@ def _check_connector_inventory(
         existing = sum(1 for d in pdirs if os.path.isdir(d))
         detail = f"{existing}/{len(pdirs)} present — " + ", ".join(pdirs)
         if existing == 0:
-            _emit("warn", "Plugin paths", detail, r=r)
+            # The agent creates its plugin folder with the first plugin, so a
+            # missing folder is normal, not a problem.
+            _emit("skip", "Plugin paths", f"{detail} (no plugins installed yet; nothing to do)", r=r)
         else:
             _emit("pass", "Plugin paths", detail, r=r)
     else:
