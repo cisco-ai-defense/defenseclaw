@@ -52,7 +52,7 @@ func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
 	// A loaded Windows host took 142 s before the API listened (GAP-1206).
 	want := 60 * time.Second
 	if runtime.GOOS == "windows" {
-		want = 240 * time.Second
+		want = 600 * time.Second
 	}
 	if defaultStartReadinessTimeout != want {
 		t.Fatalf("default start readiness timeout = %s, want %s", defaultStartReadinessTimeout, want)

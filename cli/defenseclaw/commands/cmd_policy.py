@@ -266,8 +266,7 @@ def create(
     ux.ok(f"Policy '{name}' created at {dest}")
     click.echo(f"  {ux.dim('Activate with:')} defenseclaw policy activate {name}")
 
-    if app.logger:
-        app.logger.log_action("policy-create", name, f"path={dest}")
+    _log_policy_action(app, "policy-create", name, f"path={dest}", done="Policy created")
 
 
 # ---------------------------------------------------------------------------
@@ -470,22 +469,10 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     (POST /policy/reload) so the change takes effect immediately. If the
     gateway isn't running, it loads the policy when it next starts.
     """
-    from defenseclaw.logger import CanonicalObservabilityUnavailableError
-
     before = _restart_only_config(app.cfg)
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
-    if app.logger:
-        try:
-            app.logger.log_action("policy-activate", name, f"source={path}")
-        except CanonicalObservabilityUnavailableError:
-            # Same offline-staging rule as setup: the policy is saved for the
-            # next gateway start, but the audit event can't be admitted now.
-            click.echo(
-                "  ⚠ Policy saved, but the gateway runtime is unavailable; the audit event "
-                "was not recorded.",
-                err=True,
-            )
+    _log_policy_action(app, "policy-activate", name, f"source={path}", done="Policy saved")
     # The policy's guardrail thresholds are not the tool-call block level
     # (GAP-1228).
     click.echo(
@@ -495,6 +482,29 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     if not reload_gateway:
         return
     _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
+
+
+def _log_policy_action(app: AppContext, action: str, name: str, details: str, *, done: str) -> None:
+    """Record a finished policy change; a stopped gateway only skips the audit event.
+
+    The policy file is already written, so a stopped or refusing gateway prints
+    one plain warning instead of a traceback and rc=1 (GAP-1651), like
+    ``setup webhook`` and ``guardrail fail-mode``.
+    """
+    if not app.logger:
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        app.logger.log_action(action, name, details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded "
+            "(start it with: defenseclaw-gateway start).",
+            err=True,
+        )
+    except CanonicalObservabilityError as exc:
+        click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _restart_only_config(cfg) -> tuple[str, ...]:  # noqa: ANN001 - Config, imported lazily
@@ -791,8 +801,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
         # GAP-1458: drop the user copy that shadowed the built-in.
         os.remove(real_path)
         ux.ok(f"Removed your edited copy of built-in policy '{name}'; the built-in version is back.")
-        if app.logger:
-            app.logger.log_action("policy-delete", name, "reverted edited built-in")
+        _log_policy_action(app, "policy-delete", name, "reverted edited built-in", done="Copy removed")
         if is_active:
             _activate_policy(app, name)
         return
@@ -808,8 +817,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
 
     os.remove(real_path)
     ux.ok(f"Policy '{name}' deleted.")
-    if app.logger:
-        app.logger.log_action("policy-delete", name, "")
+    _log_policy_action(app, "policy-delete", name, "", done="Policy deleted")
 
     # N1: the live data.json still names the just-deleted policy. Re-point
     # it at the default built-in so the gateway never keeps enforcing a

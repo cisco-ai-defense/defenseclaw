@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -98,16 +99,18 @@ def call_llm(
         api_base = config.get("api_base")
         provider = config.get("provider")
         max_tokens = config.get("max_tokens", 8192)
-        python_binary = config.get("python_binary", "python3")
+        python_binary = config.get("python_binary")
     else:
         model = config.model
         api_key = config.api_key
         api_base = config.api_base
         provider = config.provider
         max_tokens = config.max_tokens or 8192
-        python_binary = config.python_binary or "python3"
+        python_binary = config.python_binary
 
-    python = validate_python_binary(python_binary or "python3")
+    # Default to the interpreter running DefenseClaw (its venv): a bare
+    # "python3" from PATH is a system Python without the defenseclaw package.
+    python = validate_python_binary(python_binary or sys.executable)
 
     # Normalise messages
     msg_dicts = []

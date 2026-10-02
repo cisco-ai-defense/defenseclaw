@@ -264,12 +264,26 @@ func (writer *AlertAcknowledgementWriter) ApplyAlertAcknowledgement(
 	ctx context.Context,
 	command AlertAcknowledgementCommand,
 ) (AlertAcknowledgementResult, error) {
+	result, _, err := writer.ApplyAlertAcknowledgementForExport(ctx, command)
+	return result, err
+}
+
+// ApplyAlertAcknowledgementForExport is ApplyAlertAcknowledgement that also
+// returns the committed compliance record (alert.acknowledgement.requested or
+// alert.dismissal.requested), so the runtime can send it to the optional
+// destinations after the transaction (GAP-1635). An exact operation-ID replay
+// commits no new record and returns nil.
+func (writer *AlertAcknowledgementWriter) ApplyAlertAcknowledgementForExport(
+	ctx context.Context,
+	command AlertAcknowledgementCommand,
+) (AlertAcknowledgementResult, *observability.Record, error) {
 	var result AlertAcknowledgementResult
+	var committed *observability.Record
 	var err error
 	for attempt := 0; attempt < alertCASRetryAttempts; attempt++ {
 		err = retryBusy(ctx, "alert_acknowledgement_transaction", func() error {
 			var attemptErr error
-			result, attemptErr = writer.applyAlertAcknowledgementOnce(ctx, command)
+			result, committed, attemptErr = writer.applyAlertAcknowledgementOnce(ctx, command)
 			return attemptErr
 		})
 		if !errors.Is(err, errAlertProjectionCASRetry) {
@@ -290,35 +304,35 @@ func (writer *AlertAcknowledgementWriter) ApplyAlertAcknowledgement(
 		if writer != nil && writer.eventHistory != nil {
 			writer.eventHistory.reportAppendError(err)
 		}
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
-	return result, nil
+	return result, committed, nil
 }
 
 func (writer *AlertAcknowledgementWriter) applyAlertAcknowledgementOnce(
 	ctx context.Context,
 	command AlertAcknowledgementCommand,
-) (AlertAcknowledgementResult, error) {
+) (AlertAcknowledgementResult, *observability.Record, error) {
 	if writer == nil || writer.store == nil || writer.eventHistory == nil || writer.eventFactory == nil {
-		return AlertAcknowledgementResult{}, fmt.Errorf("audit: alert acknowledgement writer is not initialized")
+		return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: alert acknowledgement writer is not initialized")
 	}
 	s := writer.store
 	if ctx == nil {
-		return AlertAcknowledgementResult{}, fmt.Errorf("audit: alert acknowledgement context is required")
+		return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: alert acknowledgement context is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	normalized, err := normalizeAlertCommand(command)
 	if err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	if err := writer.fingerprintAlertCommand(ctx, &normalized); err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	release, err := s.acquireReady()
 	if err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	released := false
 	releaseStore := func() {
@@ -331,66 +345,66 @@ func (writer *AlertAcknowledgementWriter) applyAlertAcknowledgementOnce(
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AlertAcknowledgementResult{}, fmt.Errorf("audit: begin alert acknowledgement: %w", err)
+		return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: begin alert acknowledgement: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	existing, existingFingerprint, found, err := lookupAlertOperation(ctx, tx, normalized.operationID)
 	if err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	if found {
 		existingKeyID, valid := alertFingerprintKeyID(existingFingerprint)
 		if !valid || existingKeyID != writer.eventHistory.signer.KeyID() {
-			return AlertAcknowledgementResult{}, ErrAlertCommandFingerprintUnavailable
+			return AlertAcknowledgementResult{}, nil, ErrAlertCommandFingerprintUnavailable
 		}
 		if subtle.ConstantTimeCompare([]byte(existingFingerprint), []byte(normalized.fingerprint)) == 1 {
 			if err := tx.Commit(); err != nil {
-				return AlertAcknowledgementResult{}, fmt.Errorf("audit: commit alert acknowledgement retry: %w", err)
+				return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: commit alert acknowledgement retry: %w", err)
 			}
 			existing.IdempotentReplay = true
-			return existing, nil
+			return existing, nil, nil
 		}
 		// A conflicting reuse is audited only for a real alert target. This
 		// keeps arbitrary caller-supplied identifiers from creating compliance
 		// history merely by colliding with a known operation ID.
 		if err := requireEligibleAlertTarget(ctx, tx, normalized.alertID); err != nil {
-			return AlertAcknowledgementResult{}, err
+			return AlertAcknowledgementResult{}, nil, err
 		}
-		result, appendOutcome, err := writer.recordAlertIdempotencyConflict(ctx, tx, normalized)
+		result, conflict, appendOutcome, err := writer.recordAlertIdempotencyConflict(ctx, tx, normalized)
 		if err != nil {
-			return AlertAcknowledgementResult{}, err
+			return AlertAcknowledgementResult{}, nil, err
 		}
 		if err := writer.eventHistory.commitAppendTransaction(tx, appendOutcome); err != nil {
 			releaseStore()
 			writer.eventHistory.flushHealth()
-			return AlertAcknowledgementResult{}, fmt.Errorf("audit: commit alert acknowledgement conflict: %w", err)
+			return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: commit alert acknowledgement conflict: %w", err)
 		}
 		releaseStore()
 		writer.eventHistory.flushHealth()
-		return result, nil
+		return result, &conflict, nil
 	}
 	if err := requireEligibleAlertTarget(ctx, tx, normalized.alertID); err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 
 	projection, integrityErr, err := reconcileAlertTx(ctx, tx, normalized.alertID)
 	if err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	if integrityErr != nil {
 		appendOutcome, err := writer.appendAlertProjectionHealth(ctx, tx, normalized.alertID, integrityErr.Code)
 		if err != nil {
-			return AlertAcknowledgementResult{}, err
+			return AlertAcknowledgementResult{}, nil, err
 		}
 		if err := writer.eventHistory.commitAppendTransaction(tx, appendOutcome); err != nil {
 			releaseStore()
 			writer.eventHistory.flushHealth()
-			return AlertAcknowledgementResult{}, fmt.Errorf("audit: commit alert projection health: %w", err)
+			return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: commit alert projection health: %w", err)
 		}
 		releaseStore()
 		writer.eventHistory.flushHealth()
-		return AlertAcknowledgementResult{}, integrityErr
+		return AlertAcknowledgementResult{}, nil, integrityErr
 	}
 
 	result := AlertAcknowledgementResult{
@@ -420,27 +434,28 @@ func (writer *AlertAcknowledgementWriter) applyAlertAcknowledgementOnce(
 		Outcome: observability.Outcome(result.Outcome), AlertID: normalized.alertID, Body: body,
 	})
 	if err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	result.EventID = appended.record.RecordID()
 	result.CreatedAt = appended.record.Timestamp()
 	result.Actor = projectedAlertActor(appended.body)
 	if result.Outcome == AlertAcknowledgementApplied {
 		if err := applyAlertProjectionCAS(ctx, tx, projection, result); err != nil {
-			return AlertAcknowledgementResult{}, err
+			return AlertAcknowledgementResult{}, nil, err
 		}
 	}
 	if err := insertAlertOperation(ctx, tx, normalized.fingerprint, result); err != nil {
-		return AlertAcknowledgementResult{}, err
+		return AlertAcknowledgementResult{}, nil, err
 	}
 	if err := writer.eventHistory.commitAppendTransaction(tx, appended.historyOutcome); err != nil {
 		releaseStore()
 		writer.eventHistory.flushHealth()
-		return AlertAcknowledgementResult{}, fmt.Errorf("audit: commit alert acknowledgement: %w", err)
+		return AlertAcknowledgementResult{}, nil, fmt.Errorf("audit: commit alert acknowledgement: %w", err)
 	}
 	releaseStore()
 	writer.eventHistory.flushHealth()
-	return result, nil
+	committed := appended.record
+	return result, &committed, nil
 }
 
 func requireEligibleAlertTarget(ctx context.Context, tx *sql.Tx, alertID string) error {
@@ -720,10 +735,10 @@ func (writer *AlertAcknowledgementWriter) recordAlertIdempotencyConflict(
 	ctx context.Context,
 	tx *sql.Tx,
 	command normalizedAlertCommand,
-) (AlertAcknowledgementResult, eventHistoryAppendOutcome, error) {
+) (AlertAcknowledgementResult, observability.Record, eventHistoryAppendOutcome, error) {
 	projection, found, err := readAlertProjection(ctx, tx, command.alertID)
 	if err != nil {
-		return AlertAcknowledgementResult{}, eventHistoryAppendOutcome{}, err
+		return AlertAcknowledgementResult{}, observability.Record{}, eventHistoryAppendOutcome{}, err
 	}
 	if !found {
 		projection = AlertAcknowledgementProjection{
@@ -749,12 +764,12 @@ func (writer *AlertAcknowledgementWriter) recordAlertIdempotencyConflict(
 		Outcome:   observability.OutcomeRejected, AlertID: command.alertID, Body: body,
 	})
 	if err != nil {
-		return AlertAcknowledgementResult{}, eventHistoryAppendOutcome{}, err
+		return AlertAcknowledgementResult{}, observability.Record{}, eventHistoryAppendOutcome{}, err
 	}
 	result.EventID = appended.record.RecordID()
 	result.CreatedAt = appended.record.Timestamp()
 	result.Actor = projectedAlertActor(appended.body)
-	return result, appended.historyOutcome, nil
+	return result, appended.record, appended.historyOutcome, nil
 }
 
 func reconcileAlertTx(

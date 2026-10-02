@@ -92,6 +92,7 @@ plugin-install
 plugin-quarantine
 plugin-remove
 plugin-restore
+plugin-unblock
 policy-activate
 policy-create
 policy-delete

@@ -274,7 +274,18 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
     system_root = os.environ.get("SystemRoot") or r"C:\Windows"
     cmd = os.path.join(system_root, "System32", "cmd.exe")
     steps = ["ping -n 4 127.0.0.1 >nul"]
-    steps.extend(f'rd /s /q "{path}"' for path in dirs)
+    for path in dirs:
+        # Rename first, then delete the renamed folder: the rename is instant,
+        # so a reinstall that recreates the folder while rd still runs keeps
+        # its new files (GAP-1647). Retry the rename once; if it still fails,
+        # fall back to removing the folder in place as before.
+        tombstone_name = f"{os.path.basename(path)}.dc-removed-{os.urandom(4).hex()}"
+        tombstone = os.path.join(os.path.dirname(path), tombstone_name)
+        rename = f'ren "{path}" "{tombstone_name}" 2>nul'
+        steps.append(
+            f"({rename} || (ping -n 5 127.0.0.1 >nul & {rename}))"
+            f' & if exist "{tombstone}" (rd /s /q "{tombstone}") else (rd /s /q "{path}")'
+        )
     steps.extend(f'rd "{path}"' for path in empty_dirs if not _CMD_METACHARACTERS & set(path))
     command = " & ".join(steps)
     flags = (

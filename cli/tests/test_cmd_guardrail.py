@@ -683,6 +683,21 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertIn("only enabled connector", result.output)
         self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
 
+    def test_disable_one_connector_says_a_stopped_gateway_is_started(self):
+        # GAP-1370: the single-connector form says plainly that it starts the gateway.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with (
+            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+            patch("defenseclaw.commands.cmd_setup._restart_services"),
+        ):
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("The gateway is stopped; it will be started so the Codex connector teardown", result.output)
+        self.assertNotIn("Will restart the gateway", result.output)
+
     def test_no_restart_persists_but_skips_gateway(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
@@ -1411,6 +1426,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "block-message",
                 "block-at",
                 "alert-at",
+                "allow-private-upstream",
                 "judge",
                 "list-packs",
                 "mode",

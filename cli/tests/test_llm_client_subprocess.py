@@ -35,6 +35,21 @@ class TestLLMClientSubprocess(unittest.TestCase):
             self.assertEqual(ctx.exception.returncode, 2)
             self.assertIn("SUBPROCESS_EXIT", str(ctx.exception))
 
+    def test_default_interpreter_is_the_running_one(self):
+        # GAP-1579: a bare "python3" from PATH lacks the defenseclaw package
+        # on a per-user install; the bridge must run in DefenseClaw's own venv.
+        from defenseclaw.scanner.plugin_scanner.llm_client import (
+            LLMMessage,
+            call_llm,
+        )
+        from defenseclaw.scanner.plugin_scanner.policy import LLMPolicy
+
+        cfg = {"model": "m", "python_binary": LLMPolicy().python_binary or None}
+        with patch("defenseclaw.scanner.plugin_scanner.llm_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout='{"content": "ok"}', stderr="")
+            call_llm(cfg, [LLMMessage(role="user", content="hi")])
+        self.assertEqual(run.call_args.args[0][0], os.path.abspath(sys.executable))
+
 
 if __name__ == "__main__":
     unittest.main()
