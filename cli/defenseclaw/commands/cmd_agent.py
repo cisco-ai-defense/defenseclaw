@@ -239,6 +239,14 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
     default=0,
     help="Cap rows shown (0 = no cap). Use --json for the unfiltered list.",
 )
+@click.option(
+    "--wide",
+    is_flag=True,
+    help=(
+        "Show every column (model format, version, identity and presence "
+        "confidence). The default table keeps the columns that fit."
+    ),
+)
 @click.option("--gateway-host", default=None, help="Sidecar API host override.")
 @click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
 @click.option(
@@ -259,6 +267,7 @@ def usage(
     show_gone: bool,
     by_detector: bool,
     limit: int,
+    wide: bool,
     gateway_host: str | None,
     gateway_port: int | None,
     gateway_token_env: str | None,
@@ -312,6 +321,7 @@ def usage(
             show_gone=show_gone,
             by_detector=by_detector,
             limit=limit,
+            wide=wide,
         ).rstrip()
     )
 
@@ -4111,6 +4121,7 @@ def _render_ai_usage_table(
     show_gone: bool = False,
     by_detector: bool = False,
     limit: int = 0,
+    wide: bool = False,
 ) -> str:
     raw_signals = payload.get("signals", []) or []
     filtered = _filter_ai_usage_signals(
@@ -4139,7 +4150,12 @@ def _render_ai_usage_table(
     from io import StringIO
 
     stream = StringIO()
-    console = Console(file=stream, force_terminal=False, color_system=None, width=120)
+    # Use the real terminal width (never below the historical 120) so a
+    # wide terminal is not squeezed into 120 columns.
+    import shutil
+
+    width = max(120, shutil.get_terminal_size((120, 24)).columns)
+    console = Console(file=stream, force_terminal=False, color_system=None, width=width)
 
     title = "AI visibility"
     if not enabled:
@@ -4303,13 +4319,12 @@ def _render_ai_usage_table(
     displayed_full = full_groups[:limit] if limit > 0 else full_groups
     has_component = any(g.get("component") for g in displayed_full)
     has_model = any(g.get("model") for g in displayed_full)
-    has_version = any(g.get("version") for g in displayed_full)
+    # The default grouped table keeps the columns that fit a normal
+    # terminal; model format, version and the identity/presence
+    # confidence columns only show with --wide (or --detail / --json).
+    has_version = wide and any(g.get("version") for g in displayed_full)
     has_last_active = any(g.get("last_active_at") for g in displayed_full)
-    # Surface confidence in the default grouped view so operators
-    # don't have to drop into --detail just to see whether the
-    # gateway is sure about a component. Only render when at least
-    # one row carries the v2 fields (older sidecars stay clean).
-    has_confidence = any(
+    has_confidence = wide and any(
         g.get("identity_band") or g.get("presence_band") for g in displayed_full
     )
 
@@ -4325,11 +4340,12 @@ def _render_ai_usage_table(
     else:
         cat_header, det_header = "Categories", "Detectors"
     table.add_column(cat_header)
-    table.add_column("Product")
+    table.add_column("Product", no_wrap=True)
     if has_model:
         table.add_column("Model")
         table.add_column("Model status")
-        table.add_column("Format")
+        if wide:
+            table.add_column("Format")
     if has_component:
         table.add_column("Component")
     if has_version:
@@ -4362,8 +4378,9 @@ def _render_ai_usage_table(
             row.extend([
                 str(g.get("model", "")),
                 _format_csv_truncated(g.get("model_statuses") or [], limit=2),
-                _format_csv_truncated(g.get("model_formats") or [], limit=2),
             ])
+            if wide:
+                row.append(_format_csv_truncated(g.get("model_formats") or [], limit=2))
         if has_component:
             ecosystem = str(g.get("ecosystem", ""))
             comp_name = str(g.get("component", ""))
@@ -4397,9 +4414,10 @@ def _render_ai_usage_table(
         footer += f" {hidden} more {_pluralize(hidden, 'group', 'groups')} hidden by --limit."
     footer += _format_ai_usage_scan_diagnostics(summary)
     footer += (
-        " Use --detail for per-signal rows, --by-detector to split by "
-        "category/detector, --json for raw, --state/--category/--product"
-        "/--component to filter (component also matches local model IDs)."
+        " Use --wide for every column, --detail for per-signal rows, "
+        "--by-detector to split by category/detector, --json for raw, "
+        "--state/--category/--product/--component to filter (component "
+        "also matches local model IDs)."
     )
     console.print(footer)
     return stream.getvalue()
