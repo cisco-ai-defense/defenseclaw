@@ -145,7 +145,7 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 			// GAP-1817: keep --json machine-readable while sandboxes are off.
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]any{"enabled": false, "available": false, "reason": disabled.Message})
+			_ = enc.Encode(map[string]any{"enabled": disabled.Enabled, "available": false, "reason": disabled.Message})
 		}
 		fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" "+err.Error())
 		if errors.Is(err, sandboxcli.ErrUnsupported) {
