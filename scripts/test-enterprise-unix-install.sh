@@ -12,9 +12,11 @@
 #   3. runs ensure again, which must be a no-op
 #   4. runs verify and status, checks the services and runs the MDM detect.sh
 #   5. uninstalls (dpkg -r / rpm -e run the lifecycle from preremove; macOS
-#      runs `enterprise macos uninstall`) and checks nothing is left running
-#      and no DefenseClaw machine-policy entry is left behind
-#   6. purges (dpkg -P, or `uninstall --purge`) and checks the state is gone
+#      runs `enterprise macos uninstall`) and checks nothing is left running,
+#      the machine config and state are gone with it and no DefenseClaw
+#      machine-policy entry is left behind
+#   6. purges (dpkg -P, or `uninstall --purge`, which must also succeed on a
+#      machine the uninstall already cleared) and checks nothing is left
 #
 # Every lifecycle result is saved under --results and checked with
 # scripts/check_enterprise_lifecycle_result.py. For the lifecycle commands the
@@ -397,7 +399,7 @@ detected=$(detect_value --require-healthy --min-version "$version" || true)
 echo "detect.sh: $detected"
 
 # ---- uninstall ---------------------------------------------------------------
-step "uninstall (configuration is kept)"
+step "uninstall (the machine config and state go too)"
 # macOS removes the binaries with the deployment; keep a root-only copy of the
 # gateway for the purge step. The Linux package manager runs the lifecycle.
 cp -p "$gateway" "$stage/defenseclaw-gateway"
@@ -407,14 +409,18 @@ case "$kind" in
     rpm) rpm -e "$linux_package_name" ;;
     pkg) lifecycle 06-uninstall uninstall ;;
 esac
-if [ "$kind" != pkg ]; then
-    [ -f "$lifecycle_dir/last-package-result.json" ] || die "preremove left no lifecycle result"
+if [ "$kind" = pkg ]; then
+    check "$results/06-uninstall.json" uninstall --action uninstall --changed --not-installed
+elif [ -f "$lifecycle_dir/last-package-result.json" ]; then
+    # The preremove keeps its result only when the uninstall reported a problem.
     cp "$lifecycle_dir/last-package-result.json" "$results/06-uninstall.json"
+    cat "$results/06-uninstall.json" "$lifecycle_dir/last-package-result.log" >&2 2>/dev/null || true
+    die "the preremove uninstall reported a problem (result kept in $lifecycle_dir)"
 fi
-check "$results/06-uninstall.json" uninstall --action uninstall --changed --not-installed
 services_gone
 [ ! -e "$gateway" ] || die "$gateway remains after uninstall"
-[ -f "$config" ] || die "uninstall without purge removed $config"
+# The default uninstall removes the machine state too; only --keep-state keeps it.
+[ ! -e "$config" ] || die "$config remains after uninstall"
 [ ! -e "$lifecycle_dir/deployment.json" ] || die "the deployment record remains after uninstall"
 leftover=$(policy_entries)
 [ -z "$leftover" ] || die "DefenseClaw machine-policy entries remain after uninstall: $leftover"
@@ -431,7 +437,7 @@ detected=$(detect_value || true)
 echo "detect.sh: $detected"
 
 # ---- purge -------------------------------------------------------------------
-step "purge the kept configuration and state"
+step "purge (removes whatever the uninstall left)"
 case "$kind" in
     deb) dpkg -P "$linux_package_name" ;;
     *)
