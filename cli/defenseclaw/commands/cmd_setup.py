@@ -10584,9 +10584,11 @@ def _hook_guardrail_options(fn):
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt (non-interactive).",
+    help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
 )
 @click.option(
     "--restart/--no-restart",
@@ -10736,9 +10738,11 @@ def setup_codex(
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt (non-interactive).",
+    help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
 )
 @click.option(
     "--restart/--no-restart",
@@ -11109,9 +11113,11 @@ def _remove_connector(
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt (non-interactive).",
+    help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
 )
 @pass_ctx
 def setup_remove(
@@ -11191,9 +11197,11 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     @click.option(
         "--yes",
         "-y",
+        "--non-interactive",
+        "--accept-defaults",
         "yes",
         is_flag=True,
-        help="Skip the confirmation prompt (non-interactive).",
+        help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
     )
     @click.option(
         "--restart/--no-restart",
