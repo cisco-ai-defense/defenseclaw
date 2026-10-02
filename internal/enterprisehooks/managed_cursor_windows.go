@@ -627,16 +627,27 @@ func validateWindowsCursorManagedStateIdentity(
 		return artifacts, errors.New("enterprise hooks: invalid Cursor managed target set")
 	}
 	state.Targets = targets
-	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, "closed")
-	if err != nil {
-		return artifacts, err
-	}
-	if state.AdapterSHA256 != windowsManagedPolicyDigest(expectedAdapter) ||
-		!bytes.Equal(expectedAdapter, artifacts.adapter.data) {
+	if !windowsCursorManagedAdapterMatchesState(state, artifacts.adapter.data) {
 		return artifacts, errors.New("enterprise hooks: Cursor enterprise adapter identity changed")
 	}
 	artifacts.parsed = state
 	return artifacts, nil
+}
+
+// windowsCursorManagedAdapterMatchesState reports whether adapter is the
+// exact body the protected ownership state recorded for its hook executable.
+// It does not require the current build's template: the adapter template
+// changes between releases, and an upgrade must still snapshot, replace and
+// restore the adapter an earlier release installed (GAP-1068). Install
+// rewrites the adapter from the current template, and the machine-policy
+// verify reports an adapter that differs from it.
+func windowsCursorManagedAdapterMatchesState(state windowsCursorManagedPolicyState, adapter []byte) bool {
+	if len(adapter) == 0 || !validWindowsCursorManagedDigest(state.AdapterSHA256) ||
+		state.AdapterSHA256 != windowsManagedPolicyDigest(adapter) {
+		return false
+	}
+	hookExecutable := "'" + strings.ReplaceAll(state.HookExecutable, "'", "''") + "'"
+	return bytes.Contains(adapter, []byte(hookExecutable))
 }
 
 func validWindowsCursorManagedDigest(value string) bool {
@@ -1528,9 +1539,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		return errors.New("enterprise hooks: Cursor snapshot has an invalid target set")
 	}
 	state.Targets = targets
-	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, "closed")
-	if err != nil || state.AdapterSHA256 != windowsManagedPolicyDigest(expectedAdapter) ||
-		!bytes.Equal(expectedAdapter, snapshot.Adapter) {
+	if !windowsCursorManagedAdapterMatchesState(state, snapshot.Adapter) {
 		return errors.New("enterprise hooks: Cursor snapshot adapter identity is invalid")
 	}
 	paths, err := windowsCursorManagedPaths()

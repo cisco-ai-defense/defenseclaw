@@ -20666,7 +20666,11 @@ function Invoke-DefenseClawSelfUninstallRecovery {
     Remove-DefenseClawSelfUninstallEvidence `
         -Layout $Layout `
         -Receipt $receipt
-    if ([bool]$receipt.purge_requested -and
+    # Only an Uninstall reports the finished purge as its result. Any other
+    # action continues on the now-empty host: an Install that returned the
+    # purge result here reported ok with nothing installed (GAP-1079).
+    if ($Action -eq 'Uninstall' -and
+        [bool]$receipt.purge_requested -and
         -not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.StateRoot)) {
         $result = Get-DefenseClawLifecycleStatus `
@@ -23209,6 +23213,19 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -Installed:$false `
             -ManagedHooksActivation $managedHooksActivation
+        if ($tombstone -is [Collections.IDictionary] -and
+            $tombstone.Contains('product_version')) {
+            # The tombstone names the release that was removed, not the
+            # Setup that removed it (GAP-1074).
+            $removedVersion = $metadata.PSObject.Properties['product_version']
+            if ($null -ne $removedVersion -and
+                -not [string]::IsNullOrWhiteSpace([string]$removedVersion.Value)) {
+                $tombstone['product_version'] = [string]$removedVersion.Value
+            }
+            else {
+                $tombstone.Remove('product_version')
+            }
+        }
         Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath
         Set-DefenseClawPreservedStateAcls `
             -Layout $Layout `

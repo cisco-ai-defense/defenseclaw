@@ -5338,3 +5338,28 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
 
     assert "Invoke-DefenseClawNamespaceSweep" not in module
     assert "Remove-DefenseClawSweepPath" not in module
+
+
+def test_uninstall_tombstone_names_the_removed_release() -> None:
+    """GAP-1074: installed_version after an uninstall is the removed release."""
+    module = read(MODULE)
+    uninstall = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") :
+        module.index("Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath")
+    ]
+    tombstone = uninstall[uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata") :]
+    assert "$tombstone.Contains('product_version')" in tombstone
+    assert "$metadata.PSObject.Properties['product_version']" in tombstone
+    assert "$tombstone['product_version'] = [string]$removedVersion.Value" in tombstone
+    assert "$tombstone.Remove('product_version')" in tombstone
+
+
+def test_install_after_cli_purge_does_not_return_the_purge_result() -> None:
+    """GAP-1079: only Uninstall reports a finished self-uninstall purge."""
+    module = read(MODULE)
+    recovery = module[
+        module.index("function Invoke-DefenseClawSelfUninstallRecovery") :
+        module.index("function Complete-DefenseClawSelfUninstallRetirement")
+    ]
+    tail = recovery[recovery.rindex("Remove-DefenseClawSelfUninstallEvidence") :]
+    assert "if ($Action -eq 'Uninstall' -and\n        [bool]$receipt.purge_requested" in tail

@@ -249,7 +249,25 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// addWindowsEnterpriseNothingInstalledError fails an install or upgrade
+// whose lifecycle reported success while the host has no deployment. An MDM
+// or administrator reading ok with exit 0 would treat the device as
+// protected while nothing is installed (GAP-1079).
+func addWindowsEnterpriseNothingInstalledError(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport, action string) {
+	if action != "install" && action != "upgrade" {
+		return
+	}
+	if report == nil || !report.OK || report.Installed || report.TransactionPending || len(result.Errors) != 0 {
+		return
+	}
+	result.AddError("not_installed", fmt.Sprintf(
+		"%s reported success but left no DefenseClaw deployment on this host, so nothing protects it; run the same command again, and if it repeats keep the enterprise lifecycle log for support",
+		action,
+	))
 }
 
 // windowsEnterpriseFailureWithDeploymentState gives a lifecycle action that
@@ -540,13 +558,42 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		result.Changes = append(result.Changes, "removed all DefenseClaw per-user data of "+account+
 			" (hook scripts and foreign-hooks-backup included) and its per-user binaries in %USERPROFILE%\\.local\\bin")
 	}
-	if remaining := windowsEnterpriseReportStrings(report.UserStateRemaining); len(remaining) > 0 {
+	var notLocalSystem, remaining []string
+	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
+			notLocalSystem = append(notLocalSystem, account)
+			continue
+		}
+		remaining = append(remaining, entry)
+	}
+	if len(notLocalSystem) > 0 {
+		// A purge that did not run as LocalSystem removed the machine
+		// deployment but none of these accounts' data: it is not the
+		// delete-everything result the caller asked for, so it fails
+		// (GAP-1111).
+		result.AddError("per_user_state_remaining", fmt.Sprintf(
+			"--purge did not run as LocalSystem, so it removed the machine deployment but not the DefenseClaw per-user data, binaries and agent registrations of %d enrolled account(s). To remove them, %s. Accounts: %s",
+			len(notLocalSystem),
+			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
+			windowsEnterpriseBoundedLabels(notLocalSystem),
+		))
+	}
+	if len(remaining) > 0 {
 		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
 			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
 			len(remaining),
 			windowsEnterpriseBoundedLabels(remaining),
 		))
 	}
+}
+
+// windowsEnterpriseLocalSystemRemedy is the next step for what only a
+// LocalSystem run removes: install again, then run the given Setup action,
+// both as LocalSystem while the accounts are signed in.
+func windowsEnterpriseLocalSystemRemedy(action string) string {
+	return "run DefenseClaw Setup /ensure and then " + action + ", both as LocalSystem while the accounts are signed in " +
+		"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
+		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
 }
 
 // addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a
@@ -620,10 +667,19 @@ const windowsEnterpriseUserRegistrationListMax = 20
 // revoked, hook runtime and binary removed).
 func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {
+		reason := "those accounts were signed out"
+		for _, failure := range windowsEnterpriseReportStrings(report.UserRegistrationsFailed) {
+			if strings.HasPrefix(failure, windowsManagedHooksRegistrationsNotRemovedPrefix) {
+				reason = "this uninstall did not run as LocalSystem"
+				break
+			}
+		}
 		result.AddWarning("user_registrations_pending", fmt.Sprintf(
-			"uninstall could not act as %d user connector registration(s) (the user was signed out, or the uninstall did not run as LocalSystem); DefenseClaw's inert registration stays in that user's agent configuration: %s",
+			"uninstall could not act as %d user connector registration(s) because %s; DefenseClaw's inert registration stays in that account's agent configuration. To remove them, %s. Accounts: %s",
 			len(pending),
-			windowsEnterpriseBoundedLabels(pending),
+			reason,
+			windowsEnterpriseLocalSystemRemedy("/uninstall"),
+			windowsEnterpriseBoundedLabels(windowsEnterpriseRegistrationsByAccount(pending)),
 		))
 	}
 	if failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed); len(failed) > 0 {
@@ -632,6 +688,36 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 			windowsEnterpriseBoundedLabels(failed),
 		))
 	}
+}
+
+// windowsEnterpriseRegistrationsByAccount groups "connector/SID" labels by
+// account, named as "user (SID): connector, connector" where the SID
+// resolves, so the administrator sees which accounts keep what.
+func windowsEnterpriseRegistrationsByAccount(entries []string) []string {
+	var order []string
+	connectors := map[string][]string{}
+	for _, entry := range entries {
+		connector, sid, found := strings.Cut(entry, "/")
+		if !found || strings.TrimSpace(sid) == "" {
+			order = append(order, entry)
+			continue
+		}
+		sid = strings.TrimSpace(sid)
+		if _, seen := connectors[sid]; !seen {
+			order = append(order, sid)
+		}
+		connectors[sid] = append(connectors[sid], strings.TrimSpace(connector))
+	}
+	labels := make([]string, 0, len(order))
+	for _, key := range order {
+		names, ok := connectors[key]
+		if !ok {
+			labels = append(labels, key)
+			continue
+		}
+		labels = append(labels, enterpriseHookWindowsAccountLabel(enterpriseHookReconcileRow{SID: key})+": "+strings.Join(names, ", "))
+	}
+	return labels
 }
 
 // windowsEnterpriseReportStrings decodes a string list the lifecycle
@@ -1466,6 +1552,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	addWindowsEnterpriseNothingInstalledError(result, report, plan.Action)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }

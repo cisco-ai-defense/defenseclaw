@@ -493,3 +493,65 @@ func TestWindowsCursorLifecycleRecognizesExactJournaledSnapshot(t *testing.T) {
 		t.Fatal("Cursor snapshot match ignored an ACL change")
 	}
 }
+
+// An upgrade must snapshot and restore the Cursor adapter an earlier release
+// installed: the adapter template changes between releases, so the recorded
+// adapter no longer equals the current render (GAP-1068). A body that differs
+// from the recorded digest, or that does not name the recorded hook
+// executable, is still refused.
+func TestWindowsCursorManagedStateAcceptsAnEarlierReleaseAdapter(t *testing.T) {
+	originalRoot := windowsCursorManagedRootResolver
+	originalTrust := windowsManagedPolicyFileTrustCheck
+	windowsCursorManagedRootResolver = func() (string, error) {
+		return `C:\ProgramData\Cursor`, nil
+	}
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsCursorManagedRootResolver = originalRoot
+		windowsManagedPolicyFileTrustCheck = originalTrust
+	})
+
+	hookExecutable := `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`
+	current, err := connector.RenderWindowsCursorEnterpriseAdapter(hookExecutable, "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := append([]byte("# adapter template of an earlier release\r\n"), current...)
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactsFor := func(adapter []byte, recorded string) windowsCursorManagedArtifacts {
+		t.Helper()
+		state, err := windowsCursorManagedStateBody(windowsCursorManagedPolicyState{
+			SchemaVersion:      1,
+			HookExecutable:     hookExecutable,
+			GatewayAddr:        "127.0.0.1:18970",
+			GatewayServiceName: "DefenseClawGateway",
+			AdapterSHA256:      recorded,
+			ReceiptSHA256:      windowsManagedPolicyDigest([]byte("private receipt")),
+			Targets: []WindowsCursorManagedRuntimeTarget{{
+				SID: "S-1-5-21-1000-1000-1000-1001", DataDir: `C:\Users\developer\.defenseclaw`,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return windowsCursorManagedArtifacts{
+			adapter: windowsManagedFileSnapshot{path: paths.Adapter, existed: true, data: adapter},
+			state:   windowsManagedFileSnapshot{path: paths.State, existed: true, data: state},
+		}
+	}
+	for name, adapter := range map[string][]byte{"current": current, "earlier release": earlier} {
+		if _, err := validateWindowsCursorManagedStateIdentity(artifactsFor(adapter, windowsManagedPolicyDigest(adapter))); err != nil {
+			t.Fatalf("%s adapter rejected: %v", name, err)
+		}
+	}
+	if _, err := validateWindowsCursorManagedStateIdentity(artifactsFor(earlier, windowsManagedPolicyDigest(current))); err == nil {
+		t.Fatal("an adapter that differs from the recorded digest was accepted")
+	}
+	other := bytes.ReplaceAll(current, []byte(hookExecutable), []byte(`C:\Users\Public\hook.exe`))
+	if _, err := validateWindowsCursorManagedStateIdentity(artifactsFor(other, windowsManagedPolicyDigest(other))); err == nil {
+		t.Fatal("an adapter that does not run the recorded hook executable was accepted")
+	}
+}
