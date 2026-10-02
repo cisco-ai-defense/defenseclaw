@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -573,6 +574,47 @@ def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: P
     # install (1.0.1)", though 1.0.1 is the newer one.
     for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
         assert "(the install you rolled back from)?" in path.read_text(encoding="utf-8"), path
+
+
+def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_path: Path) -> None:
+    # GAP-1521: after a rollback to 0.8.10 the 1.0 Copilot entries and the
+    # OpenCode plugin stayed, so 0.8.10 ran every Copilot hook twice.
+    home = tmp_path / "home"
+    dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+    (dc_home / "previous" / "bin").mkdir(parents=True)
+    (dc_home / ".venv" / "bin").mkdir(parents=True)
+    (dc_home / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    bin_dir.mkdir(parents=True)
+    calls = tmp_path / "calls.txt"
+    for folder, version in ((bin_dir, "1.0.1"), (dc_home / "previous" / "bin", "0.8.10")):
+        gateway = folder / "defenseclaw-gateway"
+        gateway.write_text(
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; '
+            f"connector) echo \"{version} $*\" >> '{calls}' ;; esac\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    state = '{"version": 3, "names": ["copilot", "opencode", "openclaw"], "inactive_names": []}'
+    (dc_home / "active_connector.json").write_text(state, encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    script = _stamped(tmp_path, "1.0.1")
+
+    back = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+
+    assert back.returncode == 0, back.stdout + back.stderr
+    assert "Could not remove" not in back.stdout + back.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "1.0.1 connector teardown --connector copilot",
+        "1.0.1 connector teardown --connector opencode",
+    ]
+    # The 1.0.1 data kept for a roll forward still names its connectors.
+    assert (dc_home / "previous" / "data" / "active_connector.json").read_text(encoding="utf-8") == state
+
+    calls.unlink()
+    forward = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+
+    assert forward.returncode == 0, forward.stdout + forward.stderr
+    assert not calls.exists()
 
 
 def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_path: Path) -> None:

@@ -263,6 +263,9 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
     return dirs
 
 
+_EMPTY_DIR_RD_TRIES = 30
+
+
 def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
     """Start cmd.exe to remove dirs (and then empty_dirs, if empty) after this process exits.
 
@@ -288,7 +291,16 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
             # in the else branch.
             f' & (if exist "{tombstone}" (rd /s /q "{tombstone}") else (rd /s /q "{path}"))'
         )
-    steps.extend(f'rd "{path}"' for path in empty_dirs if not _CMD_METACHARACTERS & set(path))
+    # Retry the empty-folder rd: Defender or another reader can hold a deleted
+    # file open, so the tombstone stays delete-pending for a few seconds and the
+    # first rd sees a non-empty folder (GAP-1728). rd without /s still keeps a
+    # folder that has real content.
+    steps.extend(
+        f'(for /l %i in (1,1,{_EMPTY_DIR_RD_TRIES}) do if exist "{path}" '
+        f'(rd "{path}" 2>nul || ping -n 3 127.0.0.1 >nul))'
+        for path in empty_dirs
+        if not _CMD_METACHARACTERS & set(path)
+    )
     command = " & ".join(steps)
     flags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
