@@ -124,7 +124,7 @@ fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token claudecode claude-code-hook "claude-code tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
+  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
 API_ADDR="{{.APIAddr}}"

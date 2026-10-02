@@ -60,7 +60,7 @@ DEFENSECLAW_HOOK_NAME="openhands-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token openhands openhands-hook "openhands hook"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token openhands openhands-hook "openhands hook"
+  defenseclaw_handle_missing_token openhands openhands-hook "openhands hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {

@@ -2030,9 +2030,8 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_hook_health(cfg, "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
-        # Windows wording only on Windows.
-        self.assertEqual("Windows DACL" in r.checks[-1]["detail"], os.name == "nt")
-        self.assertIn("not tamper-proof", r.checks[-1]["detail"])
+        self.assertNotIn("DACL", r.checks[-1]["detail"])
+        self.assertIn("plugin installed at", r.checks[-1]["detail"])
         self.assertIn("authenticated load heartbeat is fresh", r.checks[-1]["detail"])
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
@@ -2092,9 +2091,12 @@ class TestCheckHookHealth(unittest.TestCase):
             ):
                 _check_hook_health(cfg, "opencode", r)
 
-        self.assertEqual(r.checks[-1]["status"], "warn")
-        self.assertIn("no authenticated load heartbeat", r.checks[-1]["detail"])
-        self.assertNotIn("--pure", r.checks[-1]["detail"])
+        # GAP-1565: an idle OpenCode is normal, not a warning.
+        self.assertEqual(r.checks[-1]["status"], "skip")
+        self.assertIn("normal while OpenCode is closed", r.checks[-1]["detail"])
+        self.assertIn("no load heartbeat yet", r.checks[-1]["detail"])
+        for internal in ("--pure", "DACL", "tamper-proof", "authenticated"):
+            self.assertNotIn(internal, r.checks[-1]["detail"])
 
     def test_opencode_runtime_status_rejects_stale_and_malformed_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

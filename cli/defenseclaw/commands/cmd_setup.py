@@ -13881,6 +13881,7 @@ def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
         and "digest current" in detail
         and (
             "no authenticated load heartbeat" in detail
+            or "no load heartbeat yet" in detail
             or "load heartbeat predates the current gateway generation" in detail
         )
     )

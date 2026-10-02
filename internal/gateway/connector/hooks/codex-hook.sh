@@ -136,7 +136,7 @@ DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token codex codex-hook "codex tool"
+  defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
 # Drop inherited export attributes before these names receive private values.
