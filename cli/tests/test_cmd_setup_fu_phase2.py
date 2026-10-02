@@ -4043,6 +4043,14 @@ class TestGatewayOfflineStaging(_BaseSetup):
 # ND-3 — setup mode removal
 # ---------------------------------------------------------------------------
 class TestSetupModeHelp(unittest.TestCase):
+    def test_connector_id_claudecode_is_a_hidden_alias(self):
+        # GAP-1356: init/status print "claudecode"; setup accepts it too.
+        res = CliRunner().invoke(setup_group, ["claudecode", "--help"], catch_exceptions=False)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("claude-code", res.output)
+        listing = CliRunner().invoke(setup_group, ["--help"], catch_exceptions=False).output
+        self.assertNotIn("claudecode", listing)
+
     def test_mode_subcommand_is_removed(self):
         res = CliRunner().invoke(setup_group, ["mode", "--help"])
         self.assertNotEqual(res.exit_code, 0)

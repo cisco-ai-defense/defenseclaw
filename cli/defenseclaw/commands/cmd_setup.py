@@ -287,6 +287,24 @@ def _log_setup_action(
         ) from exc
 
 
+class _SetupGroup(click.Group):
+    """``setup`` with hidden aliases for connector ids.
+
+    init, status and ``--connector`` name Claude Code ``claudecode``, so
+    ``defenseclaw setup claudecode`` runs ``setup claude-code`` instead of
+    failing with "No such command" (GAP-1356).
+    """
+
+    _ALIASES = {"claudecode": "claude-code"}
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        return super().get_command(ctx, self._ALIASES.get(cmd_name, cmd_name))
+
+    def resolve_command(self, ctx: click.Context, args: list[str]):
+        name, command, rest = super().resolve_command(ctx, args)
+        return (command.name if command is not None else name), command, rest
+
+
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
     """Return the active config path when the AppContext is loaded.
 
@@ -314,7 +332,7 @@ def _safe_mtime(path: str | None) -> float | None:
         return None
 
 
-@click.group(invoke_without_command=True)
+@click.group(cls=_SetupGroup, invoke_without_command=True)
 @click.option(
     "--connector",
     "-c",
