@@ -90,7 +90,10 @@ boundary. Other platforms also offer proxy and additional hook connectors.
 skip `--connector`, it uses the single configured or detected connector; if
 more than one connector is configured/detected, or the installer hint disagrees
 with the detected connector, it exits and asks you to rerun with `--connector
-<name>`.
+<name>`. On an install that already guards other connectors, `quickstart
+--connector <name>` exits without changes instead of dropping them: use
+`defenseclaw setup <name> --yes` to add it alongside the others, or
+`defenseclaw init` to change the whole set.
 
 </Step>
 

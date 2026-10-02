@@ -87,6 +87,32 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         )
 
 
+    def test_explicit_connector_refuses_to_narrow_existing_roster(self):
+        # GAP-1078: quickstart --connector X on a multi-connector install
+        # must not rebuild the roster around X and orphan the others' hooks.
+        forbidden = AssertionError("quickstart narrowed an existing roster")
+        with (
+            patch(
+                "defenseclaw.commands.cmd_quickstart._configured_quickstart_connectors",
+                return_value=["codex", "claudecode", "hermes"],
+            ),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden) as first_run,
+        ):
+            result = self._invoke(["--connector", "claudecode", "--mode", "action", "--skip-gateway"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        output = result.output + (result.stderr or "")
+        self.assertIn("already guards: codex, claudecode, hermes", output)
+        self.assertIn("defenseclaw setup claude-code --yes --mode action", output)
+        first_run.assert_not_called()
+
+    def test_explicit_connector_matching_existing_roster_is_allowed(self):
+        from defenseclaw.commands import cmd_quickstart
+        from defenseclaw import config as cfg_mod
+
+        with patch.object(cmd_quickstart, "_configured_quickstart_connectors", return_value=["claudecode"]):
+            self.assertIsNone(cmd_quickstart._refuse_roster_narrowing(cfg_mod, "claudecode"))
+
     def test_openclaw_defaults_to_observe_profile(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
             result = self._invoke([
