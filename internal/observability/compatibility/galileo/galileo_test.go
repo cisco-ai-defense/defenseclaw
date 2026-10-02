@@ -866,6 +866,29 @@ func TestProjectSpanMetadataNamesTheDeploymentAndUser(t *testing.T) {
 	}
 }
 
+// GAP-1836: the agent span of an ACP decision has no guardrail fields; its
+// blocked outcome still reaches the metadata Galileo shows.
+func TestProjectAgentSpanMetadataNamesABlockedOutcome(t *testing.T) {
+	t.Parallel()
+	body := map[string]any{"kind": "INTERNAL", "attributes": map[string]any{
+		"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "kiro", "gen_ai.provider.name": "kiro",
+		"defenseclaw.outcome":   "blocked",
+		"gen_ai.input.messages": messages("user", "x"), "gen_ai.output.messages": messages("assistant", "y"),
+	}}
+	result := Project(projectRecord(t, observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent kiro", body, redaction.ProfileNone), Limits{})
+	if !result.Eligible() {
+		t.Fatalf("reason = %q, missing %v", result.Reason(), result.MissingFields())
+	}
+	raw, _ := resultAttributes(t, result)["metadata"].(string)
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		t.Fatalf("metadata %q: %v", raw, err)
+	}
+	if metadata["defenseclaw.outcome"] != "blocked" {
+		t.Fatalf("metadata = %v, want defenseclaw.outcome=blocked", metadata)
+	}
+}
+
 func TestProjectRejectsForgedResourceAttributes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
