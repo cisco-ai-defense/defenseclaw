@@ -1176,6 +1176,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.logs_model = logs_model or LogsPanelModel(self.data_dir, store=audit_store)
         self.audit_model = audit_model or AuditPanelModel(audit_store)
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
+        self.overview_model.not_configured = config is None
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
         self._runtime_model_injected = runtime_model is not None
@@ -12234,6 +12235,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         self.config = new_cfg
         self.data_dir = new_data_dir
+        self.overview_model.not_configured = new_cfg is None
         self.overview_model.set_cfg(new_overview_cfg)
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)

@@ -547,6 +547,8 @@ class OverviewPanelModel:
     def __init__(self, cfg: OverviewConfig | None = None, *, version: str = "") -> None:
         self.cfg = cfg
         self.version = version
+        # Set by the app when no config.yaml was loaded (GAP-1163).
+        self.not_configured = False
         self.active_policy: object | None = None
         self.health: HealthSnapshot | None = None
         # Availability of the sidecar management endpoint is deliberately
@@ -666,7 +668,7 @@ class OverviewPanelModel:
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
-        if self.cfg is None:
+        if self.not_configured:
             # No config.yaml (first run, wizard declined): say so instead of
             # implying the gateway will show up on its own (GAP-1163).
             notices.append(
@@ -689,7 +691,7 @@ class OverviewPanelModel:
                 suffix = f": {detail}" if detail else ""
                 notices.append(OverviewNotice("error", f"Gateway health check failed{suffix}"))
             elif gateway_state == "unknown":
-                if self.cfg is not None:
+                if not self.not_configured:
                     notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
             else:
                 notices.append(

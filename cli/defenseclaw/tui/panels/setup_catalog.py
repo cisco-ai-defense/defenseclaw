@@ -344,7 +344,7 @@ def _llm_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
     if problems:
         return TaskStatus("attention", "no region" if provider and (model or instance) else "not set")
     if not provider and not model:
-        return TaskStatus("off", "not needed (judge off)" if not _flag(cfg, "guardrail.judge.enabled") else "not set")
+        return TaskStatus("off", "not needed" if not _flag(cfg, "guardrail.judge.enabled") else "not set")
     if model and "/" not in model and provider:
         model = f"{provider}/{model}"
     return TaskStatus("ok", _short(model or f"{provider} via {instance}"))

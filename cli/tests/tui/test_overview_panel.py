@@ -1154,6 +1154,7 @@ def test_no_config_overview_says_not_set_up() -> None:
     from defenseclaw.tui.widgets.hint_bar import HintEngine
 
     model = OverviewPanelModel(None, version="test")
+    model.not_configured = True
     messages = [notice.message for notice in model.build_notices()]
     assert any("not set up yet" in m and "defenseclaw init" in m for m in messages), messages
     assert not any("not available yet" in m for m in messages)
