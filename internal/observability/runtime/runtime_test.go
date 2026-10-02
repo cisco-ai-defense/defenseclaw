@@ -190,6 +190,16 @@ func newRuntimeForTest(
 	return runtime
 }
 
+// lifecycleTestContext bounds a test's wait on Close, Stop, FlushReports or
+// WaitReporter, so a lifecycle regression fails with that call's error instead
+// of hanging until the package timeout. It is safe to use inside t.Cleanup.
+func lifecycleTestContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func diagnosticMetadata(t *testing.T) router.Metadata {
 	t.Helper()
 	metadata, err := router.NewClassifiedLogMetadata(
@@ -314,7 +324,7 @@ func TestRuntimeBindsReadyRealSQLitePathAndLeavesStoreCallerOwned(t *testing.T) 
 	if runtime.store != dependencies.store || runtime.store.DatabasePath() != dependencies.storePath {
 		t.Fatal("runtime did not retain the exact caller-owned store identity")
 	}
-	if err := runtime.Close(t.Context()); err != nil {
+	if err := runtime.Close(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
 	}
 	if !dependencies.store.Ready() {
@@ -374,7 +384,7 @@ func TestRuntimeBindsEventHistoryGenerationOnlyWhenGraphActivates(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = runtime.Close(t.Context()) })
+	t.Cleanup(func() { _ = runtime.Close(lifecycleTestContext(t)) })
 	if got := reporter.snapshot(); !reflect.DeepEqual(got, []uint64{1}) {
 		t.Fatalf("initial generation bindings = %+v", got)
 	}
@@ -409,8 +419,8 @@ func TestRuntimeActivationBindsBeforeOldGenerationRetires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = runtime.Close(t.Context()) })
-	<-reporter.bound // generation one Activate
+	t.Cleanup(func() { _ = runtime.Close(lifecycleTestContext(t)) })
+	receiveRetentionTest(t, reporter.bound) // generation one Activate
 	oldLease, leaseErr := runtime.manager.Acquire(t.Context())
 	if leaseErr != nil {
 		t.Fatal(leaseErr)

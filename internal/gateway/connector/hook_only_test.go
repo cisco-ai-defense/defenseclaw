@@ -2309,7 +2309,7 @@ func TestAntigravitySetup_WritesOfficialMixedSchema(t *testing.T) {
 		}
 		if runtime.GOOS == "windows" {
 			decoded := decodePowerShellEncodedCommandForTest(t, eventCommand)
-			if !strings.Contains(decoded, "'--event','"+event+"'") ||
+			if !strings.Contains(decoded, "'--event' '"+event+"'") ||
 				!strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
 				t.Errorf("%s encoded command is not event-bound:\n%s", event, decoded)
 			}
