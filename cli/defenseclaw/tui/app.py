@@ -4978,6 +4978,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         }[state]
         badge_color = {
             "up": TOKENS.accent_green,
+            "partial": TOKENS.accent_amber,
             "idle": TOKENS.accent_amber,
             "blind": TOKENS.accent_red,
         }
@@ -5010,6 +5011,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 hue = badge_color.get(plane.badge, TOKENS.text_muted)
                 if plane.running:
                     detail = f"watching via {plane.mechanism or 'unknown mechanism'}"
+                    if plane.reason:
+                        detail += f"; {plane.reason}"
                 else:
                     detail = plane.reason or "no reason reported"
                 lines.append(

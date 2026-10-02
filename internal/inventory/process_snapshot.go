@@ -121,6 +121,22 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 			procs[i].Connector = "cursor"
 		}
 	}
+	// cursor-agent's worker-server is a second cursor-agent node.exe started
+	// by the first one: fold it into its parent so one run is one Cursor
+	// process (GAP-1849).
+	var cursorHelpers []int
+	for i := range procs {
+		if procs[i].Connector != "cursor" || normalizedWindowsProcessName(procs[i].Comm) != "node" {
+			continue
+		}
+		if parent := byPID[procs[i].PPID]; parent != nil && parent.PID != procs[i].PID && parent.Connector == "cursor" &&
+			normalizedWindowsProcessName(parent.Comm) == "node" {
+			cursorHelpers = append(cursorHelpers, i)
+		}
+	}
+	for _, i := range cursorHelpers {
+		procs[i].Connector = ""
+	}
 	for i := 0; i < len(procs); i++ {
 		if procs[i].Connector != "" || normalizedWindowsProcessName(procs[i].Comm) != "node" {
 			continue

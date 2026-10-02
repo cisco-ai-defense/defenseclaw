@@ -11,11 +11,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,21 +39,30 @@ import (
 // must be root-owned).
 var enterpriseDiscoveryReadRecord = inventory.ReadUserScanRecord
 
+// enterpriseDiscoveryRuntime reads the gateway's runtime discovery snapshot;
+// replaceable in tests.
+var enterpriseDiscoveryRuntime = fetchEnterpriseDiscoveryRuntime
+
 // newUnixDiscoveryCommand is `enterprise linux|macos discovery`: a read-only
 // view of the AI Discovery inventory (agents, skills, MCP servers, plugins,
 // running AI processes) the hook guardian's per-user scans recorded for each
-// enrolled account. Before it the data was only in root-only JSON, behind
-// the gateway API's token or in exported telemetry (GAP-1144).
+// enrolled account, plus the gateway's runtime discovery planes and findings.
+// Before it the data was only in root-only JSON, behind the gateway API's
+// token or in exported telemetry (GAP-1144).
 func newUnixDiscoveryCommand(platform string) *cobra.Command {
 	var user string
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "discovery",
-		Short: "Show each enrolled account's AI Discovery inventory: agents, skills, MCP servers, processes (read-only)",
+		Short: "Show AI Discovery per enrolled account and the runtime discovery planes (read-only)",
 		Long: `Show the AI Discovery inventory the hook guardian's per-user scans recorded
 for each enrolled account: AI agents and apps, skills, MCP servers, plugins
-and running AI processes (runtime discovery). It reads the guardian's spool
-(ai-discovery/ in the authorization ledger) and changes nothing. Run as root.
+and AI processes that were running at scan time. It reads the guardian's
+spool (ai-discovery/ in the authorization ledger) and changes nothing.
+
+It then shows runtime discovery (ai_discovery.runtime): each plane
+(inference heartbeat, shadow egress, agent actions) with its state, the
+last poll and the scored findings, read from the local gateway. Run as root.
 
 The records exist only while ai_discovery.enabled is true in the deployment
 config. Skills and MCP servers are inventoried here; a managed deployment
@@ -70,6 +82,7 @@ does not run the skill or MCP scanners.`,
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			dir := filepath.Join(layout.GuardianAuthDir, inventory.UserScanDirName)
+			runtimeCommand = cmd
 			if err := writeEnterpriseDiscovery(cmd.OutOrStdout(), dir, user, asJSON); err != nil {
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
 			}
@@ -93,6 +106,81 @@ type enterpriseDiscoveryReport struct {
 	Spool    string                       `json:"spool"`
 	Accounts []enterpriseDiscoveryAccount `json:"accounts"`
 	Errors   []string                     `json:"errors,omitempty"`
+	// Runtime is the gateway's runtime discovery snapshot; RuntimeError
+	// says why it could not be read.
+	Runtime      *enterpriseRuntimeView `json:"runtime,omitempty"`
+	RuntimeError string                 `json:"runtime_error,omitempty"`
+}
+
+// enterpriseRuntimeView is the part of GET /api/v1/ai-usage/runtime an
+// administrator needs: plane health, the last poll and the findings.
+type enterpriseRuntimeView struct {
+	Gateway         string                     `json:"gateway"`
+	Enabled         bool                       `json:"enabled"`
+	ScannedAt       string                     `json:"scanned_at,omitempty"`
+	Planes          []enterpriseRuntimePlane   `json:"planes"`
+	Findings        []enterpriseRuntimeFinding `json:"findings"`
+	Degraded        bool                       `json:"degraded"`
+	DegradedReasons []string                   `json:"degraded_reasons,omitempty"`
+}
+
+type enterpriseRuntimePlane struct {
+	Plane     string `json:"plane"`
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+	Running   bool   `json:"running"`
+	Mechanism string `json:"mechanism,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type enterpriseRuntimeFinding struct {
+	PID       int    `json:"pid"`
+	Process   string `json:"process"`
+	User      string `json:"user,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	Score     int    `json:"score"`
+	Severity  string `json:"severity"`
+	LastSeen  string `json:"last_seen,omitempty"`
+}
+
+// runtimeCommand is the running discovery command, for the config load.
+var runtimeCommand *cobra.Command
+
+// fetchEnterpriseDiscoveryRuntime reads the runtime snapshot from the local
+// gateway with the deployment's gateway token, which root can read.
+func fetchEnterpriseDiscoveryRuntime() (*enterpriseRuntimeView, error) {
+	if err := loadGatewayCommandConfigFor(runtimeCommand); err != nil {
+		return nil, err
+	}
+	host := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+"/api/v1/ai-usage/runtime", nil)
+	if err != nil {
+		return nil, err
+	}
+	token := daemonGatewayToken(cfg)
+	if token == "" {
+		token = strings.TrimSpace(cfg.Gateway.ResolvedToken())
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-DefenseClaw-Token", token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("the gateway at %s did not answer; check it with: defenseclaw-gateway status", host)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the gateway at %s answered %s", host, resp.Status)
+	}
+	view := &enterpriseRuntimeView{}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(view); err != nil {
+		return nil, fmt.Errorf("read the gateway's runtime snapshot: %w", err)
+	}
+	view.Gateway = host
+	return view, nil
 }
 
 func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error {
@@ -127,6 +215,20 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 	sort.Slice(report.Accounts, func(i, j int) bool { return report.Accounts[i].UID < report.Accounts[j].UID })
 	if user != "" && len(report.Accounts) == 0 && len(report.Errors) == 0 {
 		return fmt.Errorf("no AI Discovery record for account %q in %s; the account is not enrolled or has not been scanned yet", user, dir)
+	}
+	if view, err := enterpriseDiscoveryRuntime(); err != nil {
+		report.RuntimeError = err.Error()
+	} else if view != nil {
+		if user != "" {
+			findings := view.Findings[:0]
+			for _, finding := range view.Findings {
+				if finding.User == user {
+					findings = append(findings, finding)
+				}
+			}
+			view.Findings = findings
+		}
+		report.Runtime = view
 	}
 	if asJSON {
 		encoder := json.NewEncoder(w)
@@ -174,8 +276,55 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 	for _, problem := range report.Errors {
 		fmt.Fprintf(w, "unreadable record: %s\n", problem)
 	}
+	writeEnterpriseRuntime(w, report)
 	if user == "" && len(report.Accounts) > 0 {
 		fmt.Fprintln(w, "Run with --user <account> to list one account's signals, or --json for every field.")
 	}
 	return nil
+}
+
+// writeEnterpriseRuntime prints the runtime discovery section.
+func writeEnterpriseRuntime(w io.Writer, report enterpriseDiscoveryReport) {
+	view := report.Runtime
+	switch {
+	case report.RuntimeError != "":
+		fmt.Fprintf(w, "Runtime discovery: not read: %s\n", report.RuntimeError)
+		return
+	case view == nil:
+		return
+	case !view.Enabled:
+		fmt.Fprintf(w, "Runtime discovery (gateway %s): off; ai_discovery.runtime is not enabled in the deployment config\n", view.Gateway)
+		return
+	}
+	scanned := view.ScannedAt
+	if scanned == "" {
+		scanned = "no poll yet"
+	}
+	state := "healthy"
+	if view.Degraded {
+		state = "degraded"
+	}
+	fmt.Fprintf(w, "Runtime discovery (gateway %s): %s, last poll %s, %d finding(s)\n", view.Gateway, state, scanned, len(view.Findings))
+	for _, plane := range view.Planes {
+		switch {
+		case plane.Running && plane.Reason != "":
+			fmt.Fprintf(w, "  %s: partial, running via %s -- %s\n", plane.Name, plane.Mechanism, plane.Reason)
+		case plane.Running:
+			fmt.Fprintf(w, "  %s: running via %s\n", plane.Name, plane.Mechanism)
+		case plane.Available:
+			fmt.Fprintf(w, "  %s: not running -- %s\n", plane.Name, plane.Reason)
+		default:
+			fmt.Fprintf(w, "  %s: unavailable -- %s\n", plane.Name, plane.Reason)
+		}
+	}
+	if len(view.Findings) == 0 {
+		return
+	}
+	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "  SEVERITY\tSCORE\tPROCESS\tPID\tUSER\tAGENT\tLAST SEEN")
+	for _, finding := range view.Findings {
+		fmt.Fprintf(table, "  %s\t%d\t%s\t%d\t%s\t%s\t%s\n", finding.Severity, finding.Score, finding.Process, finding.PID,
+			defaultStr(finding.User, "-"), defaultStr(finding.AgentName, "-"), defaultStr(finding.LastSeen, "-"))
+	}
+	_ = table.Flush()
 }

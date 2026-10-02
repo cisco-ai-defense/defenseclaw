@@ -2001,7 +2001,12 @@ def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
     for plane in payload.get("planes") or []:
         name = str(plane.get("name") or plane.get("plane") or "plane")
         if plane.get("running"):
-            ux.ok(f"{name}: running via {plane.get('mechanism') or 'unknown mechanism'}", indent=indent)
+            via = plane.get("mechanism") or "unknown mechanism"
+            if plane.get("reason"):
+                # Running with a stated limit is partial coverage (GAP-1377).
+                ux.warn(f"{name}: partial, running via {via} -- {plane.get('reason')}", indent=indent)
+            else:
+                ux.ok(f"{name}: running via {via}", indent=indent)
         elif plane.get("available"):
             ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
         else:

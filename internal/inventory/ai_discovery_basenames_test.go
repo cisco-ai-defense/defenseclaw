@@ -299,3 +299,31 @@ func TestSanitizeBasenameValue(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1378: a skill in the shared ~/.agents/skills (DefenseClaw's CodeGuard)
+// is evidence only for products that have evidence of their own.
+func TestSharedSkillPathNeedsOwnEvidence(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, ".agents", "skills", "codeguard"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog := []AISignature{
+		{ID: "codex", Name: "Codex", SupportedConnector: "codex", ConfigPaths: []string{"~/.codex", "~/.agents/skills"}, SkillPaths: []string{"~/.agents/skills"}},
+		{ID: "cursor", Name: "Cursor", SupportedConnector: "cursor", ConfigPaths: []string{"~/.cursor", "~/.agents/skills"}, SkillPaths: []string{"~/.agents/skills"}},
+	}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(tmp, "data"), HomeDir: tmp,
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+	signals := append(svc.detectConfigPaths(), svc.detectSkills()...)
+	got := map[string]int{}
+	for _, sig := range svc.dropUnbackedSharedSurfaceSignals(signals) {
+		got[sig.SignatureID]++
+	}
+	if got["cursor"] != 0 || got["codex"] != 3 {
+		t.Fatalf("signals per product = %v, want codex=3 cursor=0", got)
+	}
+}
