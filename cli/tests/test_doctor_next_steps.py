@@ -779,3 +779,31 @@ def test_port_held_by_another_account_row_carries_its_next_step(tmp_path) -> Non
     assert row["status"] == "fail" and r.gateway_down == "foreign"
     assert "--api-port 19040" in row["remediation"] and "defenseclaw-gateway start" in row["remediation"]
     assert text.count("defenseclaw setup gateway") == 1 and "`" not in text
+
+
+def test_pre_first_start_token_and_codex_hook_rows_are_pending(tmp_path) -> None:
+    # GAP-1975: right after `init --no-start-gateway` the token and the Codex
+    # hook script do not exist yet; both appear on the first gateway start.
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(token_env=""))
+    r = _DoctorResult()
+    r.gateway_down = "stopped"
+    with (
+        mock.patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("", "", "")),
+        mock.patch.object(cmd_doctor, "_custom_gateway_token_env", return_value=""),
+    ):
+        text = _render(
+            lambda: (
+                cmd_doctor._check_gateway_auth(cfg, r),
+                cmd_doctor._check_codex_hooks(cfg, r, platform_name="linux"),
+            )
+        )
+    assert [c["status"] for c in r.checks] == ["skip", "skip"]
+    assert text.count("'defenseclaw-gateway start'") == 2
+    assert "doctor --fix" not in text
+
+    running = _DoctorResult()
+    cmd_doctor._check_codex_hooks(cfg, running, platform_name="linux")
+    assert running.checks[-1]["status"] == "fail"
+    assert running.checks[-1]["remediation"] == "re-register the hooks: defenseclaw setup codex --yes"
