@@ -952,3 +952,14 @@ def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
     configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text()
     samples = configuration[configuration.index("## Sample configs"):]
     assert samples.count("ai_discovery:\n  enabled: true") == 3
+
+
+def test_threat_model_r7_matches_linux_socket_dependency() -> None:
+    # GAP-1198: on Linux the gateway service requires both socket units, so
+    # a held port keeps the whole gateway (hook socket included) down.
+    model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text()
+    unit = (ROOT / "packaging/systemd/defenseclaw-gateway.service").read_text()
+    assert "Requires=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket" in unit
+    assert "which the gateway serves independently of the TCP port" not in model
+    assert "does not start at all, and every hook on the host fails closed" in model
+    assert "| R34 |" in model and "logger -t defenseclaw-gateway" in model
