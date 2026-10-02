@@ -5102,6 +5102,16 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			errors.Is(err, connector.ErrAgentVersionProbeTimeout) && ctx.Err() == nil; attempt++ {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; retrying (attempt %d of %d)\n",
 				registration.conn.Name(), err, attempt, connectorProbeTimeoutAttempts)
+			if transaction.publishSetupProgress {
+				// A retry is progress: start and restart give it another
+				// readiness window instead of stopping the gateway (GAP-1850).
+				s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+					"setup_connector": registration.conn.Name(),
+					"setup_step":      index + 1,
+					"setup_total":     len(registrations),
+					"setup_attempt":   attempt,
+				})
+			}
 			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
 		}
 		if err != nil {

@@ -892,9 +892,25 @@ func (writer *EventHistoryWriter) enqueueHealthFailure(
 	if accepted && code == EventHistoryHealthWriteFailed {
 		// One line per state change (not per failed write), so gateway.log
 		// says which write failed and why (GAP-1660).
-		fmt.Fprintf(os.Stderr, "[audit] event-history write failed (sqlite class=%s code=%d): %v\n",
-			sqliteClass, primary, err)
+		fmt.Fprintln(os.Stderr, eventHistoryWriteFailureLogLine(sqliteClass, primary, err))
 	}
+}
+
+// eventHistoryWriteFailureLogLine adds the driver's (or Go's) own error to the
+// class and code. eventHistoryWriteError.Error() is a fixed string so health
+// never carries driver text, which left a class=other code=0 failure with no
+// cause in gateway.log (GAP-1831). The cause is one bounded line.
+func eventHistoryWriteFailureLogLine(class EventHistorySQLiteClass, primary uint8, err error) string {
+	line := fmt.Sprintf("[audit] event-history write failed (sqlite class=%s code=%d): %v", class, primary, err)
+	var writeErr *eventHistoryWriteError
+	if errors.As(err, &writeErr) && writeErr.cause != nil {
+		cause := strings.Join(strings.Fields(writeErr.cause.Error()), " ")
+		if len(cause) > 300 {
+			cause = strings.ToValidUTF8(cause[:300], "") + "..."
+		}
+		line += ": " + cause
+	}
+	return line
 }
 
 // enqueueHealthTransitionLocked reports whether the transition changed the

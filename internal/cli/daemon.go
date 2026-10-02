@@ -345,6 +345,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
 	}
+	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
+		return err
+	}
 	if !rotationTransaction {
 		if problem := foreignGatewayListener(cfg); problem != "" {
 			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
@@ -367,7 +370,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("start daemon: %w", err)
+		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
 	cfg, cfgErr = loadDaemonConfig(cmd)
@@ -415,7 +418,8 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
+		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
+			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 
@@ -709,6 +713,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := daemonConfigLoadError("restart", cfgLoadErr); err != nil {
 		return err
 	}
+	if err := gatewayDiskFullError("restart", config.DefaultDataPath()); err != nil {
+		return err
+	}
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
@@ -744,7 +751,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("start daemon: %w", err)
+		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
 	cfg, cfgErr = loadDaemonConfig(cmd)
@@ -763,7 +770,8 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
+		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
+			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 
@@ -947,7 +955,13 @@ func connectorSetupStep(guardrail gateway.SubsystemHealth) string {
 	if strings.TrimSpace(name) == "" || step < 1 || total < step {
 		return ""
 	}
-	return fmt.Sprintf("setting up connector %s (%d of %d)", name, int(step), int(total))
+	text := fmt.Sprintf("setting up connector %s (%d of %d)", name, int(step), int(total))
+	// A retried slow agent probe is a new step, so readiness keeps waiting
+	// (GAP-1850).
+	if attempt, _ := guardrail.Details["setup_attempt"].(float64); attempt > 1 {
+		text += fmt.Sprintf(", attempt %d", int(attempt))
+	}
+	return text
 }
 
 // startProgressPrinter prints a slow start's progress under the

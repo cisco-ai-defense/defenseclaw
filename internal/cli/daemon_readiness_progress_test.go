@@ -93,3 +93,38 @@ func TestWaitForGatewayReadinessStalledSetupNamesTheStep(t *testing.T) {
 		t.Fatalf("stalled setup = ready %v, err %v; want a timeout naming the step", ready, err)
 	}
 }
+
+// GAP-1850: a retried slow agent probe is progress, so start and restart keep
+// waiting while the retries run instead of stopping the gateway.
+func TestWaitForGatewayReadinessExtendsWhileASlowProbeRetries(t *testing.T) {
+	withReadinessProgressFactor(t, 20)
+	began := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempt := 1 + int(time.Since(began)/(100*time.Millisecond))
+		snap := readinessSnapshot(gateway.StateStarting, gateway.StateDisabled)
+		if attempt > 3 {
+			snap.Guardrail = gateway.SubsystemHealth{State: gateway.StateRunning}
+		} else {
+			snap.Guardrail.Details = map[string]interface{}{
+				"setup_connector": "codex", "setup_step": 3, "setup_total": 8, "setup_attempt": attempt,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	t.Cleanup(srv.Close)
+	_, ready, err := waitForGatewayReadiness(srv.Client(), srv.URL, 250*time.Millisecond, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, reportProgress: func(time.Duration, string) {}},
+		func() bool { return true })
+	if err != nil || !ready {
+		t.Fatalf("waitForGatewayReadiness() = ready %v, err %v; want ready after the third attempt", ready, err)
+	}
+	step := connectorSetupStep(gateway.SubsystemHealth{State: gateway.StateStarting, Details: map[string]interface{}{
+		"setup_connector": "codex", "setup_step": 3.0, "setup_total": 8.0, "setup_attempt": 2.0,
+	}})
+	if step != "setting up connector codex (3 of 8), attempt 2" {
+		t.Fatalf("connectorSetupStep() = %q", step)
+	}
+	if limit := startReadinessProgressFactor * platformStartReadinessTimeout; limit < 180*time.Second {
+		t.Fatalf("progress cap %s cannot fit three 20 s Codex probe attempts plus the other connectors", limit)
+	}
+}

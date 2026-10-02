@@ -1761,6 +1761,9 @@ def _specified_collection(*, logs: bool | None, traces: bool | None, metrics: bo
 
 
 def _restart_gateway(*, quiet: bool = False) -> None:
+    # Restart waits for READY itself; stopping it early left no gateway (GAP-1850).
+    from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT
+
     binary = resolve_gateway_binary()
     if not binary:
         raise click.ClickException("configuration was written, but defenseclaw-gateway was not found for restart")
@@ -1769,7 +1772,7 @@ def _restart_gateway(*, quiet: bool = False) -> None:
             [binary, "restart"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=_GATEWAY_START_TIMEOUT,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

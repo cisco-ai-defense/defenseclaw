@@ -2270,3 +2270,24 @@ func mustProjectionBytes(t *testing.T, projection observabilityredaction.Project
 	}
 	return encoded
 }
+
+// GAP-1831: gateway.log names the cause of a failed write; health does not.
+func TestEventHistoryWriteFailureLogLineNamesTheCause(t *testing.T) {
+	err := eventHistoryFailure(
+		EventHistoryHealthWriteFailed,
+		&eventHistoryWriteError{cause: errors.New("database is locked (5)\n(SQLITE_BUSY)")},
+	)
+	line := eventHistoryWriteFailureLogLine(EventHistorySQLiteClass("busy_locked"), 5, err)
+	want := "[audit] event-history write failed (sqlite class=busy_locked code=5): " +
+		"audit: insert v8 event-history row failed: database is locked (5) (SQLITE_BUSY)"
+	if line != want {
+		t.Fatalf("log line = %q, want %q", line, want)
+	}
+	if strings.Contains(err.Error(), "locked") {
+		t.Fatalf("health error gained driver text: %v", err)
+	}
+	long := eventHistoryWriteFailureLogLine("other", 0, &eventHistoryWriteError{cause: errors.New(strings.Repeat("x", 1000))})
+	if len(long) > 500 || !strings.HasSuffix(long, "...") {
+		t.Fatalf("long cause not bounded: %d bytes", len(long))
+	}
+}
