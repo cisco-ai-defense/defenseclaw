@@ -7789,6 +7789,35 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         _emit("warn", "LLM reachable", prefix + msg, r=r)
 
 
+# A judge that cannot reach its provider or credential source (dead proxy,
+# blocked network, instance-role fetch) is not fixed by re-running
+# 'setup llm' (GAP-1669). Kept in step with internal/cli/status.go.
+_JUDGE_NETWORK_NEXT_STEP = (
+    "check the network and the gateway's proxy settings (HTTPS_PROXY, NO_PROXY; an instance role "
+    "also needs 169.254.169.254 in NO_PROXY), then restart the gateway (defenseclaw-gateway restart)"
+)
+_JUDGE_NETWORK_ERROR_MARKERS = (
+    "proxyconnect",
+    "proxy",
+    "connection refused",
+    "connection reset",
+    "no such host",
+    "network is unreachable",
+    "i/o timeout",
+    "dial tcp",
+    "tls handshake",
+    "failed to retrieve aws credentials",
+    "failed to refresh cached credentials",
+    "ec2 imds",
+    "no route to host",
+)
+
+
+def _judge_error_is_network(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _JUDGE_NETWORK_ERROR_MARKERS)
+
+
 def _check_judge_calls(cfg, r: _DoctorResult) -> None:
     """Report whether the LLM judge's calls since the gateway started worked.
 
@@ -7849,7 +7878,9 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
             label,
             f"all {total} recent judge call(s) failed, so the judge decides nothing: {latest}",
             r=r,
-            remediation="defenseclaw setup llm --role judge",
+            remediation=(
+                _JUDGE_NETWORK_NEXT_STEP if _judge_error_is_network(latest) else "defenseclaw setup llm --role judge"
+            ),
         )
     else:
         _emit("warn", label, f"{len(errors)} of {total} recent judge call(s) failed: {latest}", r=r)

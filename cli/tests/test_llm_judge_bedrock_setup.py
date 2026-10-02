@@ -201,6 +201,38 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         r = run()
         self.assertEqual((r.failed, r.warned), (0, 1), r.checks)
 
+    def test_doctor_judge_next_step_matches_the_cause(self) -> None:
+        """GAP-1669: a network failure points at the proxy/network, not at setup llm."""
+        cfg = self.app.cfg
+        cfg.guardrail.enabled = True
+        cfg.guardrail.judge.enabled = True
+        cases = (
+            ("1", "Bedrock request failed: failed to retrieve aws credentials", "NO_PROXY"),
+            (
+                "2",
+                "Bedrock returned 400: The provided model identifier is invalid.",
+                "defenseclaw setup llm --role judge",
+            ),
+        )
+        for row_id, error, want in cases:
+            with closing(sqlite3.connect(cfg.audit_db)) as db:
+                db.execute("DELETE FROM audit_events")
+                db.execute(
+                    "INSERT INTO audit_events (id, timestamp, action, structured_json) VALUES (?, ?, ?, ?)",
+                    (
+                        row_id,
+                        "2099-01-01T00:00:00Z",
+                        "llm-judge-response",
+                        json.dumps({"defenseclaw.judge.action": "error", "defenseclaw.judge.error_summary": error}),
+                    ),
+                )
+                db.commit()
+            r = _DoctorResult()
+            with mock.patch.object(cmd_doctor, "_json_mode", True):
+                cmd_doctor._check_judge_calls(cfg, r)
+            self.assertEqual(r.failed, 1, r.checks)
+            self.assertIn(want, r.checks[0]["remediation"], r.checks)
+
 
 if __name__ == "__main__":
     unittest.main()
