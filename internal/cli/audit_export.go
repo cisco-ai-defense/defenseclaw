@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"container/heap"
 	"database/sql"
 	"encoding/json"
@@ -32,6 +33,7 @@ var (
 	auditExportSince           string
 	auditExportUntil           string
 	auditExportNewest          bool
+	auditExportForce           bool
 )
 
 var auditCmd = &cobra.Command{
@@ -165,6 +167,7 @@ func init() {
 	auditExportCmd.Flags().StringVar(&auditExportSince, "since", "", "Only rows at or after this time: RFC3339 (2026-09-27T18:30:00Z) or a duration ago (30m, 2h)")
 	auditExportCmd.Flags().StringVar(&auditExportUntil, "until", "", "Only rows before this time: RFC3339 or a duration ago")
 	auditExportCmd.Flags().BoolVar(&auditExportNewest, "newest", false, "With --limit, keep the newest matching rows instead of the oldest (still written oldest first)")
+	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
 
 	auditCmd.AddCommand(auditExportCmd)
@@ -195,7 +198,7 @@ func isKnownAuditAction(s string) bool {
 	return false
 }
 
-func runAuditExport(cmd *cobra.Command, _ []string) error {
+func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if cfg == nil {
 		return fmt.Errorf("audit export: config not loaded")
 	}
@@ -220,16 +223,38 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 		// afterwards. Open with O_CREATE|O_EXCL|0o600 so the file is
 		// 0600 from creation and we refuse to clobber an existing
 		// file (which could be an attacker-pre-created decoy).
+		// --force removes the old file first, so the new one is still
+		// created with O_EXCL and 0600 (GAP-1398).
+		if auditExportForce {
+			if rmErr := os.Remove(auditExportOut); rmErr != nil && !os.IsNotExist(rmErr) {
+				return fmt.Errorf("audit export: remove existing output %s: %w", auditExportOut, rmErr)
+			}
+		}
 		f, err := os.OpenFile(
 			auditExportOut,
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
 			0o600,
 		)
 		if err != nil {
+			if os.IsExist(err) {
+				return fmt.Errorf("audit export: %s already exists; pass --force to overwrite it or choose another -o path", auditExportOut)
+			}
 			return fmt.Errorf("audit export: create output: %w", err)
 		}
 		defer f.Close()
-		out = f
+		lc := &lineCountWriter{w: f}
+		out = lc
+		// GAP-1494: say what was written instead of finishing silently.
+		defer func() {
+			if err != nil {
+				return
+			}
+			msgOut := io.Writer(os.Stderr)
+			if cmd != nil {
+				msgOut = cmd.ErrOrStderr()
+			}
+			fmt.Fprintf(msgOut, "Wrote %d line(s) to %s\n", lc.lines, auditExportOut)
+		}()
 	}
 
 	connFilter := strings.ToLower(strings.TrimSpace(auditExportConnector))
@@ -969,4 +994,17 @@ func validateActivityPayloadMap(m map[string]any) error {
 		return fmt.Errorf("invalid activity action %q", act)
 	}
 	return nil
+}
+
+// lineCountWriter counts the JSONL lines written through it so a file export
+// can report its size.
+type lineCountWriter struct {
+	w     io.Writer
+	lines int
+}
+
+func (c *lineCountWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.lines += bytes.Count(p[:n], []byte{'\n'})
+	return n, err
 }

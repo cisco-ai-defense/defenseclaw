@@ -1296,7 +1296,9 @@ def _filter_verdicts(
 @click.argument("entry_name")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True, help="Whether the entry is a skill or an MCP server")
+              default=None,
+              help="Whether the entry is a skill or an MCP server. Optional when "
+                   "the source holds one content type or the name is unique.")
 @click.option("--repromote/--no-repromote", default=True,
               help="Re-run asset_policy promotion against the cached "
                    "manifest immediately (no network call).")
@@ -1306,7 +1308,7 @@ def approve_cmd(
     app: AppContext,
     source_id: str,
     entry_name: str,
-    entry_type: str,
+    entry_type: str | None,
     repromote: bool,
     emit_json: bool,
 ) -> None:
@@ -1330,7 +1332,9 @@ def approve_cmd(
 @click.argument("entry_name")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True, help="Whether the entry is a skill or an MCP server")
+              default=None,
+              help="Whether the entry is a skill or an MCP server. Optional when "
+                   "the source holds one content type or the name is unique.")
 @click.option("--repromote/--no-repromote", default=True,
               help="Re-run asset_policy promotion against the cached "
                    "manifest immediately (no network call).")
@@ -1340,7 +1344,7 @@ def reject_cmd(
     app: AppContext,
     source_id: str,
     entry_name: str,
-    entry_type: str,
+    entry_type: str | None,
     repromote: bool,
     emit_json: bool,
 ) -> None:
@@ -1357,11 +1361,42 @@ def reject_cmd(
     )
 
 
+def _resolve_entry_type(
+    cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
+) -> str:
+    """Pick the entry type for approve/reject when ``--type`` is omitted.
+
+    A source that declares one content type (skill or mcp) implies it;
+    otherwise the cached index decides when the name exists under one
+    type only.
+    """
+    if entry_type:
+        return entry_type.lower()
+    content = (source.content or "").lower()
+    if content in ("skill", "mcp"):
+        return content
+    types = sorted({
+        v.type for v in load_index(cfg.data_dir, source.id).verdicts
+        if v.name == entry_name
+    })
+    if len(types) == 1:
+        return types[0]
+    if not types:
+        raise click.UsageError(
+            f"no cached entry {entry_name!r} in {source.id}; run "
+            f"`defenseclaw registry sync {source.id}` first, or pass --type skill|mcp",
+        )
+    raise click.UsageError(
+        f"{entry_name!r} exists as both a skill and an MCP server in {source.id}; "
+        "pass --type skill or --type mcp",
+    )
+
+
 def _do_manual_verdict(
     app: AppContext,
     source_id: str,
     entry_name: str,
-    entry_type: str,
+    entry_type: str | None,
     *,
     approved: bool,
     rejected: bool,
@@ -1379,6 +1414,7 @@ def _do_manual_verdict(
     """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
+    entry_type = _resolve_entry_type(cfg, source, entry_name, entry_type)
     verdict = manual_set_verdict(
         cfg.data_dir, source.id, entry_type.lower(), entry_name,
         approved=approved, rejected=rejected,

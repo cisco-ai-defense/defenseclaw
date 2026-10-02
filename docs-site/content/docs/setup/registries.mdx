@@ -252,7 +252,7 @@ defenseclaw registry approve corp-skills my-skill --type skill
 defenseclaw registry reject  corp-skills evil-skill --type skill
 ```
 
-`approve` and `reject` re-promote against the cached manifest immediately by default, so the new rule lands without a network round-trip. Pass `--no-repromote` if you want to defer the change to the next `registry sync`.
+`approve` and `reject` re-promote against the cached manifest immediately by default, so the new rule lands without a network round-trip. Pass `--no-repromote` if you want to defer the change to the next `registry sync`. `--type` is optional when the source holds one content type (`--content skill` or `--content mcp`) or the entry name exists under one type only.
 
 ## Sync schedules
 

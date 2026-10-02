@@ -91,7 +91,7 @@ for token, audit, identity, compatibility, and recovery safety boundaries.
 | `defenseclaw acp catalog` | Show the pinned ACP schema and built-in client/agent inventory. |
 | `defenseclaw acp setup --client zed\|jetbrains --agent <name> [--activate]` | Install or reconfigure a managed guarded entry. Defaults to observe mode. |
 | `defenseclaw acp setup --managed ... --runtime-data-dir <dir> --token-file <path>` | Install only user-side editor/lock files for a centrally authorized enterprise enrollment. |
-| `defenseclaw acp status` | Show the ACP posture and configured bindings. |
+| `defenseclaw acp status` | Show the ACP posture and configured bindings (`--json` for the machine-readable document). |
 | `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
 | `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
 | `defenseclaw-gateway enterprise acp enroll\|verify\|revoke ...` | Manage the protected per-principal/client/agent/profile credential and its private user copy. |

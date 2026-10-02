@@ -249,7 +249,10 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, combined_output)
         self.assertIn("OTel: not emitted", combined_output)
         self.assertNotEqual(required.exit_code, 0)
-        self.assertIn("sidecar unavailable", required.output)
+        self.assertIn("gateway is not running", required.output)
+        # GAP-1471: no raw urllib3/requests exception text.
+        self.assertNotIn("no sidecar", combined_output)
+        self.assertIn("defenseclaw-gateway start", combined_output)
 
     def test_no_emit_skips_client(self):
         with patch(

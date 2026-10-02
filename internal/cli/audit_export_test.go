@@ -250,6 +250,32 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 			t.Fatalf("non-codex row leaked through filter: %s", ln)
 		}
 	}
+
+	// GAP-1398: a second export to the same file names the way out, and
+	// --force overwrites it.
+	err = runAuditExport(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "already exists; pass --force") {
+		t.Fatalf("second export error = %v, want an 'already exists; pass --force' hint", err)
+	}
+	prevForce := auditExportForce
+	t.Cleanup(func() { auditExportForce = prevForce })
+	auditExportForce = true
+	if err := runAuditExport(nil, nil); err != nil {
+		t.Fatalf("runAuditExport --force: %v", err)
+	}
+	if raw2, _ := os.ReadFile(outPath); string(raw2) != string(raw) {
+		t.Fatalf("--force output differs:\n%s\nvs\n%s", raw2, raw)
+	}
+}
+
+func TestLineCountWriterCountsLines(t *testing.T) {
+	var buf strings.Builder
+	lc := &lineCountWriter{w: &buf}
+	_, _ = lc.Write([]byte("a\nb\n"))
+	_, _ = lc.Write([]byte("c\n"))
+	if lc.lines != 3 {
+		t.Fatalf("lines = %d, want 3", lc.lines)
+	}
 }
 
 // sqlNullableConnector maps an empty connector to a SQL NULL so test rows

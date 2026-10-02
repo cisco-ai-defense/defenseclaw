@@ -151,8 +151,9 @@ acp:
       allowed_agents: [devin]
 ```
 
-`defenseclaw acp status` reports each binding's resolved profile and whether it
-came from the binding or was inherited:
+`defenseclaw acp status` prints a summary of the guard and each binding (health,
+resolved profile and mode). `defenseclaw acp status --json` reports each
+binding's resolved profile and whether it came from the binding or was inherited:
 
 ```json
 "zed/kiro":  {"profile": "locked", "mode": "action",  "profile_source": "binding"}

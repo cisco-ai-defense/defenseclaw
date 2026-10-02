@@ -8,7 +8,13 @@
 
 package cli
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/spf13/cobra"
+)
 
 // exitCodeError carries the process exit code a command needs the shell to
 // see. Windows deployment systems act on the exact code, so a command that
@@ -45,4 +51,32 @@ func commandExitCode(err error) int {
 		return coded.ExitCode()
 	}
 	return 1
+}
+
+// usageFlagErrorExempt lists command trees whose wrong-flag exit status is a
+// contract of its own (agent hooks, the notify hook, the watchdog and the
+// enterprise lifecycle set theirs, or are read by deployment tooling), so the
+// root usage-error mapping leaves them alone.
+var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}
+
+// usageFlagError turns a flag parse error ("unknown flag: --bogus") into a
+// usage error with the usage line, a --help pointer and exit status 2, the
+// same shape and status the Python defenseclaw CLI uses (GAP-1405).
+func usageFlagError(c *cobra.Command, err error) error {
+	if c == nil || err == nil {
+		return err
+	}
+	fields := strings.Fields(c.CommandPath())
+	for _, f := range fields[min(1, len(fields)):] {
+		for _, exempt := range usageFlagErrorExempt {
+			if f == exempt {
+				return err
+			}
+		}
+	}
+	return withExitCode(fmt.Errorf("%w\nUsage: %s\nTry '%s --help' for help.", err, c.UseLine(), c.CommandPath()), 2)
+}
+
+func init() {
+	rootCmd.SetFlagErrorFunc(usageFlagError)
 }

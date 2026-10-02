@@ -1410,8 +1410,11 @@ func defaultLaunchConfigRestartHelper() error {
 	}
 	cmd := exec.Command(exe, configRestartHelperArgs(os.Args)...)
 	cmd.Env = os.Environ()
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	// The helper outlives this process: give it the log file itself, not
+	// the in-process line-stamping pipe (GAP-1319).
+	logFile := daemon.RawStderr()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("config reload restart: launch helper: %w", err)
 	}

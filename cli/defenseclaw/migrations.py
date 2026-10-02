@@ -3365,9 +3365,8 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         # deliberately omits this row until the release workflow stamps the
         # checkout to 0.8.5.
         "0.8.5",
-        "Convert the active observability configuration to schema v8, "
-        "validate it with the installed target gateway, and activate it "
-        "transactionally during defenseclaw upgrade",
+        "Convert the observability configuration to config v8, check it "
+        "with the installed gateway, and activate it (all or nothing)",
         _migrate_observability_v8,
     ),
 ]
@@ -3487,7 +3486,7 @@ def migrate(
     if steps:
         _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
     for name, step in steps:
-        click.echo(f"  {ux.dim('→')} {name}")
+        click.echo(f"  {ux.dim('→')} {display_step_name(name)}")
         try:
             step(ctx)
         except Exception as exc:  # noqa: BLE001 - surfaced to the installer, which rolls back
@@ -3603,6 +3602,20 @@ def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:
         except OSError as exc:
             raise MigrationError(f"could not make {path} private: {exc}") from exc
         ctx.changes.append(f"made {os.path.basename(path)} private ({oct(stat.S_IMODE(info.st_mode))} → 0o600)")
+
+
+_LEGACY_STEP_PREFIX = re.compile(r"^0\.x import [^:]+: ")
+
+
+def display_step_name(name: str) -> str:
+    """Return a migration step name in user terms.
+
+    The "0.x import X.Y.Z: " prefix keys a step to the release that
+    introduced it, which reads as the wrong version when a newer 0.x
+    config is migrated (GAP-1500). Human output shows only the
+    description; JSON keeps the full step names.
+    """
+    return _LEGACY_STEP_PREFIX.sub("", name)
 
 
 def _pending_migration_steps(

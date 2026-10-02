@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sys
 
 import click
@@ -45,6 +46,17 @@ def _default_data_dir() -> str:
     return str(default_data_path())
 
 
+def _validate_from_version(_ctx, _param, value):
+    # GAP-1449: any string used to be accepted. Installer values are package
+    # versions (0.8.10, 1.0.1.dev3, 0.8.10+local), so only the X.Y.Z prefix
+    # is required.
+    if value is None or re.match(r"v?\d+\.\d+\.\d+", value.strip()):
+        return value
+    raise click.BadParameter(
+        f"{value!r} is not a release version; use X.Y.Z, for example 0.8.10",
+    )
+
+
 @click.command("migrate")
 @click.option(
     "--check",
@@ -54,7 +66,13 @@ def _default_data_dir() -> str:
         "(pending or not), 1 when they cannot, 2 when the config is from a newer release."
     ),
 )
-@click.option("--from-version", default=None, metavar="X.Y.Z", help="Version that wrote the data (0.x imports).")
+@click.option(
+    "--from-version",
+    default=None,
+    metavar="X.Y.Z",
+    callback=_validate_from_version,
+    help="Version that wrote the data (0.x imports).",
+)
 @click.option("--data-dir", default=None, type=click.Path(file_okay=False), help="Data directory to migrate.")
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
 @click.option("--gateway-binary", default=None, type=click.Path(dir_okay=False), help="Gateway used by --check.")
@@ -63,7 +81,7 @@ def _default_data_dir() -> str:
 def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, yes) -> None:
     """Bring config and data to this version's schema."""
     del yes
-    from defenseclaw.migrations import ConfigTooNewError, MigrationError, migrate
+    from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 
     # With --json, stdout carries only the JSON document; step progress goes to stderr.
     progress = contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext()
@@ -111,7 +129,7 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
             f"(config_version {result.from_config_version} -> {result.to_config_version}):"
         )
         for step in result.applied:
-            ux.echo(f"    → {step}")
+            ux.echo(f"    → {display_step_name(step)}")
         ux.subhead("Nothing was changed. 'defenseclaw migrate' (or the upgrade) applies them.")
     else:
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
