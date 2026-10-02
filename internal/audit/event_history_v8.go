@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1097,6 +1098,19 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		if value, ok := payload[field].(string); ok && value != "" {
 			return value
 		}
+	}
+	// Platform health records carry no message: name the subsystem, its state
+	// and the (already redacted) reason, so an alert does not read only
+	// "subsystem.degraded".
+	if subsystem, ok := payload["defenseclaw.health.subsystem"].(string); ok && subsystem != "" {
+		label := subsystem
+		if state, ok := payload["defenseclaw.health.state"].(string); ok && state != "" {
+			label += " " + state
+		}
+		if summary, ok := payload["defenseclaw.health.error_summary"].(string); ok && strings.TrimSpace(summary) != "" {
+			return label + ": " + strings.TrimSpace(summary)
+		}
+		return label
 	}
 	return fallback
 }

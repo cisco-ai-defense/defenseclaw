@@ -272,6 +272,7 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
             "defenseclaw.network.target_ref",
             "defenseclaw.scan.target_ref",
             "defenseclaw.agent.id",
+            "defenseclaw.health.subsystem",
         )
         or row.event_name
     )
@@ -1637,6 +1638,11 @@ def _alert_details_label(event: AlertEvent) -> str:
             parts.append(elapsed)
         if parts:
             return _truncate(" · ".join(parts), 58)
+    # Canonical-history rows end with ``summary=<free text>``; that text (for
+    # example the degraded subsystem and its reason) beats the bucket prefix.
+    _, has_summary, summary = event.details.partition(" summary=")
+    if has_summary and event.details.startswith("bucket=") and summary.strip():
+        return _truncate(summary.strip(), 58)
     return _truncate(humanize_alert_details(event.details) or event.details, 58)
 
 
