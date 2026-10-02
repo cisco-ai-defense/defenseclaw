@@ -569,6 +569,7 @@ def test_setup_wait_skips_a_peer_the_restarted_gateway_refused(monkeypatch, tmp_
     )
 
     assert result
+    assert result.skipped == frozenset({"cursor"})
     output = capsys.readouterr().out
     assert "skipping cursor: the restarted gateway did not activate it" in output
     assert "defenseclaw setup cursor" in output
@@ -580,6 +581,29 @@ def test_setup_wait_skips_a_peer_the_restarted_gateway_refused(monkeypatch, tmp_
     assert not cmd_setup._wait_for_connector_runtime(
         str(tmp_path), ["amp", "codex"], None, None, timeout=0.3, required={"amp"}
     )
+
+
+def test_restart_services_does_not_wait_for_a_refused_peer_in_the_api(monkeypatch, tmp_path: Path) -> None:
+    """GAP-1710: the API wait must not expect a peer the runtime wait skipped."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: ["hermes", "claudecode", "copilot"])
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(
+        cmd_setup,
+        "_wait_for_connector_runtime",
+        lambda *_args, **_kwargs: cmd_setup._ConnectorRuntimeReadiness(True, skipped=frozenset({"copilot"})),
+    )
+
+    def api_wait(*_args, expected_connectors=(), **_kwargs):
+        seen.append(list(expected_connectors))
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", api_wait)
+
+    cmd_setup._restart_services(str(tmp_path), connector="hermes", wait_for_connector_ready=True)
+
+    assert seen == [["hermes", "claudecode"]]
 
 
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(
