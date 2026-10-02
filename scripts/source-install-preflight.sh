@@ -79,7 +79,14 @@ refuse() {
     echo "Release installs upgrade with: defenseclaw upgrade (or re-run the release install.sh / install.ps1)." >&2
     if [[ "${FOREIGN_INSTALL}" -eq 1 && "${IS_WINDOWS}" -eq 0 ]]; then
         echo "To develop from this checkout instead, stop the gateway and remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
-        echo "  defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" >&2
+        if [[ -f "${INSTALL_DIR:-}/defenseclaw-uv.sha256" ]]; then
+            # The uninstall removes the uv the release installer recorded, and
+            # make all needs uv (GAP-1783). Without its record uv stays.
+            echo "  defenseclaw-gateway stop; rm -f '${INSTALL_DIR}/defenseclaw-uv.sha256'; defenseclaw uninstall --binaries --yes && make all" >&2
+            echo "(Removing defenseclaw-uv.sha256 keeps the uv the release installer added; make all needs it.)" >&2
+        else
+            echo "  defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" >&2
+        fi
         echo "If the uninstall stops on a connector teardown timeout (older releases with a large audit log), run the same command again." >&2
     elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
         # Windows finishes removing binaries a moment after the CLI exits.

@@ -645,6 +645,31 @@ def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
     assert installed_acp.read_bytes() == b"foreign acp\n"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_refusal_hint_keeps_the_release_installed_uv(tmp_path: Path) -> None:
+    # GAP-1783: uninstall --binaries removes the uv the release installer
+    # recorded, and make all needs uv, so the hint drops the record first.
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    install_dir.mkdir(parents=True)
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    _write_executable(repo / "defenseclaw-acp", b"source acp\n")
+    _write_executable(install_dir / "defenseclaw-acp", b"foreign acp\n")
+    (install_dir / "defenseclaw-uv.sha256").write_text("0" * 64 + "  uv\n", encoding="utf-8")
+
+    completed = _preflight(tmp_path, repo, install_dir, "publish-acp")
+
+    assert completed.returncode != 0
+    record = f"{install_dir}/defenseclaw-uv.sha256"
+    assert (
+        f"defenseclaw-gateway stop; rm -f '{record}'; defenseclaw uninstall --binaries --yes && make all"
+        in completed.stderr
+    )
+    assert "keeps the uv the release installer added" in completed.stderr
+    assert (install_dir / "defenseclaw-uv.sha256").exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_make_all_dev_reclaim_replaces_existing_acp(tmp_path: Path) -> None:
     repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
