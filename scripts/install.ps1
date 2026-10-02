@@ -1273,16 +1273,23 @@ Environment:
 # -- Main ---------------------------------------------------------------------
 
 function Invoke-Rollback {
-    Write-Step "Rolling back"
     $backTo = Read-Text (Join-Path $Previous "VERSION")
-    if (-not (Test-Version $backTo)) { Die "No previous install to roll back to ($Previous is missing)" }
+    if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
     if (Test-Path -LiteralPath (Join-Path $Previous "legacy-setup")) {
         Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. Its files and " +
             "your data from before the upgrade are in $Previous; nothing was changed")
     }
     $current = Get-InstalledVersion
     $currentLabel = if ($current) { $current } else { "?" }
-    if (-not (Confirm-Step "Replace DefenseClaw $currentLabel with the previous install ($backTo)?")) {
+    # Run again after a rollback, this goes forward to the newer install (GAP-1497).
+    if ($current -and (Test-Version $current) -and [version]$current -lt [version]$backTo) {
+        Write-Step "Rolling forward to DefenseClaw $backTo"
+        $question = "Replace DefenseClaw $current with DefenseClaw $backTo (the install you rolled back from)?"
+    } else {
+        Write-Step "Rolling back to DefenseClaw $backTo"
+        $question = "Replace DefenseClaw $currentLabel with the previous install ($backTo)?"
+    }
+    if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"
     }
     Wait-VenvFree
@@ -1612,6 +1619,11 @@ function Invoke-Install {
         Write-Host "  Replaced DefenseClaw Setup $PrevVersion; your config and data were kept."
     } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
         Write-Host "  Upgraded from $PrevVersion. Undo with: defenseclaw rollback"
+    }
+    if ($PrevVersion -and $configured -and -not (Get-GatewayProcess)) {
+        # GAP-1496: it was not running before the upgrade, so it was not started.
+        Write-Warn "The gateway is not running, so agent hooks are not guarded until it is"
+        Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
         # An earlier install that was never initialized: say how to start, as a

@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -969,7 +969,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=90,
         )
 
     def test_windows_verified_gateway_still_counts_as_running(self):
@@ -1263,3 +1263,43 @@ def test_hooks_missing_because_the_gateway_did_not_start_point_at_the_start():
         "defenseclaw-gateway start",
         "defenseclaw setup devin --workspace <project>",
     ]
+
+
+def test_hooks_pending_a_gateway_not_started_on_purpose_are_not_warnings():
+    # GAP-1491: with --no-start-gateway every connector read "! not found yet"
+    # and Next listed `defenseclaw setup <connector>` for each of them.
+    from defenseclaw.bootstrap import StepResult, _defer_hooks_to_gateway_start, _next_commands, _rollup_status
+
+    setup = [StepResult("Sidecar", "skip", "not started (--no-start-gateway)", "defenseclaw-gateway start")]
+    readiness = [StepResult("Connector", "warn", "Amp system policy plugin not found at /p", "defenseclaw setup amp")]
+    _defer_hooks_to_gateway_start(setup, readiness)
+
+    assert readiness[0].status == "skip"
+    assert readiness[0].detail.endswith("written when the gateway starts")
+    assert _rollup_status(setup, readiness) == "ready"
+    assert "defenseclaw setup amp" not in _next_commands(setup, readiness, object(), "action")
+
+
+def test_a_gateway_start_that_outlasts_init_says_it_is_still_starting(tmp_path, monkeypatch):
+    # GAP-1382: init gave up after 30 s and printed "start timed out" on
+    # Windows, though the gateway was up seconds later.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    running = iter([False, True])
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: next(running))
+
+    def slow(argv, **kwargs):
+        assert kwargs["timeout"] >= 90
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", slow)
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail.startswith("still starting")
+    assert step.next_command == "defenseclaw-gateway status"

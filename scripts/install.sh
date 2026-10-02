@@ -457,11 +457,12 @@ if [[ "${ROLLBACK}" == true ]]; then
     # Run again after a rollback, this goes forward to the newer install.
     if [[ -n "${current}" ]] && version_lt "${current}" "${back_to}"; then
         step "Rolling forward to DefenseClaw ${back_to}"
+        question="Replace DefenseClaw ${current} with DefenseClaw ${back_to} (the install you rolled back from)?"
     else
         step "Rolling back to DefenseClaw ${back_to}"
+        question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
-    ask_yes_no "Replace DefenseClaw ${current:-?} with the previous install (${back_to})?" \
-        || die "Rollback cancelled; nothing was changed"
+    ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
@@ -487,7 +488,8 @@ if [[ "${ROLLBACK}" == true ]]; then
     if [[ ${rollback_rc} -eq 1 ]]; then
         # The swap is done, but the hooks are unguarded: say so, and exit 1.
         warn "Now running DefenseClaw ${back_to}, but its gateway is not up, so agent hooks are not guarded until it is"
-        info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
+        # A start that said why it failed already printed the command that fixes it.
+        [[ -n "${START_EXPLAINED:-}" ]] || info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
     else
         ok "Now running DefenseClaw ${back_to}."
     fi
@@ -744,6 +746,12 @@ if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
     fi
+fi
+if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
+    && [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # GAP-1496: it was not running before the upgrade, so it was not started.
+    warn "The gateway is not running, so agent hooks are not guarded until it is"
+    printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
     # An earlier install that was never initialized: say how to start, as a
@@ -1139,7 +1147,9 @@ explain_start_failure() {
         after="$(printf '%s' "${reason}" | sed -nE 's/.*current version="([^"]*)".*/\1/p')"
         warn "The gateway refused to start: ${conn:-a connector}'s agent changed (${before:-?} -> ${after:-?}) after this DefenseClaw recorded its hook contract lock"
         if [[ "${reason}" == *DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1* ]]; then
-            info "To accept the new agent version and refresh the lock, start it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start"
+            # restart, not start: a gateway that refused its connector can
+            # still be running, and start then only says it is (GAP-0012).
+            info "To accept the new agent version and refresh the lock, restart it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
         else
             info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
         fi

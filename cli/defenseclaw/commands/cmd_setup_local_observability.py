@@ -340,6 +340,15 @@ def status_cmd(app: AppContext) -> None:
     output = _run_native_controller(controller.status, "Docker Compose status")
     click.echo(output, nl=False)
     # GAP-1335: a stack that is down or failing is not a success.
+    if getattr(controller, "status_foreign", False) is True:
+        # GAP-1461: `up` refuses too, so do not point at it alone.
+        click.echo(
+            "  These containers belong to another copy of the stack (see the note above), so this one "
+            "cannot start. Use that copy's Grafana as it is, or stop that stack and then run: "
+            "defenseclaw setup local-observability up",
+            err=True,
+        )
+        raise SystemExit(1)
     if not getattr(controller, "status_ready", True):
         click.echo(
             "  The local observability stack is not ready. Start it with: "

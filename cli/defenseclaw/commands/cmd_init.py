@@ -791,11 +791,17 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # Extra connectors get their hooks from the gateway's reconcile on
             # the next start; say so instead of leaving Doctor to report
             # "no hooks registered" with no explanation.
+            # GAP-1491: name every connector still waiting for its hooks, the
+            # primary too (the Connector readiness rows follow `activated`).
+            rows = [r for r in report.readiness if r.name == "Connector"]
+            pending = (
+                [name for name, row in zip(activated, rows) if row.status != "pass"]
+                if len(rows) == len(activated)
+                else activated[1:]
+            )
             for s in report.setup:
-                if s.name == "Sidecar" and s.status == "skip":
-                    s.detail = (
-                        f"{s.detail}; hooks for {', '.join(activated[1:])} are installed when the gateway starts"
-                    )
+                if s.name == "Sidecar" and s.status == "skip" and pending:
+                    s.detail = f"{s.detail}; hooks for {', '.join(pending)} are installed when the gateway starts"
     elif extras and primary["connector"] != "none":
         from defenseclaw.bootstrap import StepResult
 
@@ -1149,12 +1155,16 @@ def _prompt_connector_selection(
         rescan_agents=rescan_agents,
         trusted_prompt_cache=trusted_prompt_cache,
     )
-    table = agent_discovery.render_discovery_table(_with_config_state(disc, data_dir)).rstrip()
+    disc = _with_config_state(disc, data_dir)
+    table = agent_discovery.render_discovery_table(disc).rstrip()
     if table:
         click.echo(table)
         click.echo()
     _note_proxy_connectors(disc)
     installed = _installed_hook_connectors(disc)
+    # GAP-1433: on a configured install the active set is the default, so
+    # Enter keeps it; detected connectors never enrolled stay unchecked.
+    active = [name for name in installed if getattr(disc.agents.get(name), "active", False)]
     # Choosing no connector is the interactive form of --connector none, for
     # someone who only wants sandboxes or will add an agent later.
     later = "'defenseclaw setup <connector>' can add one later"
@@ -1162,10 +1172,17 @@ def _prompt_connector_selection(
         later = "OpenShell sandboxes still work, and " + later
     if installed:
         ux.subhead(f"Clear every box to protect no host agent now; {later}.")
+        if active:
+            inactive = [name for name in installed if name not in active]
+            if inactive:
+                ux.subhead(f"Detected but not active (check to add): {', '.join(inactive)}.")
+            title = "Select active connector(s). Active connectors are pre-selected."
+        else:
+            title = "Select active connector(s). Detected connectors are pre-selected."
         selected = _prompt_checkbox_selection(
             installed,
-            default_selected=installed,
-            title="Select active connector(s). Detected connectors are pre-selected.",
+            default_selected=active or installed,
+            title=title,
             empty_ok=True,
         )
         if selected:
@@ -3297,7 +3314,8 @@ def _start_gateway(cfg, logger) -> None:
             ["defenseclaw-gateway", "start"],
             capture_output=True,
             text=True,
-            timeout=30,
+            # `defenseclaw-gateway start` waits up to 60 s for readiness (GAP-1382).
+            timeout=90,
         )
         if result.returncode == 0:
             click.echo(" " + ux._style("✓", fg="green", bold=True))
@@ -3316,7 +3334,7 @@ def _start_gateway(cfg, logger) -> None:
     except FileNotFoundError:
         click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))
     except subprocess.TimeoutExpired:
-        click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (timed out)"))
+        click.echo(" " + ux._style("!", fg="yellow", bold=True) + ux.dim(" (still starting after 90 s)"))
         click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
 
     if started:
