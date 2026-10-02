@@ -330,3 +330,19 @@ func TestClassifyWindowsProcessesFindsCursorAgentNode(t *testing.T) {
 		t.Fatalf("connectors = %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector)
 	}
 }
+
+// GAP-1849: cursor-agent's worker-server node.exe child is folded into its
+// parent, so one cursor-agent run is one Cursor process.
+func TestClassifyWindowsProcessesFoldsCursorWorkerServer(t *testing.T) {
+	catalog := append(windowsAgentCatalog(), AISignature{ID: "cursor", Name: "Cursor", ProcessNames: []string{"cursor", "Cursor"}})
+	image := `C:\Users\kevin\AppData\Local\cursor-agent\versions\2026.10.01-14929f9\node.exe`
+	procs := []processInfo{
+		{PID: 2144, PPID: 900, Comm: "node.exe", Image: image, Windows: true},
+		{PID: 15344, PPID: 2144, Comm: "node.exe", Image: image, Windows: true},
+		{PID: 3000, PPID: 901, Comm: "node.exe", Image: image, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "cursor" || procs[1].Connector != "" || procs[2].Connector != "cursor" {
+		t.Fatalf("connectors = %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector)
+	}
+}
