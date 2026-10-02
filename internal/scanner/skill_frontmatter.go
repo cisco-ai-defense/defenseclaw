@@ -97,7 +97,7 @@ func (s *SkillScanner) scanDescription(ctx context.Context, description string) 
 		}
 		return nil
 	}
-	findings, err := parseSkillOutput(out)
+	findings, err := parseSkillOutput(out, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[scanner] skill description scan: %v\n", err)
 		return nil

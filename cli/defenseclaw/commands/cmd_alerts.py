@@ -360,7 +360,7 @@ def _finding_facts(
         "rule": f"{rule_id}: {title}" if title else rule_id,
         "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
         # GAP-1525: the file (and line) inside the scanned plugin or skill.
-        "location": _readable_location(structured.get("defenseclaw.finding.location")),
+        "location": _readable_location(structured.get("defenseclaw.finding.location"), target),
         "route": _acp_route(hook_details.get(e.id, [])),
         "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
     }
@@ -395,10 +395,19 @@ def _alert_targets_for(store, alert_list: list) -> dict[str, dict[str, str]]:
     return result if isinstance(result, dict) else {}
 
 
-def _readable_location(value: object) -> str:
-    """A file and line, or "" for a redacted or hashed hook location (GAP-1676)."""
+_HOOK_EVENT_LOCATION = re.compile(r"[A-Za-z0-9_-]+:[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _readable_location(value: object, target: str = "") -> str:
+    """A file and line, or "" for a hook location that is not one.
+
+    Hook-rule findings store a redacted or hashed placeholder (GAP-1676) or
+    the hook event itself (``openclaw:exec``, ``claudecode:PreToolUse``),
+    which repeats the Target and names no file (GAP-1691)."""
     text = str(value or "").strip()
-    return "" if text.startswith("<") else text
+    if text.startswith("<") or text == target.strip() or _HOOK_EVENT_LOCATION.fullmatch(text):
+        return ""
+    return text
 
 
 def _short_hook_target(target: str, connector: str) -> str:
