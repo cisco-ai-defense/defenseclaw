@@ -1194,7 +1194,9 @@ class AlertsPanelModel:
                 *(f"{label}: {rich_escape(value)}" for label, value in event.facts),
                 f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
             ]
-            if event.details:
+            if (canonical := _canonical_detail_pairs(event)) is not None:
+                lines.extend(f"{label}: {rich_escape(value)}" for label, value in canonical)
+            elif event.details:
                 human = "" if event.facts else humanize_alert_details(event.details)
                 if human and human != event.details:
                     lines.append(f"Summary: {rich_escape(human)}")
@@ -1312,6 +1314,8 @@ class AlertsPanelModel:
                 pairs.extend(structured)
             elif event.details:
                 pairs.append(("Details", event.details))
+        elif (canonical := _canonical_detail_pairs(event)) is not None:
+            pairs.extend(canonical)
         else:
             human = "" if event.facts else humanize_alert_details(event.details)
             if human and human != event.details:
@@ -1368,6 +1372,8 @@ class AlertsPanelModel:
                     lines.append(f"{label}: {value}")
             elif event.details:
                 lines.append(f"Details: {event.details}")
+        elif (canonical := _canonical_detail_pairs(event)) is not None:
+            lines.extend(f"{label}: {value}" for label, value in canonical)
         else:
             human = humanize_alert_details(event.details)
             if human and human != event.details:
@@ -1899,6 +1905,23 @@ def _alert_details_label(event: AlertEvent) -> str:
         if summary:
             return _truncate(summary, 58)
     return _truncate(humanize_alert_details(event.details) or event.details, 58)
+
+
+def _canonical_detail_pairs(event: AlertEvent) -> list[tuple[str, str]] | None:
+    """Readable detail rows of a canonical-history alert, or None for a legacy row.
+
+    The ``bucket=... event_name=... source=... redaction_profile=...`` blob is
+    internal telemetry; the pane already names the target, connector, rule and
+    decision, so only a readable summary is kept (GAP-1743). A row with no
+    facts and no summary keeps the raw line so the pane is never empty.
+    """
+    if not event.details.startswith("bucket="):
+        return None
+    summary = event.details.partition(" summary=")[2].strip()
+    event_name = event.details.partition("event_name=")[2].split(" ", 1)[0]
+    if summary and not summary.startswith("<redacted") and summary != event_name:
+        return [("Summary", summary)]
+    return [] if event.facts else [("Details", event.details)]
 
 
 def _hook_detail_lines(event: AlertEvent) -> list[str]:
