@@ -2460,6 +2460,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if panel == self.active_panel:
             return 0
+        if panel == "alerts":
+            # Alerts is an inbox: its badge is the open-alert count that
+            # Overview and the status bar show, not "new since last visit",
+            # so the same number appears everywhere (WIN2-U2-11).
+            return min(99, self.alerts_model.total_count())
         total = self._panel_total_count(panel)
         if total <= 0:
             return 0
@@ -9983,7 +9988,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             redaction_on=redaction_on,
             policy_posture=policy_posture,
             commands_run=int(self.commands_run),
-            active_alerts=self.alerts_model.critical_count() or self.overview_model.enforcement.active_alerts,
+            active_alerts=self.alerts_model.total_count() or self.overview_model.enforcement.active_alerts,
             command_running=self.command_running,
             version=__version__,
         )
