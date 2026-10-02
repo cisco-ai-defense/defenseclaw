@@ -1260,7 +1260,12 @@ def test_doctor_v8_local_rows_fail_when_gateway_reports_audit_write_failure() ->
     full = {
         "telemetry": {
             "state": "error",
-            "details": {"event_history_failure": "sqlite_write_failed", "event_history_last_sqlite_class": "full"},
+            "details": {
+                "event_history_failure": "sqlite_write_failed",
+                "event_history_last_sqlite_class": "full",
+                # The sink's own counters lag the failure (GAP-2002).
+                "destinations": [{"name": "local-sqlite", "health_state": "healthy", "reason": "activated"}],
+            },
         }
     }
     result = _DoctorResult()
@@ -1270,6 +1275,8 @@ def test_doctor_v8_local_rows_fail_when_gateway_reports_audit_write_failure() ->
         assert checks[label]["status"] == "fail"
         assert "disk holding the audit database is full" in checks[label]["detail"]
         assert checks[label]["remediation"].startswith("free space on the disk")
+    row = checks["Destination: local-sqlite"]["detail"]
+    assert "health=healthy" not in row and "0 consecutive failures" not in row
 
     healthy = _DoctorResult()
     _check_observability_v8_status(status, healthy, live_health={"telemetry": {"state": "running"}})

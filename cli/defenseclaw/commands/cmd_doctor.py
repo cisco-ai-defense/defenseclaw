@@ -9375,7 +9375,14 @@ def _check_observability_v8_status(
             detail += f"; target={destination.endpoint}"
         live = destination_health.get(destination.name)
         tag = "pass" if destination.enabled else "skip"
-        if destination.enabled and live is not None:
+        sqlite_write_failure = bool(destination.enabled and destination.kind == "sqlite" and write_failure)
+        if sqlite_write_failure:
+            # The sink's own counters lag the gateway's audit-write failure
+            # (healthy, 0 consecutive failures), so leave them out and say
+            # what the telemetry row says (GAP-1984, GAP-2002).
+            tag = "fail"
+            detail += f"; {write_failure}"
+        elif destination.enabled and live is not None:
             live_state = live.state or "unavailable"
             detail += f"; health={live_state}"
             if live.reason:
@@ -9412,12 +9419,6 @@ def _check_observability_v8_status(
         elif destination.enabled and destination.kind != "sqlite":
             tag = "warn"
             detail += "; health=unavailable; queue=unavailable; last=unavailable"
-        sqlite_write_failure = bool(destination.enabled and destination.kind == "sqlite" and write_failure)
-        if sqlite_write_failure:
-            # The sink's own counters lag the gateway's audit-write failure,
-            # so say what the telemetry row says (GAP-1984).
-            tag = "fail"
-            detail += f"; {write_failure}"
         next_step = ""
         if tag in {"warn", "fail"}:
             next_step = write_next_step if sqlite_write_failure else _destination_remediation(destination, live)
