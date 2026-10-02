@@ -276,6 +276,16 @@ protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
 | Terminal | `terminal/*` | Bidirectional content/method policy |
 | Extensions | for example `cursor/*` | Preserved as ACP extensions and evaluated as tool traffic |
 
+In action mode a blocked prompt ends that turn normally: the editor shows the
+reason as an agent message, in the wording the hook connectors use
+("DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key).
+Do not retry it in another form."), and the next prompt runs. Agent output
+blocked in the middle of a turn ends the turn the same way, and the guard
+cancels the turn in the agent. If the gateway does not answer an evaluation
+(the guard retries once), only that step is refused, with "DefenseClaw could
+not check this step because the gateway did not answer"; the session stays
+open.
+
 The guard launches the agent with literal argv—never a shell. It connects only
 to a literal loopback address, disables environment proxying and redirects,
 and authenticates the gateway with a fresh HMAC challenge before encrypting
@@ -342,6 +352,11 @@ A blocked prompt therefore looks like this:
 A profile-denied method blocks with `finding_count` 0 and no `rule_ids`: that
 veto comes from the allow-list, not a scanner match, and the event does not
 invent a finding to justify it.
+
+A decision with findings (a block, an alert, or an observe-mode would-block)
+and a profile-denied method are also exported as an `apply_guardrail` span,
+as hook decisions are, so trace destinations such as Tempo and Galileo record
+ACP blocks too.
 
 ## Configuration
 

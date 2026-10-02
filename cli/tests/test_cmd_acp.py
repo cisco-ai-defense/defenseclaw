@@ -841,3 +841,30 @@ def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatc
         assert result.exit_code != 0 and "agent executable digest has drifted" in result.output
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_setup_and_remove_print_each_slow_step_and_keep_json_clean(tmp_path, monkeypatch):
+    """GAP-1835: setup and remove ran for minutes on Windows with no output at all."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        for step in ("checking the guard and agent executables", "Pinning the guard and agent executable digests",
+                     "Saving the ACP policy", "Recording the change with the gateway"):
+            assert step in result.stderr
+        assert result.stdout.startswith("Configured kiro through DefenseClaw in zed")
+
+        result = CliRunner().invoke(acp_cmd, [*setup, "--json-output"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["agent"] == "kiro" and "Pinning" not in result.stderr
+
+        result = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Removing the DefenseClaw kiro entry" in result.stderr
+        assert "Recording the change with the gateway" in result.stderr
+    finally:
+        cleanup_app(app, db_path, data_dir)

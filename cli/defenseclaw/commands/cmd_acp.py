@@ -447,6 +447,18 @@ def catalog_cmd() -> None:
     click.echo(json.dumps(_REGISTRY, indent=2, sort_keys=True))
 
 
+def _progress(enabled: bool, message: str) -> None:
+    """Print one step of a slow ACP change, so it does not look hung (GAP-1835).
+
+    Setup and remove hash executables, rewrite editor files and config.yaml
+    and wait for the gateway's audit acknowledgement; on a busy Windows host
+    that took about two minutes with no output at all. The lines go to
+    stderr, so --json output stays one document.
+    """
+    if enabled:
+        click.echo(f"  {message}", err=True)
+
+
 @acp_cmd.command("setup")
 @click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
 @click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
@@ -496,6 +508,8 @@ def setup_cmd(
     """Install a guarded agent entry into Zed or JetBrains."""
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
+    show = not json_output
+    _progress(show, f"Setting up {client}/{agent}: checking the guard and agent executables...")
     guard = _resolve_executable(guard_binary, "DefenseClaw ACP guard")
     catalog_command, catalog_args = _AGENTS[agent]
     agent_executable = _resolve_executable(agent_binary or catalog_command, agent)
@@ -583,7 +597,9 @@ def setup_cmd(
         *catalog_args,
     ]
     try:
+        _progress(show, f"Writing the DefenseClaw {agent} entry to {client_path}...")
         path = _set_client_entry(client, agent, guard, args)
+        _progress(show, "Pinning the guard and agent executable digests...")
         lock_path = _write_contract_lock(
             data_dir=data_dir,
             client=client,
@@ -628,6 +644,7 @@ def setup_cmd(
             profile_value.allowed_clients = sorted(set(profile_value.allowed_clients) | {client})
             profile_value.allowed_agents = sorted(set(profile_value.allowed_agents) | {agent})
             app.cfg.acp.profiles[profile] = profile_value
+            _progress(show, "Saving the ACP policy to the DefenseClaw config...")
             app.cfg.save()
     except Exception as exc:
         app.cfg.acp = acp_snapshot
@@ -654,6 +671,7 @@ def setup_cmd(
     }
     prior = acp_snapshot.bindings.get(pair_key)
     prior_profile = acp_snapshot.profiles.get(prior.profile) if prior is not None else None
+    _progress(show, "Recording the change with the gateway...")
     _log_acp_change(
         app,
         "acp-setup",
@@ -714,6 +732,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         return
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
+        _progress(True, f"Removing the DefenseClaw {agent} entry from {path}...")
         path = _remove_client_entry(client, agent)
         remaining = _managed_pairs()
         if not managed:
@@ -738,6 +757,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                     value for value in profile_value.allowed_agents if value in active_agents
                 ]
             app.cfg.acp.enabled = bool(active_clients and active_agents)
+            _progress(True, "Saving the ACP policy to the DefenseClaw config...")
             app.cfg.save()
     except Exception as exc:
         app.cfg.acp = acp_snapshot
@@ -749,6 +769,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 rollback_errors.append(f"{managed_path}: {type(rollback_exc).__name__}")
         suffix = f"; rollback problems: {', '.join(rollback_errors)}" if rollback_errors else ""
         raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
+    _progress(True, "Recording the change with the gateway...")
     _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
     if had_entry:
         click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
