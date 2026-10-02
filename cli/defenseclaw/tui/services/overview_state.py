@@ -861,9 +861,10 @@ class OverviewPanelModel:
                         notices.append(
                             OverviewNotice(
                                 "info",
-                                f"No connector has seen a hook event since the gateway started "
-                                f"{format_duration(uptime)} ago - normal until an agent runs; "
-                                "verify connector hook setup if this persists",
+                                # One line at 80 columns: the wrapped rest fell
+                                # below the fold and read as cut off (GAP-1775).
+                                f"No hook events in {format_duration(uptime)} - normal until an "
+                                "agent runs; d runs Doctor",
                             )
                         )
                 elif not _connector_saw_traffic(self.health.connector):

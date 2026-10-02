@@ -43,6 +43,7 @@ from defenseclaw.tui.services.event_models import (
     parse_timestamp,
 )
 from defenseclaw.tui.services.v8_event_history import (
+    LEGACY_HOOK_EVENT_NAME,
     V8EventHistoryRow,
     load_v8_alert_history,
     load_v8_event_history,
@@ -241,13 +242,16 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
         return _v8_row_outcome(row) in ALERT_NON_ALLOW_OUTCOMES
     if row.bucket in {"platform.health", "diagnostic"}:
         return severity in ALERT_ACTIONABLE_SEVERITIES
-    if not row.bucket:
+    legacy_hook = _is_legacy_hook_row(row)
+    if not row.bucket or legacy_hook:
         action = (row.action or "").strip().lower()
         if action == "connector-hook":
             projected_decision = (row.hook_decision or "").strip().lower()
             if projected_decision in {"allow", "alert", "block"}:
                 return projected_decision == "block"
             return connector_hook_decision(row.details) == "block"
+        if legacy_hook:
+            return False
         return (
             (action in ALERT_LEGACY_FINDING_ACTIONS and severity in _V8_FINDING_SEVERITIES)
             or action in ALERT_NON_ALLOW_OUTCOMES
@@ -255,6 +259,17 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
             or action.endswith("-failed")
         )
     return False
+
+
+def _is_legacy_hook_row(row: V8EventHistoryRow) -> bool:
+    """The connector-hook row a current gateway files under guardrail.evaluation.
+
+    A block with no rule finding (a tool on the static block list) exists only
+    as this row; the history reader already drops the ones a finding explains
+    (GAP-1747).
+    """
+
+    return row.event_name == LEGACY_HOOK_EVENT_NAME and (row.action or "").strip().lower() == "connector-hook"
 
 
 _DECISION_KEYS = (
@@ -372,6 +387,10 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         severity = "WARNING"
     elif row.bucket == "enforcement.action" and severity == "INFO":
         severity = "HIGH"
+    elif _is_legacy_hook_row(row) and severity == "INFO":
+        # The row's own severity is INFO; the hook decision carries the real one.
+        detail_severity = _severity_bucket(parse_kv_details(row.details).get("severity", ""))
+        severity = detail_severity if detail_severity in {"CRITICAL", "HIGH", "MEDIUM", "LOW"} else "HIGH"
     elif not row.bucket and severity == "INFO":
         severity = "HIGH"
     return AlertEvent(
@@ -781,6 +800,18 @@ class AlertsPanelModel:
     def deselect_all(self) -> None:
         self.selected_ids.clear()
 
+    def marked_events(self) -> list[AlertEvent]:
+        """Loaded events whose ids are marked with Space, newest first."""
+
+        seen: set[str] = set()
+        events: list[AlertEvent] = []
+        for row in self.flat_rows():
+            event = row.event
+            if event.id in self.selected_ids and event.id not in seen:
+                seen.add(event.id)
+                events.append(event)
+        return events
+
     def filtered_ids(self) -> list[str]:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
 
@@ -932,16 +963,35 @@ class AlertsPanelModel:
                 return AlertPanelAction(True, hint="No alert detail to copy.")
             return AlertPanelAction(True, hint="Copied alert detail.", copy_text=copied)
         if key == "d":
+            # With rows marked by Space, d dismisses exactly those rows (like
+            # x acknowledges them); only without marks does it act on the
+            # highlighted row. The confirm text names the alert(s), so the
+            # operator sees it is the one they reviewed (GAP-1777).
+            if self.selected_ids:
+                marked = self.marked_events()
+                count = len(self.selected_ids)
+                return AlertPanelAction(
+                    True,
+                    AlertCommandIntent(
+                        label=f"alerts dismiss {count} marked",
+                        args=_alert_id_command_args("dismiss", self.selected_ids),
+                        hint=f"Dismissing {count} marked alert(s).",
+                        consequence=_marked_dismiss_consequence(marked, count),
+                    ),
+                )
             row = self.selected()
             if row is None or row.event.id.startswith("gw:"):
-                return AlertPanelAction(True, hint="No audit alert selected to dismiss.")
+                return AlertPanelAction(True, hint="No audit alert highlighted to dismiss.")
+            summary = _alert_summary_line(row.event)
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
-                    label="alerts dismiss selected",
+                    label="alerts dismiss highlighted",
                     args=_alert_id_command_args("dismiss", [row.event.id]),
-                    hint=f"Dismissing selected alert {row.event.id}.",
-                    consequence="Removes this alert from the active list. The audit trail keeps the event.",
+                    hint=f"Dismissing highlighted alert: {summary}.",
+                    consequence=(
+                        f"Removes this alert from the active list: {summary}. The audit trail keeps the event."
+                    ),
                 ),
             )
         if key == "x":
@@ -1477,6 +1527,31 @@ def _alert_filter_change(old: str, new: str) -> AlertFilterChange | None:
 
 def _bulk_dismiss_consequence(count: int) -> str:
     return f"Removes {count} alert(s) from the active list. The TUI has no undo for this."
+
+
+def _alert_summary_line(event: AlertEvent) -> str:
+    """One-line identity of an alert for confirm text: time, connector, target, rule."""
+
+    parts = [event.timestamp.strftime("%b %d %H:%M"), _event_display_severity(event)]
+    connector = _alert_connector(event)
+    target = _alert_target_label(event)
+    if connector and not target.startswith(connector):
+        parts.append(connector)
+    if target:
+        parts.append(target)
+    details = _alert_details_label(event)
+    if details:
+        parts.append(details)
+    return " · ".join(part for part in parts if part)
+
+
+def _marked_dismiss_consequence(events: list[AlertEvent], count: int) -> str:
+    lines = [f"Removes {count} marked alert(s) from the active list. The audit trail keeps the events."]
+    shown = events[:5]
+    lines.extend(f"  {_alert_summary_line(event)}" for event in shown)
+    if count > len(shown):
+        lines.append(f"  … and {count - len(shown)} more")
+    return "\n".join(lines)
 
 
 def _alert_id_command_args(command: str, alert_ids: list[str] | set[str]) -> tuple[str, ...]:
