@@ -24,6 +24,9 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		filepath.Join(alice, "AppData", "Local", "hermes", "skills"),
 		filepath.Join(bob, "AppData", "Local", "hermes", "skills"),
 		filepath.Join(bob, ".kiro", "settings"),
+		// Kiro CLI's install folder (GAP-1210): what the service can still
+		// see when the guardian protects the user's .kiro.
+		filepath.Join(alice, "AppData", "Local", "Kiro-Cli"),
 	} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -36,11 +39,24 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		{Home: alice, UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"},
 		{Home: bob, UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"},
 	}
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kiroPaths []string
+	for _, sig := range catalog {
+		if sig.ID == "kiro" {
+			kiroPaths = sig.ConfigPaths
+		}
+	}
+	if !strings.Contains(strings.Join(kiroPaths, "\n"), "$LOCALAPPDATA/Kiro-Cli") {
+		t.Fatalf("catalog Kiro config paths %v do not name the Kiro CLI install folder", kiroPaths)
+	}
 	s := &ContinuousDiscoveryService{
 		opts: AIDiscoveryOptions{HomeDir: alice, HomeDirs: []string{alice, bob}, homeOwners: owners},
 		catalog: []AISignature{
 			{ID: "hermes", Name: "Hermes", SupportedConnector: "hermes", ConfigPaths: []string{"$LOCALAPPDATA/hermes/skills"}},
-			{ID: "kiro", Name: "Kiro", SupportedConnector: "kiro", ConfigPaths: []string{"~/.kiro/settings/cli.json"}},
+			{ID: "kiro", Name: "Kiro", SupportedConnector: "kiro", ConfigPaths: []string{"~/.kiro/settings/cli.json", "$LOCALAPPDATA/Kiro-Cli"}},
 		},
 	}
 
@@ -51,6 +67,7 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	want := map[string]string{
 		"hermes/alice": "S-1-5-21-1-2-3-1001",
 		"hermes/bob":   "S-1-5-21-1-2-3-1002",
+		"kiro/alice":   "S-1-5-21-1-2-3-1001",
 		"kiro/bob":     "S-1-5-21-1-2-3-1002",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {

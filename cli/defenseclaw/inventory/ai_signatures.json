@@ -2273,6 +2273,7 @@
       ],
       "config_paths": [
         "~/.kiro/settings/cli.json",
+        "$LOCALAPPDATA/Kiro-Cli",
         "~/.kiro/settings/mcp.json",
         "~/.kiro/agents",
         "~/.kiro/hooks",
