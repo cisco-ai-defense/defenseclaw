@@ -485,12 +485,23 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// across the AID / judge / regex lanes. Confidence stays at 0
 		// (lane doesn't self-report one); the emitter treats zero as
 		// "not computed" and omits it on the wire.
+		// A judge finding is titled by its category and keeps the
+		// severity of the judge that reported it, not the strictest one
+		// of the judges merged into the lane verdict (GAP-1886).
 		for _, f := range aid.Findings {
 			rf := RuleFinding{
 				RuleID:   f,
 				Title:    f,
 				Severity: aid.Severity,
 				Tags:     []string{strings.TrimSuffix(findingTag, ":")},
+			}
+			if s := aid.findingSeverity[f]; s != "" {
+				rf.Severity = s
+			}
+			if findingTag == "llm-judge:" {
+				if title := judgeFindingTitle(f); title != "" {
+					rf.Title = title
+				}
 			}
 			local.DetailedFindings = append(local.DetailedFindings, rf)
 		}

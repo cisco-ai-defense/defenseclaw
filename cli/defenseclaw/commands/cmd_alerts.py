@@ -309,10 +309,37 @@ def _rule_pack_titles() -> dict[str, str]:
 
 
 def _finding_title(rule_id: str, title: str) -> str:
-    """The pack's own title for a rule whose stored title was redacted."""
+    """The pack's own title for a rule whose stored title was redacted.
+
+    A title that only repeats the rule ID is dropped: an LLM-judge finding
+    read "JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE" (GAP-1886)."""
     if title == _REDACTED_SECRET_TITLE and rule_id:
         return _rule_pack_titles().get(rule_id, title) or title
+    if title == rule_id:
+        return ""
     return title
+
+
+# Finding tags of the hook lanes that are not local rules (gateway
+# mergeWithLaneVerdict); their findings share the hook-rules scan.
+_HOOK_LANE_TAGS = ("llm-judge", "ai-defense")
+
+
+def _finding_scanner(structured: dict, rule_id: str) -> str:
+    """The detector of a finding: the hook lane for a judge or AI Defense
+    finding, which reported "Scanner: hook-rules" like a regex rule (GAP-1886)."""
+    scanner = str(structured.get("defenseclaw.scan.scanner") or "").strip()
+    value = structured.get("defenseclaw.finding.tags")
+    if isinstance(value, str):
+        value = value.strip("[]").split(",")
+    tags = {str(tag).strip().strip("\"'").lower() for tag in value or () if str(tag).strip()}
+    for lane in _HOOK_LANE_TAGS:
+        if lane in tags:
+            return lane
+    # A PII finding's tags are rewritten when it is stored ("pii", "redacted").
+    if scanner == "hook-rules" and rule_id.upper().startswith("JUDGE-"):
+        return "llm-judge"
+    return scanner
 
 
 def _finding_facts(
@@ -358,7 +385,7 @@ def _finding_facts(
         "decision": _hook_decision(hook_details.get(e.id, []), target),
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
-        "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
+        "scanner": _finding_scanner(structured, rule_id),
         # GAP-1525: the file (and line) inside the scanned plugin or skill.
         "location": _readable_location(structured.get("defenseclaw.finding.location"), target),
         "route": _acp_route(hook_details.get(e.id, [])),

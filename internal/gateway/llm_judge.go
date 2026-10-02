@@ -1534,12 +1534,18 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 	var allReasons []string
 	totalEntityCount := 0
 	allFailed := true
+	findingSeverity := map[string]string{}
 
 	for _, v := range verdicts {
 		if severityRank[v.Severity] > severityRank[best.Severity] {
 			best = v
 		}
 		allFindings = append(allFindings, v.Findings...)
+		for _, f := range v.Findings {
+			if severityRank[v.Severity] > severityRank[findingSeverity[f]] {
+				findingSeverity[f] = v.Severity
+			}
+		}
 		totalEntityCount += v.EntityCount
 		if v.Reason != "" {
 			allReasons = append(allReasons, v.Reason)
@@ -1556,13 +1562,34 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 	}
 
 	return &ScanVerdict{
-		Action:      best.Action,
-		Severity:    best.Severity,
-		Reason:      strings.Join(allReasons, "; "),
-		Findings:    allFindings,
-		EntityCount: totalEntityCount,
-		Scanner:     "llm-judge",
+		Action:          best.Action,
+		Severity:        best.Severity,
+		Reason:          strings.Join(allReasons, "; "),
+		Findings:        allFindings,
+		EntityCount:     totalEntityCount,
+		Scanner:         "llm-judge",
+		findingSeverity: findingSeverity,
 	}
+}
+
+// judgeFindingTitle is the category a built-in judge finding ID stands for
+// ("JUDGE-EXFIL-FILE" -> "Sensitive File Access"), or "" for another ID. A
+// judge finding used to carry its ID as its title too, so alerts read
+// "Rule: JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE" (GAP-1886).
+func judgeFindingTitle(findingID string) string {
+	for _, categories := range []map[string]string{injectionCategories, exfilCategories, toolInjectionCategories} {
+		for label, id := range categories {
+			if id == findingID {
+				return label
+			}
+		}
+	}
+	for label, defaults := range piiCategoryDefaults {
+		if defaults.findingID == findingID {
+			return label
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

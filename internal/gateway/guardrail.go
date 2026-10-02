@@ -91,6 +91,10 @@ type ScanVerdict struct {
 	TraceContext        trace.SpanContext `json:"-"`
 	EnforcementID       string            `json:"-"`
 	FindingsEmitted     bool              `json:"-"`
+	// findingSeverity is the severity of the judge that reported each
+	// finding of a verdict merged from several judges (mergeJudgeVerdicts),
+	// whose own severity is the strictest one. In-process only.
+	findingSeverity map[string]string
 }
 
 func allowVerdict(scanner string) *ScanVerdict {
