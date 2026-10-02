@@ -815,6 +815,18 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
         self.assertEqual(json.loads(as_json.output)["config_errors"], ["galileo needs GALILEO_API_KEY"])
 
+    def test_config_problem_is_not_repeated_by_the_observability_section(self):
+        # GAP-1995: the loader's raw diagnostic repeated the config check's
+        # remedy under Observability.
+        self.app.config_problems = ["line 25: galileo needs GALILEO_API_KEY"]
+        raw = RuntimeError("config.yaml:25:11: [config_semantic_invalid] $.observability.destinations[0]")
+        with patch("defenseclaw.observability.v8_status.inspect_v8_operator_status", side_effect=raw):
+            result = self._invoke()
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("destination plan unavailable: the config has a problem, listed above", result.output)
+        self.assertNotIn("config_semantic_invalid", result.output)
+        self.assertNotIn("canonical v8", result.output)
+
 
 class TestStatusJson(unittest.TestCase):
     """SU-13: ``status --json`` emits a machine-readable document."""

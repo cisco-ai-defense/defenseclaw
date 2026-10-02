@@ -930,7 +930,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	}
 	switch state {
 	case stateDegraded:
-		Warn("Watchdog last known state: degraded (a required downstream connector or protection subsystem did not converge; restarting the watchdog is not a repair)")
+		printWatchdogDegraded(lastWatchdogDegradedDetail(dataDir))
 	case stateDown:
 		Warn("Watchdog last known state: down (gateway health is unavailable and protection status cannot be verified)")
 	default:
@@ -938,6 +938,59 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// watchdogDegradedLogPrefix starts the line the watchdog writes to
+// watchdog.log when protection becomes degraded.
+const watchdogDegradedLogPrefix = "[watchdog] protection degraded: "
+
+// lastWatchdogDegradedDetail is the cause of the last degraded transition the
+// watchdog logged ("Required connector opencode is missing from the health
+// response"), read from the tail of watchdog.log, or "". watchdog.state holds
+// only the state name.
+func lastWatchdogDegradedDetail(dataDir string) string {
+	file, err := os.Open(filepath.Join(dataDir, watchdogLogFile))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	offset := max(info.Size()-64<<10, 0)
+	tail := make([]byte, info.Size()-offset)
+	if _, err := file.ReadAt(tail, offset); err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	detail := ""
+	for _, line := range strings.Split(string(tail), "\n") {
+		if index := strings.Index(line, watchdogDegradedLogPrefix); index >= 0 {
+			detail = strings.TrimSpace(line[index+len(watchdogDegradedLogPrefix):])
+		}
+	}
+	if len(detail) > 300 {
+		detail = strings.ToValidUTF8(detail[:300], "") + "..."
+	}
+	return detail
+}
+
+// printWatchdogDegraded names what is degraded and the next step instead of a
+// generic "a connector or subsystem did not converge" (GAP-1968).
+func printWatchdogDegraded(detail string) {
+	if detail == "" {
+		Warn("Watchdog last known state: degraded (a required connector or protection subsystem is not running; restarting the watchdog does not fix it)")
+		Subhead("See which one: defenseclaw-gateway status")
+		return
+	}
+	Warn("Watchdog last known state: degraded: " + detail)
+	if rest, ok := strings.CutPrefix(detail, "Required connector "); ok {
+		if name, _, found := strings.Cut(rest, " "); found && name != "" {
+			Subhead(fmt.Sprintf("See gateway.log for the reason, then run: defenseclaw setup %s", name))
+			return
+		}
+	}
+	Subhead("See which subsystem and why: defenseclaw-gateway status (restarting the watchdog does not fix it)")
 }
 
 // watchdogPIDInfo is the JSON payload of watchdog.pid. The fingerprint

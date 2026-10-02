@@ -84,13 +84,29 @@ func gatewayExitedBeforeReadinessError(err error, logPath string, offset int64) 
 	return fmt.Errorf("%w: %s", errGatewayExitedBeforeReadiness, reason)
 }
 
-// configEnumProblem renders an invalid enum value the way 'defenseclaw config
-// validate' does, 'line 13: guardrail.mode is "x"; allowed values: observe,
-// action', instead of the raw schema diagnostic (GAP-1914).
-func configEnumProblem(err error) (string, bool) {
+// configSchemaProblem renders an invalid enum value or a value of the wrong
+// type the way 'defenseclaw config validate' does, 'line 13: guardrail.mode
+// is "x"; allowed values: observe, action' or 'line 11: guardrail.mode:
+// expected a value of type string (got a number)', instead of the raw schema
+// diagnostic (GAP-1914, GAP-1990).
+func configSchemaProblem(err error) (string, bool) {
 	var schemaErr *config.V8SchemaError
-	if !errors.As(err, &schemaErr) || schemaErr.Keyword != "enum" ||
-		!strings.HasPrefix(schemaErr.Expected, "one of ") {
+	if !errors.As(err, &schemaErr) {
+		return "", false
+	}
+	where := config.ConfigPath()
+	if schemaErr.Line > 0 {
+		where += fmt.Sprintf(" line %d", schemaErr.Line)
+	}
+	field := strings.TrimPrefix(schemaErr.Path, "$.")
+	if schemaErr.Keyword == "type" && schemaErr.Expected != "" {
+		got := ""
+		if noun := configValueClassNoun(schemaErr.ReceivedClass); noun != "" {
+			got = " (got " + noun + ")"
+		}
+		return fmt.Sprintf("%s: %s: expected %s%s", where, field, schemaErr.Expected, got), true
+	}
+	if schemaErr.Keyword != "enum" || !strings.HasPrefix(schemaErr.Expected, "one of ") {
 		return "", false
 	}
 	var choices []any
@@ -101,16 +117,30 @@ func configEnumProblem(err error) (string, bool) {
 	for i, choice := range choices {
 		names[i] = fmt.Sprint(choice)
 	}
-	where := config.ConfigPath()
-	if schemaErr.Line > 0 {
-		where += fmt.Sprintf(" line %d", schemaErr.Line)
-	}
-	field := strings.TrimPrefix(schemaErr.Path, "$.")
 	is := "is not an allowed value"
 	if schemaErr.Value != "" {
 		is = fmt.Sprintf("is %q", schemaErr.Value)
 	}
 	return fmt.Sprintf("%s: %s %s; allowed values: %s", where, field, is, strings.Join(names, ", ")), true
+}
+
+// configValueClassNoun names a YAML value class in plain words.
+func configValueClassNoun(class string) string {
+	switch class {
+	case "integer", "number":
+		return "a number"
+	case "boolean":
+		return "true or false"
+	case "array":
+		return "a list"
+	case "object":
+		return "a section of nested keys"
+	case "null":
+		return "an empty value"
+	case "string":
+		return "text"
+	}
+	return ""
 }
 
 // gatewayStatusNextVerb is the gateway command that applies a fixed config.

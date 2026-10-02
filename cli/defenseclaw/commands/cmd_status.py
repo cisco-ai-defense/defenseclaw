@@ -394,7 +394,7 @@ def status(app: AppContext, as_json: bool) -> None:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
     # Canonical v8 collection, routing, redaction, and destination status.
-    _print_observability_status(cfg)
+    _print_observability_status(cfg, config_has_problems=bool(config_problems))
 
     # Sidecar status
     ux.echo()
@@ -1265,7 +1265,7 @@ def _hook_guardian_status(cfg) -> dict:
     return data
 
 
-def _print_observability_status(cfg) -> None:
+def _print_observability_status(cfg, *, config_has_problems: bool = False) -> None:
     """Render the compiler-owned canonical v8 destination plan."""
 
     from defenseclaw.config import config_path_for_data_dir
@@ -1275,7 +1275,10 @@ def _print_observability_status(cfg) -> None:
     try:
         status = inspect_v8_operator_status(config_path_for_data_dir(cfg.data_dir))
     except Exception as exc:  # noqa: BLE001 - status remains useful when the sidecar is stopped.
-        ux.echo("    " + ux._style(f"canonical v8 plan unavailable: {exc}", fg="yellow"))
+        # The config check above already names the problem and its remedy;
+        # the loader's raw diagnostic repeated both (GAP-1995).
+        reason = "the config has a problem, listed above" if config_has_problems else str(exc)
+        ux.echo("    " + ux._style(f"destination plan unavailable: {reason}", fg="yellow"))
         _print_native_delivery_status(_native_delivery_summary(cfg))
         return
 

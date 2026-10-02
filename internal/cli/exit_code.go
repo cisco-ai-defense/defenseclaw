@@ -69,6 +69,11 @@ func usageFlagError(c *cobra.Command, err error) error {
 	for _, f := range fields[min(1, len(fields)):] {
 		for _, exempt := range usageFlagErrorExempt {
 			if f == exempt {
+				// Keep the tree's own exit status; only name a bad flag
+				// value plainly (GAP-1989).
+				if plain := plainFlagValueError(err); plain != err.Error() {
+					return &delegatedUsageError{msg: plain, err: err}
+				}
 				return err
 			}
 		}

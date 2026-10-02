@@ -9,11 +9,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // usageArgsExempt lists the command trees whose positional-argument handling
@@ -68,8 +70,33 @@ func usageMessage(c *cobra.Command, err error) string {
 			use = group
 		}
 	}
-	msg := fmt.Sprintf("%v\nUsage: %s\nTry '%s --help' for help.", err, use, c.CommandPath())
+	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, c.CommandPath())
 	return delegatedCommandText(c, msg)
+}
+
+// plainFlagValueError names what a typed flag takes instead of pflag's
+// parser text ('invalid argument "maybe" for "--json" flag:
+// strconv.ParseBool: parsing "maybe": invalid syntax'): '--json takes true
+// or false, not "maybe"' (GAP-1989).
+func plainFlagValueError(err error) string {
+	var invalid *pflag.InvalidValueError
+	if !errors.As(err, &invalid) || invalid.GetFlag() == nil {
+		return err.Error()
+	}
+	takes := ""
+	switch invalid.GetFlag().Value.Type() {
+	case "bool":
+		takes = "true or false"
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "count":
+		takes = "a whole number"
+	case "float32", "float64":
+		takes = "a number"
+	case "duration":
+		takes = "a duration such as 30s, 5m or 1h"
+	default:
+		return err.Error()
+	}
+	return fmt.Sprintf("--%s takes %s, not %q", invalid.GetFlag().Name, takes, invalid.GetValue())
 }
 
 // delegatedFromEnv is set by the Python CLI when it runs a gateway command on
