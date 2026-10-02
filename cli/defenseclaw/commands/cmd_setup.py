@@ -12689,7 +12689,12 @@ def _interactive_guardrail_setup(
             data_dir=getattr(app.cfg, "data_dir", None),
         )
         if _pre_mutation_selection is not None:
-            _pre_mutation_selection((selected_connector,))
+            # After a default uninstall the guardrail is off but the kept
+            # connectors stay configured, and the version check covers all of
+            # them; the exact OpenCode selection must cover the same set, or
+            # setup aborted with "exact OpenCode selection was not recorded"
+            # (GAP-1695).
+            _pre_mutation_selection(tuple(dict.fromkeys((selected_connector, *configured))))
         gc.connector = selected_connector
         click.echo()
         _print_connector_info(gc.connector)

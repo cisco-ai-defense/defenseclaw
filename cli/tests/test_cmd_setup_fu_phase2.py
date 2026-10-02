@@ -3136,6 +3136,30 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         self.assertEqual(gc.judge.hook_connectors, sorted(targets))
         model_prompt.assert_called_once()
 
+    def test_resume_after_uninstall_preselects_every_kept_connector(self):
+        # GAP-1695: a default uninstall turns the guardrail off but keeps the
+        # connectors; the picker path must hand the whole kept set to the
+        # exact-selection step, or Windows OpenCode was never selected.
+        self._seed_map("claudecode", "codex", "opencode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = False
+        seen: list[tuple[str, ...]] = []
+
+        class _StopError(Exception):
+            pass
+
+        def preselect(targets):
+            seen.append(tuple(targets))
+            raise _StopError
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._select_connector_interactive",
+            return_value="claudecode",
+        ), self.assertRaises(_StopError):
+            cmd_setup._interactive_guardrail_setup(self.app, gc, _pre_mutation_selection=preselect)
+
+        self.assertEqual(seen, [("claudecode", "codex", "opencode")])
+
     def test_single_connector_resume_defaults_to_its_action_override(self):
         # GAP-1093: `setup claudecode --mode action` writes a per-connector
         # override while the global mode stays observe; resuming with
