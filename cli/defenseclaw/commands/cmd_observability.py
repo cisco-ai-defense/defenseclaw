@@ -144,7 +144,9 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     default=None,
     help="Evaluate minimum-severity route constraints.",
 )
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table", show_default=True)
+@click.option(
+    "--format", "fmt", type=click.Choice(["table", "json"]), default="table", show_default=True, help="Output format."
+)
 def observability_plan(
     buckets: tuple[str, ...],
     signals: tuple[str, ...],

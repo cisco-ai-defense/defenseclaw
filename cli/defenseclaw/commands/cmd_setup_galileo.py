@@ -50,6 +50,7 @@ _CLOUD_TRACE_ENDPOINT = "https://api.galileo.ai/otel/traces"
     type=click.Choice(["cloud", "self-hosted"]),
     default="cloud",
     show_default=True,
+    help="Galileo cloud, or your own Galileo deployment (asks for its console URL)",
 )
 @click.option("--project", default=None, help="Galileo project name or ID")
 @click.option("--logstream", default=None, help="Galileo Log stream name or ID")
@@ -196,7 +197,7 @@ def remove_cmd(app: AppContext, yes: bool) -> None:
 
 
 @galileo.command("test")
-@click.option("--timeout", type=float, default=15.0, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True, help="Seconds to wait for Galileo.")
 @pass_ctx
 def test_cmd(app: AppContext, timeout: float) -> None:
     """Emit and acknowledge a content-free trace through Galileo."""

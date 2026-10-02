@@ -59,8 +59,8 @@ _DEFAULT_SIGNALS: tuple[str, ...] = ("traces", "metrics", "logs")
 def local_observability(ctx: click.Context) -> None:
     """Drive the bundled local observability stack.
 
-    Provides a one-command path to the same compose stack that
-    historically lived under ``deploy/observability/``. Subcommands:
+    Starts a local Prometheus, Loki, Tempo and Grafana stack (Docker
+    Compose) on loopback and points DefenseClaw at it. Subcommands:
 
     \b
       up       Start the stack, wait for readiness, wire config.yaml
@@ -70,9 +70,7 @@ def local_observability(ctx: click.Context) -> None:
       logs     Tail logs for one or all services
       url      Print the Grafana / Prometheus / Tempo / Loki URLs
 
-    Bare invocation is an alias for ``up`` so ``defenseclaw setup
-    local-observability`` matches the ergonomics of ``setup splunk
-    --logs``.
+    With no subcommand it runs 'up'.
     """
     if ctx.invoked_subcommand is None:
         ctx.invoke(up_cmd)

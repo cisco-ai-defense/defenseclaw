@@ -163,7 +163,10 @@ def config_validate(quiet: bool) -> None:
 @click.option(
     "--reveal",
     is_flag=True,
-    help="Include resolved secret VALUES (masked). Off by default; env-var names are always shown.",
+    # Hidden: it works only for pre-v8 configurations, and every 1.0
+    # config is v8 (secrets there are always masked).
+    hidden=True,
+    help="Pre-v8 configurations only: show partly masked secret values instead of '***'.",
 )
 @pass_ctx
 def config_show(
@@ -185,7 +188,9 @@ def config_show(
     v8 = _looks_like_v8_config(cfg_path)
     if v8:
         if reveal:
-            raise click.UsageError("--reveal is not supported for configuration v8 output")
+            raise click.UsageError(
+                "--reveal works only for pre-v8 configurations; this config is v8, which always masks secret values"
+            )
         if source:
             try:
                 raw = Path(cfg_path).read_bytes()
@@ -234,17 +239,31 @@ def config_show(
 
 
 @config_cmd.command("reference")
-@click.argument("section", type=click.Choice(["observability"], case_sensitive=False))
+@click.argument(
+    "section",
+    type=click.Choice(["observability"], case_sensitive=False),
+    required=False,
+    default="observability",
+)
 @click.option(
     "--format",
     "fmt",
     type=click.Choice(["yaml", "json-schema", "markdown"], case_sensitive=False),
     default="yaml",
     show_default=True,
+    help="Output format.",
 )
-@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the reference to this file instead of stdout.",
+)
 def config_reference(section: str, fmt: str, output: Path | None) -> None:
-    """Render a version-matched generated configuration reference."""
+    """Print the configuration reference for this version.
+
+    SECTION defaults to observability (the only section today).
+    """
 
     try:
         rendered = (
@@ -289,12 +308,17 @@ def config_path(app: AppContext) -> None:
         ("quarantine dir", cfg.quarantine_dir),
         ("dotenv", os.path.join(cfg.data_dir, ".env")),
         ("device key", cfg.gateway.device_key_file),
+    ]
+    # OpenClaw paths matter only when OpenClaw is set up on this host.
+    claw_rows = [
         ("OpenClaw config", cfg.claw.config_file),
         ("OpenClaw home", cfg.claw.home_dir),
     ]
-    label_width = max(len(lbl) for lbl, _ in rows)
+    if any(value and os.path.exists(os.path.expanduser(str(value))) for _, value in claw_rows):
+        rows.extend(claw_rows)
+    label_width = max(len(lbl) for lbl, _ in rows) + 2  # colon plus one space
     for label, value in rows:
-        exists = value and os.path.exists(str(value))
+        exists = value and os.path.exists(os.path.expanduser(str(value)))
         marker = ux._style("✓", fg="green", bold=True) if exists else ux.dim("·")
         padded = (label + ":").ljust(label_width)
         click.echo(f"  {marker}  {ux._style(padded, fg='bright_black', bold=True)}{value}")

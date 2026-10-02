@@ -46,7 +46,14 @@ def _default_data_dir() -> str:
 
 
 @click.command("migrate")
-@click.option("--check", is_flag=True, help="Report pending steps without changing anything.")
+@click.option(
+    "--check",
+    is_flag=True,
+    help=(
+        "List pending steps without changing anything. Exit 0 when they can be applied "
+        "(pending or not), 1 when they cannot, 2 when the config is from a newer release."
+    ),
+)
 @click.option("--from-version", default=None, metavar="X.Y.Z", help="Version that wrote the data (0.x imports).")
 @click.option("--data-dir", default=None, type=click.Path(file_okay=False), help="Data directory to migrate.")
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
@@ -77,12 +84,15 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         raise SystemExit(EXIT_FAILED) from None
 
     if as_json:
+        # In check mode nothing ran: list the steps under "pending" and keep
+        # "applied" empty so a script never mistakes a dry run for a migration.
         click.echo(
             json.dumps(
                 {
                     "from_config_version": result.from_config_version,
                     "to_config_version": result.to_config_version,
-                    "applied": result.applied,
+                    "applied": [] if check else result.applied,
+                    "pending": result.applied if check else [],
                     "changed": result.changed,
                     "check": check,
                 },
@@ -94,7 +104,15 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
     elif not result.applied:
         ux.ok(f"Configuration is current (config_version {result.to_config_version}).")
     elif check:
-        ux.ok(f"{len(result.applied)} migration step(s) pending.")
+        # Pending is not success: a neutral marker, the step names, and how
+        # they get applied (the installer and upgrade run them as well).
+        ux.echo(
+            f"  {ux.bold('•')} {len(result.applied)} migration step(s) pending "
+            f"(config_version {result.from_config_version} -> {result.to_config_version}):"
+        )
+        for step in result.applied:
+            ux.echo(f"    → {step}")
+        ux.subhead("Nothing was changed. 'defenseclaw migrate' (or the upgrade) applies them.")
     else:
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
     if not check and not as_json:

@@ -231,7 +231,9 @@ def _status_row(key: str, value: str) -> None:
     whole "Environment:  " region. Empty values render as a dim
     em-dash to keep the row tracking its column.
     """
-    label_padded = (key + ":").ljust(_STATUS_LABEL_WIDTH)
+    # Keep at least one space after the colon for labels as long as the
+    # column ("Model routing:").
+    label_padded = (key + ":").ljust(max(_STATUS_LABEL_WIDTH, len(key) + 2))
     rendered_value = ux.dim("—") if not value else value
     ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
@@ -417,7 +419,7 @@ def status(app: AppContext, as_json: bool) -> None:
             _status_row("Sidecar", ux._style("not running", fg="yellow"))
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        _print_agents(cfg)
+        _print_agents(cfg, sidecar_down=True)
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
@@ -487,6 +489,7 @@ def _print_agents(
     cfg,
     *,
     health: dict | None = None,
+    sidecar_down: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -551,7 +554,22 @@ def _print_agents(
     header = f"{enabled_count} active"
     if disabled_count:
         header += f", {disabled_count} disabled"
+    if sidecar_down and enabled_count:
+        # Hooks are configured but nothing answers them: each connector falls
+        # back to its fail-mode (open = calls run unchecked, closed = blocked).
+        header = f"{enabled_count} configured, not enforced while the sidecar is stopped"
+        if disabled_count:
+            header += f" ({disabled_count} disabled)"
+        header = ux._style(header, fg="yellow")
     _status_row("Agents", header)
+    if sidecar_down and enabled_count:
+        ux.echo(
+            " " * 16
+            + ux.dim(
+                "Hooks fall back to each connector's fail-mode: open lets calls run "
+                "unchecked, closed blocks them. Start it: defenseclaw-gateway start"
+            )
+        )
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)

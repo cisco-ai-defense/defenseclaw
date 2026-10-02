@@ -642,11 +642,9 @@ _WIZARD_LLM_PROVIDERS = [
 def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     """Rewrite config.yaml to the unified v5 LLM shape.
 
-    Copies ``inspect_llm``, ``default_llm_*``, and legacy ``guardrail``
-    fields into ``llm:`` (if not already merged), then clears the v4
-    slots so a round-trip through ``config.load()``/``save()`` produces
-    a minimal YAML. Writes a ``config.yaml.bak`` alongside the live
-    file unless ``--no-backup`` is passed.
+    Copies the old inspect_llm, default_llm_* and guardrail LLM fields into
+    the llm: section (if not already there) and removes the old fields.
+    Writes config.yaml.bak next to the file first unless --no-backup is given.
     """
     import shutil
 
@@ -5620,7 +5618,7 @@ def _resolve_judge_hook_gate(
 # (guardrail.detection_strategy_{prompt,completion,tool_call}) so an operator
 # can opt the judge into the tool-output / tool-call lanes. OFF by default
 # (opt-in) — omitting a flag leaves that direction inheriting the base
-# strategy. CLI surface only; the Go lane wiring is Round-2 fu/judge-go.
+# strategy. The gateway reads them through GuardrailConfig.EffectiveStrategy.
 @click.option(
     "--detection-strategy-prompt",
     type=click.Choice(["regex_only", "regex_judge", "judge_first"]),
@@ -5633,8 +5631,8 @@ def _resolve_judge_hook_gate(
     default=None,
     help=(
         "Per-direction detection strategy for the tool-output/completion lane "
-        "(opt-in; OFF by default — judging tool output adds an LLM round-trip "
-        "per tool call). Go wiring lands in Round-2 fu/judge-go."
+        "(opt-in; off by default: judging tool output adds an LLM round-trip "
+        "per tool call)."
     ),
 )
 @click.option(
@@ -5642,8 +5640,8 @@ def _resolve_judge_hook_gate(
     type=click.Choice(["regex_only", "regex_judge", "judge_first"]),
     default=None,
     help=(
-        "Per-direction detection strategy for the tool-call lane (opt-in; OFF "
-        "by default). Go wiring lands in Round-2 fu/judge-go."
+        "Per-direction detection strategy for the tool-call lane (opt-in; off "
+        "by default)."
     ),
 )
 @click.option(
@@ -5897,14 +5895,11 @@ def setup_guardrail(
     Every prompt and response is inspected for prompt injection, secrets,
     PII, and data exfiltration patterns.
 
-    Use --connector (alias: --agent) to select the agent framework
-    connector. The connector
-    determines how LLM traffic is intercepted, how tool calls are
-    inspected, and what subprocess enforcement policy is applied. When
-    omitted, the value defaults to the install-time hint at
-    ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
-    --connector ...``), then to any previously saved choice in
-    ``guardrail.connector``, then to ``openclaw``.
+    Use --connector (alias: --agent) to pick the agent connector. It
+    decides how LLM traffic is intercepted, how tool calls are inspected
+    and which subprocess policy applies. When omitted, it is the connector
+    picked at install time, then the one an earlier run saved; with neither
+    it falls back to OpenClaw, so pass --connector on hosts without OpenClaw.
 
     Two modes:
       observe — log findings, never block (default, recommended to start)
@@ -9235,10 +9230,7 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         return
 
     click.echo("    • Watch decisions live: defenseclaw tui  (Logs and Alerts read canonical SQLite history)")
-    click.echo(
-        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
-        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
-    )
+    click.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
 
 
 def _print_observability_summary(

@@ -45,7 +45,7 @@ writes a log to `~/.defenseclaw/logs/`.
 | `defenseclaw upgrade --yes` | The same, without prompting. |
 | `defenseclaw upgrade --version 1.2.3` | Install a specific release, newer or older. |
 | `defenseclaw rollback` | Put back the install that the last upgrade replaced. Run it again to undo the rollback. |
-| `defenseclaw migrate --check` | Report pending config migrations without changing anything. |
+| `defenseclaw migrate --check` | List pending config migrations by name without changing anything. Exits 0 when they can be applied, 1 when they cannot, 2 when the config is from a newer release; `--json` lists them under `pending`. |
 
 If the `defenseclaw` command itself does not start, run the install command
 again. It repairs any install and keeps your data:

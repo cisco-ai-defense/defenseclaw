@@ -431,3 +431,23 @@ def test_windows_agent_selection_writes_no_receipt_without_a_native_agent(data_d
     monkeypatch.setattr(os, "name", "nt")
 
     migrations._select_windows_agents(str(data_dir))
+
+
+def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list[str]) -> None:
+    # GAP-1117: --check names each step, uses no success tick, and its JSON
+    # lists them under "pending" (nothing was applied).
+    config = _write_config(data_dir, "config_version: 7\n")
+    runner = CliRunner()
+
+    text = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--check"])
+    assert text.exit_code == 0, text.output
+    assert "1 migration step(s) pending (config_version 7 -> 8)" in text.stdout
+    assert "→ 0.x import 0.8.5: step 0.8.5" in text.stdout
+    assert "✓" not in text.stdout
+
+    js = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--check", "--json"])
+    assert js.exit_code == 0, js.output
+    payload = json.loads(js.stdout)
+    assert payload["pending"] == ["0.x import 0.8.5: step 0.8.5"]
+    assert payload["applied"] == []
+    assert config.read_text(encoding="utf-8") == "config_version: 7\n"

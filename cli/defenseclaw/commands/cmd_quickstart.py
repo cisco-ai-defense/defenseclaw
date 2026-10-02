@@ -138,7 +138,7 @@ import click
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
 )
-@click.option("--json-summary", is_flag=True, help="Emit the first-run summary as JSON.")
+@click.option("--json-summary", "--json", "json_summary", is_flag=True, help="Emit the first-run summary as JSON.")
 def quickstart_cmd(
     mode: str | None,
     scanner_mode: str,

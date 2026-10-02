@@ -1111,6 +1111,13 @@ def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
     return disc
 
 
+def _display_version(version: str) -> str:
+    """Return a version for display: some CLIs end their banner with a period
+    ("GitHub Copilot CLI 1.0.90."). The raw value stays untouched for the
+    connector-contract gate."""
+    return (version or "").strip().rstrip(".")
+
+
 def render_discovery_table(disc: AgentDiscovery) -> str:
     """Render discovery as a Rich table string suitable for click.echo."""
     try:
@@ -1133,7 +1140,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = signal.version or signal.error
+        detail = _display_version(signal.version) or signal.error
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -2530,7 +2537,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    signal.version or signal.error,
+                    _display_version(signal.version) or signal.error,
                 ]
             )
         )

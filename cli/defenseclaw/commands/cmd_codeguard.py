@@ -42,9 +42,16 @@ def codeguard() -> None:
     default="",
     help="Inspect a single configured connector (default: every active connector).",
 )
-@click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
+@click.option(
+    "--target",
+    type=click.Choice(["skill", "rule"]),
+    default="skill",
+    show_default=True,
+    help="Asset to inspect: the CodeGuard skill or the rule file.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print one JSON object per connector as a list.")
 @pass_ctx
-def status_cmd(app: AppContext, connector_flag: str, target: str) -> None:
+def status_cmd(app: AppContext, connector_flag: str, target: str, as_json: bool) -> None:
     """Show whether a native CodeGuard asset is installed.
 
     Lists every active connector by default — one line each, tagged with the
@@ -54,8 +61,17 @@ def status_cmd(app: AppContext, connector_flag: str, target: str) -> None:
     from defenseclaw.codeguard_skill import codeguard_status
     from defenseclaw.commands import resolve_list_connectors
 
-    for connector in resolve_list_connectors(app, connector_flag):
-        status = codeguard_status(app.cfg, connector=connector, target=target)
+    statuses = [
+        codeguard_status(app.cfg, connector=connector, target=target)
+        for connector in resolve_list_connectors(app, connector_flag)
+    ]
+    if as_json:
+        import dataclasses  # noqa: PLC0415
+        import json  # noqa: PLC0415
+
+        click.echo(json.dumps([dataclasses.asdict(status) for status in statuses], indent=2, sort_keys=True))
+        return
+    for status in statuses:
         click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
 
 
@@ -66,7 +82,13 @@ def status_cmd(app: AppContext, connector_flag: str, target: str) -> None:
     default="",
     help="Connector to install into (default: every active connector).",
 )
-@click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
+@click.option(
+    "--target",
+    type=click.Choice(["skill", "rule"]),
+    default="skill",
+    show_default=True,
+    help="Asset to install: the CodeGuard skill or the rule file.",
+)
 @click.option("--replace", is_flag=True, help="Replace an existing non-CodeGuard asset at the target path.")
 @pass_ctx
 def install_cmd(app: AppContext, connector_flag: str, target: str, replace: bool) -> None:

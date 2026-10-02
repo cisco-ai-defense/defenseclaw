@@ -870,9 +870,12 @@ _reload_option = click.option(
 @edit.command("actions")
 @click.option("--severity", "-s", required=True, type=click.Choice(SEVERITIES),
               help="Severity level to configure")
-@click.option("--runtime", type=click.Choice(RUNTIME_CHOICES), default=None)
-@click.option("--file", "file_action", type=click.Choice(FILE_CHOICES), default=None)
-@click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None)
+@click.option("--runtime", type=click.Choice(RUNTIME_CHOICES), default=None,
+              help="Turn a finding at this severity off (disable) or leave it running (enable)")
+@click.option("--file", "file_action", type=click.Choice(FILE_CHOICES), default=None,
+              help="Quarantine the files of a finding at this severity, or leave them (none)")
+@click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None,
+              help="Block or allow installing an item with a finding at this severity (none: no rule)")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
 @_reload_option
 @pass_ctx
@@ -915,9 +918,12 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
               help="Scanner type to override")
 @click.option("--severity", "-s", required=True, type=click.Choice(SEVERITIES),
               help="Severity level to configure")
-@click.option("--runtime", type=click.Choice(RUNTIME_CHOICES), default=None)
-@click.option("--file", "file_action", type=click.Choice(FILE_CHOICES), default=None)
-@click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None)
+@click.option("--runtime", type=click.Choice(RUNTIME_CHOICES), default=None,
+              help="Turn a finding at this severity off (disable) or leave it running (enable)")
+@click.option("--file", "file_action", type=click.Choice(FILE_CHOICES), default=None,
+              help="Quarantine the files of a finding at this severity, or leave them (none)")
+@click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None,
+              help="Block or allow installing an item with a finding at this severity (none: no rule)")
 @click.option("--remove", is_flag=True, help="Remove this override (revert to global)")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
 @_reload_option
@@ -971,7 +977,8 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
               help="Minimum severity rank to block (1=LOW .. 4=CRITICAL)")
 @click.option("--alert-threshold", type=int, default=None,
               help="Minimum severity rank to alert (1=LOW .. 4=CRITICAL)")
-@click.option("--cisco-trust-level", type=click.Choice(["full", "advisory", "none"]), default=None)
+@click.option("--cisco-trust-level", type=click.Choice(["full", "advisory", "none"]), default=None,
+              help="How Cisco AI Defense verdicts count: full (can block), advisory (shown, never block), none")
 @click.option("--add-pattern", nargs=2, multiple=True, metavar="CATEGORY PATTERN",
               help="Add a guardrail pattern (e.g. --add-pattern injection 'new pattern')")
 @click.option("--remove-pattern", nargs=2, multiple=True, metavar="CATEGORY PATTERN",
@@ -1036,7 +1043,8 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 
 
 @edit.command("firewall")
-@click.option("--default-action", type=click.Choice(["allow", "deny"]), default=None)
+@click.option("--default-action", type=click.Choice(["allow", "deny"]), default=None,
+              help="What happens to traffic no rule matches")
 @click.option("--add-domain", multiple=True, help="Add an allowed domain")
 @click.option("--remove-domain", multiple=True, help="Remove an allowed domain")
 @click.option("--add-blocked", multiple=True, help="Add a blocked destination (IP/host)")

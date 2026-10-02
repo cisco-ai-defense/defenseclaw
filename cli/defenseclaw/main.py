@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -403,6 +404,34 @@ cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")
 cli.add_command(version_cmd, "version")
+
+
+_RST_LITERAL = re.compile(r"``([^`]+?)``")
+
+
+def _plain_help(text: str | None) -> str | None:
+    """Show RST inline literals (``x``) as 'x': Click prints help verbatim."""
+    if not text or "``" not in text:
+        return text
+    return _RST_LITERAL.sub(r"'\1'", text)
+
+
+def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
+    """Clean the help text of every command and option once, at import."""
+    seen = set() if seen is None else seen
+    if id(command) in seen:
+        return
+    seen.add(id(command))
+    command.help = _plain_help(command.help)
+    command.short_help = _plain_help(command.short_help)
+    for param in command.params:
+        if isinstance(param, click.Option):
+            param.help = _plain_help(param.help)
+    for sub in (getattr(command, "commands", None) or {}).values():
+        _plain_help_tree(sub, seen)
+
+
+_plain_help_tree(cli)
 
 
 def _ensure_codeguard_skill(cfg) -> None:
