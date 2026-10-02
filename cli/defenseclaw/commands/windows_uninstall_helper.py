@@ -272,14 +272,32 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
 _EMPTY_DIR_RD_TRIES = 30
 
 
-def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
+def _result_step(status_path: str, gone: list[str]) -> str:
+    """cmd.exe step that writes the uninstall result once the after-exit removal ran.
+
+    It says failed with the first folder in gone that is still there, else
+    succeeded (GAP-1960).
+    """
+    step = f'(echo {{"status": "succeeded"}}>"{status_path}")'
+    for path in reversed(gone):
+        detail = json.dumps(f"could not remove {path}; remove it by hand")
+        step = f'(if exist "{path}" (echo {{"status": "failed", "detail": {detail}}}>"{status_path}") else {step})'
+    return step
+
+
+def _remove_after_exit(
+    dirs: list[str], empty_dirs: list[str], *, status_path: str = "", gone: list[str] | None = None
+) -> bool:
     """Start cmd.exe to remove dirs (and then empty_dirs, if empty) after this process exits.
 
     rd /s does not follow junctions, and rd without /s removes only an
-    empty folder.
+    empty folder. With status_path, cmd.exe then writes the result there:
+    failed if a dir, its renamed copy or a folder in gone is still there.
+    Returns whether it will write that result.
     """
     if not dirs:
-        return
+        return False
+    must_go: list[str] = []
     system_root = os.environ.get("SystemRoot") or r"C:\Windows"
     cmd = os.path.join(system_root, "System32", "cmd.exe")
     steps = ["ping -n 4 127.0.0.1 >nul"]
@@ -290,6 +308,7 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
         # fall back to removing the folder in place as before.
         tombstone_name = f"{os.path.basename(path)}.dc-removed-{os.urandom(4).hex()}"
         tombstone = os.path.join(os.path.dirname(path), tombstone_name)
+        must_go.extend((path, tombstone))
         rename = f'ren "{path}" "{tombstone_name}" 2>nul'
         steps.append(
             f"({rename} || (ping -n 5 127.0.0.1 >nul & {rename}))"
@@ -307,6 +326,10 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
         for path in empty_dirs
         if not _CMD_METACHARACTERS & set(path)
     )
+    must_go.extend(gone or [])
+    writes_result = bool(status_path) and not _CMD_METACHARACTERS & set(status_path + "".join(must_go))
+    if writes_result:
+        steps.append(_result_step(status_path, must_go))
     command = " & ".join(steps)
     flags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -322,6 +345,7 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
         creationflags=flags,
         cwd=system_root,
     )
+    return writes_result
 
 
 def _remove_tree(path: str, *, marker_names: set[str] | None = None, skip: set[str] | None = None) -> None:
@@ -422,6 +446,8 @@ def main() -> int:
     launchers: list[tuple[int, float]] = []
     after_exit: list[str] = []
     after_exit_empty: list[str] = []
+    gone: list[str] = []
+    deferred = False
     try:
         with open(manifest_path, encoding="utf-8") as stream:
             plan = json.load(stream)
@@ -477,7 +503,21 @@ def main() -> int:
         after_exit_empty.extend(
             os.path.dirname(path) for path in interpreter_dirs if os.path.basename(path) == "python"
         )
-        _write_json(status_path, {"status": "succeeded"})
+        gone = [data_dir] if bool(plan.get("remove_data_dir")) else []
+        if after_exit:
+            # The folders that hold this Python go after it exits; cmd.exe
+            # rewrites this file once that ran (GAP-1960).
+            _write_json(
+                status_path,
+                {
+                    "status": "removing",
+                    "detail": "the last folders are removed after the helper exits; "
+                    "this file says succeeded or failed when that finishes",
+                },
+            )
+            deferred = True
+        else:
+            _write_json(status_path, {"status": "succeeded"})
         _remove_earlier_results(status_path)
         return 0
     except Exception as exc:  # noqa: BLE001 - helper result boundary.
@@ -509,10 +549,17 @@ def main() -> int:
             os.rmdir(os.path.dirname(__file__))
         except OSError:
             pass
+        result: dict[str, object] = {"status": "succeeded"}
         try:
-            _remove_after_exit(after_exit, after_exit_empty)
-        except OSError:
-            pass
+            if _remove_after_exit(after_exit, after_exit_empty, status_path=status_path if deferred else "", gone=gone):
+                result = {}
+        except OSError as exc:
+            result = {"status": "failed", "detail": f"could not start the final removal: {exc}"}
+        if deferred and result:
+            try:
+                _write_json(status_path, result)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

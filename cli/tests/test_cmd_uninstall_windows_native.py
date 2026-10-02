@@ -49,6 +49,36 @@ class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
             command,
         )
 
+    def test_after_exit_writes_the_result_after_the_removal(self) -> None:
+        # GAP-1960: the result file said succeeded before cmd.exe removed .uv
+        # and the data folder, so it could not report that step.
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        data_dir = r"C:\Users\u\.defenseclaw"
+        status = r"C:\Users\u\AppData\Local\Temp\defenseclaw-uninstall-result-ab.json"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            writes = windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                [uv], [data_dir], status_path=status, gone=[data_dir]
+            )
+
+        self.assertTrue(writes)
+        command = popen.call_args.args[0]
+        result = command.index(f'(if exist "{uv}" (echo {{"status": "failed"')
+        self.assertLess(command.index(f'(for /l %i in (1,1,30) do if exist "{data_dir}"'), result)
+        self.assertIn("could not remove C:\\\\Users\\\\u\\\\.defenseclaw\\\\.uv; ", command)
+        self.assertTrue(command.endswith(f'(echo {{"status": "succeeded"}}>"{status}")' + ")" * 3 + '"'), command)
+        # A path cmd.exe would misparse keeps the result Python wrote.
+        with patch.object(windows_uninstall_helper.subprocess, "Popen"):
+            self.assertFalse(
+                windows_uninstall_helper._remove_after_exit([uv], [], status_path=r"C:\T&x\r.json")  # noqa: SLF001
+            )
+
     @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
     def test_after_exit_command_removes_the_folder_on_windows(self) -> None:
         from unittest.mock import patch
@@ -60,10 +90,14 @@ class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
             uv = data_dir / ".uv"
             (uv / "python").mkdir(parents=True)
             (uv / "python" / "python.exe").write_bytes(b"MZ")
+            status = Path(tmp) / "result.json"
             with patch.object(windows_uninstall_helper.subprocess, "Popen") as popen:
-                windows_uninstall_helper._remove_after_exit([str(uv)], [str(data_dir)])  # noqa: SLF001
+                windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                    [str(uv)], [str(data_dir)], status_path=str(status), gone=[str(data_dir)]
+                )
             subprocess.run(popen.call_args.args[0], timeout=60, check=False)
             self.assertFalse(data_dir.exists(), list(Path(tmp).rglob("*")))
+            self.assertEqual(json.loads(status.read_text(encoding="utf-8")), {"status": "succeeded"})
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
@@ -341,9 +375,15 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             self.assertIsNotNone(match, output)
             status_path = Path(match.group(1))
 
-            deadline = time.monotonic() + 15
+            def finished() -> bool:
+                try:
+                    return json.loads(status_path.read_text(encoding="utf-8"))["status"] != "removing"
+                except (OSError, ValueError):
+                    return False
+
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline and (
-                data_dir.exists() or any(path.exists() for path in launchers) or not status_path.exists()
+                data_dir.exists() or any(path.exists() for path in launchers) or not finished()
             ):
                 time.sleep(0.1)
 

@@ -271,18 +271,23 @@ def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
     assert lookup.index("Join-Path $BinDir") < lookup.index("$Uv = Install-Uv")
 
 
-def test_the_locked_package_install_is_retried_once() -> None:
+def test_the_locked_package_install_is_retried_with_backoff() -> None:
     # GAP-1315: a sharing violation (os error 32) on uv's cache rename failed
     # the whole Windows install.
     # The DefenseClaw wheel install hit the same hold, so both uv pip steps
-    # go through the single-retry helper.
+    # go through the retry helper.
     start = _text().index("function New-Venv")
     body = _text()[start : _text().index("function Invoke-UvPipInstall")]
     assert body.count("Invoke-UvPipInstall") == 2
     assert "Invoke-Native $Uv @(\"pip\"" not in body
-    helper = _text()[_text().index("function Invoke-UvPipInstall") :][:600]
-    assert helper.count("Invoke-Native $Uv $UvArgs") == 2
-    assert "Retrying the Python package install once" in helper
+    # GAP-1941: on a busy host one retry hit the same hold on the next
+    # package, so it backs off several times, checks for a full disk before
+    # each attempt, and the last failure says to run the command again.
+    helper = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    assert "$waits = @(5, 15, 30)" in helper
+    assert helper.index("Test-DiskFull") > helper.index("for ($i = 0")
+    assert "Start-Sleep -Seconds $waits[$i]" in helper
+    assert "run the same command again" in helper
 
 
 def _ps1_function(name: str) -> str:
@@ -428,7 +433,7 @@ def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
 def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> None:
     # GAP-1883: the uv retry blamed a busy host, and a failed first install
     # kept about 2 GB (.failed-*, .venv) that held the disk full.
-    uv = _text()[_text().index("function Invoke-UvPipInstall(") :][:600]
+    uv = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
     assert uv.index("if (Test-DiskFull) { return $false }") < uv.index("Retrying the Python package install")
     full = _ps1_function("Test-DiskFull")
     assert "$free -ge 300MB" in full and "then run the installer again" in full
