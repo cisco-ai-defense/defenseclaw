@@ -7,8 +7,8 @@
 param(
     [switch]$Child,
     [string]$Root,
-    [ValidateRange(4, 30)]
-    [int]$WaitSeconds = 6
+    [int]$OwnerProcessId,
+    [long]$OwnerStartTicks
 )
 
 Set-StrictMode -Version Latest
@@ -25,6 +25,9 @@ $modulePath = [IO.Path]::GetFullPath(
 if ($Child) {
     if ([string]::IsNullOrWhiteSpace($Root)) {
         throw 'detached-helper child mode requires -Root'
+    }
+    if ($OwnerProcessId -le 0 -or $OwnerStartTicks -le 0) {
+        throw 'detached-helper child mode requires the owning smoke identity'
     }
     $childRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
     $helperPath = Microsoft.PowerShell.Management\Join-Path `
@@ -65,14 +68,32 @@ Microsoft.PowerShell.Core\Import-Module -Name '$moduleLiteral' -Force
     )
 }
 [IO.File]::WriteAllText(
-    '$observationLiteral',
+    '$observationLiteral.tmp',
     (
         `$observation |
             Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
     ),
     [Text.UTF8Encoding]::new(`$false)
 )
-Microsoft.PowerShell.Utility\Start-Sleep -Seconds $WaitSeconds
+# Publish atomically, then live exactly as long as the owning smoke. The
+# smoke outlives every capture wait, so "alive after captured EOF" is a causal
+# no-inheritance proof; the smoke kills this helper after the proof, and on any
+# path where the smoke ends first this helper exits with it instead of leaking.
+[IO.File]::Move('$observationLiteral.tmp', '$observationLiteral')
+try {
+    `$owner = [Diagnostics.Process]::GetProcessById($OwnerProcessId)
+    try {
+        if (`$owner.StartTime.ToUniversalTime().Ticks -eq $OwnerStartTicks) {
+            `$owner.WaitForExit()
+        }
+    }
+    finally {
+        `$owner.Dispose()
+    }
+}
+catch {
+    # The owning smoke already exited (or its PID was reused).
+}
 "@
     [IO.File]::WriteAllText(
         $helperPath,
@@ -163,6 +184,8 @@ try {
         $enginePath = [IO.Path]::GetFullPath(
             [string]$currentProcess.MainModule.FileName
         )
+        $ownerProcessId = $currentProcess.Id
+        $ownerStartTicks = $currentProcess.StartTime.ToUniversalTime().Ticks
     }
     finally {
         $currentProcess.Dispose()
@@ -174,7 +197,7 @@ try {
     $startInfo.Arguments = (
         '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
         "-File $quotedScript -Child -Root $quotedRoot " +
-        "-WaitSeconds $WaitSeconds"
+        "-OwnerProcessId $ownerProcessId -OwnerStartTicks $ownerStartTicks"
     )
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
@@ -285,19 +308,9 @@ try {
             'returned'
         )
     }
-    # The still-live helper is the primary no-inheritance proof. Also require
-    # captured EOF comfortably before the synthetic helper's deadline without
-    # making engine JIT variance a false failure.
-    $captureDeadlineMilliseconds = [int64](
-        ($WaitSeconds * 1000) - 500
-    )
-    if ($elapsedMilliseconds -ge $captureDeadlineMilliseconds) {
-        throw (
-            'captured parent pipe EOF was retained for ' +
-            "$elapsedMilliseconds ms by the detached helper (deadline " +
-            "$captureDeadlineMilliseconds ms)"
-        )
-    }
+    # The helper lives until this smoke exits or kills it, so both pipes
+    # reaching EOF while it is still alive proves it inherited no capture
+    # handle. That proof is causal; capture_elapsed_ms is diagnostic only.
     $observationPath = [IO.Path]::GetFullPath(
         [string]$childResult.observation_path
     ).TrimEnd('\')
@@ -307,17 +320,18 @@ try {
         )) {
         throw 'helper environment observation escaped its protected root'
     }
-    $observationDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    # Wait for the helper's observation or its exit, never a wall clock: a
+    # cold Windows PowerShell import of the module is slow, not failed.
     while (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $observationPath `
-            -PathType Leaf) -and
-        [DateTime]::UtcNow -lt $observationDeadline) {
-        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 50
-    }
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $observationPath `
             -PathType Leaf)) {
-        throw 'detached helper did not publish its isolated environment'
+        if ($helperProcess.HasExited -and
+            -not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $observationPath `
+                -PathType Leaf)) {
+            throw 'detached helper did not publish its isolated environment'
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 50
     }
     $observation = Microsoft.PowerShell.Management\Get-Content `
         -LiteralPath $observationPath `
@@ -356,8 +370,10 @@ try {
     }
     if (-not $helperProcess.HasExited) {
         $helperProcess.Kill()
-        [void]$helperProcess.WaitForExit(5000)
     }
+    # The exit event, not a bound: the root below is removable only after
+    # the killed helper has released it.
+    $helperProcess.WaitForExit()
     $helperProcess.Dispose()
     $helperProcess = $null
     Microsoft.PowerShell.Management\Remove-Item `
@@ -376,7 +392,6 @@ try {
         ok = $true
         engine = $PSVersionTable.PSVersion.ToString()
         capture_elapsed_ms = $elapsedMilliseconds
-        capture_deadline_ms = $captureDeadlineMilliseconds
         helper_pid = $helperPID
         helper_alive_after_capture = $helperAlive
         no_inherited_capture_handles = $true
@@ -392,7 +407,7 @@ finally {
         try {
             if (-not $helperProcess.HasExited) {
                 $helperProcess.Kill()
-                [void]$helperProcess.WaitForExit(5000)
+                $helperProcess.WaitForExit()
             }
         }
         finally {
@@ -408,7 +423,7 @@ finally {
     if ($null -ne $nestedProcess) {
         if (-not $nestedProcess.HasExited) {
             $nestedProcess.Kill()
-            [void]$nestedProcess.WaitForExit(5000)
+            $nestedProcess.WaitForExit()
         }
         $nestedProcess.Dispose()
     }

@@ -2077,6 +2077,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
+		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
 		var cfg map[string]interface{}
 		if err := json.Unmarshal(data, &cfg); err == nil &&
 			structuredHookCommandReferences(cfg, ownedCommands) {
@@ -2547,6 +2548,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
+		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
 		return removeJSONHookReferences(path, ownedCommands...)
 	default:
 		return nil
@@ -4476,7 +4478,7 @@ func (c *hookOnlyConnector) ownedCursorHookContractPresent(opts SetupOpts) (bool
 	if !runtimeInfo.Mode().IsRegular() || runtimeInfo.Mode()&os.ModeSymlink != 0 || runtimeInfo.Size() > 512*1024 {
 		return false, nil
 	}
-	runtimeBody, err := os.ReadFile(runtimePath)
+	runtimeBody, err := readHookConfigFile(runtimePath)
 	if err != nil {
 		return false, err
 	}
@@ -5153,6 +5155,16 @@ func legacyAntigravityWindowsHookCommand() string {
 
 func legacyAntigravityNonWaitingWindowsHookCommand() string {
 	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
+}
+
+// legacyAntigravityStartProcessWindowsHookCommands are the event-bound
+// Start-Process bridge commands earlier builds registered on Windows.
+func legacyAntigravityStartProcessWindowsHookCommands() []string {
+	commands := make([]string, 0, len(antigravityLifecycleEvents))
+	for _, event := range antigravityLifecycleEvents {
+		commands = append(commands, legacyStartProcessWindowsNativePowerShellHookCommand("antigravity", event, "", defenseclawHookBinary()))
+	}
+	return commands
 }
 
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {

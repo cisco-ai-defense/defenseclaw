@@ -4912,6 +4912,10 @@ _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS = (
     _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS + _CURSOR_WINDOWS_RUNTIME_PROCESS_OVERHEAD_SECONDS
 )
 _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS = 2
+_CURSOR_WINDOWS_PROBE_CORE_MODULES = ", ".join(
+    f'"$PSHOME\\Modules\\{name}\\{name}.psd1"'
+    for name in ("Microsoft.PowerShell.Management", "Microsoft.PowerShell.Utility")
+)
 _CURSOR_WINDOWS_RUNTIME_TREE_REAP_SECONDS = 2.0
 
 
@@ -5077,8 +5081,18 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         # This mirrors Cursor's Windows PowerShell command-hook boundary. Paths are
         # encoded as PowerShell literals, the whole script is UTF-16LE/base64,
         # and subprocess receives an argv list (never shell=True).
+        #
+        # Get-Content here and the adapter's only cmdlets (Test-Path,
+        # New-Object) live in the two core modules imported first by their
+        # $PSHOME path. Without the import, the first auto-loaded cmdlet in a
+        # fresh Windows profile makes Windows PowerShell search and analyze
+        # the modules on PSModulePath before it runs. On a busy host that can
+        # use the whole probe budget, and an attempt killed at its deadline
+        # never saves the analysis cache, so the retry pays the same cost.
         script = (
             "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "Import-Module -ErrorAction Stop -Name "
+            f"{_CURSOR_WINDOWS_PROBE_CORE_MODULES}; "
             f"Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw | "
             f"& {{ $input | & {_powershell_literal(adapter_path)} }}"
         )
@@ -5606,6 +5620,34 @@ def _omnigent_setup_repair_command(cfg) -> str:
     return " ".join(args)
 
 
+def _omnigent_config_entries_intact(body: bytes) -> bool:
+    """Return True when OmniGent's config still holds the DefenseClaw entries.
+
+    OmniGent rewrites its own config.yaml during normal use (hosts,
+    providers), so a changed file digest alone is not drift. The entries
+    setup manages are the policy module registration and the
+    ``policies.defenseclaw_guardrail`` function handler.
+    """
+    import yaml
+
+    try:
+        data = yaml.safe_load(body.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    modules = data.get("policy_modules")
+    policies = data.get("policies")
+    if not isinstance(modules, list) or "defenseclaw_omnigent_policy" not in modules:
+        return False
+    entry = policies.get("defenseclaw_guardrail") if isinstance(policies, dict) else None
+    return (
+        isinstance(entry, dict)
+        and entry.get("type") == "function"
+        and entry.get("handler") == "defenseclaw_omnigent_policy.defenseclaw_policy"
+    )
+
+
 def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
     """Return an integrity/custody failure for one OmniGent-managed artifact."""
     record, detail = _omnigent_backup_record(cfg, logical)
@@ -5626,7 +5668,9 @@ def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
     if status != "ok" or body is None:
         return detail
     expected = str(record["post_sha256"])
-    if hashlib.sha256(body).hexdigest() != expected:
+    if hashlib.sha256(body).hexdigest() != expected and not (
+        logical == "config" and _omnigent_config_entries_intact(body)
+    ):
         repair = _omnigent_setup_repair_command(cfg)
         return (
             f"managed OmniGent {logical} drift detected; run "
@@ -5701,6 +5745,9 @@ def _windows_command_line_argv(command_line: str) -> tuple[str, ...] | None:
 
 
 _HERMES_HOST_EXECUTABLES = frozenset({"hermes", "hermes-agent"})
+_HERMES_LAUNCHERS = frozenset(
+    {"uv", "uvx", "pipx", "env", "poetry", "pdm", "hatch", "rye", "pixi", "conda", "mamba", "micromamba"}
+)
 
 
 def _hermes_host_running() -> bool | None:
@@ -5732,8 +5779,16 @@ def _hermes_host_running() -> bool | None:
         if len(fields) < 3 or fields[1] != uid or fields[0] in own:
             continue
         args = fields[2:]
+        program = os.path.basename(args[0]).lower()
+        if program in _HERMES_HOST_EXECUTABLES:
+            return True
+        # Only an interpreter or launcher can run Hermes under another name.
+        # Any other program (an agent whose prompt mentions Hermes, an
+        # editor) is not a Hermes host, whatever words its arguments hold.
+        if not (program.startswith("python") or program in _HERMES_LAUNCHERS):
+            continue
         # A script launcher puts the interpreter first: python .../bin/hermes.
-        if any(os.path.basename(arg).lower() in _HERMES_HOST_EXECUTABLES for arg in args[:2]):
+        if len(args) > 1 and os.path.basename(args[1]).lower() in _HERMES_HOST_EXECUTABLES:
             return True
         # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
         # that is not proof of absence.

@@ -1848,7 +1848,8 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                         match = re.fullmatch(
                             r"\$ErrorActionPreference='Stop'; "
                             r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                            r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                            r"\$hookProcess=(?:Microsoft\.PowerShell\.Management\\)?Start-Process "
+                            r"-FilePath '((?:[^']|'')+)' "
                             r"-ArgumentList @\('hook','--connector','"
                             + re.escape(connector)
                             + r"'"
@@ -2961,9 +2962,14 @@ def _command_target(
             except (binascii.Error, UnicodeError, ValueError) as exc:
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
             event_suffix = ""
+            awaited_suffix = ""
             if connector == "antigravity":
                 event_suffix = (
                     r"(?:,'--event','(?P<event>PreInvocation|PreToolUse|"
+                    r"PostToolUse|PostInvocation|Stop)')?"
+                )
+                awaited_suffix = (
+                    r"(?: '--event' '(?P<event>PreInvocation|PreToolUse|"
                     r"PostToolUse|PostInvocation|Stop)')?"
                 )
             elif connector == "codex":
@@ -2983,18 +2989,54 @@ def _command_target(
                     + contract_pattern
                     + r")')?)?"
                 )
+                awaited_suffix = (
+                    r"(?: '--event' '(?P<event>"
+                    + event_pattern
+                    + r")'(?: '--hook-contract' '(?P<contract>"
+                    + contract_pattern
+                    + r")')?)?"
+                )
+            # The current bridge starts the launcher with Process.Start and
+            # repeats the arguments in its Constrained Language branch; both
+            # copies must name the same launcher and arguments.
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process "
-                r"-FilePath '(?P<target>(?:[^']|'')+)' "
-                r"-ArgumentList @\('hook','--connector','"
+                r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
+                r"\$ErrorActionPreference='Continue'; "
+                r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '"
                 + re.escape(connector)
                 + r"'"
-                + event_suffix
-                + r"\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
+                + awaited_suffix
+                + r" \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; "
+                r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
+                r"\$hookStart\.UseShellExecute=\$false; "
+                r"\$hookStart\.RedirectStandardError=\$true; "
+                r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
+                r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
+                r"\$hookProcess\.WaitForExit\(\); "
+                r"exit \$hookProcess\.ExitCode",
                 script,
             )
+            if not match:
+                match = re.fullmatch(
+                    r"\$ErrorActionPreference='Stop'; "
+                    r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                    r"\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process "
+                    r"-FilePath '(?P<target>(?:[^']|'')+)' "
+                    r"-ArgumentList @\('hook','--connector','"
+                    + re.escape(connector)
+                    + r"'"
+                    + event_suffix
+                    + r"\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
+                    script,
+                )
+                if match and connector in {"antigravity", "codex"}:
+                    raise _InspectionError(
+                        "stale",
+                        "PowerShell EncodedCommand hook uses the Start-Process launcher, "
+                        "which loses the status of a hook that exits at once",
+                    )
             if match:
                 target = match.group("target").replace("''", "'")
                 args = ["hook", "--connector", connector]
@@ -3009,6 +3051,12 @@ def _command_target(
                             "Codex hook command contains an unsupported event/contract pair",
                         )
                     args.extend(["--hook-contract", contract_id])
+                arguments = match.groupdict().get("arguments")
+                if arguments is not None and arguments != " ".join(args):
+                    raise _InspectionError(
+                        "malformed",
+                        "PowerShell EncodedCommand hook starts different arguments in its two launch paths",
+                    )
                 return target, args, "direct"
             unqualified = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "

@@ -97,12 +97,24 @@ def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> No
 
     first_init = quickstart.index(init_command)
     no_tty_init = quickstart.index(init_command, first_init + len(init_command))
-    assert no_tty_init < quickstart.index(setup_guard)
-    setup_failure = quickstart[
-        quickstart.index(setup_guard) : quickstart.index("\n\t\t\tfi; \\", quickstart.index(setup_guard))
-    ]
+    no_tty_setup = quickstart.index(setup_guard, no_tty_init)
+    setup_failure = quickstart[no_tty_setup : quickstart.index("\n\t\t\tfi; \\", no_tty_setup)]
     assert "Could not add newly detected connectors" in setup_failure
     assert "exit 1;" in setup_failure
+
+
+def test_make_all_keeps_an_existing_config_instead_of_rerunning_first_run() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
+    keep = quickstart.index('elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then')
+
+    # Only an explicit CONNECTOR runs init before the existing-config check;
+    # the TTY and no-TTY init paths come after it.
+    assert quickstart.index('"$$dc_bin" init \\') > keep
+    assert quickstart.index('"$$dc_bin" init --non-interactive --yes', quickstart.index("--connector")) > keep
+    branch = quickstart[keep : quickstart.index("\t\telif ", keep + 1)]
+    assert '"$$dc_bin" setup --add-detected --yes --restart' in branch
+    assert " init " not in branch.replace("defenseclaw init", "")
 
 
 def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:

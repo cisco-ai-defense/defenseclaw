@@ -414,9 +414,7 @@ func TestTrustedGatewayStartRunsPinnedNativeExecutableAndHonorsDeadline(t *testi
 		state := testColdStartState(gateway, digest, dataRoot)
 		t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "project-home"))
 		t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(t.TempDir(), "project-config.yaml"))
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := runTrustedNativeGatewayStart(ctx, state); err != nil {
+		if err := runTrustedNativeGatewayStart(t.Context(), state); err != nil {
 			t.Fatal(err)
 		}
 		marker, err := os.ReadFile(filepath.Join(dataRoot, "cold-start-marker.txt"))
@@ -430,19 +428,18 @@ func TestTrustedGatewayStartRunsPinnedNativeExecutableAndHonorsDeadline(t *testi
 
 	t.Run("deadline kills management process", func(t *testing.T) {
 		dataRoot := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dataRoot, "sleep-before-ready"), nil, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dataRoot, "block-before-ready"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		state := testColdStartState(gateway, digest, dataRoot)
 		ctx, cancel := context.WithTimeout(context.Background(), 125*time.Millisecond)
 		defer cancel()
-		started := time.Now()
+		// The helper never exits on its own before its ready marker, so this
+		// call returns only because the deadline killed it, however long the
+		// image takes to start.
 		err := runTrustedNativeGatewayStart(ctx, state)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("deadline start error = %v, want deadline exceeded", err)
-		}
-		if elapsed := time.Since(started); elapsed > time.Second {
-			t.Fatalf("gateway start ignored hook deadline: %s", elapsed)
 		}
 		if _, err := os.Stat(filepath.Join(dataRoot, "cold-start-marker.txt")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("deadline-expired helper reached ready marker: %v", err)
@@ -491,8 +488,10 @@ func main() {
   return
  }
  if len(os.Args) != 2 || os.Args[1] != "start" { os.Exit(7) }
- if _, err := os.Stat(filepath.Join(home, "sleep-before-ready")); err == nil {
-  time.Sleep(5 * time.Second)
+ if _, err := os.Stat(filepath.Join(home, "block-before-ready")); err == nil {
+  for {
+   time.Sleep(time.Hour)
+  }
  }
  child := exec.Command(os.Args[0], "daemon")
  child.Env = os.Environ()

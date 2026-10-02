@@ -144,15 +144,37 @@ class WindowsHookDoctorTests(unittest.TestCase):
         contract: str = "",
         legacy: bool = False,
         unqualified: bool = False,
+        start_process: bool = False,
     ) -> str:
         literal = str(runtime).replace("'", "''")
-        if legacy and unqualified:
-            raise ValueError("legacy and unqualified fixtures are mutually exclusive")
+        if legacy and (unqualified or start_process):
+            raise ValueError("legacy and Start-Process fixtures are mutually exclusive")
+        arguments = ["hook", "--connector", connector]
+        if event:
+            arguments += ["--event", event]
+        if contract:
+            arguments += ["--hook-contract", contract]
         if legacy:
             script = (
                 "$ErrorActionPreference='Stop'; "
                 "$env:NoDefaultCurrentDirectoryInExePath='1'; "
                 f"& '{literal}' hook --connector {connector}; exit $LASTEXITCODE"
+            )
+        elif not (unqualified or start_process) and connector != "devin":
+            quoted = " ".join(f"'{argument}'" for argument in arguments)
+            script = (
+                "$ErrorActionPreference='Stop'; "
+                "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+                f"$ErrorActionPreference='Continue'; & '{literal}' {quoted} "
+                "| Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }; "
+                f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('{literal}','{' '.join(arguments)}'); "
+                "$hookStart.UseShellExecute=$false; "
+                "$hookStart.RedirectStandardError=$true; "
+                "$hookProcess=[System.Diagnostics.Process]::Start($hookStart); "
+                "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); "
+                "$hookProcess.WaitForExit(); "
+                "exit $hookProcess.ExitCode"
             )
         else:
             start_process = "Start-Process" if unqualified else r"Microsoft.PowerShell.Management\Start-Process"
@@ -189,15 +211,27 @@ class WindowsHookDoctorTests(unittest.TestCase):
             except (ValueError, UnicodeError):
                 return command
             needle = "@('hook','--connector','codex')"
-            if needle not in script:
+            awaited = ("'hook' '--connector' 'codex' |", ",'hook --connector codex')")
+            if needle in script:
+                script = script.replace(
+                    needle,
+                    "@('hook','--connector','codex',"
+                    f"'--event','{event}','--hook-contract','{contract}')",
+                    1,
+                )
+            elif all(part in script for part in awaited):
+                script = script.replace(
+                    awaited[0],
+                    f"'hook' '--connector' 'codex' '--event' '{event}' '--hook-contract' '{contract}' |",
+                    1,
+                ).replace(
+                    awaited[1],
+                    f",'hook --connector codex --event {event} --hook-contract {contract}')",
+                    1,
+                )
+            else:
                 return command
-            replacement = (
-                "@('hook','--connector','codex',"
-                f"'--event','{event}','--hook-contract','{contract}')"
-            )
-            parts[encoded_index + 1] = base64.b64encode(
-                script.replace(needle, replacement, 1).encode("utf-16-le")
-            ).decode("ascii")
+            parts[encoded_index + 1] = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
             return subprocess.list2cmdline(parts)
 
         suffix = "hook --connector codex"
@@ -1729,6 +1763,18 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "stale", check.detail)
         self.assertIn("unqualified Start-Process launcher", check.detail)
         self.assertIn("repair", check.detail)
+
+    def test_codex_start_process_invocation_requires_repair(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime, start_process=True)
+        config = self._config("codex", command, codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("loses the status of a hook that exits at once", check.detail)
+        self.assertIn("repair", check.detail)
+        self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
 
     def test_codex_command_windows_encoded_invocation_without_feature_override(self) -> None:
         runtime = self._runtime()

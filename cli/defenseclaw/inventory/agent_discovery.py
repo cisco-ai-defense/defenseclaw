@@ -2100,6 +2100,27 @@ def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     return candidates[0] if candidates else ""
 
 
+def _windows_hermes_managed_executable(local_app_data: str) -> str:
+    """Return the updater-managed Hermes image under a LocalAppData root.
+
+    Mirrors internal/hermespath managedExecutableCandidates: the original
+    installer's hermes-agent\\venv\\Scripts\\hermes.exe wins, then the stable
+    bin\\hermes.exe launcher of the bootstrap installer (Hermes 0.21.5 and
+    later). Falls back to the venv path so callers name the historical
+    location when neither exists.
+    """
+
+    home = os.path.join(local_app_data, "hermes")
+    candidates = (
+        os.path.join(home, "hermes-agent", "venv", "Scripts", "hermes.exe"),
+        os.path.join(home, "bin", "hermes.exe"),
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate) and not os.path.islink(candidate):
+            return candidate
+    return candidates[0]
+
+
 def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]:
     """Enumerate launchable-location candidates without trusting the first alias.
 
@@ -2114,7 +2135,7 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
         root = _windows_current_user_known_folder(_WINDOWS_LOCAL_APP_DATA_FOLDER_ID)
         if not root:
             return ()
-        candidate = os.path.join(root, "hermes", "hermes-agent", "venv", "Scripts", "hermes.exe")
+        candidate = _windows_hermes_managed_executable(root)
         return (candidate,) if os.path.isfile(candidate) else ()
     if name == "antigravity" and _is_windows_host():
         return tuple(
@@ -2293,7 +2314,7 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
         ]
     elif connector == "hermes":
         prefixes[0:0] = [
-            os.path.join(root, "hermes", "hermes-agent", "venv", "Scripts")
+            os.path.dirname(_windows_hermes_managed_executable(root))
             for root in _windows_current_user_local_app_data_roots()
         ]
     elif connector == "cursor":

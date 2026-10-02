@@ -32,3 +32,7 @@ func atomicFilePublish(source, destination string, _ os.FileInfo, _ os.FileMode)
 func atomicFilePublishHookAPIToken(source, destination string, info os.FileInfo, perm os.FileMode) error {
 	return atomicFilePublish(source, destination, info, perm)
 }
+
+// FileBusyError reports a Windows-only sharing conflict; POSIX renames replace
+// open files, so no error here is transient in that sense.
+func FileBusyError(error) bool { return false }

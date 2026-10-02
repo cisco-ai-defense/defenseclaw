@@ -2512,7 +2512,7 @@ func TestForeignHookBlockNamesTheFileInEveryConnectorsResponse(t *testing.T) {
 		{connector: "cursor", payload: `{"hook_event_name":"preToolUse","tool_name":"Shell"}`, code: 2, stdout: `"permission":"deny"`},
 		{connector: "codex", event: "PreToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
 		{connector: "antigravity", event: "PreToolUse", code: 0, stdout: `"decision":"deny"`},
-		{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stdout: `"decision":"block"`},
+		{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stdout: ForeignHookBlockedReasonPrefix},
 		{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stderr: "blocking claude-code tool"},
 		{connector: "copilot", event: "preToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
 	} {

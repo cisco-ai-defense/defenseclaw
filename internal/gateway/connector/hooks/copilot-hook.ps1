@@ -102,8 +102,11 @@ catch {
 finally {
     if ($started -and -not $process.HasExited) {
         try {
+            # Kill() only starts termination. Wait briefly: this wait and the
+            # exit below share the reserve left after $timeoutMS inside
+            # Copilot's 30-second hook budget.
             $process.Kill()
-            [void]$process.WaitForExit(5000)
+            [void]$process.WaitForExit(2000)
         }
         catch {
             [Console]::Error.WriteLine('defenseclaw: could not stop failed Copilot hook launcher: ' + $_.Exception.Message)
@@ -125,4 +128,13 @@ finally {
 
 [Console]::Out.Flush()
 [Console]::Error.Flush()
-[System.Environment]::Exit(0)
+# Exit through the console host. Windows PowerShell 5.1 spends seconds in
+# runtime shutdown after [System.Environment]::Exit (about 3s on an idle host,
+# more on a busy one), and Copilot counts that time against the hook budget.
+# Hosts that do not support SetShouldExit keep the forced exit.
+try {
+    $Host.SetShouldExit(0)
+}
+catch {
+    [System.Environment]::Exit(0)
+}

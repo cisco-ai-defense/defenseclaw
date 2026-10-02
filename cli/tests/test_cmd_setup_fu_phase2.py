@@ -3536,8 +3536,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.gateway.api_port, 19091)
         self.assertTrue(os.path.isfile(self.cfg_path))
-        self.assertIn("Change saved", result.output)
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("was not written to the audit log", result.output)
 
     def test_new_api_port_saves_without_a_running_gateway(self):
         # The gateway cannot listen on the new port until it starts, so a
@@ -3552,8 +3551,11 @@ class TestGatewayOfflineStaging(_BaseSetup):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.gateway.api_port, 19093)
-        self.assertIn("defenseclaw-gateway start", result.output)
+        self.assertEqual(result.output.count("defenseclaw-gateway start"), 1, result.output)
         self.assertNotIn("OpenClaw", result.output)
+        # MAC-U3-03: no OpenClaw gateway.port and no internal audit wording.
+        self.assertNotIn("gateway.port:", result.output)
+        self.assertNotIn("canonical", result.output)
         openclaw_check.assert_not_called()
 
     def test_api_port_flag_is_used_on_a_terminal(self):

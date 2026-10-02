@@ -69,7 +69,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
@@ -182,6 +182,9 @@ path: _source-install-preflight
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
+# An existing config is kept as it is (first-run setup would replace its
+# connectors and modes with the defaults); only newly detected hook connectors
+# are added, unless CONNECTOR or PROFILE asks for first-run setup.
 # When no TTY is available, the follow-up additive setup observes only newly
 # detected hook connectors, preserves existing modes, and restarts the gateway
 # only when it actually adds a connector.
@@ -202,6 +205,7 @@ quickstart: _source-install-preflight
 			echo "  Developers: run 'make all'. Release installs: run 'defenseclaw upgrade'."; \
 			exit 1; \
 		fi; \
+		cfg_file="$${DEFENSECLAW_CONFIG:-$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}/config.yaml}"; \
 		if [ -n "$${CONNECTOR:-}" ]; then \
 			if ! "$$dc_bin" init --non-interactive --yes \
 				--connector "$${CONNECTOR}" \
@@ -209,6 +213,12 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
+			fi; \
+		elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then \
+			echo "  • Existing config kept ($$cfg_file); change connectors or modes with: defenseclaw init"; \
+			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
+				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
 				exit 1; \
 			fi; \
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
@@ -429,8 +439,9 @@ endif
 # `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
 # who don't need the plugin at all. Instead we drop a placeholder file
-# so //go:embed has at least one entry, and the OpenClaw connector
-# detects the placeholder at runtime and returns a clear error when
+# so //go:embed has at least one entry (the tracked .placeholder is kept
+# even after a sync, so a build leaves the checkout clean), and the
+# OpenClaw connector finds no package.json at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension: _checkout-write-preflight
@@ -438,11 +449,10 @@ sync-openclaw-extension: _checkout-write-preflight
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
 	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
-	  if [ -f "$$embed_dir/.placeholder" ] || [ ! -d "$$embed_dir" ] \
-	      || [ -z "$$(ls -A "$$embed_dir" 2>/dev/null | grep -v '^\.placeholder$$' || true)" ]; then \
+	  if [ ! -f "$$embed_dir/package.json" ]; then \
 	    mkdir -p "$$embed_dir"; \
-	    printf '%s\n' "OpenClaw extension not built." \
-	      "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+	    [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
+	      "OpenClaw extension bundle is not present in this source checkout." \
 	      > "$$embed_dir/.placeholder"; \
 	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
 	  else \
@@ -450,7 +460,11 @@ sync-openclaw-extension: _checkout-write-preflight
 	  fi; \
 	  exit 0; \
 	fi; \
-	rm -rf "$$embed_dir"; \
+	mkdir -p "$$embed_dir"; \
+	for entry in "$$embed_dir"/* "$$embed_dir"/.[!.]*; do \
+	  [ -e "$$entry" ] || continue; \
+	  [ "$${entry##*/}" = .placeholder ] || rm -rf "$$entry"; \
+	done; \
 	mkdir -p "$$embed_dir/node_modules"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
@@ -1059,13 +1073,22 @@ check-provider-coverage: sync-openclaw-extension
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
 
 # check-llm-catalog cross-references the suggested model ids in
-# bundles/llm/model_catalog.json against LiteLLM's bundled registry,
-# failing on ids LiteLLM no longer knows or has marked deprecated. The
-# curated catalog carries provider/auth/region metadata LiteLLM does not
-# model (so it stays hand-maintained), but the model list still rots as
-# providers ship and retire models — this gate catches that drift.
+# bundles/llm/model_catalog.json against LiteLLM's registry, failing on ids
+# LiteLLM no longer knows or has marked deprecated. The curated catalog
+# carries provider/auth/region metadata LiteLLM does not model (so it stays
+# hand-maintained), but the model list still rots as providers ship and
+# retire models.
+#
+# check-llm-catalog is the hermetic PR gate: the registry snapshot bundled
+# in the locked litellm wheel, judged as of GATE_AS_OF in the script, so an
+# upstream deprecation date passing cannot fail unrelated PRs.
+# check-llm-catalog-live is the drift radar (upstream registry, today's
+# date), run on a schedule by .github/workflows/llm-catalog-radar.yml.
 check-llm-catalog: pycli
 	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py
+
+check-llm-catalog-live: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py --live
 
 # ---------------------------------------------------------------------------
 # Lint targets

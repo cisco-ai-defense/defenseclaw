@@ -37,9 +37,11 @@ Coverage:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -802,6 +804,19 @@ class TestCheckConnectorHooks(unittest.TestCase):
         )
         self.assertEqual(run_mock.call_args.kwargs["env"]["SystemRoot"], r"C:\Windows")
         self.assertEqual(run_mock.call_args.kwargs["env"]["WINDIR"], r"C:\Windows")
+        # A cold profile analyzes the modules on PSModulePath the first time a
+        # cmdlet must be auto-loaded. The wrapper imports the two core modules
+        # from $PSHOME before its only other cmdlet, so nothing is discovered.
+        script = base64.b64decode(argv[4]).decode("utf-16-le")
+        self.assertRegex(
+            script,
+            r'^\$OutputEncoding = [^;]+; Import-Module -ErrorAction Stop -Name '
+            r'"\$PSHOME\\Modules\\Microsoft\.PowerShell\.Management\\Microsoft\.PowerShell\.Management\.psd1", '
+            r'"\$PSHOME\\Modules\\Microsoft\.PowerShell\.Utility\\Microsoft\.PowerShell\.Utility\.psd1"; ',
+        )
+        self.assertEqual(
+            re.findall(r"\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b", script), ["Import-Module", "Get-Content"]
+        )
         self.assertEqual(
             run_mock.call_args.kwargs["timeout"],
             _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
@@ -1924,6 +1939,8 @@ class TestCheckHookHealth(unittest.TestCase):
             ("uv run hermes", None),
             ("python3 -m hermes_cli.main", None),
             ("vim notes.txt", False),
+            ("claude --system-prompt You are polly, not hermes", False),
+            ("claude hermes help", False),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
@@ -2927,6 +2944,26 @@ class TestCheckHookHealth(unittest.TestCase):
             detail,
         )
         self.assertIn("without changing enforcement posture", detail)
+
+    def test_omnigent_config_rewritten_by_omnigent_is_not_drift(self) -> None:
+        managed = (
+            "policy_modules: [defenseclaw_omnigent_policy]\n"
+            "policies:\n"
+            "  defenseclaw_guardrail: {type: function, handler: defenseclaw_omnigent_policy.defenseclaw_policy}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = os.path.join(tmp, "config.yaml")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed)
+            self._write_omnigent_backup(tmp, "config", artifact)
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write("hosts: {local: {port: 62998}}\n" + managed)
+            self.assertEqual(_omnigent_managed_artifact_drift(cfg, "config", artifact), "")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed.replace("defenseclaw_policy}", "other}"))
+            self.assertIn("drift detected", _omnigent_managed_artifact_drift(cfg, "config", artifact))
 
     def test_omnigent_missing_import_shim_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
