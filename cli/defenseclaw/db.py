@@ -701,17 +701,59 @@ class Store:
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
+    # The few structured fields an audit list row shows (target and outcome
+    # of guardrail-verdict, judge and hook_decision rows, GAP-1510); the full
+    # payload stays out of the list query.
+    _SUMMARY_STRUCTURED_KEYS = (
+        "defenseclaw.guardrail.effective_action",
+        "defenseclaw.guardrail.decision",
+        "defenseclaw.guardrail.mode",
+        "defenseclaw.guardrail.would_block",
+        "defenseclaw.guardrail.rule_ids",
+        "defenseclaw.finding.rule_id",
+        "defenseclaw.judge.action",
+        "defenseclaw.judge.kind",
+        "defenseclaw.acp.method",
+        "defenseclaw.hook.event",
+    )
+
+    def _summary_structured_sql(self) -> str:
+        columns, _tables = self._audit_projection_schema()
+        if "structured_json" not in columns:
+            return "NULL"
+        source = (
+            "COALESCE(NULLIF(structured_json, ''), payload_json)" if "payload_json" in columns else "structured_json"
+        )
+        paths = ", ".join(f"'$.\"{key}\"'" for key in self._SUMMARY_STRUCTURED_KEYS)
+        # With several paths json_extract returns one JSON array of the values.
+        return f"CASE WHEN json_valid(COALESCE({source}, '')) THEN json_extract({source}, {paths}) END"
+
+    @classmethod
+    def _summary_row_to_event(cls, row: tuple[Any, ...]) -> Event:
+        values: Any = None
+        if row[8]:
+            try:
+                values = json.loads(row[8])
+            except (json.JSONDecodeError, TypeError):
+                values = None
+        structured = (
+            {key: value for key, value in zip(cls._SUMMARY_STRUCTURED_KEYS, values) if value is not None}
+            if isinstance(values, list)
+            else {}
+        )
+        return cls._row_to_event((*row[:8], json.dumps(structured) if structured else None, *row[9:]))
+
     def list_event_summaries(self, limit: int = 100) -> list[Event]:
         """List recent audit rows without loading large structured payloads."""
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector, enforced
+                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
                FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
-        return [self._row_to_event(r) for r in cur.fetchall()]
+        return [self._summary_row_to_event(r) for r in cur.fetchall()]
 
     def list_block_event_summaries(self, limit: int = 500) -> list[Event]:
         """List the newest block/deny rows from the whole trail.
@@ -722,9 +764,9 @@ class Store:
         """
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector, enforced
+                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
                FROM audit_events
                WHERE COALESCE(enforced, 0) = 1
                   OR (action = 'connector-hook'
@@ -734,7 +776,7 @@ class Store:
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
-        return [self._row_to_event(r) for r in cur.fetchall()]
+        return [self._summary_row_to_event(r) for r in cur.fetchall()]
 
     def list_actionable_event_summaries(self, limit: int = 100) -> list[Event]:
         """List high-signal audit rows for the default TUI view."""
@@ -742,13 +784,13 @@ class Store:
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector, enforced
+                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
                FROM audit_events
                WHERE {_ACTIONABLE_EVENT_WHERE}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
-        return [self._row_to_event(r) for r in cur.fetchall()]
+        return [self._summary_row_to_event(r) for r in cur.fetchall()]
 
     def count_routine_events(self, connector: str = "") -> int:
         """Count the rows :meth:`list_actionable_event_summaries` leaves out.
@@ -1319,18 +1361,84 @@ class Store:
         if not ids or "request_id" not in columns:
             return {}
         placeholders = ",".join("?" for _ in ids)
+        # ACP prompts and OpenClaw tool calls have no connector-hook row: their
+        # decision is in the guardrail-verdict or inspect-tool-<verdict> row of
+        # the same request (GAP-1616, GAP-1629). Those rows are rendered in
+        # the connector-hook ``key=value`` shape so one parser reads all three.
+        payload = "h.structured_json"
+        if "payload_json" in columns:
+            payload = "COALESCE(NULLIF(h.structured_json, ''), h.payload_json)"
+        facts = ", ".join(
+            self._safe_json_extract(payload, f'$."defenseclaw.{key}"')
+            for key in (
+                "guardrail.effective_action", "guardrail.would_block", "guardrail.mode", "acp.method", "acp.client",
+            )
+        )
         cur = self.db.execute(
-            f"""SELECT f.id, h.details
+            f"""SELECT f.id, h.action, h.details, {facts}
                FROM audit_events AS f
                JOIN audit_events AS h
-                 ON h.request_id = f.request_id AND h.action = 'connector-hook'
+                 ON h.request_id = f.request_id
+                AND (h.action IN ('connector-hook', 'guardrail-verdict') OR h.action LIKE 'inspect-tool-%')
                WHERE f.id IN ({placeholders}) AND COALESCE(f.request_id, '') <> ''
                ORDER BY h.timestamp ASC, h.rowid ASC""",
             ids,
         )
         out: dict[str, list[str]] = {}
-        for alert_id, details in cur.fetchall():
-            out.setdefault(alert_id, []).append(details or "")
+        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client in cur.fetchall():
+            if action == "connector-hook":
+                out.setdefault(alert_id, []).append(details or "")
+            elif action.startswith("inspect-tool-"):
+                out.setdefault(alert_id, []).append(f"action={action.removeprefix('inspect-tool-')} {details or ''}")
+            elif effective:
+                parts = [f"action={str(effective).strip().lower()}"]
+                if str(would_block).strip().lower() in ("1", "true"):
+                    parts.append("would_block=true")
+                if mode:
+                    parts.append(f"mode={'action' if str(mode).lower() == 'enforce' else mode}")
+                if acp_method:
+                    parts.append(f"acp_method={acp_method}")
+                if acp_client:
+                    parts.append(f"acp_client={acp_client}")
+                out.setdefault(alert_id, []).append(" ".join(parts))
+        return out
+
+    def alert_targets_for(self, alert_ids: list[str]) -> dict[str, dict[str, str]]:
+        """Name what a target-less alert row is about (GAP-1590).
+
+        A skill or path scan finding keeps its path only in ``scan_results``
+        (by scan id), and a quarantine row only in the ``asset.quarantined``
+        row of the same enforcement. Returns ``{id: {"target", "path"}}``.
+        """
+
+        ids = [alert_id for alert_id in alert_ids if alert_id]
+        columns, tables = self._audit_projection_schema()
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        out: dict[str, dict[str, str]] = {}
+        if "scan_id" in columns and "scan_results" in tables:
+            for alert_id, target in self.db.execute(
+                f"""SELECT f.id, s.target FROM audit_events AS f
+                   JOIN scan_results AS s ON s.id = f.scan_id
+                   WHERE f.id IN ({placeholders}) AND COALESCE(s.target, '') <> ''""",
+                ids,
+            ).fetchall():
+                out[alert_id] = {"target": str(target), "path": str(target)}
+        if "enforcement_action_id" in columns and "payload_json" in columns:
+            asset = "COALESCE(NULLIF(a.structured_json, ''), a.payload_json)"
+            for alert_id, name, path in self.db.execute(
+                f"""SELECT f.id, {self._safe_json_extract(asset, '$."defenseclaw.asset.id"')},
+                          {self._safe_json_extract(asset, '$."defenseclaw.asset.target_path"')}
+                   FROM audit_events AS f
+                   JOIN audit_events AS a
+                     ON a.enforcement_action_id = f.enforcement_action_id AND a.id <> f.id
+                    AND a.details = 'asset.quarantined'
+                   WHERE f.id IN ({placeholders}) AND COALESCE(f.enforcement_action_id, '') <> ''""",
+                ids,
+            ).fetchall():
+                if name or path:
+                    out.setdefault(alert_id, {"target": str(name or path or ""), "path": str(path or "")})
         return out
 
     # -- Actions --
