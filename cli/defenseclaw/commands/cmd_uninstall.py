@@ -310,6 +310,19 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
         click.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
     else:
         click.echo("  • turn protection back on:   defenseclaw setup guardrail")
+    # A Windows `make all` developer install refuses --binaries, so naming
+    # that command sent the user to a refusal (GAP-1256).
+    developer = (
+        _windows_developer_files(plan.install_root)
+        if plan.platform_name == "win32" and not plan.remove_binaries
+        else []
+    )
+    if developer:
+        if not plan.remove_data_dir:
+            click.echo("  • remove the data too:       defenseclaw uninstall --all")
+        click.echo("  • remove the developer files (PowerShell):")
+        click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(developer)}")
+        return
     click.echo("  • remove everything:         defenseclaw uninstall --all --binaries")
 
 
@@ -1555,8 +1568,12 @@ def _windows_developer_files(install_root: str) -> list[str]:
     ]
 
 
+def _powershell_quoted_paths(files: list[str]) -> str:
+    return ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+
+
 def _windows_developer_removal(files: list[str]) -> str:
-    quoted = ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+    quoted = _powershell_quoted_paths(files)
     return (
         "this is a developer install from 'make all', which uninstall does not remove. "
         "Run 'defenseclaw uninstall' without --binaries (add --all to remove data too), "

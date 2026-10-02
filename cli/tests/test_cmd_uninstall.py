@@ -213,6 +213,25 @@ class KeptAndNextStepsTests(unittest.TestCase):
         self.assertNotIn("audit log", text)
         self.assertIn("defenseclaw quickstart", text)
 
+    def test_windows_developer_install_next_step_is_remove_item(self):
+        # GAP-1256: --binaries refuses a make-all developer install, so the
+        # next step names the files instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            root.mkdir()
+            for name in ("defenseclaw.exe", ".defenseclaw-source-root"):
+                (root / name).write_text("dev", encoding="ascii")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32", data_dir=str(Path(tmp) / ".defenseclaw"), install_root=str(root),
+                remove_data_dir=True,
+            )
+            with capture_click_output() as buf:
+                cmd_uninstall._render_kept_and_next_steps(plan)
+            text = buf.getvalue()
+        self.assertNotIn("--binaries", text)
+        self.assertIn("Remove-Item -LiteralPath", text)
+        self.assertIn(f"'{root / 'defenseclaw.exe'}'", text)
+
     def test_full_uninstall_prints_nothing(self):
         plan = cmd_uninstall.UninstallPlan(data_dir="/d", install_root="/b", remove_data_dir=True, remove_binaries=True)
         with capture_click_output() as buf:

@@ -44,3 +44,36 @@ func TestWindowsEnterpriseStoppedServiceNextStep(t *testing.T) {
 		t.Fatalf("all running, next step = %q", got)
 	}
 }
+
+// GAP-1184: a stopped gateway is named instead of "installer exit 1".
+func TestWindowsEnterpriseNotHealthyMessageNamesTheStoppedService(t *testing.T) {
+	services := []enterprisestatus.Service{
+		{Name: "DefenseClawGateway", Kind: "gateway", State: "stopped", Required: true},
+		{Name: "DefenseClawHookGuardian", Kind: "guardian", State: "running", Required: true},
+	}
+	got := windowsEnterpriseNotHealthyMessage(services, 1)
+	if !strings.Contains(got, "the DefenseClawGateway service is stopped") || strings.Contains(got, "installer exit") {
+		t.Fatalf("not healthy message = %q", got)
+	}
+	services[0].State = "running"
+	if got := windowsEnterpriseNotHealthyMessage(services, 1); !strings.Contains(got, "enterprise windows verify") || strings.Contains(got, "installer exit") {
+		t.Fatalf("no stopped service, message = %q", got)
+	}
+}
+
+// GAP-1276: the enumerator's rule-pack error leads, without its log line.
+func TestWindowsEnterpriseEnumeratorFailureTextUnwrapsTheCause(t *testing.T) {
+	message := `synchronous target enumeration failed with exit 1603: [hook-enumerator] windows: manifest=C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml interval=5m0s once=true initial_delay=30s ` +
+		`Error: enterprise windows enumerate: load config: config: managed standalone guardrail.rule_pack_dir C:\pack: the gateway service account NT SERVICE\DefenseClawGateway cannot read C:\pack; grant it Read & execute, for example: icacls "C:\pack" /grant "NT SERVICE\DefenseClawGateway:(OI)(CI)RX" /T`
+	text, code, ok := windowsEnterpriseEnumeratorFailureText(message)
+	if !ok || code != "rule_pack_unreadable" {
+		t.Fatalf("ok=%t code=%q", ok, code)
+	}
+	if !strings.HasPrefix(text, `the managed config's guardrail.rule_pack_dir C:\pack: the gateway service account NT SERVICE\DefenseClawGateway cannot read`) ||
+		!strings.Contains(text, "icacls") || strings.Contains(text, "hook-enumerator") {
+		t.Fatalf("text = %q", text)
+	}
+	if _, _, ok := windowsEnterpriseEnumeratorFailureText("the gateway did not start"); ok {
+		t.Fatal("an unrelated message was rewritten")
+	}
+}

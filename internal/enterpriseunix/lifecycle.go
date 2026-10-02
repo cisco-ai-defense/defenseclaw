@@ -119,6 +119,9 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// perUserRemoved counts the per-user hook registrations an uninstall
+	// removed, for its summary.
+	perUserRemoved int
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1770,7 +1773,35 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	r.Installed = false
+	r.Changes = append(r.Changes, l.uninstallSummary(record)...)
 	return 0
+}
+
+// uninstallSummary says what a completed uninstall removed and kept, like
+// the change list of ensure and repair. A bare "uninstall: done" did not
+// tell the administrator that the config and the users' data stay
+// (GAP-1227).
+func (l *lifecycle) uninstallSummary(record *Deployment) []string {
+	env, r := l.env, l.result
+	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
+	if record != nil && record.Channel == ChannelPackage && env.GOOS == "linux" {
+		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
+	}
+	lines := []string{removed}
+	if l.perUserRemoved > 0 {
+		lines = append(lines, fmt.Sprintf("removed %d DefenseClaw per-user hook registrations from the enrolled accounts", l.perUserRemoved))
+	}
+	if len(r.MachinePolicy) > 0 {
+		lines = append(lines, "removed DefenseClaw's machine policy entries for "+strings.Join(sortedKeys(r.MachinePolicy), ", "))
+	}
+	if l.opts.Purge {
+		lines = append(lines, fmt.Sprintf("removed the managed config, secrets, data, logs and lifecycle state (%s, %s, %s, %s)",
+			env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.LogDir, env.Layout.LifecycleDir))
+		return lines
+	}
+	lines = append(lines, fmt.Sprintf("kept: the managed config and secrets (%s), the gateway data and audit log (%s), the logs (%s) "+
+		"and each enrolled user's ~/.defenseclaw; `%s --purge` removes them", env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.LogDir, l.uninstallCommand()))
+	return lines
 }
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
@@ -1796,10 +1827,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Failed      []string `json:"failed"`
 		StateFailed []string `json:"state_failed"`
 		Purged      []string `json:"purged"`
+		Removed     int      `json:"removed"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
 	}
+	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"
 	left := false
 	for _, entry := range report.Failed {

@@ -289,6 +289,29 @@ func TestInstallRefusals(t *testing.T) {
 	requireError(t, fresh.run(Options{Action: ActionInstall, PayloadDir: fresh.payload("1.0.0")}), codeNotRoot)
 }
 
+// GAP-1201: status by a standard user that cannot read the deployment
+// record asks for root instead of reporting state_unreadable.
+func TestStatusAsAStandardUserAsksForRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any mode")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	h.env.Geteuid = func() int { return 1000 }
+	r := h.run(Options{Action: ActionStatus})
+	requireError(t, r, codeNotRoot)
+	for _, e := range r.Errors {
+		if e.Code == codeState {
+			t.Fatalf("status still reports %s: %s", codeState, e.Message)
+		}
+	}
+}
+
 func TestLeftoversNeedAdoption(t *testing.T) {
 	h := newTestHost(t, "linux")
 	legacy := h.env.P("/etc/systemd/system/defenseclaw-hook-guardian@.service")
@@ -541,6 +564,13 @@ func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	r := h.run(Options{Action: ActionUninstall})
 	requireOK(t, r)
+	// GAP-1227: the result says what went and what stayed.
+	summary := strings.Join(r.Changes, "\n")
+	for _, want := range []string{"stopped and removed the DefenseClaw services", "kept: the managed config", "~/.defenseclaw", "--purge"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("uninstall summary lacks %q:\n%s", want, summary)
+		}
+	}
 	l := h.env.Layout
 	if exists(h.env.P(filepath.Join(l.BinDir, binGateway))) || exists(h.env.P(l.DescriptorPath)) ||
 		exists(h.env.P("/etc/systemd/system/"+unitGateway)) || exists(h.env.deploymentPath()) {
@@ -569,6 +599,9 @@ func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 	}
 	purge := h.run(Options{Action: ActionUninstall, Purge: true, RemoveServiceAccount: true})
 	requireOK(t, purge)
+	if summary := strings.Join(purge.Changes, "\n"); !strings.Contains(summary, "removed the managed config") || strings.Contains(summary, "kept:") {
+		t.Fatalf("purge summary:\n%s", summary)
+	}
 	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir} {
 		if exists(h.env.P(dir)) {
 			t.Fatalf("purge left %s", dir)
@@ -1168,5 +1201,19 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 	}
 	if got := h.mode(filepath.Join(l.VendorPolicyDir, "guardrail", "default", "rules", "secrets.yaml")); got != 0o644 {
 		t.Fatalf("vendor rule mode %04o under umask 077", got)
+	}
+}
+
+// GAP-1193: a connector that inherits the global rule pack is not checked
+// again, so a refusal names guardrail.rule_pack_dir.
+func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
+	got := rulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
+	})
+	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
 	}
 }

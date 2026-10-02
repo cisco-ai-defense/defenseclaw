@@ -180,7 +180,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	if result.Action == enterpriseunix.ActionRepair && result.OK && len(result.Changes) == 0 {
 		fmt.Fprintln(w, "  nothing to repair")
 	}
-	if result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify {
+	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) && !lifecycleResultHasError(result, "not_root") {
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,
 			result.Readiness.Enumerator, result.Readiness.SensorHelper)
@@ -192,6 +192,18 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		}
 	}
 	return nil
+}
+
+// lifecycleResultHasError reports whether result carries an error with code.
+// A not_root status knows nothing about the deployment, so its readiness
+// line (installed=false ...) is left out.
+func lifecycleResultHasError(result *enterprisestatus.Result, code string) bool {
+	for _, e := range result.Errors {
+		if e.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func lifecycleErrorSummary(result *enterprisestatus.Result) string {
