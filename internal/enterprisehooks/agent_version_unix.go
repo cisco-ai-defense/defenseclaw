@@ -827,8 +827,16 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return c.buf.Write(p)
 }
 
+// unixAgentVersionAttemptTimeout bounds one `--version` run; tests shorten
+// it.
+var unixAgentVersionAttemptTimeout = unixAgentVersionTimeout
+
 // execUnixAgentVersion runs candidate --version with a minimal environment
-// and a timeout. The caller must already run as the target user.
+// and a timeout. The caller must already run as the target user. A run that
+// times out is retried once at once: a cold start right after install, when
+// the enumerator probes every connector for every user together, can take
+// most of the timeout (agy took 4.85 s cold and 0.15 s warm), and the next
+// cycle is five minutes away.
 func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string) string {
 	info, err := os.Stat(candidate)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
@@ -837,7 +845,19 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, unixAgentVersionTimeout)
+	for attempt := 0; attempt < 2; attempt++ {
+		version, timedOut := runUnixAgentVersion(ctx, candidate, home, stateEnv)
+		if version != "" || !timedOut || ctx.Err() != nil {
+			return version
+		}
+	}
+	return ""
+}
+
+// runUnixAgentVersion is one `--version` run; timedOut reports that it hit
+// its own timeout.
+func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv string) (version string, timedOut bool) {
+	ctx, cancel := context.WithTimeout(parent, unixAgentVersionAttemptTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, candidate, "--version")
 	cmd.Dir = home
@@ -852,7 +872,7 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	if stateEnv != "" {
 		scratch, err := os.MkdirTemp("", "dc-agent-probe-")
 		if err != nil {
-			return ""
+			return "", false
 		}
 		defer os.RemoveAll(scratch)
 		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
@@ -868,8 +888,8 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	_ = cmd.Run()
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
 	if version := ExtractUnixAgentVersion(first); version != "" {
-		return version
+		return version, false
 	}
 	first, _, _ = strings.Cut(errOut.buf.String(), "\n")
-	return ExtractUnixAgentVersion(first)
+	return ExtractUnixAgentVersion(first), errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
