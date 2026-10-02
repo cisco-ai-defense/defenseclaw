@@ -43,6 +43,11 @@ class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
         tombstone = ntpath.join(ntpath.dirname(uv), match.group(2))
         self.assertLess(command.index("ren "), command.index(f'rd /s /q "{tombstone}"'))
         self.assertLess(command.index(f'rd /s /q "{tombstone}"'), command.index(r'rd "C:\Users\u\.defenseclaw"'))
+        # GAP-1728: the data folder rd retries while a deleted file is still held open.
+        self.assertIn(
+            r'(for /l %i in (1,1,30) do if exist "C:\Users\u\.defenseclaw" (rd "C:\Users\u\.defenseclaw" 2>nul || ',
+            command,
+        )
 
     @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
     def test_after_exit_command_removes_the_folder_on_windows(self) -> None:
