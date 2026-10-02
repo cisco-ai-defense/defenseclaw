@@ -950,9 +950,9 @@ are capped at 4 MiB, far below the main receiver's 64 MiB.
   response, marked `X-DefenseClaw-Idempotent-Replay: true`, instead of a
   second evaluation. The same key on a different request gets 422.
 - A blocked tool call's verdict carries a plain reason for the agent, in the
-  words a host hook uses for the same rule ("DefenseClaw policy blocked this
-  action (rule <ID>: <title>). Do not retry it in another form."), never the
-  matched content.
+  words a host hook uses for the same rule
+  (`DefenseClaw policy blocked this action (rule <ID>: <title>). Do not retry it in another form.`),
+  never the matched content.
 - The [CSRF rules](#csrf-protection) are the same as on the main API.
 
 ### Egress proxy
