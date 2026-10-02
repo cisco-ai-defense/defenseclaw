@@ -60,11 +60,12 @@ import click
     default=None,
     help=(
         "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'open' (default) allows + logs; 'closed' blocks where the hook supports it. "
+        "'closed' (the default on a new install) blocks where the hook supports it, "
+        "so the agent's tools are blocked while the gateway is down; 'open' allows + logs. "
+        "Omit it to keep the current setting. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
         "missing-token failures closed. "
-        "Quickstart is non-interactive — pick 'closed' here to opt the agent into a "
-        "stricter posture without later running `defenseclaw guardrail fail-mode`."
+        "Change it later with `defenseclaw guardrail fail-mode open|closed`."
     ),
 )
 @click.option(

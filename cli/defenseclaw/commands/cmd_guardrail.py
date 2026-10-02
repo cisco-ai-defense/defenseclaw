@@ -1323,11 +1323,10 @@ def fail_mode_cmd(
 
       \b
       open   — allow the tool/prompt and log the failure.
-               A misbehaving gateway never bricks your agent.
-               Recommended for almost all installs.
+               A gateway outage never blocks your agent.
       closed — block supported events when inspection is unavailable.
-               Choose for regulated workflows where every prompt
-               MUST be inspected.
+               The default on a new install: every prompt and
+               tool call is inspected or blocked.
 
     Transport failures (gateway unreachable / timeout / 5xx) follow the
     same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
