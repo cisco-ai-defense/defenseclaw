@@ -1089,6 +1089,10 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
             return connector_hook_decision(event.details, event.structured, event.enforced) == "block"
         if _structured_text(event.structured, "defenseclaw.guardrail.effective_action") == "block":
             return True
+        if "config" in action and not any(token in action for token in ("block", "deny", "quarantine")):
+            # "config.reload.rejected" is a refused config change, not a
+            # block/deny/quarantine event (GAP-1583).
+            return False
         return any(token in action for token in ("block", "deny", "quarantine", "reject"))
     if preset == "scans":
         return any(token in action for token in ("scan", "finding", "analyze"))

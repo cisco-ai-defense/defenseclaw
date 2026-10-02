@@ -287,6 +287,9 @@ class InventorySummary:
     plugins: Mapping[str, Any] = field(default_factory=dict)
     mcp: Mapping[str, Any] = field(default_factory=dict)
     agents: Mapping[str, Any] = field(default_factory=dict)
+    # Counted only: rule files ("Rules (Hermes 1)" in aibom) have no sub-tab
+    # yet, but the Summary lists them so every aibom category shows (GAP-1546).
+    rules: Mapping[str, Any] = field(default_factory=dict)
     tools: Mapping[str, Any] = field(default_factory=dict)
     models: Mapping[str, Any] = field(default_factory=dict)
     memory: Mapping[str, Any] = field(default_factory=dict)
@@ -307,6 +310,7 @@ class InventorySummary:
             plugins=_mapping(raw.get("plugins")),
             mcp=_mapping(raw.get("mcp")),
             agents=_mapping(raw.get("agents")),
+            rules=_mapping(raw.get("rules")),
             tools=_mapping(raw.get("tools")),
             models=_mapping(raw.get("model_providers")),
             memory=_mapping(raw.get("memory")),
@@ -735,11 +739,13 @@ class InventoryPanelModel:
         memory = tuple(item for snap in snaps for item in snap.memory)
         total_errors = sum(len(snap.errors) for snap in snaps)
         limitations = tuple(item for snap in snaps for item in snap.limitations)
+        rules = sum(_int_count(snap.summary.rules) for snap in snaps)
         total_items = (
             len(skills)
             + len(plugins)
             + len(mcps)
             + len(agents)
+            + rules
             + len(tools)
             + len(models)
             + len(memory)
@@ -750,6 +756,7 @@ class InventoryPanelModel:
             plugins={"count": str(len(plugins))},
             mcp={"count": str(len(mcps))},
             agents={"count": str(len(agents))},
+            rules={"count": str(rules)},
             tools={"count": str(len(tools))},
             models={"count": str(len(models))},
             memory={"count": str(len(memory))},
@@ -906,6 +913,7 @@ class InventoryPanelModel:
             "plugins": _map_val(inv.summary.plugins, "count"),
             "mcp": _map_val(inv.summary.mcp, "count"),
             "agents": _map_val(inv.summary.agents, "count"),
+            "rules": str(_int_count(inv.summary.rules)),
             "tools": _map_val(inv.summary.tools, "count"),
             "models": _map_val(inv.summary.models, "count"),
             "memory": _map_val(inv.summary.memory, "count"),
@@ -969,6 +977,12 @@ class InventoryPanelModel:
             ),
             ("MCPs", summary.counts["mcp"]),
             ("Agents", summary.counts["agents"]),
+            (
+                "Rules",
+                summary.counts["rules"]
+                if summary.counts["rules"] == "0"
+                else f"{summary.counts['rules']} (list them with: defenseclaw aibom scan)",
+            ),
             ("Tools", summary.counts["tools"]),
             ("Models", summary.counts["models"]),
             ("Memory", summary.counts["memory"]),
@@ -1314,6 +1328,13 @@ class InventoryPanelModel:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _int_count(raw: Mapping[str, Any]) -> int:
+    try:
+        return int(raw.get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _map_val(mapping: Mapping[str, Any], key: str) -> str:

@@ -893,14 +893,15 @@ def _set_alert_disposition(
         selection_digest = preview.get("selection_digest")
         if not isinstance(selection_digest, str) or not selection_digest.startswith("sha256:v1:"):
             raise click.ClickException("Gateway returned a malformed alert selection preview.")
-        click.echo(f"Preview: {matched} alert(s) matched; digest={selection_digest}")
+        # The selection digest and projection versions are the gateway's
+        # concurrency check, not something to read; the IDs are listed only
+        # for --dry-run, which promises them (GAP-1512).
+        click.echo(f"Preview: {matched} alert(s) matched.")
         targets = preview.get("targets", [])
-        if isinstance(targets, list):
+        if dry_run and isinstance(targets, list):
             for item in targets[:20]:
                 if isinstance(item, dict):
-                    click.echo(
-                        f"  {item.get('id', '')} version={item.get('projection_version', '')}"
-                    )
+                    click.echo(f"  {item.get('id', '')}")
             if len(targets) > 20:
                 click.echo(f"  … and {len(targets) - 20} more")
         if dry_run:

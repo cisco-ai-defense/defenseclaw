@@ -1048,16 +1048,14 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         return (
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} policy rows{filter_text}{detail}\n"
-            "[dim]Rows:[/] block/allow policy only; unblocked tools disappear from this table.\n"
-            "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  b block  ·  a allow  ·  u unblock"
+            # The keys are on the hint bar; repeating them here left no
+            # room for rows at 80x24 (GAP-1541).
+            "[dim]Rows:[/] block/allow policy only; unblocked tools disappear from this table."
         )
 
     def empty_state(self) -> str:
-        return (
-            "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here. "
-            + TOOLS_ADD_HINT
-        )
+        # The summary above already says what the table holds (GAP-1541).
+        return "No tool policy rows yet. " + TOOLS_ADD_HINT
 
 
 TOOLS_ADD_HINT = "To add a rule, press : and type: tool block <tool-name> --connector <connector> (or tool allow)."

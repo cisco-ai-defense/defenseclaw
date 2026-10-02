@@ -170,11 +170,13 @@ def test_fifteen_tabs_fit_at_120_columns(width: int) -> None:
 
 def test_tabs_name_the_most_important_panels_first() -> None:
     full = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 400)
-    wide = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 180 - 33)
+    # Since GAP-1544 every tab has a (tiny) name from about 150 columns, so
+    # check the order at 120.
+    wide = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 120 - 33)
 
     assert full["policies"] == "P Policies"
     assert wide["overview"] == "1 Overview"
-    assert strip_width(tuple(wide.values())) <= 180 - 33
+    assert strip_width(tuple(wide.values())) <= 120 - 33
     # A named tab is never less important than a letter-only one.
     named = [name for name in LABEL_PRIORITY if name in wide and wide[name] != wide[name][:1]]
     letter_only = [name for name in LABEL_PRIORITY if name in wide and name not in named]

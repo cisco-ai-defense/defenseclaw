@@ -11,9 +11,9 @@
 """Fit the top tab strip into the terminal width.
 
 Sixteen tabs with full names need about 180 columns. ``fit_tab_labels``
-starts from the key letter alone and then gives tabs a short name, and then
-their full name, in order of importance (``LABEL_PRIORITY``), stopping at the
-first tab that no longer fits. That choice depends on the width only, so
+starts from the key letter alone and then gives tabs a tiny name ("Inv"),
+a short name and then their full name, in order of importance
+(``LABEL_PRIORITY``), stopping at the first tab that no longer fits. That choice depends on the width only, so
 labels stay put as you switch panels or badges change. The active tab always
 shows its full name, every tab keeps its key letter, and unread badges stay
 unless even letter-only tabs with badges overflow. PANELS order never changes.
@@ -34,6 +34,18 @@ SHORT_LABELS: dict[str, str] = {
     "ai": "AI",
     "sandboxes": "Sandbox",
     "registries": "Registry",
+}
+
+# The shortest readable names, which every tab gets before any tab gets its
+# short name, so at 160 columns no tab is a bare key letter (GAP-1544).
+# Tabs that aren't listed use their short name.
+TINY_LABELS: dict[str, str] = {
+    "inventory": "Inv",
+    "sandboxes": "Sbox",
+    "activity": "Act",
+    "runtime": "Run",
+    "registries": "Reg",
+    "policies": "Policy",
 }
 
 
@@ -64,19 +76,21 @@ _SUPERSCRIPT = str.maketrans("0123456789+", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺")
 _PLAIN_BADGE = os.name == "nt"
 
 
-def _label(key: str, name: str, unread: int) -> str:
+def _label(key: str, name: str, unread: int, compact: bool = False) -> str:
     """``"2 Alerts (3)"``, or ``"2³"`` when ``name`` is empty.
 
     A letter-only tab shows its unread count as superscript digits, so the
-    badge costs one cell per digit instead of ``"(3)"``'s three.
+    badge costs one cell per digit instead of ``"(3)"``'s three. A named tab
+    does the same when ``compact`` (``"8 Logs²"``).
     """
 
     count = _badge(unread)
+    if not unread:
+        return f"{key} {name}" if name else key
+    small = f"({count})" if _PLAIN_BADGE else count.translate(_SUPERSCRIPT)
     if not name:
-        if not unread:
-            return key
-        return f"{key}({count})" if _PLAIN_BADGE else f"{key}{count.translate(_SUPERSCRIPT)}"
-    return f"{key} {name} ({count})" if unread else f"{key} {name}"
+        return f"{key}{small}"
+    return f"{key} {name}{small}" if compact else f"{key} {name} ({count})"
 
 
 # Badges show the real count, so the Alerts tab reads the same number as
@@ -93,9 +107,25 @@ def strip_width(labels: Sequence[str]) -> int:
     return sum(len(label) + TAB_GUTTER for label in labels)
 
 
+# Badges shortened or dropped only after every other tab's.
+KEEP_BADGE = frozenset({"alerts"})
+
 # Cells kept free when choosing which tabs get a name, so the names don't
 # change as unread badges come and go (GAP-1155).
 BADGE_RESERVE = 6
+
+
+def _names(name: str, label: str) -> tuple[str, str, str]:
+    """The tiny, short and full name of one tab."""
+
+    short = SHORT_LABELS.get(name, label)
+    return TINY_LABELS.get(name, short), short, label
+
+
+def _abbreviated(text: str, label: str) -> str:
+    """``text`` with a trailing "…" when it is a shortened ``label``."""
+
+    return text if text == label else f"{text}\u2026"
 
 
 def fit_tab_labels(
@@ -112,92 +142,126 @@ def fit_tab_labels(
     Which tabs get a name depends only on the width (badges come out of a
     fixed reserve), so moving between panels or a new badge never renames
     another tab. The active tab shows its full name when the room left over
-    allows it.
+    allows it, and a shortened active name ends with "…" (GAP-1541).
     """
 
     full = {name: _label(key, label, unread.get(name, 0)) for name, key, label in panels}
     if width <= 0 or strip_width(tuple(full.values())) <= width:
         return full
     keys = {name: key for name, key, _label in panels}
-    plain_full = {name: _label(key, label, 0) for name, key, label in panels}
-    plain_short = {name: _label(key, SHORT_LABELS.get(name, label), 0) for name, key, label in panels}
+    titles = {name: label for name, _key, label in panels}
     ranked = sorted(
-        (name for name, _key, _label in panels),
+        keys,
         key=lambda name: LABEL_PRIORITY.index(name) if name in LABEL_PRIORITY else len(LABEL_PRIORITY),
     )
-    # 1. Names from the width alone. Stop at the first tab that doesn't fit,
-    #    so a named tab is always more important than every letter-only one.
+    no_badge: set[str] = set()
+    compact: set[str] = set()
+
+    def render(chosen: Mapping[str, str], badges: bool = True) -> dict[str, str]:
+        return {
+            name: _label(
+                keys[name],
+                chosen[name],
+                unread.get(name, 0) if badges and name not in no_badge else 0,
+                name in compact,
+            )
+            for name in keys
+        }
+
+    def width_of(chosen: Mapping[str, str], badges: bool = True) -> int:
+        return strip_width(tuple(render(chosen, badges).values()))
+
+    def _squeeze(candidate: dict[str, str]) -> tuple[int, dict[str, str], set[str]] | None:
+        """Fit ``candidate`` by naming fewer other tabs, then dropping badges."""
+
+        candidate = dict(candidate)
+        cost = 0
+        for name in reversed(ranked):
+            if width_of(candidate) <= width:
+                break
+            if name != active and candidate[name]:
+                candidate[name] = ""
+                cost += 1
+        # Large badges (Windows draws them as "8(99)") can still leave no
+        # room: the active tab's name beats the badges of the least
+        # important other tabs, or it showed a bare key (GAP-1457).
+        dropped: set[str] = set()
+        for name in reversed(ranked):
+            if width_of(candidate) <= width:
+                break
+            if name != active and unread.get(name, 0):
+                no_badge.add(name)
+                dropped.add(name)
+                cost += 1
+        fits = width_of(candidate) <= width
+        no_badge.difference_update(dropped)
+        return (cost, candidate, dropped) if fits else None
+
+    # 1. Names from the width alone: every tab first gets its tiny name
+    #    ("Inv", "Run"; GAP-1544), then its short and full name, in order of
+    #    importance. Stop at the first tab that doesn't fit, so a named tab
+    #    is always more important than every letter-only one.
     budget = width - BADGE_RESERVE
-    names = dict(keys)
-    for tier in (plain_short, plain_full):
+    chosen = dict.fromkeys(keys, "")
+    for tier in range(3):
         for name in ranked:
-            candidate = {**names, name: tier[name]}
-            if strip_width(tuple(candidate.values())) > budget:
+            candidate = {**chosen, name: _names(name, titles[name])[tier]}
+            if width_of(candidate, badges=False) > budget:
                 break
-            names = candidate
-    # 2. Badges go on every tab.
-    named = {name: names[name] != keys[name] for name in names}
-    tier_label = {name: plain_full[name] == names[name] for name in names}
-    labels: dict[str, str] = {}
-    for name, key, label in panels:
-        if tier_label[name]:
-            labels[name] = _label(key, label, unread.get(name, 0))
-        elif named[name]:
-            labels[name] = _label(key, SHORT_LABELS.get(name, label), unread.get(name, 0))
-        else:
-            labels[name] = _label(key, "", unread.get(name, 0))
-    # 3. The active tab always shows a name. It takes its full (or short)
-    #    name from the room that is left, so no other tab changes for it;
-    #    only when there is no room do the least important other tabs fall
-    #    back to their key letter (GAP-1327: "A" alone on Activity).
-    if active in labels:
-        key, label = keys[active], next(label for name, _key, label in panels if name == active)
-        count = unread.get(active, 0)
-        wanted = (_label(key, label, count), _label(key, SHORT_LABELS.get(active, label), count))
+            chosen = candidate
+    named = {name for name in keys if chosen[name]}
+    # 2. Badges go on every tab. 3. The active tab always shows a name. It
+    #    takes its full (or a shortened) name from the room that is left, so
+    #    no other tab changes for it; only when it has no name at all do the
+    #    least important other tabs fall back to their key letter (GAP-1327:
+    #    "A" alone on Activity).
+    if active in keys:
+        title = titles[active]
+        short = _names(active, title)[1]
+        wanted = list(dict.fromkeys((title, _abbreviated(short, title), short)))
+        if chosen[active]:
+            # Never trade a name for a shorter one; keep the plain
+            # abbreviation when even its "…" doesn't fit.
+            current = chosen[active]
+            wanted = [text for text in wanted if len(text) > len(current)]
+            wanted += list(dict.fromkeys((_abbreviated(current, title), current)))
         for want in wanted:
-            candidate = {**labels, active: want}
-            if strip_width(tuple(candidate.values())) <= width:
-                labels = candidate
+            candidate = {**chosen, active: want}
+            if width_of(candidate) <= width:
+                chosen = candidate
                 break
         else:
-            if not named[active]:
-                candidate = {**labels, active: wanted[-1]}
-                demoted: list[str] = []
-                for name in reversed(ranked):
-                    if strip_width(tuple(candidate.values())) <= width:
+            if active not in named:
+                # Prefer "Sandbox…"; keep plain "Sandbox" when the "…" would
+                # cost another tab its name.
+                tiny, short, _title = _names(active, title)
+                best: tuple[int, dict[str, str], set[str]] | None = None
+                for name_text in dict.fromkeys((short, tiny)):
+                    for want in dict.fromkeys((_abbreviated(name_text, title), name_text)):
+                        squeezed = _squeeze({**chosen, active: want})
+                        if squeezed is not None and (best is None or squeezed[0] < best[0]):
+                            best = squeezed
+                    if best is not None:
                         break
-                    letter = _label(keys[name], "", unread.get(name, 0))
-                    if name != active and candidate[name] != letter:
-                        candidate[name] = letter
-                        demoted.append(name)
-                # Large badges (Windows draws them as "8(99)") can still
-                # leave no room: the active tab's name beats the badges of
-                # the least important other tabs, or it showed a bare key
-                # (GAP-1457).
-                for name in reversed(ranked):
-                    if strip_width(tuple(candidate.values())) <= width:
-                        break
-                    if name != active and unread.get(name, 0):
-                        keep_name = named[name] and name not in demoted
-                        candidate[name] = names[name] if keep_name else keys[name]
-                        if not keep_name:
-                            demoted.append(name)
-                if strip_width(tuple(candidate.values())) <= width:
-                    labels = candidate
-                    named.update(dict.fromkeys(demoted, False))
-    # 4. Only when the reserve is not enough (many large badges on a tiny
-    #    terminal): drop the least important badges, then names.
+                if best is not None:
+                    chosen = best[1]
+                    no_badge.update(best[2])
+    # 4. Only when the reserve is not enough (many badges): shrink the least
+    #    important badges to superscript ("8 Logs²"), then drop them, then
+    #    names. The Alerts count goes last: it is the open-alert count that
+    #    Overview and the status bar show.
+    for shrink, kept in ((compact, False), (no_badge, False), (compact, True), (no_badge, True)):
+        for name in reversed(ranked):
+            if width_of(chosen) <= width:
+                return render(chosen)
+            if name != active and unread.get(name, 0) and (name in KEEP_BADGE) == kept:
+                shrink.add(name)
     for name in reversed(ranked):
-        if strip_width(tuple(labels.values())) <= width:
-            return labels
-        if name != active and unread.get(name, 0):
-            labels[name] = names[name] if named[name] else keys[name]
-    for name in reversed(ranked):
-        if strip_width(tuple(labels.values())) <= width:
+        if width_of(chosen) <= width:
             break
         if name != active:
-            labels[name] = keys[name]
-    return labels
+            chosen[name] = ""
+    return render(chosen)
 
 
 __all__ = [
@@ -206,6 +270,7 @@ __all__ = [
     "LABEL_PRIORITY",
     "SHORT_LABELS",
     "TAB_GUTTER",
+    "TINY_LABELS",
     "fit_tab_labels",
     "strip_width",
 ]
