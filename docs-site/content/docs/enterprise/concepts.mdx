@@ -40,7 +40,7 @@ The profile that Cisco Secure Client installs as one of its modules, on
 Windows and macOS. Cisco AI Defense makes every decision and the local
 detectors are off. In the config it allows only `enterprise.profile`; every
 other `enterprise.*` setting is rejected. See
-[Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
+[Secure Client managed deployment](/docs/setup/enterprise-deployment).
 
 ### Standalone profile
 
@@ -179,8 +179,19 @@ macOS, where the administrator supplies the file.
 
 The guardian's record of which user is enrolled for which agent. Only the
 guardian writes it; the gateway reads it. On Linux and macOS the gateway checks
-the kernel-reported user ID of each hook call against it. Status and readiness
-come from the ledger, not from a file the gateway can write.
+the kernel-reported user ID of each hook call against it. The ledger keeps a
+user's last success so the guardian can repair that user's hooks. On Linux and
+macOS, every guardian reconcile also writes a credential attestation next to
+the ledger. It is root-only and records what that run did for each target,
+which key it used, and a fingerprint of each target's credential. Status and
+verify count the guardian ready only when the attestation comes from the same
+run as the ledger and from the current `targets.yaml`, lists each enabled
+target once, and names a key the gateway holds that derives each target's
+credential. They name every target the attestation reports failed. Readiness
+never comes from an old success in the ledger or from a file the gateway can
+write. An attestation written by an earlier release is in an older format
+that does not name credentials. It does not count as ready, and the next
+guardian reconcile (within a minute) rewrites it.
 
 ### Runtime descriptor
 

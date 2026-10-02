@@ -862,7 +862,7 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 		}
 		if standalone {
 			if !winpath.IsInteractiveUserSID(sid.String(), winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
-				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or Entra ID S-1-12-1-…); refusing well-known / machine-scoped principals")
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-... or Entra ID S-1-12-1-...); refusing well-known / machine-scoped principals")
 				continue
 			}
 		} else if !sidIsInteractiveUser(sid) {

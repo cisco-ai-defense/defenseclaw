@@ -7,12 +7,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
@@ -41,7 +44,13 @@ func validateEnterpriseHookUserTokenKeyLocation(dataDir string) error {
 
 // loadEnterpriseHookPendingUserTokenKey reads the key a credential rotation
 // staged (connector.PendingUserScopedTokenKeyPath), with the committed key's
-// location and trust checks; "" when no rotation is in progress.
+// location and trust checks; "" when no rotation is preparing it. The
+// guardian renders from a staged key only while the rotation's root-only
+// transaction record is in its prepare phase and names that key as next and
+// the committed key as previous (enterprisehooks.CredentialTransaction): the
+// key files live in the service account's data directory, so a staged key
+// alone authorizes nothing, and a rolling-back rotation moves every target
+// back to the committed key.
 func loadEnterpriseHookPendingUserTokenKey(dataDir string) (string, error) {
 	path, err := connector.PendingUserScopedTokenKeyPath(dataDir)
 	if err != nil {
@@ -54,12 +63,57 @@ func loadEnterpriseHookPendingUserTokenKey(dataDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("enterprise hooks: %w", err)
 	}
+	if key == "" {
+		return "", nil
+	}
+	transaction, err := loadEnterpriseHookCredentialTransaction(dataDir)
+	if err != nil || transaction == nil {
+		return "", nil
+	}
+	committed, err := connector.LoadUserScopedTokenKey(dataDir)
+	if err != nil || committed == "" ||
+		!transaction.RendersNext(connector.UserScopedTokenKeyFingerprint(committed), connector.UserScopedTokenKeyFingerprint(key)) {
+		return "", nil
+	}
 	return key, nil
 }
 
+// loadEnterpriseHookCredentialTransaction reads the root-only record of the
+// credential rotation in progress; nil when there is none. A record that
+// fails its custody (a regular 0600 file of the guardian's own account in
+// the trusted authorization directory) or schema check is an error.
+func loadEnterpriseHookCredentialTransaction(dataDir string) (*enterprisehooks.CredentialTransaction, error) {
+	dir := managed.HookGuardianAuthorizationDir(dataDir)
+	path := filepath.Join(dir, managed.HookGuardianCredentialTransactionFile)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: inspect the credential transaction: %w", err)
+	}
+	if err := enterpriseHookAuthorizationDirTrustCheck(dir); err != nil {
+		return nil, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != os.Geteuid() || info.Mode().Perm() != 0o600 {
+		return nil, errors.New("enterprise hooks: the credential transaction record is not a 0600 file of the guardian's account")
+	}
+	data, err := readEnterpriseHookBoundedFile(path, info, enterprisehooks.CredentialTransactionMaxBytes, "credential transaction")
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: %w", err)
+	}
+	transaction, err := enterprisehooks.ParseCredentialTransaction(data)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: %w", err)
+	}
+	return &transaction, nil
+}
+
 // currentEnterpriseHookUserTokenKeyID is the fingerprint of the key targets
-// are rendered from right now: a rotation's staged key, else the committed
-// one; "" when neither exists yet.
+// are rendered from right now: a rotation's staged key while the guardian's
+// prepare record names it, else the committed one; "" when neither exists
+// yet.
 func currentEnterpriseHookUserTokenKeyID(dataDir string) (string, error) {
 	key, err := loadEnterpriseHookPendingUserTokenKey(dataDir)
 	if err == nil && key == "" {

@@ -223,9 +223,9 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// Kiro honors only exit 2 as a block. Release launchers use the GUI
 	// subsystem, which PowerShell's call operator does not await (the hook's
 	// status is lost and Kiro proceeds), and cmd.exe rejects the call operator
-	// outright. Use Kiro's encoded system PowerShell command, which awaits the
-	// launcher and returns its exit status to cmd.exe and to any launcher that
-	// runs the command line directly (windowsKiroHookCommandForBinary).
+	// outright. Use Kiro's cmd.exe and encoded system PowerShell command, which
+	// awaits the launcher and returns its exit status through a PowerShell
+	// host, cmd.exe or a direct start (windowsKiroHookCommandForBinary).
 	if connector == "kiro" {
 		return windowsKiroHookCommandForBinary(defenseclawHookBinary(), "")
 	}
@@ -262,7 +262,7 @@ func legacyWindowsDevinEncodedPowerShellHookCommandForBinary(binary string) stri
 	if strings.TrimSpace(binary) == "" || strings.ContainsAny(binary, "\"\x00\r\n") || !isWindowsAbsolutePath(binary) {
 		return ""
 	}
-	command := windowsNativePowerShellHookCommandForBinary("devin", binary)
+	command := legacyStartProcessWindowsNativePowerShellHookCommand("devin", "", "", binary)
 	powershell := windowsSystemPowerShellExe()
 	if !strings.HasPrefix(command, powershell+" ") {
 		return ""
@@ -277,7 +277,7 @@ func legacyWindowsDevinEncodedPowerShellHookCommandForBinary(binary string) stri
 // backslash escapes. Keep it only so a refresh removes that exact no-fire
 // registration before installing the POSIX-quoted outer command.
 func legacyWindowsDevinUnquotedPowerShellHookCommandForBinary(binary string) string {
-	return windowsNativePowerShellHookCommandForBinary("devin", binary)
+	return legacyStartProcessWindowsNativePowerShellHookCommand("devin", "", "", binary)
 }
 
 // legacyWindowsDevinPowerShellHookCommandForBinary reconstructs the exact
@@ -649,38 +649,128 @@ func windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBina
 // windowsNativePowerShellHookCommandForBoundEvent renders the encoded system
 // PowerShell bridge for one hook registration. extra are further hook
 // arguments (flag, value pairs such as Kiro's --hook-surface v3), appended
-// after the event and contract; without them the bytes are the same as
-// before extra existed.
+// after the event and contract.
 func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractID, hookBinary string, extra ...string) string {
-	arguments := []string{
-		powershellQuoteLiteral("hook"),
-		powershellQuoteLiteral("--connector"),
-		powershellQuoteLiteral(connector),
-	}
+	script := strings.Join(append([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+	}, windowsAwaitedHookStatements(hookBinary, nativeHookBridgeArguments(connector, event, contractID, extra))...), "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+func nativeHookBridgeArguments(connector, event, contractID string, extra []string) []string {
+	arguments := []string{"hook", "--connector", connector}
 	if strings.TrimSpace(event) != "" {
-		arguments = append(arguments,
-			powershellQuoteLiteral("--event"),
-			powershellQuoteLiteral(event),
-		)
+		arguments = append(arguments, "--event", event)
 	}
 	if strings.TrimSpace(contractID) != "" {
-		arguments = append(arguments,
-			powershellQuoteLiteral("--hook-contract"),
-			powershellQuoteLiteral(contractID),
-		)
+		arguments = append(arguments, "--hook-contract", contractID)
 	}
-	for _, argument := range extra {
-		arguments = append(arguments, powershellQuoteLiteral(argument))
+	return append(arguments, extra...)
+}
+
+// windowsAwaitedHookStatements returns the PowerShell statements that run the
+// hook launcher with arguments, wait for it and exit with its status.
+// Release launchers use the Windows GUI subsystem, which the PowerShell call
+// operator does not await, so the statements start the launcher with
+// Process.Start. Windows PowerShell 5.1 implements Start-Process -Wait
+// -PassThru by closing the handle CreateProcess returned and opening the
+// child again by process ID, so a launcher that exited at once made
+// Start-Process fail with "the process has exited" and PowerShell exit 1: a
+// block (exit 2) and the hook's output were lost. Process.Start keeps the
+// handle CreateProcess returns, so the exit status is always there to read.
+// Redirecting stderr makes .NET pass the agent's own stdin and stdout to the
+// launcher (a GUI-subsystem child gets no standard handles otherwise); the
+// script copies the launcher's stderr to its own unchanged.
+//
+// Constrained Language mode (WDAC or AppLocker script enforcement) refuses
+// the .NET calls. In that mode the statements run the launcher with the call
+// operator and pipe its stdout to Out-Host: a piped GUI-subsystem launcher is
+// awaited on the handle PowerShell started it with, and $LASTEXITCODE is its
+// status. Its stdout then reaches the agent as console-encoded text lines.
+// Continue keeps a host that turns native stderr into error records from
+// ending the script with 1.
+//
+// Outside Constrained Language mode the statements call no cmdlet, and
+// Out-Host is module-qualified, so a fresh Windows PowerShell process does
+// not run a broad first-use module discovery scan.
+func windowsAwaitedHookStatements(hookBinary string, arguments []string) []string {
+	quoted := make([]string, len(arguments))
+	escaped := make([]string, len(arguments))
+	for i, argument := range arguments {
+		quoted[i] = powershellQuoteLiteral(argument)
+		escaped[i] = windowsCommandLineArgument(argument)
+	}
+	return []string{
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
+			powershellQuoteLiteral(strings.Join(escaped, " ")) + ")",
+		"$hookStart.UseShellExecute=$false",
+		"$hookStart.RedirectStandardError=$true",
+		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+		"$hookProcess.WaitForExit()",
+		"exit $hookProcess.ExitCode",
+	}
+}
+
+// windowsCommandLineArgument quotes one argument for
+// ProcessStartInfo.Arguments the way syscall.EscapeArg does, so the launcher
+// parses it back unchanged (Windows PowerShell 5.1 has no argument list).
+// The fixed hook tokens need no quoting and pass through as they are.
+func windowsCommandLineArgument(argument string) string {
+	if argument == "" {
+		return `""`
+	}
+	hasSpace := strings.ContainsAny(argument, " \t")
+	if !strings.ContainsAny(argument, `"\`) {
+		if hasSpace {
+			return `"` + argument + `"`
+		}
+		return argument
+	}
+	var b strings.Builder
+	if hasSpace {
+		b.WriteByte('"')
+	}
+	slashes := 0
+	for i := 0; i < len(argument); i++ {
+		c := argument[i]
+		switch c {
+		case '\\':
+			slashes++
+		case '"':
+			for ; slashes > 0; slashes-- {
+				b.WriteByte('\\')
+			}
+			b.WriteByte('\\')
+		default:
+			slashes = 0
+		}
+		b.WriteByte(c)
+	}
+	if hasSpace {
+		for ; slashes > 0; slashes-- {
+			b.WriteByte('\\')
+		}
+		b.WriteByte('"')
+	}
+	return b.String()
+}
+
+// legacyStartProcessWindowsNativePowerShellHookCommand reconstructs the exact
+// Start-Process -Wait -PassThru bridge emitted before the awaited
+// Process.Start statements (windowsAwaitedHookStatements). It remains owned
+// for repair and teardown, but is never generated.
+func legacyStartProcessWindowsNativePowerShellHookCommand(connector, event, contractID, hookBinary string, extra ...string) string {
+	arguments := nativeHookBridgeArguments(connector, event, contractID, extra)
+	for i, argument := range arguments {
+		arguments[i] = powershellQuoteLiteral(argument)
 	}
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		// Release builds use the Windows GUI subsystem, which Windows PowerShell
-		// does not synchronously await through its native call operator. Start the
-		// launcher without a new window so it inherits the agent's standard
-		// handles, waits, and returns the process exit code instead of stale
-		// LASTEXITCODE. Qualify the built-in module so a fresh PowerShell 5.1
-		// process does not perform a broad first-use module discovery scan.
 		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
 			" -ArgumentList @(" + strings.Join(arguments, ",") + ") -NoNewWindow -Wait -PassThru",
 		"exit $hookProcess.ExitCode",
@@ -788,7 +878,7 @@ func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary str
 
 // legacyWindowsNativePowerShellHookCommandForCodexEvent reconstructs the exact
 // event-bound non-waiting Codex command emitted before WIN-AUD-069. Keep this
-// separate from the current Start-Process generator: it is accepted only as a
+// separate from the current generator: it is accepted only as a
 // byte-exact ownership candidate for a finite built-in event/contract pair so
 // Setup can replace it during repair without claiming arbitrary PowerShell.
 func legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary string) string {
@@ -815,6 +905,12 @@ func windowsSystemPowerShellExe() string {
 	// SystemRoot/WINDIR values inherited from the project launching an agent.
 	// Build this as a Windows path even in OS-parameterized tests.
 	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
+}
+
+// windowsSystemCmdExe is cmd.exe in the trusted system directory, built as a
+// Windows path like windowsSystemPowerShellExe.
+func windowsSystemCmdExe() string {
+	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\cmd.exe`
 }
 
 func powershellEncodedCommand(script string) string {
@@ -847,40 +943,8 @@ func isNativeHookCommand(cmd string) bool {
 	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
 	// without shell interpolation. Compare against the exact commands we emit;
 	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
-	hookBinaries := nativeHookBinaryOwnershipCandidates()
-	for _, connectorName := range []string{"codex", "antigravity"} {
-		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
-				cmd == legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
-				cmd == legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
-				return true
-			}
-		}
-	}
-	for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-		for _, contract := range builtinHookContracts["codex"] {
-			for _, event := range contract.Events {
-				if cmd == windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary) ||
-					cmd == legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary) {
-					return true
-				}
-			}
-		}
-	}
-	for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-		if cmd == windowsCopilotPowerShellHookCommandForBinary(hookBinary) ||
-			cmd == legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary) ||
-			cmd == legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary) {
-			return true
-		}
-		for _, event := range copilotCurrentHookEvents {
-			if cmd == windowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
-				return true
-			}
-			if cmd == legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
-				return true
-			}
-		}
+	if _, ok := nativeHookExactCommands(nativeHookBinaryOwnershipCandidates())[cmd]; ok {
+		return true
 	}
 	// Codex's Windows command uses PATH with current-directory lookup disabled;
 	// strip only that exact hardening prefix before applying the existing strict
@@ -943,6 +1007,83 @@ func isDevinBashNativeHookCommand(command string) bool {
 		}
 	}
 	return false
+}
+
+// nativeHookExactCommandCache holds the exact command set for the last
+// ownership inputs. Rendering it means encoding every current and legacy
+// bridge for every launcher candidate, and matchers ask once per hook
+// command, so a large hooks file rendered the same set hundreds of times.
+var nativeHookExactCommandCache struct {
+	mu       sync.Mutex
+	key      string
+	commands map[string]struct{}
+}
+
+// nativeHookExactCommands returns every exact command isNativeHookCommand
+// accepts for hookBinaries: the encoded Codex and Antigravity bridges, the
+// event-bound Codex bridges and the Copilot programs, current and legacy.
+// The cache key covers every input the builders read, so a changed launcher
+// candidate, system directory or built-in event set renders a new set.
+// Callers must not modify the returned map.
+func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
+	hookBinaries = uniqueNonEmptyStrings(hookBinaries)
+	codexContracts := builtinHookContracts["codex"]
+	var key strings.Builder
+	key.WriteString(windowsSystemPowerShellExe())
+	for _, hookBinary := range hookBinaries {
+		key.WriteString("\x00b")
+		key.WriteString(hookBinary)
+	}
+	for _, contract := range codexContracts {
+		key.WriteString("\x00c")
+		key.WriteString(contract.ContractID)
+		for _, event := range contract.Events {
+			key.WriteString("\x00e")
+			key.WriteString(event)
+		}
+	}
+	for _, event := range copilotCurrentHookEvents {
+		key.WriteString("\x00p")
+		key.WriteString(event)
+	}
+
+	cache := &nativeHookExactCommandCache
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.commands != nil && cache.key == key.String() {
+		return cache.commands
+	}
+	commands := make(map[string]struct{})
+	add := func(cmd string) { commands[cmd] = struct{}{} }
+	for _, connectorName := range []string{"codex", "antigravity"} {
+		for _, hookBinary := range hookBinaries {
+			add(windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
+			add(legacyStartProcessWindowsNativePowerShellHookCommand(connectorName, "", "", hookBinary))
+			add(legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
+			add(legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
+		}
+	}
+	for _, hookBinary := range hookBinaries {
+		for _, contract := range codexContracts {
+			for _, event := range contract.Events {
+				add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
+				add(legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contract.ContractID, hookBinary))
+				add(legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
+			}
+		}
+	}
+	for _, hookBinary := range hookBinaries {
+		add(windowsCopilotPowerShellHookCommandForBinary(hookBinary))
+		add(legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary))
+		add(legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary))
+		for _, event := range copilotCurrentHookEvents {
+			add(windowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
+			add(legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
+		}
+	}
+	cache.key = key.String()
+	cache.commands = commands
+	return commands
 }
 
 func nativeHookBinaryOwnershipCandidates() []string {

@@ -58,7 +58,7 @@ func TestRuntimeOwnershipRejectsDirectControllerLifecycleMutation(t *testing.T) 
 	if err := dependencies.retentionController.Start(t.Context()); err == nil {
 		t.Fatal("runtime-owned controller accepted a direct start")
 	}
-	if err := dependencies.retentionController.Stop(t.Context()); err == nil {
+	if err := dependencies.retentionController.Stop(lifecycleTestContext(t)); err == nil {
 		t.Fatal("runtime-owned controller accepted a direct stop")
 	}
 	if _, _, _, days := dependencies.retentionReaper.snapshot(); days != 90 {
@@ -187,7 +187,7 @@ func TestRetentionPolicyContextFailureReleasesReservationWithoutMutation(t *test
 	if managerErr != nil {
 		t.Fatal(managerErr)
 	}
-	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	t.Cleanup(func() { _ = manager.Close(lifecycleTestContext(t)) })
 
 	failureFactory.failNext.Store(true)
 	reloadContext, cancel := context.WithCancel(t.Context())
@@ -239,9 +239,9 @@ func TestRuntimeConcurrentReloadAndCloseNeverActivateAfterControllerStop(t *test
 	closeDone := make(chan error, 1)
 	go func() {
 		close(closeStarted)
-		closeDone <- runtime.Close(t.Context())
+		closeDone <- runtime.Close(lifecycleTestContext(t))
 	}()
-	<-closeStarted
+	receiveRetentionTest(t, closeStarted)
 	close(allowUpdate)
 	reloaded := receiveRetentionTest(t, reloadDone)
 	if reloaded.err != nil || reloaded.result.Status() != runtimegraph.ReloadApplied {
@@ -319,7 +319,7 @@ func TestRuntimeCloseDeadlineFailureIsBoundedAndRetryWaitsForRetention(t *testin
 	}
 
 	close(blockingReporter.release)
-	if err := runtime.Close(t.Context()); err != nil {
+	if err := runtime.Close(lifecycleTestContext(t)); err != nil {
 		t.Fatalf("retry close failed: %v", err)
 	}
 	if status := controller.Status(); status.State != RetentionStateStopped {

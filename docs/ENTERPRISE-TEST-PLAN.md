@@ -1627,7 +1627,7 @@ and `audit export` row. Rule-pack edits in place need a gateway restart.
 | FM8 | Windows directory fixture available | Run repository identity tests and a controlled profile-list simulation | SID/profile binding stays eligible and isolated; do not label a simulation a real directory sign-in |
 | FM9 | Distinct desktop, IDE or ACP route available | Open that UI and repeat C0a/C0b | Same visible side effect and attributed audit, or named residual / `NOT_RUN` |
 
-The expected block message names DefenseClaw, the rule id and title, and tells the agent not to retry in another form. `~/`, `$HOME/` and wildcard redirect targets are covered only when the parsed command facts are complete. A command after `&&` or `||`, a variable target such as `$OUT`, and command substitution have documented detection limits (#923/#925); record the exact form and audit decision. Built-in rules with code prerequisites retain their regex fallback. Never classify a model's alternate command as the original marker call.
+The expected block message names DefenseClaw, the rule id and title, and tells the agent not to retry in another form. `~/`, `$HOME/` and wildcard redirect targets block for custom and built-in rules on POSIX shells (#925); PowerShell and cmd commands are not reduced this way. A command after `&&` or `||`, a variable target such as `$OUT`, and command substitution have documented detection limits (#923); record the exact form and audit decision. Never classify a model's alternate command as the original marker call.
 
 ## Foreign-hook guard
 
@@ -2484,8 +2484,8 @@ Per-user installs got these changes from the branch (CHANGELOG "Enterprise harde
 them on a normal install:
 
 - **REG-1-11-01** OpenHands terminal calls blocked (decoder); Antigravity `run_command` matches rules.
-- **REG-1-11-02** Redirect targets (`> ~/x`) and the first command of `&&`/`||` lists block for custom CEL rules
-  (built-in rules with a code prerequisite keep the regex fallback, #925).
+- **REG-1-11-02** Redirect targets (`> ~/x`) block for custom CEL rules and built-in rules (#925), and the first
+  command of `&&`/`||` lists blocks for custom CEL rules.
 - **REG-1-11-03** Block wording: "DefenseClaw policy blocked this action (rule <ID>)" plus "do not retry";
   confirm-as-alert names the rule.
 - **REG-1-11-04** OpenCode: visible block error and notice; confirm notice; restart hint after a failed
@@ -2554,7 +2554,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R26, W-58, L-28, M-19 | Copilot in VS Code (Local harness) is not governed (#913) | Every OS |
 | R27, W-59, L-29 | Agent sessions in WSL are outside Windows machine policy (#914); a Linux install inside WSL is unsupported | Windows |
 | R28, W-60, L-30, M-20 | Devin Desktop not enrolled; Cascade in builds 3.0.12 to before 3.9.19 not covered (#915) | Every OS |
-| R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Windows hook shell under `powershell -Command` reports exit 1 (#916) | Every OS |
+| R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Kiro IDE Windows hook shell not live-verified (#916) | Every OS |
 | R30, L-33, M-23 | A project `.openhands/hooks.json` replaces the user's, so none of DefenseClaw's OpenHands hooks run in that project (OpenHands shows "1 hook" instead of six) | OpenHands |
 | R31 | Per-account hook budget (60/s, burst 120, 32 in flight): under `hook_fail_mode: open` a user who floods their own budget makes their own hooks allow | Standalone |
 | Linux residual 1, macOS residual 1, Windows residual 1 | A user can delete or edit their own registration until the next repair (seconds with file watching, at most one reconcile interval) | Per-user connectors |
@@ -2579,8 +2579,8 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 ### Documented behaviors that look like bugs
 
 - A command after `&&` or `||` (including `cd /tmp && <marker>`) stays detection-only (#923).
-- Built-in rules with a code prerequisite keep the regex fallback for `> ~/x` and list forms
-  (#925); only custom rules without a prerequisite gain the new blocks.
+- `> ~/x`, `> "$HOME/x"` and `> out-*.txt` targets are reduced only for POSIX shell commands; a
+  PowerShell or cmd command with such a target keeps its legacy fallback (#925).
 - In-place edits of a rule pack or policy file need a gateway restart (lifecycle page); ensure
   does not reload them. Config changes, secrets and upgrades restart it on their own.
 - A change to `enterprise.network` needs a gateway restart on every OS.
@@ -2633,7 +2633,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | #920 | Claude Code releases that do not read `managed-settings.d` run without DefenseClaw (also the 2.1.154 floor limit; old Copilot and OpenHands below their minimum are the same class) | R15 |
 | #921 | Attribute scan and inspect-route audit rows to the verified caller | Remainder: `scan-finding` and `scan` rows still have no user fields; connector-hook, inspect-tool and auth-failure rows are fixed |
 | #923 | Commands chained with `&&` or `\|\|`: later commands never block | First command now blocks; later ones stay detection-only |
-| #925 | Built-in rules with a code prerequisite still record a runtime-expanded redirect target as detection-only | Custom rules fixed |
+| #925 | Built-in rules with a code prerequisite still record a runtime-expanded redirect target as detection-only | Fixed on the branch: every corpus entry that blocks with an absolute target blocks with `~/`, `"$HOME/"` and pattern targets in all three profiles; POSIX only |
 | #927 | Windows: roll back a failed first install cleanly for accounts with per-user agents (Amp, Antigravity, Copilot, Devin, Hermes, OpenCode) | Fixed on the branch (cleanup contracts for every per-user connector); forced first-install failure not exercised live |
 | #928 | Windows: dedicated DefenseClaw event log only admins can write | Fixed on the branch: `DefenseClaw` log, source `DefenseClaw Lifecycle`; legacy Application-log copies continue for one transition. See CLI-13, REG-1-9-10 |
 | #929 | Windows: status names the process holding the gateway API port | Fixed on the branch: `api_port_held` and `api_port_holders` |

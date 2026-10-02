@@ -41,7 +41,14 @@ func newWindowsRotateCredentialsCommand() *cobra.Command {
 		Short:              "Not available on Windows (see the enterprise operations guide)",
 		SilenceUsage:       true,
 		DisableFlagParsing: true,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Flag parsing is off so any other argument gets the refusal;
+			// a request for help still gets the help.
+			for _, arg := range args {
+				if arg == "-h" || arg == "--help" {
+					return cmd.Help()
+				}
+			}
 			return withExitCode(errWindowsCredentialRotationUnavailable, enterprisestatus.WindowsExitInvalidArgs)
 		},
 	}

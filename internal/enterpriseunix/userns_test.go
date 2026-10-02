@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestUnprivilegedUserNamespaceWarning(t *testing.T) {
@@ -63,11 +62,8 @@ func TestUnprivilegedUserNamespaceWarning(t *testing.T) {
 func TestVerifyWarnsAboutUnprivilegedUserNamespaces(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
 	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 1, "success_count": 1})
-	if err := os.WriteFile(ledger, data, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	h.publishLedger(data)
 	hasWarning := func(r *enterprisestatus.Result) bool {
 		for _, warning := range r.Warnings {
 			if warning.Code == codeUserNamespaces {

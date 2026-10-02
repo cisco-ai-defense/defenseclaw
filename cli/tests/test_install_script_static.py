@@ -173,7 +173,8 @@ def test_handoff_runs_the_verified_installer_with_yes(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert f"installer args: --yes --local {release}" in result.stdout
     assert "fresh=unset" in result.stdout
-    assert "ignoring unsupported option: --recover-corrupt-audit" in result.stderr
+    assert "corrupt audit store is moved aside" in result.stderr
+    assert "ignoring unsupported option" not in result.stderr
 
 
 def test_handoff_refuses_an_installer_that_does_not_match(tmp_path: Path) -> None:
@@ -267,3 +268,30 @@ def test_legacy_sandbox_installer_asset_is_an_inert_stub(tmp_path: Path) -> None
     assert "defenseclaw sandbox setup" in completed.stderr
     assert "once available" not in completed.stderr
     assert not (tmp_path / "bin").exists()
+
+
+def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: Path) -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("first_install_extras() {")
+    extras = text[start : text.index("\n}\n", start) + 3]
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "defenseclaw").write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    (venv_bin / "defenseclaw").chmod(0o755)
+    script = tmp_path / "extras.sh"
+    script.write_text(
+        "set -euo pipefail\nwarn() { :; }\n"
+        + extras
+        + 'CONNECTOR=codex RUN_QUICKSTART=true QUICKSTART_MODE=action QUICKSTART_RC=0 QUICKSTART_RERUN=""\n'
+        + f'DEFENSECLAW_HOME="{tmp_path}" VENV="{tmp_path / "venv"}" BIN_DIR="{venv_bin}"\n'
+        + 'first_install_extras\nprintf "%s|%s\\n" "${QUICKSTART_RC}" "${QUICKSTART_RERUN}"\n',
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    rerun = "defenseclaw quickstart --non-interactive --yes --connector codex --mode action"
+    assert completed.stdout.strip() == f"7|{rerun}"
+    summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
+    assert summary.index("exit 4") < summary.index("exit ${START_RC}")

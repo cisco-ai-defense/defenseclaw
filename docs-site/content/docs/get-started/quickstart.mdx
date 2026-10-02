@@ -43,7 +43,7 @@ On a TTY this runs the guided path (`_prompt_first_run`). It runs local agent di
 The action-only policy knobs — hook fail-mode (`open`/`closed`) and HITL human-approval plus its minimum severity — are asked **once** and shared across every connector you promote to action; observe connectors never see them. Proxy connectors (`openclaw`, `zeptoclaw`) are detected but excluded from the observe-all set — they own the single LLM proxy port and can't be multi-connector peers — so the wizard prints a one-line note pointing you to `defenseclaw setup <proxy>` for them.
 
 <Callout type="warn">
-An action connector whose installed version doesn't map to a known hook contract is **downgraded to observe** with a warning — the same gate the gateway applies at boot. Override only for exploratory testing with `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1`.
+An agent version newer than DefenseClaw's tested versions keeps action mode and is reported as an untested newer version. An action connector whose installed version has no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) is **downgraded to observe** with a warning — the same gate the gateway applies at boot. Override only for exploratory testing with `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1`. See [Version policy](/docs/connectors/compatibility#version-policy).
 </Callout>
 
 ### Scripted `init` (no prompts)

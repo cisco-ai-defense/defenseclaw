@@ -5,16 +5,12 @@
 package connector
 
 import (
-	"bufio"
-	"context"
-	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -42,7 +38,7 @@ func TestManagedPluginInstallMarkerRequiresAManagedAbsolutePath(t *testing.T) {
 // foreign-hook guard; while the marker exists it still fails closed, and a
 // render without a marker never relaxes.
 func TestOpenCodePluginStopsFailingClosedOnceTheDeploymentIsRemoved(t *testing.T) {
-	node := nodeForTest(t)
+	nodeForTest(t)
 	root := testenv.PrivateTempDir(t)
 	marker := filepath.Join(root, "DefenseClaw-HookRuntime")
 	if err := os.MkdirAll(marker, 0o700); err != nil {
@@ -97,6 +93,7 @@ for (const path of process.argv.slice(1)) {
   const loaded = await import(pathToFileURL(path).href);
   plugins.push(await loaded.DefenseClaw({ directory: "" }));
 }
+console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of lines) {
   const plugin = plugins[Number(line)];
@@ -111,37 +108,10 @@ for await (const line of lines) {
   }
 }
 `
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, withMarker, withoutMarker)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
-	scanner := bufio.NewScanner(stdout)
+	session := startNodeHarnessSession(t, harness, withMarker, withoutMarker)
 	evaluate := func(step string, plugin int) string {
 		t.Helper()
-		if _, err := fmt.Fprintln(stdin, plugin); err != nil {
-			t.Fatal(err)
-		}
-		if !scanner.Scan() {
-			t.Fatalf("%s: read verdict: %v; stderr=%s", step, scanner.Err(), stderr.String())
-		}
-		return scanner.Text()
+		return session.request(step, strconv.Itoa(plugin))
 	}
 
 	if got := evaluate("installed, gateway down", 0); !strings.HasPrefix(got, "block:DefenseClaw hook failed closed") {
@@ -168,12 +138,7 @@ for await (const line of lines) {
 	if got := evaluate("installed, credential gone", 0); got != "block:DefenseClaw hook credential is unavailable." {
 		t.Fatalf("installed deployment without a credential = %q, want the credential block", got)
 	}
-	if err := stdin.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("OpenCode marker process: %v; stderr=%s", err, stderr.String())
-	}
+	session.close()
 
 	// The foreign-hook guard's binary is removed with the marker: a guard
 	// that cannot run blocks while the marker exists or none was rendered,

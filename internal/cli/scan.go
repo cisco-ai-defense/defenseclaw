@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,15 +63,21 @@ func init() {
 	rootCmd.AddCommand(scanCmd)
 }
 
-func runScanCode(_ *cobra.Command, args []string) error {
+func runScanCode(cmd *cobra.Command, args []string) error {
 	if scanNoRedact && !scanOutputJSON {
 		return fmt.Errorf("--no-redact requires --json")
 	}
+	// Machine output goes through the command's writer (os.Stdout unless a
+	// caller redirected it) so the JSON contract can be exercised in-process.
+	var stdout io.Writer = os.Stdout
+	if cmd != nil {
+		stdout = cmd.OutOrStdout()
+	}
 	if scanPrintSchema {
-		if _, err := os.Stdout.Write(scanResultSchemaJSON); err != nil {
+		if _, err := stdout.Write(scanResultSchemaJSON); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintln(os.Stdout)
+		_, _ = fmt.Fprintln(stdout)
 		return nil
 	}
 
@@ -129,11 +136,11 @@ func runScanCode(_ *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		_, err = os.Stdout.Write(b)
+		_, err = stdout.Write(b)
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(os.Stdout)
+		_, err = fmt.Fprintln(stdout)
 		return err
 	}
 

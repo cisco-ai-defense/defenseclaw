@@ -36,6 +36,10 @@ dc_handoff() {
             --version) [ "$#" -gt 1 ] && shift ;;
             --version=*) ;;
             --plan) plan=1 ;;
+            # The 1.x gateway moves a corrupt audit store aside on its own when
+            # it starts, which is the recovery 0.8.x asks for with this flag.
+            --recover-corrupt-audit)
+                echo "  - a corrupt audit store is moved aside and replaced when the new gateway starts" >&2 ;;
             *) echo "  ! ignoring unsupported option: $1" >&2 ;;
         esac
         shift

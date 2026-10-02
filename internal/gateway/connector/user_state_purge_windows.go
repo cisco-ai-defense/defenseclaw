@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -21,8 +22,10 @@ import (
 // hook script becomes the disabled stub in place, so it keeps the owner and
 // access list the account needs to run it. It keeps what PurgeUserState
 // keeps and removes the rest, including the per-user hook credentials; the
-// caller removes the directory itself once nothing stayed.
-func PurgeUserStateInRoot(root *os.Root) error {
+// caller removes the directory itself once nothing stayed. An entry whose
+// access list refuses the removal goes to removeDenied, when set, with its
+// path from root (the account can deny SYSTEM on a folder it owns).
+func PurgeUserStateInRoot(root *os.Root, removeDenied func(rel string) error) error {
 	names, err := rootEntryNames(root)
 	if err != nil {
 		return err
@@ -34,23 +37,36 @@ func PurgeUserStateInRoot(root *os.Root) error {
 		}
 		if name == "hooks" {
 			if info, err := root.Lstat(name); err == nil && info.IsDir() {
-				if err := purgeHookScriptsInRoot(root); err != nil {
+				if err := purgeHookScriptsInRoot(root, removeDenied); err != nil {
 					errs = append(errs, err)
 				}
 				continue
 			}
 		}
-		if err := root.RemoveAll(name); err != nil {
+		if err := removeAllInRoot(root, name, name, removeDenied); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
+// removeAllInRoot removes name in dir. When the access list refuses it and
+// removeDenied is set, removeDenied gets rel, the path from the purge root.
+func removeAllInRoot(dir *os.Root, name, rel string, removeDenied func(string) error) error {
+	err := dir.RemoveAll(name)
+	if err == nil || removeDenied == nil || !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	if deniedErr := removeDenied(rel); deniedErr != nil {
+		return errors.Join(err, deniedErr)
+	}
+	return nil
+}
+
 // purgeHookScriptsInRoot turns every DefenseClaw hook script in <root>/hooks
 // into the disabled stub and removes everything else there (credentials,
 // hook config, temporary files).
-func purgeHookScriptsInRoot(root *os.Root) error {
+func purgeHookScriptsInRoot(root *os.Root, removeDenied func(string) error) error {
 	hooks, err := root.OpenRoot("hooks")
 	if err != nil {
 		return err
@@ -70,7 +86,7 @@ func purgeHookScriptsInRoot(root *os.Root) error {
 		if stubbed {
 			continue
 		}
-		if err := hooks.RemoveAll(name); err != nil {
+		if err := removeAllInRoot(hooks, name, `hooks\`+name, removeDenied); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -92,6 +108,13 @@ func stubHookScriptInRoot(dir *os.Root, name string) (bool, error) {
 		return false, nil
 	}
 	file, err := dir.OpenFile(name, os.O_RDWR, 0)
+	if errors.Is(err, fs.ErrPermission) && info.Mode().Perm()&0o200 == 0 {
+		// The read-only attribute, not the access list, refused the write:
+		// clear it (Chmod changes only that attribute on Windows) and retry.
+		if chmodErr := dir.Chmod(name, 0o600); chmodErr == nil {
+			file, err = dir.OpenFile(name, os.O_RDWR, 0)
+		}
+	}
 	if err != nil {
 		return false, err
 	}

@@ -1828,7 +1828,7 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	}
 	switch {
 	case err != nil:
-		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+		errs = append(errs, restoreBackupFailure(err))
 	case restored && c.name == "devin":
 		// A Devin backup captured after an earlier DefenseClaw setup (the
 		// per-user devin-hook.sh route) holds DefenseClaw's own hooks, which
@@ -2070,6 +2070,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
+		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
 		var cfg map[string]interface{}
 		if err := json.Unmarshal(data, &cfg); err == nil &&
 			structuredHookCommandReferences(cfg, ownedCommands) {
@@ -2540,6 +2541,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
+		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
 		return removeJSONHookReferences(path, ownedCommands...)
 	default:
 		return nil
@@ -4469,7 +4471,7 @@ func (c *hookOnlyConnector) ownedCursorHookContractPresent(opts SetupOpts) (bool
 	if !runtimeInfo.Mode().IsRegular() || runtimeInfo.Mode()&os.ModeSymlink != 0 || runtimeInfo.Size() > 512*1024 {
 		return false, nil
 	}
-	runtimeBody, err := os.ReadFile(runtimePath)
+	runtimeBody, err := readHookConfigFile(runtimePath)
 	if err != nil {
 		return false, err
 	}
@@ -5146,6 +5148,16 @@ func legacyAntigravityWindowsHookCommand() string {
 
 func legacyAntigravityNonWaitingWindowsHookCommand() string {
 	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
+}
+
+// legacyAntigravityStartProcessWindowsHookCommands are the event-bound
+// Start-Process bridge commands earlier builds registered on Windows.
+func legacyAntigravityStartProcessWindowsHookCommands() []string {
+	commands := make([]string, 0, len(antigravityLifecycleEvents))
+	for _, event := range antigravityLifecycleEvents {
+		commands = append(commands, legacyStartProcessWindowsNativePowerShellHookCommand("antigravity", event, "", defenseclawHookBinary()))
+	}
+	return commands
 }
 
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {

@@ -526,8 +526,12 @@ class CliSmokeTests(unittest.TestCase):
                 ),
                 patch.object(Logger, "from_config", return_value=Logger.no_runtime()),
                 patch("defenseclaw.observability.v8_writer._validate_candidate"),
+                # Never start a real gateway for a temporary home (#1031).
+                # --no-start-gateway would switch init to the guided flow.
+                patch("defenseclaw.commands.cmd_init._start_gateway"),
             ):
-                runner.invoke(cli, ["init", "--skip-install"])
+                init = runner.invoke(cli, ["init", "--skip-install"])
+                self.assertEqual(init.exit_code, 0, init.output)
                 result = runner.invoke(
                     cli,
                     ["setup", "splunk", "--o11y", "--access-token", "test-tok", "--realm", "us1", "--non-interactive"],

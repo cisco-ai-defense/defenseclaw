@@ -103,7 +103,7 @@
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
-      "purpose": "Bypass the action-mode fail-closed checks for unverified hook contracts and hook-contract lock drift during connector setup, allowing enforcing hooks to be installed against agent versions outside the verified contract matrix.",
+      "purpose": "Bypass the action-mode fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
       "default": "unset (fail-closed in action mode)",
       "accepted_values": [
         "1",
@@ -764,6 +764,25 @@
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-event token that tells the Codex policy process-tree fixture helpers when to exit, so the test controls their lifetime by event instead of by sleep.",
+      "default": "unset",
+      "accepted_values": [
+        "test release-event token",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
+          "description": "Codex policy process-tree fixture release signal"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_CODEX_POLICY_READY_PATH",
@@ -3735,6 +3754,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_PROCESS_TREE_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-event token that tells the native Windows process-tree fixture helpers when to exit, so the test controls their lifetime by event instead of by sleep.",
+      "default": "unset",
+      "accepted_values": [
+        "test release-event token",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/processutil/command_windows_test.go",
+          "description": "Native Windows process-tree test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_PROCESS_TREE_PID_FILE",
       "category": "test_fixture",
       "purpose": "PID-record path shared with the process-tree cancellation fixture.",
@@ -4616,6 +4654,25 @@
         {
           "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
           "description": "Test-only apply-target worker helper selector"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_AWAITED_HOOK_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that exits at once with a block when it receives the expected hook argument list, so the Windows PowerShell hook bridge tests can check that a fast-exiting hook keeps its exit code and output.",
+      "default": "unset",
+      "accepted_values": [
+        "expected hook argument list",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/awaited_hook_fast_exit_windows_test.go",
+          "description": "Test-only fast-exiting hook helper selector"
         }
       ],
       "since": "1.0.0"
@@ -5680,6 +5737,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_V2_LOCK_CONTENDED",
+      "category": "test_fixture",
+      "purpose": "Marker path the native CAS V2 cross-process lock fixture writes when its contender finds the lock held and starts to wait, so the test proves contention instead of sleeping.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute test marker path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
+          "description": "Native CAS V2 lock contention fixture"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_V2_LOCK_STATE",
       "category": "test_fixture",
       "purpose": "Recovery-state directory passed to the native CAS V2 cross-process lock fixture.",
@@ -5930,6 +6006,26 @@
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS",
+      "category": "security_opt_out",
+      "purpose": "Skip the S4U logon that the rollback of a failed first Windows standalone install uses to put back a signed-out account's agent configuration. Those accounts are then listed as rollback leftovers.",
+      "default": "unset (signed-out accounts are restored through an S4U logon)",
+      "accepted_values": [
+        "0",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/rollback_first_install_windows.go",
+          "description": "windowsStandaloneSignedOutRollbackEnabled() skips the S4U restore of signed-out accounts when set to 0"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Cleanup opt-out: with 0, a signed-out account can keep agent hook configuration that points at the rolled-back install until an administrator removes the listed leftovers."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT",

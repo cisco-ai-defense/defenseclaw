@@ -456,15 +456,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
-    ux.banner("Notifications")
-    _onboard_notifications(
-        cfg,
-        logger,
-        non_interactive=non_interactive,
-        yes=yes,
-        is_new_config=is_new_config,
-    )
-
     ux.banner("Sidecar")
     _start_gateway(cfg, logger)
 
@@ -778,6 +769,29 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # the now-started gateway. _next_commands only reads cfg.data_dir,
             # which the report already exposes.
             report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
+        elif not start_gateway and len(activated) > 1:
+            # Extra connectors get their hooks from the gateway's reconcile on
+            # the next start; say so instead of leaving Doctor to report
+            # "no hooks registered" with no explanation.
+            for s in report.setup:
+                if s.name == "Sidecar" and s.status == "skip":
+                    s.detail = (
+                        f"{s.detail}; hooks for {', '.join(activated[1:])} are installed when the gateway starts"
+                    )
+    elif extras and primary["connector"] != "none":
+        from defenseclaw.bootstrap import StepResult
+
+        report.setup.append(
+            StepResult(
+                "Connectors",
+                "fail",
+                "not configured because setup for "
+                f"{primary['connector']} failed: "
+                + ", ".join(connector_paths.normalize(s["connector"]) for s in extras),
+                "defenseclaw init",
+            )
+        )
+        report.status = _rollup_status(report.setup, report.readiness)
 
     mode_warnings = _connector_mode_warnings(connector_settings)
     if mode_warnings:
@@ -1111,10 +1125,33 @@ def _note_proxy_connectors(disc) -> None:
     )
 
 
-def _prompt_action_connectors(connectors: list[str]) -> list[str]:
+def _current_action_connectors(
+    connectors: list[str],
+    data_dir: str | os.PathLike[str] | None = None,
+) -> list[str]:
+    """Connectors an existing config already runs in action mode.
+
+    A re-run of init preselects them so pressing Enter keeps the current
+    posture instead of quietly asking for observe."""
+    try:
+        from defenseclaw import config as cfg_mod
+
+        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
+            return []
+        guardrail = cfg_mod.load(data_dir=data_dir).guardrail
+        return [c for c in connectors if guardrail.effective_mode(c).lower() == "action"]
+    except Exception:  # noqa: BLE001 - an unreadable config preselects nothing
+        return []
+
+
+def _prompt_action_connectors(
+    connectors: list[str],
+    current_action: list[str] | None = None,
+) -> list[str]:
     """Ask which of the selected active connectors should run in ACTION mode.
 
-    Every selected connector defaults to observe. The operator
+    Connectors default to observe, except those the existing config already
+    runs in action mode (``current_action``). The operator
     names the subset to enforce; a blank answer keeps everything in observe.
     The reply is intersected with the selected active list so a typo can't
     enable a connector that isn't being set up."""
@@ -1124,7 +1161,7 @@ def _prompt_action_connectors(connectors: list[str]) -> list[str]:
     ux.subhead("Unchecked connectors stay in observe mode and only report findings.")
     requested = _prompt_checkbox_selection(
         connectors,
-        default_selected=[],
+        default_selected=[c for c in connectors if c in set(current_action or ())],
         title="Select connector(s) for action enforcement.",
         empty_ok=True,
     )
@@ -1322,8 +1359,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
     elif signal is not None and getattr(signal, "version", ""):
+        from defenseclaw.connector_contracts import resolve_connector_contract
+
+        why = resolve_connector_contract(key, signal.version).reason
         record["reason"] = (
-            f"installed version {signal.version} is not covered by a known hook contract"
+            f"installed version {signal.version} is not covered by a known hook contract ({why})"
         )
         record["installed_version"] = signal.version
     return record
@@ -1383,7 +1423,8 @@ def _append_mode_warning_steps(report, warnings: list[dict]) -> None:
         report.setup.append(
             StepResult(
                 f"{label} mode",
-                "fail",
+                # Observe is a working, non-blocking posture: warn, never fail.
+                "warn",
                 detail,
                 warning.get("next_command", ""),
             )
@@ -1561,7 +1602,10 @@ def _prompt_first_run(
     elif connector and profile is not None and len(connectors) == 1:
         requested_action = list(connectors) if profile.lower() == "action" else []
     else:
-        requested_action = _prompt_action_connectors(host_connectors)
+        requested_action = _prompt_action_connectors(
+            host_connectors,
+            _current_action_connectors(host_connectors, data_dir),
+        )
 
     # Gate action connectors on hook-contract support; unverified ones are
     # downgraded to observe (still guarded, just non-blocking).
@@ -2807,94 +2851,6 @@ def _install_codeguard_skill(cfg, logger) -> None:
     _ = cfg
     _ = logger
     click.echo("  CodeGuard:     skipped (explicit opt-in required)")
-
-
-def _onboard_notifications(
-    cfg,
-    logger,
-    *,
-    non_interactive: bool,
-    yes: bool,
-    is_new_config: bool,
-) -> None:
-    """Surface the desktop-notifications opt-in prompt on first run.
-
-    Mirrors the single-question contract documented in the
-    ``macos-block-and-hitl-notifications`` plan: a fresh install is
-    asked once, the answer is persisted to
-    ``notifications.enabled``, and subsequent ``defenseclaw init``
-    invocations stay quiet (the operator can rerun
-    ``defenseclaw setup notifications`` to flip it).
-
-    Decision tree:
-      * Existing config (``is_new_config=False``) → never prompt;
-        print the current state for visibility. Re-running ``init``
-        on a configured install must not re-litigate onboarding.
-      * ``--non-interactive`` or ``--yes`` or non-TTY stdin (CI) →
-        keep platform default, print a one-liner pointing at
-        ``setup notifications``.
-      * Otherwise → ``click.confirm`` with the platform-aware
-        default.
-
-    The ``cfg`` mutation is in-memory; the caller does the
-    ``cfg.save()`` so this helper composes with whatever else
-    ``init`` decides to write.
-    """
-    nc = cfg.notifications
-
-    if not is_new_config:
-        # Re-run of ``init`` against an existing config. We can't
-        # safely tell "operator said no last time" from "operator
-        # never saw the prompt" without a separate sentinel, and
-        # re-prompting on every init would be irritating, so the
-        # rule is: ask only at first-install. Operators flip the
-        # toggle later via ``defenseclaw setup notifications``.
-        state = "ON" if nc.enabled else "OFF"
-        click.echo(f"  Notifications: {ux.dim('preserving current setting')} ({state})")
-        click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
-        return
-
-    if non_interactive or yes or not _stdin_is_tty():
-        state = "ON" if nc.enabled else "OFF"
-        click.echo(f"  Notifications: {ux.dim('platform default')} ({state})")
-        click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
-        return
-
-    desired = click.confirm(
-        "  Show desktop notifications for blocks and approval requests?",
-        default=bool(nc.enabled),
-    )
-
-    if desired == bool(nc.enabled):
-        state = "ON" if desired else "OFF"
-        click.echo("  Notifications: " + ux._style(state, fg="green") + ux.dim(" (unchanged)"))
-        return
-
-    nc.enabled = desired
-    state = "ON" if desired else "OFF"
-    click.echo("  Notifications: " + ux._style(state, fg="green"))
-    click.echo("  " + ux.dim("Re-run: defenseclaw setup notifications"))
-    logger.log_action(
-        "init-notifications-toggle",
-        "config",
-        f"enabled={desired!s}",
-    )
-
-
-def _stdin_is_tty() -> bool:
-    """Best-effort TTY probe used by the notifications onboarding.
-
-    Wrapped so unit tests can monkey-patch a single point. ``init``
-    already routes around interactive prompts when ``--non-interactive``
-    or ``--yes`` is set, so this is the last-mile guard for piped /
-    redirected stdin.
-    """
-    import sys
-
-    try:
-        return sys.stdin.isatty()
-    except (AttributeError, ValueError, OSError):
-        return False
 
 
 def _onboard_notifications(

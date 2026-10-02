@@ -168,6 +168,50 @@ func hookSourceReason(resp agentHookResponse) string {
 	return resp.Reason
 }
 
+// agentHookDisconnectGrace bounds how long an accepted hook keeps working
+// after its client has gone away. A var so tests can expire it.
+var agentHookDisconnectGrace = 30 * time.Second
+
+// agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
+// writes once the hook's own work has been cancelled.
+const agentHookPersistGrace = 10 * time.Second
+
+// agentHookCompletionContext keeps the request's values, but not its
+// cancellation: a hook client that hangs up after its own budget (while the
+// gateway waits on the local store, say) used to cancel the persistence of a
+// verdict the gateway had enforced anyway, so the verdict lost its audit row and
+// hook_decision. The work is cancelled agentHookDisconnectGrace after the
+// disconnect, or when the handler returns.
+func agentHookCompletionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return contextWithCancelGrace(parent, agentHookDisconnectGrace)
+}
+
+// agentHookPersistenceContext carries the terminal persistence of a verdict.
+// It outlives the completion context by agentHookPersistGrace, so a hook whose
+// work the disconnect grace cut off still records the verdict it returned.
+func agentHookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return contextWithCancelGrace(ctx, agentHookPersistGrace)
+}
+
+// contextWithCancelGrace keeps parent's values and is cancelled grace after
+// parent is done, or when the returned cancel runs.
+func contextWithCancelGrace(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-ctx.Done():
+		}
+	})
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -306,7 +350,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			}
 		}
-		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(r.Context(), profile, req, b)
+		// From here on the hook is accepted: its verdict is enforced, so its
+		// correlation, hook_decision and audit row must not depend on the client
+		// waiting for the response.
+		ctx, cancelCompletion := agentHookCompletionContext(r.Context())
+		defer cancelCompletion()
+		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for export, not for policy
 			// enforcement. The hook must still be evaluated if the local ledger is
@@ -364,9 +413,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
-					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
+					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
+					defer cancelPersist()
+					persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
 					if persisted {
-						if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
+						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
 								connectorName, req.HookEventName, err)
 						}
@@ -517,13 +568,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
-		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
+		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
+		defer cancelPersist()
+		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
+		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
 		}
 		if persisted {
-			if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
+			if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
@@ -2643,11 +2696,12 @@ func genericHookAdditionalContext(connectorName, event, mode, rawAction, severit
 	// distinctly from "observed ...").
 	lead := "DefenseClaw observed"
 	switch {
-	case wouldBlock && mode == "action" && connectorName == "amp" && canonicalEvent(event) == "agentstart":
-		// Amp cannot block a prompt, so in action mode this hidden notice
-		// is what DefenseClaw does about a blocking rule. Saying it "would
-		// block this in action mode" read as observe mode; tell the model
-		// the request must not be carried out instead.
+	case wouldBlock && mode == "action" && promptNoticeOnlyEvent(connectorName, event):
+		// Amp (agent.start) and Hermes (pre_llm_call) cannot block a
+		// prompt, so in action mode this notice is what DefenseClaw does
+		// about a blocking rule. Saying it "would block this in action
+		// mode" read as observe mode; tell the model the request is
+		// blocked and must not be carried out instead.
 		lead = "This request matched a DefenseClaw blocking rule and must not be carried out:"
 	case wouldBlock:
 		lead = "DefenseClaw would block this in action mode:"
@@ -2657,6 +2711,19 @@ func genericHookAdditionalContext(connectorName, event, mode, rawAction, severit
 		return fmt.Sprintf("%s %s.", lead, finding)
 	}
 	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
+}
+
+// promptNoticeOnlyEvent reports a prompt event whose only DefenseClaw
+// response is a notice added to the model's context: the agent has no
+// prompt veto there.
+func promptNoticeOnlyEvent(connectorName, event string) bool {
+	switch connectorName {
+	case "amp":
+		return canonicalEvent(event) == "agentstart"
+	case "hermes":
+		return canonicalEvent(event) == "prellmcall"
+	}
+	return false
 }
 
 // connectorReason renders the user-facing reason string surfaced by

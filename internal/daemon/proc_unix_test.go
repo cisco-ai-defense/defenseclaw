@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestKillStaleProcessesDoesNotExecutePathPgrep(t *testing.T) {
@@ -202,5 +204,60 @@ func TestProtectedDaemonPIDsDistinguishesMissingFromMalformedIdentity(t *testing
 	tracked, watchdog, err = d.protectedDaemonPIDs()
 	if err != nil || tracked != 1234 || watchdog != 5678 {
 		t.Fatalf("valid identity files = (%d, %d, %v), want (1234, 5678, nil)", tracked, watchdog, err)
+	}
+}
+
+// The daemon child starts from the file this process runs, not from the
+// install path, which could name another file by then (#643).
+func TestDaemonChildStartsFromTheRunningFile(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := daemonExecPath(executable)
+	if runtime.GOOS != "linux" {
+		if got != executable {
+			t.Fatalf("daemonExecPath = %q, want %q", got, executable)
+		}
+		return
+	}
+	running, errRunning := os.Stat(got)
+	named, errNamed := os.Stat(executable)
+	if got != "/proc/self/exe" || errRunning != nil || errNamed != nil || !os.SameFile(running, named) {
+		t.Fatalf("daemonExecPath = %q (%v, %v), want /proc/self/exe naming the running file", got, errRunning, errNamed)
+	}
+}
+
+// Where the child cannot start from /proc/self/exe (macOS), the launch is
+// bound to the checked file: replacing it before the child exists fails the
+// start, and a path other accounts can write is refused (#643).
+func TestDaemonLaunchPinRefusesAReplacedExecutable(t *testing.T) {
+	trusted := launchPathTrusted
+	launchPathTrusted = func([]launchPathEntry) error { return nil }
+	t.Cleanup(func() { launchPathTrusted = trusted })
+	executable := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := pinLaunchPath(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.close()
+	if err := pin.check(); err != nil {
+		t.Fatalf("check on an unchanged path: %v", err)
+	}
+	if err := os.WriteFile(executable+".new", []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(executable+".new", executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := pin.check(); err == nil {
+		t.Fatal("check passed after the executable was replaced")
+	}
+	shared := []launchPathEntry{{path: executable, mode: unix.S_IFREG | 0o777, uid: uint32(os.Geteuid())}}
+	if err := trustedLaunchPath(shared); err == nil {
+		t.Fatal("a world-writable executable was trusted")
 	}
 }

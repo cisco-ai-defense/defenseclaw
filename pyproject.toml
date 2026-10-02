@@ -271,6 +271,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # top-of-file. None of these are bugs and rewriting them all carries
 # no review benefit, so silence the ruff codes there.
 "cli/tests/**" = ["E501", "E402", "E702", "F841", "N801", "N803", "N806", "N812"]
+# The CLI entry module answers the installer identity probe before it imports
+# the command tree, so its remaining imports follow that early exit.
+"cli/defenseclaw/main.py" = ["E402"]
 # Hand-written migrations occasionally need slightly-long error lines
 # for grep-friendly messages.
 "cli/defenseclaw/migrations.py" = ["E501"]

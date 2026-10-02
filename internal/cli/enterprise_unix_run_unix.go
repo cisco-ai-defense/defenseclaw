@@ -23,11 +23,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // newUnixLifecycleEnv is a seam for CLI tests.
@@ -57,10 +59,13 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
 	}
+	ctx := cmd.Context()
 	if action == enterpriseunix.ActionRotateCredentials {
-		defer noteInterruptedRotation(cmd.ErrOrStderr(), platform)()
+		var stop func()
+		ctx, stop = settleInterruptedRotation(ctx, cmd.ErrOrStderr(), platform)
+		defer stop()
 	}
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{
+	result := enterpriseunix.Run(ctx, env, enterpriseunix.Options{
 		Action:               action,
 		PayloadDir:           opts.payload,
 		FromPackage:          opts.fromPackage,
@@ -79,18 +84,28 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	return lifecycleFailure(result, opts.json)
 }
 
-// noteInterruptedRotation says what an interrupted rotate-credentials left
-// behind. The interrupt still ends the run at once, as before; the gateway
-// then accepts both keys until the next lifecycle action completes or rolls
-// back the rotation, and Ctrl+C used to exit 130 without a word.
-func noteInterruptedRotation(w io.Writer, platform string) (stop func()) {
-	signals := make(chan os.Signal, 1)
+// settleInterruptedRotation makes an interrupt (Ctrl+C, SIGTERM) end
+// rotate-credentials with one accepted key: the first one cancels the
+// returned context, and the rotation rolls itself back (or, past its commit,
+// finishes) before the command exits. A second interrupt exits at once and
+// says how to settle what is left.
+func settleInterruptedRotation(parent context.Context, w io.Writer, platform string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() {
 		select {
+		case <-signals:
+			fmt.Fprintln(w, "\nrotate-credentials was interrupted; settling the rotation so the gateway accepts one key again. This can take a few minutes; interrupt again to stop at once.")
+			cancel()
+		case <-done:
+			return
+		}
+		select {
 		case sig := <-signals:
-			fmt.Fprintf(w, "\nrotate-credentials was interrupted before it finished. Until the rotation is settled the gateway may accept the old and the new key; run `enterprise %s reconcile` as root now to complete it or roll it back.\n", platform)
+			fmt.Fprintf(w, "\nrotate-credentials stopped before the rotation was settled. The gateway may accept the old and the new key for up to %d minutes; run `enterprise %s reconcile` as root now to complete the rotation or roll it back.\n",
+				int(connector.RotationKeyMaxAge/time.Minute), platform)
 			code := 130
 			if sig == syscall.SIGTERM {
 				code = 143
@@ -99,9 +114,10 @@ func noteInterruptedRotation(w io.Writer, platform string) (stop func()) {
 		case <-done:
 		}
 	}()
-	return func() {
+	return ctx, func() {
 		signal.Stop(signals)
 		close(done)
+		cancel()
 	}
 }
 

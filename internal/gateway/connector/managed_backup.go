@@ -256,6 +256,45 @@ func managedFileBackupMatchesSnapshot(b *managedFileBackup, data []byte, exists 
 	return b != nil && managedFileBackupExpectedHash(b) == managedFileSnapshotHash(data, exists)
 }
 
+// managedRestoreError is a backup that could not be written back over its
+// target. Its message is the whole cause ("could not restore <path>: <why>"),
+// so callers report it as is instead of adding their own prefix.
+type managedRestoreError struct {
+	Path string
+	Err  error
+}
+
+func (e *managedRestoreError) Error() string {
+	return fmt.Sprintf("could not restore %s: %v", e.Path, e.Err)
+}
+func (e *managedRestoreError) Unwrap() error { return e.Err }
+
+// newManagedRestoreError keeps only the operating system's cause: the staged
+// temp file the write went through is gone, so naming it only confuses.
+func newManagedRestoreError(path string, err error) error {
+	var publish *atomicPublishError
+	var link *os.LinkError
+	var pathErr *os.PathError
+	switch {
+	case errors.As(err, &publish):
+		err = publish.Err
+	case errors.As(err, &link) && link.Err != nil:
+		err = link.Err
+	case errors.As(err, &pathErr) && pathErr.Err != nil:
+		err = pathErr.Err
+	}
+	return &managedRestoreError{Path: path, Err: err}
+}
+
+// restoreBackupFailure words a restore failure for a teardown report.
+func restoreBackupFailure(err error) string {
+	var restore *managedRestoreError
+	if errors.As(err, &restore) {
+		return err.Error()
+	}
+	return fmt.Sprintf("restore config backup: %v", err)
+}
+
 func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, targetPath string) (bool, error) {
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	b, err := loadManagedFileBackupPath(backupPath)
@@ -292,7 +331,7 @@ func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, ta
 			mode = 0o600
 		}
 		if err := atomicWriteFile(boundPath, b.PristineBytes, mode); err != nil {
-			return false, err
+			return false, newManagedRestoreError(boundPath, err)
 		}
 	} else if err := os.Remove(boundPath); err != nil && !os.IsNotExist(err) {
 		return false, err

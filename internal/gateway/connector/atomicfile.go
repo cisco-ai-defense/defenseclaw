@@ -18,6 +18,7 @@ package connector
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -123,7 +124,7 @@ func atomicWriteFileWithPublisher(
 	}
 	if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
+		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
 	}
 	// The staged file was synced before publication. POSIX rename additionally
 	// needs an explicit parent-directory fsync.
@@ -142,6 +143,25 @@ func atomicWriteFileWithPublisher(
 		}
 	}
 	return nil
+}
+
+// atomicPublishError is a failed replacement of Path. It names the target and
+// the cause once: the os rename error repeats both paths, and the staged temp
+// file it names is already gone when anyone reads the message.
+type atomicPublishError struct {
+	Path string
+	Err  error
+}
+
+func (e *atomicPublishError) Error() string { return fmt.Sprintf("replace %s: %v", e.Path, e.Err) }
+func (e *atomicPublishError) Unwrap() error { return e.Err }
+
+func publishCause(err error) error {
+	var link *os.LinkError
+	if errors.As(err, &link) && link.Err != nil {
+		return link.Err
+	}
+	return err
 }
 
 func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {

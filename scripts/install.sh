@@ -144,6 +144,8 @@ CONNECTOR=""
 NO_OPENCLAW=false
 RUN_QUICKSTART=false
 QUICKSTART_MODE=""
+QUICKSTART_RC=0
+QUICKSTART_RERUN=""
 INSTALL_SANDBOX=false
 PASSTHROUGH=()
 
@@ -168,6 +170,11 @@ Options:
   --quickstart-mode MODE   observe or action (implies --quickstart)
   --sandbox                Deprecated no-op (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
+
+Exit codes:
+  0  Installed        1  Not installed (a previous install is restored)
+  3  Installed; a connector needs attention before it is guarded again
+  4  Installed; the first-run quickstart failed (re-run it as shown)
 
 Environment:
   DEFENSECLAW_HOME         Data directory (default: ~/.defenseclaw)
@@ -648,6 +655,11 @@ if [[ -n "${APP_RELAUNCH:-}" ]]; then
     open "${APP_PATH}" >/dev/null 2>&1 || true
 fi
 printf "\n"
+if [[ -n "${QUICKSTART_RERUN}" ]]; then
+    err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
+    printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    exit 4
+fi
 exit ${START_RC}
 
 }
@@ -682,6 +694,10 @@ install_uv() {
         && mkdir -p "${BIN_DIR}" \
         && cp "${tmp}/uv-${target}/uv" "${tmp}/uv-${target}/uvx" "${BIN_DIR}/"; then
         chmod 755 "${BIN_DIR}/uv" "${BIN_DIR}/uvx"
+        # `defenseclaw uninstall --binaries` removes the uv this installed
+        # while it still matches this record.
+        printf '%s  uv\n%s  uvx\n' "$(sha256_of "${BIN_DIR}/uv")" "$(sha256_of "${BIN_DIR}/uvx")" \
+            > "${BIN_DIR}/defenseclaw-uv.sha256" || true
         rm -rf "${tmp}"
         return 0
     fi
@@ -1127,8 +1143,13 @@ first_install_extras() {
         else
             local args=(quickstart --non-interactive --yes --connector "${CONNECTOR}")
             [[ -n "${QUICKSTART_MODE}" ]] && args+=(--mode "${QUICKSTART_MODE}")
-            PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" \
-                || warn "Quickstart reported problems; run 'defenseclaw doctor'"
+            local rc=0
+            PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+            if [[ ${rc} -ne 0 ]]; then
+                # The install stays; the summary names the failure and the re-run.
+                QUICKSTART_RC=${rc}
+                QUICKSTART_RERUN="defenseclaw ${args[*]}"
+            fi
         fi
     elif [[ -n "${CONNECTOR}" && "${CONNECTOR}" != none ]]; then
         printf "\n  Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"

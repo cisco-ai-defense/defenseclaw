@@ -198,7 +198,10 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	if err != nil || info.PID != pid {
 		return false
 	}
-	return d.verifyProcessForAuthenticatedMigration(info)
+	// A current record whose executable was replaced while it ran has the same
+	// standing: stop and restart may reach it only through the authenticated
+	// control plane.
+	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info)
 }
 
 // verifyProcess verifies every identity signal present in a PID record. It
@@ -274,10 +277,46 @@ func (d *Daemon) verifyReplacedExecutable(info pidInfo) bool {
 		return false
 	}
 	executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
-	if err != nil || executable != info.Executable+" (deleted)" {
+	if err != nil || (executable != info.Executable+" (deleted)" && !IsRetiredInstallCopy(info.Executable, executable)) {
 		return false
 	}
 	return d.verifyStartIdentity(info)
+}
+
+// RunsReplacedExecutable reports whether this data directory's gateway is
+// alive on a file that was replaced or removed after it started (#1047). It
+// is still this account's gateway; a restart loads the installed binary.
+func (d *Daemon) RunsReplacedExecutable() bool {
+	info, err := d.readPIDInfo()
+	if err != nil || !processExists(info.PID) {
+		return false
+	}
+	return !d.verifyProcess(info) && d.verifyReplacedExecutable(info)
+}
+
+// IsRetiredInstallCopy reports whether live is the copy of the recorded
+// executable that a source install moved into its retirement custody beside
+// it (".defenseclaw-install-custody/retired-<sha256>") while the process ran.
+// The rename keeps the running inode, so Linux shows the custody path rather
+// than " (deleted)"; without this, `make all` over a running gateway lost
+// track of it and the next restart found the port held.
+func IsRetiredInstallCopy(recorded, live string) bool {
+	live = strings.TrimSuffix(live, " (deleted)")
+	custody := filepath.Dir(live)
+	if recorded == "" || filepath.Base(custody) != ".defenseclaw-install-custody" ||
+		filepath.Dir(custody) != filepath.Dir(recorded) {
+		return false
+	}
+	digest, ok := strings.CutPrefix(filepath.Base(live), "retired-")
+	if !ok || len(digest) != 64 {
+		return false
+	}
+	for _, c := range digest {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Daemon) verifyExecutableForAuthenticatedMigration(info pidInfo) bool {
@@ -495,7 +534,18 @@ func (d *Daemon) Start(args []string) (int, error) {
 	args = stripTokenArgs(args)
 
 	env := d.childEnv(os.Environ())
-	cmd := exec.Command(executable, args...)
+	// The child runs the file this process checked (pinDaemonLaunch) and
+	// keeps the install path as argv[0], which the process identity checks
+	// read.
+	pin, err := pinDaemonLaunch(executable)
+	if err != nil {
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
+	}
+	defer pin.close()
+	cmd := exec.Command(pin.path, args...)
+	cmd.Args[0] = executable
 	cmd.Env = env
 	cmd.Stdin = devNull
 	// Pass *os.File so os/exec dup2's these directly into the child (fd 1/2).
@@ -512,6 +562,13 @@ func (d *Daemon) Start(args []string) (int, error) {
 		devNull.Close()
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: start process: %w", err)
+	}
+	if err := pin.check(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
 	}
 
 	pid := cmd.Process.Pid

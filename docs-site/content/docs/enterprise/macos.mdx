@@ -33,7 +33,7 @@ same config.
 | Hardware | Apple silicon only. The pkg is `arm64`-only, and releases build no Intel macOS binaries, so neither the pkg nor the tarball runs on an Intel Mac. |
 | Privileges | root, through `sudo` or an MDM agent. Only `enterprise macos status` works without root. |
 | Other profiles | No Secure Client DefenseClaw module. The pkg's pre-install script refuses when `/opt/cisco/secureclient/defenseclaw` or a `com.cisco.secureclient.defenseclaw*` LaunchDaemon exists. |
-| Gatekeeper | Only the pkg can be Developer ID-signed and notarized. It is signed only when the release pipeline has Apple signing credentials, and notarized only when it also has notary credentials, so a release can be signed but not notarized. The tarball's binaries are never Developer ID-signed. On Macs that require notarized software, use the pkg and check it first with `spctl --assess --type install --verbose=2 <pkg>`. |
+| Gatekeeper | Only the pkg can be Developer ID-signed and notarized. It is signed only when the release pipeline has Apple signing credentials, and notarized only when it also has notary credentials, so a release can be signed but not notarized. Releases currently ship it unsigned and hash-pinned by `checksums.txt` (see step 1 under Install). The tarball's binaries are never Developer ID-signed. On Macs that require notarized software, use the pkg and check it first with `spctl --assess --type install --verbose=2 <pkg>`. |
 
 ## Layout
 
@@ -125,8 +125,12 @@ grep " defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg\$" checksums.txt | sha
 pkgutil --check-signature "defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg"
 ```
 
-`pkgutil` reports "no signature" for a pkg built without Apple credentials.
-Such a pkg does not satisfy Gatekeeper on Macs that require notarization.
+Releases currently ship the pkg unsigned: it is not Developer ID-signed or
+notarized, and `pkgutil` reports "no signature". The release notes say so
+when that is the case. An unsigned pkg is protected by its SHA-256 in
+`checksums.txt`, whose cosign signature the first command checks, so run both
+checks before every deployment and pin that SHA-256 in your MDM. An unsigned
+pkg does not satisfy Gatekeeper on Macs that require notarization.
 
 ### 2. Stage the config
 

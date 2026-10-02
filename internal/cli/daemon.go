@@ -278,6 +278,11 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
 	}
+	if !rotationTransaction {
+		if problem := foreignGatewayListener(cfg); problem != "" {
+			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix)
+		}
+	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")
 
@@ -625,6 +630,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 	if err := waitForConfiguredPortFree(cfg, pid, restartPortReleaseTimeout, restartPortReleaseInterval); err != nil {
 		return fmt.Errorf("restart preflight: %w", err)
+	}
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix)
 	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")

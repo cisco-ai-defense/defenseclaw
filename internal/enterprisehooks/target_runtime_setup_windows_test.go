@@ -576,6 +576,17 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	if len(spec.backupFiles) == 0 {
 		t.Fatal("per-user connector cleanup contract has no connector backup records")
 	}
+	// The guardian hardens neither connector_backups nor its connector
+	// folders, and a setup that failed before hardening leaves its records
+	// as written: give them the descriptors per-user connector setup leaves.
+	backupRoot := filepath.Join(plan.Roots[0].DataDir, windowsManagedRuntimeCleanupBackupDir)
+	setWindowsManagedRuntimeCleanupConnectorBackupShape(t, backupRoot, target, true)
+	for connectorName, records := range spec.backupFiles {
+		setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(backupRoot, connectorName), target, true)
+		for leaf := range records {
+			setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(backupRoot, connectorName, leaf), target, false)
+		}
+	}
 	generations := make([]string, 0, len(spec.generationConnectors))
 	for connectorName := range spec.generationConnectors {
 		generations = append(generations, connectorName)
@@ -1270,6 +1281,45 @@ func setWindowsManagedRuntimeCleanupFileOwnedLock(t *testing.T, path string, tar
 		)
 	}); err != nil {
 		t.Fatalf("install owned lock fixture descriptor on %s: %v", path, err)
+	}
+}
+
+// setWindowsManagedRuntimeCleanupConnectorBackupShape gives a fixture
+// connector backup folder or record the descriptor per-user connector setup
+// creates it with (connector.writeManagedFileBackup through safefile, as seen
+// on a Windows host): folders grant SYSTEM and OWNER RIGHTS full control,
+// inherited; records grant SYSTEM and the account.
+func setWindowsManagedRuntimeCleanupConnectorBackupShape(t *testing.T, path string, target *windows.SID, directory bool) {
+	t.Helper()
+	sid := target.String()
+	sddl := "O:" + sid + "D:P(A;;FA;;;SY)(A;;FA;;;" + sid + ")"
+	if directory {
+		sddl = "O:" + sid + "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSetupPrivilege(func() error {
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			target,
+			nil,
+			dacl,
+			nil,
+		)
+	}); err != nil {
+		t.Fatalf("install connector backup fixture descriptor on %s: %v", path, err)
 	}
 }
 

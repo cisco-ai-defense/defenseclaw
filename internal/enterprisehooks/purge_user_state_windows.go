@@ -8,7 +8,10 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -24,12 +27,13 @@ import (
 // hooks the foreign-hook policy moved aside, and each DefenseClaw hook script
 // as the disabled stub, for an agent that still calls the hook path it
 // loaded; see connector.PurgeUserStateInRoot) and removes the rest, including
-// the per-user hook tokens. A missing folder is not an error.
+// the per-user hook tokens. What it keeps goes back to a DACL the account can
+// manage. A missing folder is not an error.
 func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	home, _, err := validateWindowsEnterpriseHome(rawHome, rawSID)
+	home, sid, err := validateWindowsEnterpriseHome(rawHome, rawSID)
 	if err != nil {
 		return err
 	}
@@ -71,18 +75,118 @@ func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 		if !pinned.IsDir() || pinned.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(pinned, opened) {
 			return fmt.Errorf("enterprise hooks: refusing to purge %s, which changed while it was opened", dataDir)
 		}
-		return connector.PurgeUserStateInRoot(root)
+		return connector.PurgeUserStateInRoot(root, func(rel string) error {
+			return removeWindowsUserStateDenied(windows.Handle(pin.Fd()), rel)
+		})
 	}()
 	root.Close()
 	pin.Close()
 	// Gone only when nothing stayed. Remove takes only an empty folder, and
 	// a link put in its place only as the link itself.
 	_ = os.Remove(dataDir)
-	return purgeErr
+	return errors.Join(purgeErr, relaxWindowsKeptUserState(home, sid, dataDir))
+}
+
+// relaxWindowsKeptUserState returns what the purge kept to the owner-private
+// shape the per-user CLI keeps (LocalSystem and OWNER RIGHTS full control).
+// The managed DACL's read-only OWNER RIGHTS entry denies the account
+// WRITE_DAC, so a later per-user install could not protect its own folder and
+// its first run failed with Access is denied. Only objects the account owns
+// that carry that entry change, and a reparse point is neither followed nor
+// changed.
+func relaxWindowsKeptUserState(home string, sid *windows.SID, dataDir string) error {
+	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	target := windowsGenericManagedTarget{home: home, sid: sid, dataDir: dataDir}
+	var failures []error
+	walkErr := filepath.WalkDir(dataDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			failures = append(failures, err)
+			return nil
+		}
+		switch {
+		case entry.IsDir():
+			_, err = relaxWindowsStandalonePerUserDirectory(target, path)
+		case entry.Type().IsRegular():
+			_, err = relaxWindowsStandalonePerUserTokenFile(target, path)
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+		return nil
+	})
+	return errors.Join(walkErr, errors.Join(failures...))
+}
+
+// removeWindowsUserStateDenied removes rel, a path under the pinned folder
+// whose access list refuses LocalSystem: the account owns its folder and can
+// deny SYSTEM on a subfolder. SeBackupPrivilege and SeRestorePrivilege with
+// backup intent grant the access that list refuses, so no owner or access
+// list has to change first. Every open is relative to a handle already held
+// and opens a reparse point itself, so a link is removed, never followed.
+func removeWindowsUserStateDenied(pin windows.Handle, rel string) error {
+	parts := strings.Split(rel, `\`)
+	return runWindowsManagedRuntimeSetupPrivilege(func() error {
+		parent := pin
+		defer func() {
+			if parent != pin {
+				_ = windows.CloseHandle(parent)
+			}
+		}()
+		for _, part := range parts[:len(parts)-1] {
+			next, err := openWindowsNamespacePurgeChild(
+				parent, part,
+				windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+				true,
+				windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			)
+			if windowsNamespacePurgeChildMissing(err) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: open %s without following: %w", part, err)
+			}
+			if parent != pin {
+				_ = windows.CloseHandle(parent)
+			}
+			parent = next
+			attributes, err := windowsQuarantineHandleAttributes(parent)
+			if err != nil {
+				return err
+			}
+			if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+				return fmt.Errorf("enterprise hooks: refusing to purge under %s, which is a link", part)
+			}
+		}
+		child, err := openWindowsUserStateDeniedChild(parent, parts[len(parts)-1])
+		if windowsNamespacePurgeChildMissing(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: open %s without following: %w", rel, err)
+		}
+		purgeErr := purgeWindowsQuarantineHandle(child, 0, &windowsQuarantineBudget{}, openWindowsUserStateDeniedChild)
+		closeErr := windows.CloseHandle(child)
+		if purgeErr != nil {
+			return fmt.Errorf("enterprise hooks: remove %s with backup intent: %w", rel, purgeErr)
+		}
+		return closeErr
+	})
+}
+
+func openWindowsUserStateDeniedChild(parent windows.Handle, name string) (windows.Handle, error) {
+	return openWindowsNamespacePurgeChild(
+		parent, name,
+		windows.DELETE|windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES|windows.SYNCHRONIZE,
+		false,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+	)
 }
 
 // openWindowsUserStatePin opens the folder itself, not what a reparse point
-// in its place would name, without sharing delete access.
+// in its place would name, without sharing delete access. It can list the
+// folder, so removeWindowsUserStateDenied can open entries relative to it.
 func openWindowsUserStatePin(path string) (*os.File, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -94,7 +198,7 @@ func openWindowsUserStatePin(path string) (*os.File, error) {
 	}
 	handle, err := windows.CreateFile(
 		ptr,
-		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
 		windows.OPEN_EXISTING,

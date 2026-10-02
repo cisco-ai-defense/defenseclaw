@@ -75,3 +75,17 @@ func LockVerifiedGateway(state State) (*os.File, error) {
 	}
 	return file, nil
 }
+
+// protectInstalledGateway applies the private gateway DACL. The image can
+// still be mapped by a gateway that is exiting, held by a hook cold start's
+// read-only lock, or opened by an antivirus scan, and each of those denies the
+// read/write open safefile.ProtectFile uses. A current-user-owned image is
+// therefore protected through one share-all handle that needs only DACL
+// access. An image that needs an owner repair keeps the ProtectFile path,
+// which is the only one allowed to change the owner.
+func protectInstalledGateway(path string) error {
+	if err := safefile.ValidatePrivateFileOwnership(path); err != nil {
+		return safefile.ProtectFile(path)
+	}
+	return safefile.ProtectFileWhileInUse(path)
+}

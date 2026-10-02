@@ -96,7 +96,7 @@ $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copil
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.
 $RunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -317,10 +317,17 @@ function Install-Uv {
         if ((Get-Sha256 $zip) -ne $UvZipSha256) { Write-Err "The uv download does not match its pinned checksum"; return "" }
         Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "uv") -Force
         New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+        $record = @()
         foreach ($name in @("uv.exe", "uvx.exe", "uvw.exe")) {
             $file = Join-Path $tmp "uv\$name"
-            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force }
+            if (Test-Path -LiteralPath $file) {
+                Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force
+                $record += "$(Get-Sha256 (Join-Path $BinDir $name))  $name"
+            }
         }
+        # `defenseclaw uninstall --binaries` removes the uv this installed
+        # while it still matches this record.
+        Invoke-Quietly { [IO.File]::WriteAllText((Join-Path $BinDir "defenseclaw-uv.sha256"), (($record -join "`n") + "`n")) }
         $uv = Join-Path $BinDir "uv.exe"
         if (Test-Path -LiteralPath $uv) { return $uv }
         return ""
@@ -780,10 +787,40 @@ function Undo-Snapshot([string]$Slot) {
     Remove-Tree $Slot
 }
 
+function Protect-BinDir {
+    # The CLI runs only a gateway whose file and folder no account other than
+    # this one, LocalSystem and the built-in Administrators group (matched by
+    # SID) can write. A ~\.local\bin another tool created with a looser ACL
+    # (Users or Everyone may write) fails that check, and the CLI then refuses
+    # the gateway installed there. Keep only this account and LocalSystem on
+    # such a folder; what it holds inherits that.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $trusted = @($user.Value, "S-1-5-18", "S-1-3-4", "S-1-5-32-544")
+    # The write rights the CLI's custody check counts (GENERIC_ALL/WRITE included).
+    $write = 0x500D0156
+    $acl = Get-Acl -LiteralPath $BinDir
+    $open = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.AccessControlType -eq "Allow" -and ([int]$_.FileSystemRights -band $write) -and $trusted -notcontains $_.IdentityReference.Value
+    })
+    if (-not $open.Count) { return }
+    $secure = New-Object Security.AccessControl.DirectorySecurity
+    $secure.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
+        $secure.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow"))
+    }
+    try {
+        Set-Acl -LiteralPath $BinDir -AclObject $secure
+        Write-Info "Restricted $BinDir to this account and SYSTEM"
+    } catch {
+        Write-Warn "Could not restrict $BinDir to this account ($($_.Exception.Message)); DefenseClaw refuses a gateway other accounts can write"
+    }
+}
+
 function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
     if (-not (New-Venv $Venv)) { return $false }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    Protect-BinDir
     # Binaries an earlier run renamed aside while they were running.
     foreach ($name in $ManagedFiles) {
         Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -1082,8 +1119,11 @@ function Invoke-FirstInstallExtras {
         } else {
             $quickstartArgs = @("quickstart", "--non-interactive", "--yes", "--connector", $Connector)
             if ($QuickstartMode) { $quickstartArgs += @("--mode", $QuickstartMode) }
-            if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs) -ne 0) {
-                Write-Warn "Quickstart reported problems; run 'defenseclaw doctor'"
+            $quickstartRc = Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs
+            if ($quickstartRc -ne 0) {
+                # The install stays; the summary names the failure and the re-run.
+                $Run.QuickstartRc = $quickstartRc
+                $Run.QuickstartRerun = "defenseclaw " + ($quickstartArgs -join " ")
             }
         }
     } elseif ($Connector -and $Connector -ne "none") {
@@ -1115,6 +1155,11 @@ Options:
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
   -Help                 Show this help
+
+Exit codes (run as a file):
+  0  Installed        1  Not installed (a previous install is restored)
+  3  Installed; a connector needs attention before it is guarded again
+  4  Installed; the first-run quickstart failed (re-run it as shown)
 
 Environment:
   DEFENSECLAW_HOME      Data directory (default: %USERPROFILE%\.defenseclaw)
@@ -1447,6 +1492,13 @@ function Invoke-Install {
         Write-Host "  Open a new terminal to use defenseclaw."
     }
     Write-Host ""
+    if ($Run.QuickstartRerun) {
+        Write-Err "Quickstart failed (exit $($Run.QuickstartRc)): DefenseClaw $Ver is installed, but $Connector is not set up yet"
+        Write-Host "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:"
+        Write-Host "    $($Run.QuickstartRerun)" -ForegroundColor Cyan
+        Write-Host ""
+        return 4
+    }
     return $startRc
 }
 
@@ -1481,6 +1533,7 @@ try {
 }
 Wait-BeforeClose
 if ($RunAsFile) { exit $code }
+if ($code -eq 4) { throw "DefenseClaw is installed, but quickstart failed; see above" }
 if ($code -ne 0 -and $code -ne 3) { throw "DefenseClaw was not installed" }
 }
 # DefenseClaw Windows installer complete v2

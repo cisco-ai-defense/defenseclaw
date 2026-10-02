@@ -13,9 +13,13 @@ import hashlib
 import json
 import ntpath
 import os
+import re
+import shlex
+import signal
 import stat
 import struct
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -30,6 +34,20 @@ BasicIdentity = tuple[int, int]
 StrongIdentity = tuple[int, int, int, int]
 ObjectIdentity = tuple[int, ...]
 MAX_CUSTODY_ENTRIES = 128
+# Completed binary retirements kept per published name after a publish commits.
+# Nothing reads a completed retirement back: recovery treats an intent whose
+# exact retired object is present as done, rollback tokens retire the live
+# names, and release upgrades keep their own previous/ slot. One copy is kept
+# as the build a still-running gateway or ACP process was started from, and as
+# a manual fallback. Older copies only use disk space.
+RETIRED_KEEP_PER_TARGET = 1
+_PUBLISH_STAGE_MARKERS = (".source-install-", ".source-symlink-", ".managed-console-")
+_HEX_DIGITS = frozenset("0123456789abcdef")
+# Private stage files a source install writes beside its targets. A stage
+# outlives its install only when the process was killed outright, or it was
+# written by an older installer, so the next install prunes ones a day old.
+_SOURCE_INSTALL_STAGE = re.compile(r"\.defenseclaw[A-Za-z0-9._-]*\.source-install-[0-9a-f]{32}")
+STALE_STAGE_SECONDS = 24 * 60 * 60
 CUSTODY_MARKER = b"DefenseClaw deterministic retirement custody v1\n"
 
 
@@ -1334,7 +1352,7 @@ def _ensure_retirement_intent(
 def _parse_completed_entry_retirement(
     custody_fd: int,
     name: str,
-) -> tuple[str, ObjectIdentity] | None:
+) -> tuple[str, ObjectIdentity, str] | None:
     if not name.startswith("intent-") or not name.endswith(".json"):
         return None
     raw = _read_regular_at(custody_fd, name, missing_ok=True)
@@ -1366,7 +1384,114 @@ def _parse_completed_entry_retirement(
         return None
     if not _entry_claim_matches(custody_fd, retired, identity):
         return None
-    return retired, identity
+    return retired, identity, canonical
+
+
+def _discard_completed_retirement(custody_fd: int, intent: str, retired: str) -> None:
+    """Remove one completed intent/retired pair, intent first.
+
+    A crash between the two unlinks leaves only an inert retired name, which
+    recovery ignores. The reverse order would leave an intent whose object is
+    gone, and recovery would then refuse that intent on every later run.
+    """
+
+    try:
+        os.unlink(intent, dir_fd=custody_fd)
+    except FileNotFoundError:
+        pass
+    if _entry_stat(custody_fd, intent) is not None:
+        raise PublishError("retirement custody changed during reclaim")
+    os.fsync(custody_fd)
+    os.unlink(retired, dir_fd=custody_fd)
+    if _entry_stat(custody_fd, retired) is not None:
+        raise PublishError("retirement custody changed during reclaim")
+    os.fsync(custody_fd)
+
+
+def _retirement_target(canonical: str) -> str:
+    """Name the published path a retirement displaced.
+
+    Publication retires the old object under its private stage name
+    (.NAME.source-install-HEX and similar); every other retirement is grouped
+    by its own canonical path.
+    """
+
+    parent, leaf = os.path.split(canonical)
+    if leaf.startswith("."):
+        for marker in _PUBLISH_STAGE_MARKERS:
+            name, found, suffix = leaf[1:].rpartition(marker)
+            if found and name and suffix and set(suffix) <= _HEX_DIGITS:
+                return os.path.join(parent, name)
+    return canonical
+
+
+def _prune_completed_entry_retirements(custody_fd: int, *, keep_per_target: int) -> list[str]:
+    """Keep only the newest completed regular-file retirements per target.
+
+    Only intents whose exact retired object is present in this directory are
+    considered, so an interrupted retirement that recovery still needs is never
+    touched. Symlinks, directories, trees, foreign names, entries owned by
+    another account and the custody marker stay. Returns per-entry failures;
+    one failure (for example a file still in use) does not stop the others.
+    """
+
+    with os.scandir(custody_fd) as entries:
+        names = sorted(entry.name for entry in entries if entry.name.startswith("intent-"))
+    groups: dict[str, list[tuple[int, str, str, ObjectIdentity]]] = {}
+    failures: list[str] = []
+    for name in names:
+        try:
+            parsed = _parse_completed_entry_retirement(custody_fd, name)
+            if parsed is None:
+                continue
+            retired, identity, canonical = parsed
+            retired_info = _entry_stat(custody_fd, retired)
+            intent_info = _entry_stat(custody_fd, name)
+        except (OSError, PublishError) as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        if (
+            retired_info is None
+            or intent_info is None
+            or not stat.S_ISREG(retired_info.st_mode)
+            or retired_info.st_uid != os.geteuid()
+        ):
+            continue
+        groups.setdefault(_retirement_target(canonical), []).append(
+            (intent_info.st_mtime_ns, name, retired, identity)
+        )
+    for members in groups.values():
+        members.sort(key=lambda item: item[0:2], reverse=True)
+        for _mtime, intent, retired, identity in members[keep_per_target:]:
+            try:
+                if not _entry_claim_matches(custody_fd, retired, identity):
+                    continue
+                _discard_completed_retirement(custody_fd, intent, retired)
+            except (OSError, PublishError) as exc:
+                failures.append(f"{retired}: {exc}")
+    return failures
+
+
+def prune_retired_custody(custody_root: Path) -> None:
+    """Apply bounded retention after a committed publish. Never raises."""
+
+    try:
+        custody_fd = _open_custody_root(custody_root, create=False)
+    except (OSError, PublishError) as exc:
+        if "managed directory is missing" not in str(exc):
+            print(f"source-install: kept retired install copies: {exc}", file=sys.stderr)
+        return
+    try:
+        failures = _prune_completed_entry_retirements(custody_fd, keep_per_target=RETIRED_KEEP_PER_TARGET)
+    except (OSError, PublishError) as exc:
+        failures = [str(exc)]
+    finally:
+        os.close(custody_fd)
+    if failures:
+        print(
+            f"source-install: kept {len(failures)} retired install copies: {failures[0]}",
+            file=sys.stderr,
+        )
 
 
 def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
@@ -1390,7 +1515,7 @@ def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
             parsed = _parse_completed_entry_retirement(custody_fd, name)
             if parsed is None:
                 continue
-            retired, identity = parsed
+            retired, identity, _canonical = parsed
             intent_info = _entry_stat(custody_fd, name)
             mtime = 0 if intent_info is None else intent_info.st_mtime_ns
             candidates.append((mtime, name, retired, identity))
@@ -1399,16 +1524,7 @@ def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
         _mtime, intent, retired, identity = min(candidates, key=lambda item: item[0:2])
         if not _entry_claim_matches(custody_fd, retired, identity):
             return
-        os.unlink(retired, dir_fd=custody_fd)
-        if _entry_stat(custody_fd, retired) is not None:
-            raise PublishError("retirement custody changed during reclaim")
-        if _read_regular_at(custody_fd, intent, missing_ok=True) is None:
-            os.fsync(custody_fd)
-            continue
-        os.unlink(intent, dir_fd=custody_fd)
-        if _entry_stat(custody_fd, intent) is not None:
-            raise PublishError("retirement custody changed during reclaim")
-        os.fsync(custody_fd)
+        _discard_completed_retirement(custody_fd, intent, retired)
 
 
 def _bind_custody_fd(descriptor: int, *, create: bool, label: str) -> None:
@@ -2240,6 +2356,57 @@ def unlink_exact(
         os.close(parent_fd)
 
 
+def _prune_stale_stages(
+    parent_fd: int,
+    directory: Path,
+    custody_root: Path,
+    *,
+    uid: int | None = None,
+    now: float | None = None,
+) -> list[str]:
+    """Remove this account's day-old source-install stage files in directory.
+
+    Only regular files owned by this account are removed, through exact
+    custody retirement. Any other leftover is reported with the command that
+    removes it. Never raises; returns the reported paths.
+    """
+
+    owner = os.geteuid() if uid is None else uid
+    cutoff = (time.time() if now is None else now) - STALE_STAGE_SECONDS
+    reported: list[str] = []
+    try:
+        with os.scandir(parent_fd) as entries:
+            names = sorted(entry.name for entry in entries if _SOURCE_INSTALL_STAGE.fullmatch(entry.name))
+    except OSError:
+        return reported
+    for name in names:
+        path = directory / name
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if metadata.st_mtime > cutoff:
+                continue
+            if metadata.st_uid == owner and stat.S_ISREG(metadata.st_mode):
+                identity = _entry_strong_identity(parent_fd, name)
+                if identity is not None and unlink_exact(
+                    path, identity, custody_root=custody_root, reclaim_completed=True
+                ):
+                    continue
+                if identity is None:
+                    continue
+        except FileNotFoundError:
+            continue
+        except (OSError, PublishError):
+            metadata = None
+        prefix = "" if metadata is not None and metadata.st_uid == owner else "sudo "
+        print(
+            f"source-install: left a temporary file from an earlier install: {path}; "
+            f"remove it with: {prefix}rm -f {shlex.quote(str(path))}",
+            file=sys.stderr,
+        )
+        reported.append(str(path))
+    return reported
+
+
 def publish_regular(
     source: Path,
     destination: Path,
@@ -2267,6 +2434,7 @@ def publish_regular(
         source_stat = os.fstat(source_fd)
         parent_fd = _open_directory(destination.parent, create=False)
         try:
+            _prune_stale_stages(parent_fd, destination.parent, retirement_root)
             stage = f".{destination.name}.source-install-{uuid.uuid4().hex}"
             stage_fd = os.open(
                 stage,
@@ -2386,6 +2554,8 @@ def publish_regular(
                             reclaim_completed=True,
                         ):
                             raise PublishError(f"source-install staging changed and was preserved: {destination}")
+                    if succeeded:
+                        prune_retired_custody(retirement_root)
         finally:
             os.close(parent_fd)
     finally:
@@ -2557,6 +2727,11 @@ def main() -> int:
     compare_regular.add_argument("second", type=Path)
     compare_regular.add_argument("--require-executable", action="store_true")
     args = parser.parse_args()
+    if os.name != "nt":
+        # A terminated install unwinds like an interrupted one, so every
+        # publication's finally block removes its stage file.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, _interrupt)
     try:
         if args.command in {"ensure-directory", "ensure-real-directory"}:
             ensure_directory(args.path)
@@ -2650,7 +2825,14 @@ def main() -> int:
     except (OSError, PublishError) as exc:
         print(f"source-install publication refused: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("source-install publication interrupted", file=sys.stderr)
+        return 130
     return 0
+
+
+def _interrupt(_signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt
 
 
 if __name__ == "__main__":

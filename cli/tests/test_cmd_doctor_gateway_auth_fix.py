@@ -1410,7 +1410,8 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
         ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[origin_main, replacement],
+            # The first call is the foreign-port-holder check.
+            side_effect=[origin_main, origin_main, replacement],
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",

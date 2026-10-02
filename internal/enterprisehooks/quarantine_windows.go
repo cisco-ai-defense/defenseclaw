@@ -76,7 +76,7 @@ func purgeWindowsTargetOwnedQuarantine(path string, target *windows.SID) error {
 	}
 
 	budget := &windowsQuarantineBudget{}
-	purgeErr := purgeWindowsQuarantineHandle(handle, 0, budget)
+	purgeErr := purgeWindowsQuarantineHandle(handle, 0, budget, openWindowsQuarantineChild)
 	closeErr := windows.CloseHandle(handle)
 	if purgeErr != nil {
 		return purgeErr
@@ -128,6 +128,7 @@ func purgeWindowsQuarantineHandle(
 	handle windows.Handle,
 	depth int,
 	budget *windowsQuarantineBudget,
+	openChild func(parent windows.Handle, name string) (windows.Handle, error),
 ) error {
 	if depth > windowsQuarantineMaxDepth {
 		return fmt.Errorf("enterprise hooks: bounded quarantine exceeds maximum depth %d", windowsQuarantineMaxDepth)
@@ -162,14 +163,14 @@ func purgeWindowsQuarantineHandle(
 					windowsQuarantineMaxEntries,
 				)
 			}
-			child, err := openWindowsQuarantineChild(handle, name)
+			child, err := openChild(handle, name)
 			if windowsQuarantineChildDisappeared(err) {
 				continue
 			}
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: open quarantine child %q without following: %w", name, err)
 			}
-			childErr := purgeWindowsQuarantineHandle(child, depth+1, budget)
+			childErr := purgeWindowsQuarantineHandle(child, depth+1, budget, openChild)
 			closeErr := windows.CloseHandle(child)
 			if childErr != nil {
 				return fmt.Errorf("enterprise hooks: purge quarantine child %q: %w", name, childErr)

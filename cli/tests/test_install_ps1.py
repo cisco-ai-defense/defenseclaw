@@ -113,7 +113,12 @@ def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     written = set(_list("ManagedBinaries")) | {f"{shim}.cmd" for shim in _list("ManagedShims")} | {hook_state.group(1)}
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
-    assert written == windows_uninstall_helper._ALLOWED_BINARIES
+    # Install-Uv adds uv and the digest record uninstall checks it against.
+    uv = re.search(r"foreach \(\$name in @\(([^)]*)\)\)", _text()[_text().index("function Install-Uv") :])
+    assert uv is not None
+    uv_written = set(re.findall(r'"([^"]+)"', uv.group(1))) | {cmd_uninstall._UV_RECORD}
+    assert uv_written == set(cmd_uninstall._UV_NAMES["win32"]) | {cmd_uninstall._UV_RECORD}
+    assert written | uv_written == windows_uninstall_helper._ALLOWED_BINARIES
 
 
 def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
@@ -175,3 +180,14 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
     go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
     assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
+
+
+def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4() -> None:
+    text = _text()
+    extras = text[text.index("function Invoke-FirstInstallExtras") : text.index("function Show-Usage")]
+    assert "$quickstartRc = Invoke-Native" in extras
+    assert '$Run.QuickstartRerun = "defenseclaw " + ($quickstartArgs -join " ")' in extras
+    summary = text[text.index('Write-Host "  DefenseClaw $Ver is installed."') : text.index("$savedEnv = @{}")]
+    assert summary.index("if ($Run.QuickstartRerun)") < summary.index("return 4") < summary.index("return $startRc")
+    # `irm | iex` cannot exit; it reports the installed-but-not-set-up outcome instead.
+    assert text.index("if ($code -eq 4) { throw") < text.index('throw "DefenseClaw was not installed"')

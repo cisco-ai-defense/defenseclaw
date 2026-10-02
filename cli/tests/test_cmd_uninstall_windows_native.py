@@ -286,4 +286,5 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             )
             repeated_output = (repeated.stdout + repeated.stderr).decode("utf-8")
             self.assertEqual(repeated.returncode, 0, repeated_output)
-            self.assertIn("not installed", repeated_output)
+            # The plan lists only launchers that exist, so a repeat names none.
+            self.assertNotIn("defenseclaw.cmd", repeated_output)
