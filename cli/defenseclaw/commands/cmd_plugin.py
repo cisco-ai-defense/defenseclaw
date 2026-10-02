@@ -1262,7 +1262,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
 
     \b
       Local directory   defenseclaw plugin install /path/to/plugin
-      npm package       defenseclaw plugin install @openclasw/voice-call
+      npm package       defenseclaw plugin install @openclaw/voice-call
       clawhub URI       defenseclaw plugin install clawhub://voice-call
       HTTP(S) URL       defenseclaw plugin install https://example.com/plugin.tgz
 

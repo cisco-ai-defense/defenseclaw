@@ -2077,7 +2077,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         src = self._create_plugin_dir("voice-call")
         mock_fetch.return_value = src
 
-        result = self._invoke_install(["install", "@openclasw/voice-call"])
+        result = self._invoke_install(["install", "@openclaw/voice-call"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Installed plugin: voice-call", result.output)
         self.assertTrue(os.path.isdir(self._connector_plugin_path("voice-call")))
