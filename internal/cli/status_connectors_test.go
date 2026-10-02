@@ -579,3 +579,23 @@ func TestPrintSubsystemExplainsAuditWriteFailure(t *testing.T) {
 		t.Fatalf("other details dropped:\n%s", out)
 	}
 }
+
+// TestPrintSubsystemExplainsFailingJudge pins GAP-1288: gateway status says
+// in words that the LLM judge is failing.
+func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"judge_state":        "failing",
+		"judge_recent_calls": float64(10),
+		"judge_failed_calls": float64(10),
+		"judge_last_error":   "failed to retrieve aws credentials",
+		"mode":               "action",
+	}}
+	out := captureStdout(t, func() { printSubsystem("Guardrail", h) })
+	if !strings.Contains(out, "the LLM judge failed all of its last 10 calls") ||
+		!strings.Contains(out, "failed to retrieve aws credentials") || strings.Contains(out, "judge_state") {
+		t.Fatalf("judge failure not in plain words:\n%s", out)
+	}
+	if !strings.Contains(out, "mode:") {
+		t.Fatalf("other details dropped:\n%s", out)
+	}
+}

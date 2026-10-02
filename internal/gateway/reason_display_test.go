@@ -214,3 +214,19 @@ func TestAgentVerdictReasonNamesBlockListEntry(t *testing.T) {
 		t.Errorf("unexpected rewrite of a non-matching reason: %q", got)
 	}
 }
+
+// TestAgentVerdictReasonNamesLLMJudgeKind pins GAP-1564: a judge block names
+// DefenseClaw and the judge's kind instead of redaction tokens, and never
+// echoes the judge's text or its PII category label.
+func TestAgentVerdictReasonNamesLLMJudgeKind(t *testing.T) {
+	source := "judge-pii: Password: 1 instance(s) detected; judge-exfil: the prompt writes AKIAIOSFODNN7EXAMPLE to a file"
+	display := agentDisplayReason(source, redaction.SinkPolicyDefault)
+	got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault)
+	want := "DefenseClaw policy blocked this action (LLM judge: personal data or credentials, possible data exfiltration). " + agentBlockNoRetry
+	if got != want {
+		t.Fatalf("agentVerdictReason = %q, want %q", got, want)
+	}
+	if alert := agentVerdictReason("alert", source, display, redaction.SinkPolicyDefault); alert != display {
+		t.Errorf("an alert was reworded: %q", alert)
+	}
+}

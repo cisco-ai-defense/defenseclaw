@@ -1258,3 +1258,21 @@ def test_overview_alert_hint_follows_the_connector_filter() -> None:
     )
     assert "outside the Claude Code filter" in hint
     assert "Press m" in hint
+
+
+def test_guardrail_detail_names_a_failing_judge() -> None:
+    """GAP-1288: the Guardrail card says when the judge's calls fail."""
+
+    from defenseclaw.tui.services.overview_state import HealthSnapshot, SubsystemHealth
+
+    cfg = OverviewConfig(guardrail_enabled=True, guardrail_mode="action", guardrail_connector="claudecode")
+    model = OverviewPanelModel(cfg, version="test")
+    model.set_health(
+        HealthSnapshot(
+            guardrail=SubsystemHealth(
+                state="running",
+                details={"judge_state": "failing", "judge_failed_calls": 10, "judge_recent_calls": 10},
+            )
+        )
+    )
+    assert "judge failing: 10/10 calls failed" in model.guardrail_detail()

@@ -807,6 +807,10 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	if problem != "" {
 		fmt.Printf("             %s %s\n", Dim("problem:"), problem)
 	}
+	judge := judgeProblem(h.Details)
+	if judge != "" {
+		fmt.Printf("             %s %s\n", Dim("problem:"), asciiText(judge))
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -819,6 +823,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			}
 			if problem != "" && strings.HasPrefix(k, "event_history_") {
 				continue // already said in plain words above
+			}
+			if judge != "" && strings.HasPrefix(k, "judge_") {
+				continue
 			}
 			line, ok := formatDetailValue(h.Details[k])
 			if !ok {
@@ -850,6 +857,27 @@ func eventHistoryProblem(details map[string]interface{}) string {
 	default:
 		return "audit events cannot be written to the audit database; run 'defenseclaw doctor'"
 	}
+}
+
+// judgeProblem says in plain words that recent LLM judge calls failed
+// (gateway judge_* details), or returns "". The hook lane then keeps the
+// rule verdicts, which used to show nowhere but the gateway log (GAP-1288).
+func judgeProblem(details map[string]interface{}) string {
+	state, _ := details["judge_state"].(string)
+	if state != "failing" && state != "degraded" {
+		return ""
+	}
+	failed, _ := formatDetailValue(details["judge_failed_calls"])
+	total, _ := formatDetailValue(details["judge_recent_calls"])
+	lastError, _ := details["judge_last_error"].(string)
+	lead := "the LLM judge failed " + failed + " of its last " + total + " calls"
+	if state == "failing" {
+		lead = "the LLM judge failed all of its last " + total + " calls, so only the rules decide"
+	}
+	if lastError != "" {
+		lead += "; last error: " + lastError
+	}
+	return lead + "; run 'defenseclaw doctor' and 'defenseclaw setup llm --role judge'"
 }
 
 func formatDetailValue(v interface{}) (string, bool) {
