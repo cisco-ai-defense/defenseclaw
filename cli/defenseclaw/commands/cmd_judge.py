@@ -278,9 +278,9 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> Non
 
     if app.logger:
         app.logger.log_action(
-            "judge-hooks",
+            "config-update",
             "config",
-            f"{action} hook_connectors={gc.judge.hook_connectors} restart={restart}",
+            f"judge-hooks {action} hook_connectors={gc.judge.hook_connectors} restart={restart}",
         )
 
 

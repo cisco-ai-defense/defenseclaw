@@ -1176,3 +1176,25 @@ def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes()
     assert result.checks[-1]["detail"] == (
         "untested=2; automatic_limit=4; remaining enabled routes retain bounded runtime-health checks"
     )
+
+
+def test_inspect_status_errors_name_the_config_not_the_snapshot(tmp_path: Path) -> None:
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 8\nobservability: {}\n")
+    snapshots: list[str] = []
+
+    def fail(_operation: str, *, config_path: str, data_dir: str, environment_overrides: dict[str, str]):
+        snapshots.append(config_path)
+        raise ConfigInspectError(f"Error: {config_path}:68:9: [config_semantic_invalid] missing variable")
+
+    with (
+        patch("defenseclaw.observability.v8_status.default_data_path", return_value=tmp_path),
+        patch("defenseclaw.observability.v8_status.inspect_v8_config", side_effect=fail),
+        pytest.raises(ConfigInspectError) as raised,
+    ):
+        inspect_v8_operator_status(path)
+
+    assert f"{path.absolute()}:68:9" in str(raised.value)
+    assert snapshots and snapshots[0] not in str(raised.value)

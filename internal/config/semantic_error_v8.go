@@ -132,6 +132,11 @@ func annotateObservabilityV8SemanticError(document *V8YAMLDocument, err error) e
 		result.Summary = "protected credential " + strconv.Quote(secretError.Reference) + " is not stored or not trusted"
 		result.Expected = "a credential stored in a standalone enterprise deployment"
 		result.Action = "store it with `enterprise secret set --name " + secretError.Reference + "`, or remove the reference"
+	} else if errors.As(err, &secretError) {
+		result.Summary = "environment variable " + strconv.Quote(secretError.Reference) + " is not set"
+		result.ReceivedClass = ""
+		result.Expected = "the variable in the environment or in the DefenseClaw .env file"
+		result.Action = "set it with `defenseclaw keys set " + secretError.Reference + "`, or remove the reference"
 	}
 	if document != nil {
 		result.Source = document.Source

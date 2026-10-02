@@ -1718,9 +1718,9 @@ def _scan_installed_plugin_for_connector(
             )
             if app.logger:
                 app.logger.log_action(
-                    "install-refused",
+                    "install-rejected",
                     plugin_name,
-                    f"{detail} reason=critical-without-action",
+                    f"{detail} result=refused reason=critical-without-action",
                 )
             raise SystemExit(1)
         click.echo(
@@ -3161,9 +3161,9 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         )
         if app.logger:
             app.logger.log_action(
-                "plugin-unblock",
+                "action",
                 plugin_name,
-                f"manual unblock via CLI connector={connector}",
+                f"plugin-unblock manual unblock via CLI connector={connector}",
             )
         return
 
@@ -3190,9 +3190,9 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             pe.remove_action("plugin", plugin_name)
         if app.logger:
             app.logger.log_action(
-                "plugin-unblock",
+                "action",
                 plugin_name,
-                "manual unblock via CLI connector=all",
+                "plugin-unblock manual unblock via CLI connector=all",
             )
         return
 
@@ -3212,7 +3212,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         fg="green",
     )
     if app.logger:
-        app.logger.log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
+        app.logger.log_action("action", plugin_name, "plugin-unblock manual unblock via CLI")
 
 
 # ---------------------------------------------------------------------------

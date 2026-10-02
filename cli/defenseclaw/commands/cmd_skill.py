@@ -5108,8 +5108,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
             )
             if app.logger:
                 app.logger.log_action(
-                    "install-rolled-back", skill_name,
-                    "reason=staged-skill-unresolved scan=skipped",
+                    "install-rejected", skill_name,
+                    "result=rolled-back reason=staged-skill-unresolved scan=skipped",
                 )
             raise SystemExit(1)
 

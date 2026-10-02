@@ -1386,8 +1386,8 @@ def _do_manual_verdict(
 
     if app.logger:
         app.logger.log_action(
-            f"registry-{action_label}", "config",
-            f"id={source.id} {entry_type}:{entry_name}",
+            "registry-edit", "config",
+            f"{action_label} id={source.id} {entry_type}:{entry_name}",
         )
 
     if emit_json:
