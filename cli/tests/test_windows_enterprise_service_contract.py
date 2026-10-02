@@ -5348,7 +5348,7 @@ def test_uninstall_tombstone_names_the_removed_release() -> None:
         module.index("Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath")
     ]
     tombstone = uninstall[uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata") :]
-    assert "if ($tombstone.Contains('product_version'))" in tombstone
+    assert "$tombstone.Contains('product_version')" in tombstone
     assert "$metadata.PSObject.Properties['product_version']" in tombstone
     assert "$tombstone['product_version'] = [string]$removedVersion.Value" in tombstone
     assert "$tombstone.Remove('product_version')" in tombstone

@@ -23197,7 +23197,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -Installed:$false `
             -ManagedHooksActivation $managedHooksActivation
-        if ($tombstone.Contains('product_version')) {
+        if ($tombstone -is [Collections.IDictionary] -and
+            $tombstone.Contains('product_version')) {
             # The tombstone names the release that was removed, not the
             # Setup that removed it (GAP-1074).
             $removedVersion = $metadata.PSObject.Properties['product_version']
