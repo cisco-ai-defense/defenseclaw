@@ -387,7 +387,9 @@ if ! { echo $$ > "${LOCK_DIR}/pid"; } 2>/dev/null; then
     die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"
 fi
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
-exec > >(tee -a "${LOG}") 2>&1
+# tee ignores Ctrl+C: it went down with the installer's process group, and the
+# cancel message then died on a broken pipe (exit 141, GAP-1901).
+exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
 trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -555,6 +557,8 @@ fi
 
 rm -rf "${STAGING}"
 mkdir -p "${STAGING}/bin"
+# Ctrl+C before the swap: drop what this run staged and fetched (GAP-1901).
+trap 'printf "\n"; rm -rf "${STAGING}"; [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"; [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"; err "Cancelled; nothing was changed"; exit 130' INT TERM
 ARCHIVE="defenseclaw-${VERSION}-${OS}-${ARCH}.tar.gz"
 WHEEL="defenseclaw-${VERSION}-py3-none-any.whl"
 REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"

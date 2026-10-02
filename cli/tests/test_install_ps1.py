@@ -234,7 +234,7 @@ def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
     # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
     text = _text()
     assert "Remove-Item -Recurse -Force '" not in text
-    assert text.count('cmd /c rd /s /q `"') == 2
+    assert text.count('cmd /c rd /s /q `"') == 3
     # The installer's own cleanup deletes through .NET first, which is also much
     # faster than Remove-Item in Windows PowerShell 5.1 (GAP-1600).
     body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
@@ -423,6 +423,19 @@ def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     assert "it was not changed, but its gateway is not running" in failed
     final = _text()[_text().index("if ($Run.Lock) {") :][:200]
     assert "Invoke-Quietly { Clear-StagedRelease }" in final
+
+
+def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> None:
+    # GAP-1883: the uv retry blamed a busy host, and a failed first install
+    # kept about 2 GB (.failed-*, .venv) that held the disk full.
+    uv = _text()[_text().index("function Invoke-UvPipInstall(") :][:600]
+    assert uv.index("if (Test-DiskFull) { return $false }") < uv.index("Retrying the Python package install")
+    full = _ps1_function("Test-DiskFull")
+    assert "$free -ge 300MB" in full and "then run the installer again" in full
+    restore = _ps1_function("Restore-Snapshot")
+    first = restore[restore.index("if (-not $PrevVersion) {") :]
+    assert first.index("Remove-Tree $failed") < first.index("return") < first.index("was kept in $failed")
+    assert 'if (-not $PrevVersion) { return "Nothing was left installed." }' in _ps1_function("Get-RestoredNote")
 
 
 def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
