@@ -8723,10 +8723,17 @@ def _rollback_failed_connector_application(
     restore_complete = True
     gateway_still_down = False
     try:
+        # Keep the hook lock the gateway published for the failed generation.
+        # It is the gateway's teardown authority for that generation: with
+        # the prior lock back in place, the restart below refused to switch
+        # the failed connector (OpenClaw with its own gateway down) back to
+        # the prior one and the gateway stayed stopped (GAP-1826). Only the
+        # gateway writes this lock, and it republishes the prior generation's
+        # entries when it reapplies the restored config.
         _restore_setup_config_snapshot(
             app,
             snapshot,
-            restore_hook_contract_lock=not exact_runtime,
+            restore_hook_contract_lock=False,
         )
     except BaseException as exc:  # Preserve the original non-secret readiness failure too.
         if _secret_safe:
