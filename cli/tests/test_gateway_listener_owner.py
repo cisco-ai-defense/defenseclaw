@@ -37,7 +37,6 @@ def test_linux_listener_owner(tmp_path, tcp, tcp6, expected) -> None:
         assert problem == ""
 
 
-@pytest.mark.skipif(os.name == "nt", reason="per-user listener ownership is checked on Linux and macOS")
 def test_client_refuses_to_send_its_token_to_a_foreign_listener() -> None:
     client = gateway.OrchestratorClient(host="127.0.0.1", port=18960, token="t" * 64)
     with (
@@ -59,3 +58,26 @@ def test_client_without_a_token_skips_the_check() -> None:
         mock.patch.object(requests.adapters.HTTPAdapter, "send", return_value=response),
     ):
         assert client.health() == {}
+
+
+@pytest.mark.parametrize(
+    ("recorded_pid", "process_status", "expected"),
+    [
+        (0, "denied", "PID 13496, a process of another account"),
+        (13496, "denied", ""),
+        (0, "ok", ""),
+    ],
+)
+def test_windows_listener_owner(tmp_path, recorded_pid, process_status, expected) -> None:
+    """GAP-1343: on Windows another account's listener gets no token either."""
+    from defenseclaw import doctor_gateway as evidence
+
+    record = evidence.PIDRecord("ok", pid=recorded_pid) if recorded_pid else evidence.PIDRecord("missing")
+    with (
+        mock.patch.dict(os.environ, {"DEFENSECLAW_HOME": str(tmp_path)}),
+        mock.patch.object(evidence, "_windows_listener_evidence", return_value=evidence.ListenerEvidence("ok", pid=13496)),
+        mock.patch.object(evidence, "read_pid_record", return_value=record) as read,
+        mock.patch.object(evidence, "_windows_process_evidence", return_value=evidence.ProcessEvidence(process_status)),
+    ):
+        assert gateway._windows_foreign_listener("127.0.0.1", 19000) == expected
+    read.assert_called_once_with(os.path.join(str(tmp_path), "gateway.pid"))

@@ -559,6 +559,9 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 		}
 	}
 
+	if perUserForeignListener(opts) > 0 {
+		return 0
+	}
 	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(notifyCtx, http.MethodPost,
@@ -611,6 +614,9 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.
 func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
+	if pid := perUserForeignListener(opts); pid > 0 {
+		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
+	}
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts)
 	defer releaseWatch()
 	resp, err := sendHookRequest(ctx, opts, sp, payload, token)
@@ -1155,6 +1161,9 @@ func unreachableDetail(opts Options, reason string) string {
 // closed" with no cause or next step (GAP-1337). Managed hooks keep their own
 // text (managedStandaloneFailClosedText).
 func perUserGatewayDownText(opts Options, reason string) string {
+	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
+		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
+	}
 	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}

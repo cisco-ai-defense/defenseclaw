@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 )
@@ -165,6 +166,9 @@ func recordDestinationTestActivity(
 	if err != nil {
 		return errors.New("destination-test compliance activity is invalid")
 	}
+	if gatewayListenerOfAnotherAccount(access.host, access.port, dataDir) {
+		return errors.New("destination-test compliance recorder is unavailable")
+	}
 	address := net.JoinHostPort(access.host, strconv.Itoa(access.port))
 	requestURL := (&url.URL{Scheme: "http", Host: address, Path: destinationtest.EndpointPath}).String()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(payload))
@@ -271,6 +275,9 @@ func requestTraceCanary(
 	}{Destination: destination})
 	if err != nil {
 		return traceCanaryFailure(destination, "invalid_request")
+	}
+	if gatewayListenerOfAnotherAccount(access.host, access.port, dataDir) {
+		return traceCanaryFailure(destination, "gateway_unavailable")
 	}
 	address := net.JoinHostPort(access.host, strconv.Itoa(access.port))
 	requestURL := (&url.URL{Scheme: "http", Host: address, Path: "/api/v1/telemetry/canary"}).String()
@@ -410,4 +417,14 @@ func destinationTestAccess(loaded *loadedConfigV8File) (observabilityV8GatewayAc
 		return observabilityV8GatewayAccess{}, errors.New("destination-test compliance configuration is invalid")
 	}
 	return access, nil
+}
+
+// gatewayListenerOfAnotherAccount reports that another account's process
+// holds this account's gateway port, so no gateway token may be sent to it
+// (GAP-1343; Windows only, see daemon.ForeignListenerPID).
+func gatewayListenerOfAnotherAccount(host string, port int, dataDir string) bool {
+	if strings.TrimSpace(dataDir) == "" {
+		dataDir = config.DefaultDataPath()
+	}
+	return daemon.ForeignListenerPID(host, port, dataDir) > 0
 }

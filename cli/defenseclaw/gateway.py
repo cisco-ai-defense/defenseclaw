@@ -292,15 +292,16 @@ def foreign_loopback_listener(host: str, port: int) -> str:
     listened on the configured port, so an account that held it (or the old
     port after a move) collected the token. Like ``defenseclaw-gateway
     start``, this names the holder from the kernel's socket tables on Linux,
-    or from ``lsof`` on macOS, which lists only this account's sockets. It
-    returns "" whenever ownership is unknown, on Windows, for a non-loopback
-    host, and on a managed host, where the gateway is a service of another
-    account by design.
+    or from ``lsof`` on macOS, which lists only this account's sockets. On
+    Windows (GAP-1343) the holder is another account's when it is not the
+    recorded gateway and this account may not open it. It returns ""
+    whenever ownership is unknown, for a non-loopback host, and on a managed
+    host, where the gateway is a service of another account by design.
     """
     import ipaddress
     import time
 
-    if os.name == "nt" or not 0 < int(port) <= 65535:
+    if not 0 < int(port) <= 65535:
         return ""
     try:
         if not ipaddress.ip_address(str(host).strip("[]")).is_loopback:
@@ -308,16 +309,19 @@ def foreign_loopback_listener(host: str, port: int) -> str:
     except ValueError:
         if str(host).strip().lower() != "localhost":
             return ""
-    from defenseclaw.upgrade_shim import managed_descriptor
+    from defenseclaw.upgrade_shim import _windows_managed_profile, managed_descriptor
 
-    if managed_descriptor():
+    if managed_descriptor() or (os.name == "nt" and _windows_managed_profile()):
         return ""
     key = (str(host), int(port))
     now = time.monotonic()
     cached = _listener_owner_cache.get(key)
     if cached is not None and now - cached[0] < _LISTENER_OWNER_TTL_SECONDS:
         return cached[1]
-    problem = _foreign_loopback_listener_uncached(int(port))
+    if os.name == "nt":
+        problem = _windows_foreign_listener(str(host), int(port))
+    else:
+        problem = _foreign_loopback_listener_uncached(int(port))
     if problem:
         problem = (
             f"{_url_host(str(host))}:{port} is held by {problem}, not by this account's gateway, "
@@ -326,6 +330,29 @@ def foreign_loopback_listener(host: str, port: int) -> str:
         )
     _listener_owner_cache[key] = (now, problem)
     return problem
+
+
+def _windows_foreign_listener(host: str, port: int) -> str:
+    """Name another account's process listening on ``port`` on Windows, or "".
+
+    The owner-PID table lists every account's listeners. The holder is this
+    account's when it is the gateway recorded in gateway.pid, or a process
+    this account may open; a standard account cannot open another account's
+    process, so "denied" means another account holds the port.
+    """
+    from defenseclaw import doctor_gateway as evidence
+    from defenseclaw.config import default_data_path
+
+    host = "" if host.strip("[]").casefold() == "localhost" else host
+    listener = evidence._windows_listener_evidence(port, host=host)
+    if listener.status != "ok" or listener.pid <= 0:
+        return ""
+    record = evidence.read_pid_record(os.path.join(str(default_data_path()), "gateway.pid"))
+    if record.status == "ok" and record.pid == listener.pid:
+        return ""
+    if evidence._windows_process_evidence(listener.pid).status != "denied":
+        return ""
+    return f"PID {listener.pid}, a process of another account"
 
 
 def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net") -> str:
