@@ -1013,6 +1013,12 @@ func ValidEventHistoryHealthTransition(transition EventHistoryHealthTransition) 
 	return validEventHistoryHealthTransition(transition)
 }
 
+// ValidEventHistorySQLiteDiagnostic reports whether class and primary are a
+// bounded SQLite diagnostic pair, for consumers of gateway health details.
+func ValidEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary uint8) bool {
+	return validEventHistorySQLiteDiagnostic(class, primary)
+}
+
 func validEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary uint8) bool {
 	switch class {
 	case EventHistorySQLiteBusyLocked:

@@ -272,6 +272,29 @@ def test_offline_setup_note_is_not_repeated_by_the_setup_callback(tmp_path: Path
     assert "noted" in noted and "Gateway is not running" not in noted
 
 
+def test_failed_setup_auto_restart_exits_non_zero(tmp_path: Path) -> None:
+    # GAP-1573: a restart that fails after a config change (for example a new
+    # API port the running gateway cannot move to) used to exit 0.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+
+    @click.command()
+    @click.pass_context
+    def probe(ctx: click.Context) -> None:
+        ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+        (tmp_path / "config.yaml").write_text("x: 1\n")
+        cmd_setup._auto_restart_sidecar_after_setup()
+
+    with (
+        patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=False),
+    ):
+        result = CliRunner().invoke(probe, [], obj=app)
+    assert result.exit_code == 1, result.output
+    assert "the agents may not be" in result.output and "defenseclaw-gateway start" in result.output
+
+
 def test_setup_v8_explicit_token_takes_precedence_over_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -497,8 +497,14 @@ func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing
 	}
 	snap.Telemetry.Details["event_history_last_sqlite_class"] = "full"
 	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(13)
-	if _, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true}); err == nil {
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil {
 		t.Fatal("a full disk must still fail at once")
+	}
+	// GAP-1603: the failure names the cause in plain words and its SQLite class.
+	if !strings.Contains(err.Error(), "the disk holding the audit database is full") ||
+		!strings.Contains(err.Error(), "; SQLite class full, code 13)") {
+		t.Fatalf("error = %v, want the plain cause and SQLite class", err)
 	}
 }
 
@@ -566,7 +572,9 @@ func TestGatewaySnapshotReadyReportsBoundedTelemetryFailureBranches(t *testing.T
 			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
 			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
 		})
-		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed)"
+		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed; " +
+			"SQLite class io, code 10): audit events cannot be written because reading or writing the audit database " +
+			"failed (another program, such as an antivirus scan, may hold the file); try again in a minute"
 		if got != want {
 			t.Fatalf("telemetry event-history diagnostic = %q, want %q", got, want)
 		}
