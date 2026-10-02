@@ -19,12 +19,9 @@
 package notify
 
 import (
-	"io"
-	"os"
 	"os/exec"
 )
 
-var fallbackWriter io.Writer = os.Stderr
 var notifySendLookPath = exec.LookPath
 var notifySendRun = func(path string, args ...string) error {
 	return exec.Command(path, args...).Run()

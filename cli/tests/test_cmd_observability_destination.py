@@ -346,7 +346,7 @@ def test_unbound_compliance_seam_blocks_before_dns_or_network() -> None:
         )
 
     assert captured.value.failure_class == "audit_unavailable"
-    assert "ensure the v8 gateway is running" in captured.value.message
+    assert "defenseclaw-gateway start" in captured.value.message
     assert not transport.handshakes
     assert not transport.writes
 
@@ -849,7 +849,8 @@ def test_top_level_command_fails_before_network_when_local_only_audit_seam_is_un
 
     assert result.exit_code != 0
     assert "audit_unavailable" in result.output
-    assert "ensure the v8 gateway is running" in result.output
+    assert "defenseclaw-gateway start" in result.output
+    assert "v8" not in result.output
     assert "collector.example.test" not in result.output
 
 
@@ -920,3 +921,36 @@ def test_gateway_local_compliance_recorder_fails_closed_without_echoing_helper_o
         )
     assert caught.value.failure_class == "audit_unavailable"
     assert "remote-secret" not in str(caught.value)
+
+
+def test_gateway_local_compliance_recorder_names_foreign_api_port_holder(tmp_path: Path) -> None:
+    """GAP-1670: another process on the API port is named with the fix, not "v8 gateway"."""
+    held = (
+        "Error: destination-test compliance recorder is unavailable: 127.0.0.1:18961 is held by "
+        "root (PID 4242), not by this account's gateway; the gateway token was not sent. "
+        "That process belongs to another account, so move this account's gateway to a free port "
+        "with: defenseclaw setup gateway --api-port 18962 --non-interactive, then run: "
+        "defenseclaw-gateway start\n"
+    )
+    recorder = destination_test.GatewayLocalComplianceRecorder(
+        config_path=str(tmp_path / "config.yaml"),
+        data_dir=str(tmp_path),
+    )
+    with (
+        patch.object(destination_test, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(
+            destination_test.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1, stdout="", stderr=held),
+        ),
+        pytest.raises(destination_test.DestinationTestError) as caught,
+    ):
+        recorder.record(
+            destination_test.ComplianceActivity("attempt", "soc", "probe-1", "handshake", "attempted", None)
+        )
+    message = str(caught.value)
+    assert caught.value.failure_class == "audit_unavailable"
+    assert "127.0.0.1:18961 is held by root (PID 4242)" in message
+    assert "the gateway token was not sent" in message
+    assert "defenseclaw setup gateway --api-port 18962" in message
+    assert "v8" not in message
