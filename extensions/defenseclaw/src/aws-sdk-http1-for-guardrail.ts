@@ -49,6 +49,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { openClawConfigUsesAmazonBedrock } from "./bedrock-config-detect.js";
+import { logInfo } from "./log.js";
 
 const DONE_FLAG = "__defenseclawAwsHttp1ShimEvaluated";
 const PATCHED_FLAG = "__defenseclawAwsHttp1GuardrailPatch";
@@ -205,7 +206,7 @@ function resolveSmithyModule(): Record<string, unknown> | null {
 function applySmithyHttp1Patch(): boolean {
   const smithy = resolveSmithyModule();
   if (!smithy) {
-    console.log(
+    logInfo(
       "[defenseclaw] Smithy package patch skipped (could not resolve @smithy/node-http-handler); pi-ai still uses HTTP/1 via AWS_BEDROCK_FORCE_HTTP1.",
     );
     return false;
@@ -224,7 +225,7 @@ function applySmithyHttp1Patch(): boolean {
     !NodeHttpHandler ||
     typeof NodeHttpHandler.create !== "function"
   ) {
-    console.log(
+    logInfo(
       "[defenseclaw] Smithy package patch skipped (missing NodeHttp2Handler/NodeHttpHandler exports); pi-ai still uses HTTP/1 via AWS_BEDROCK_FORCE_HTTP1.",
     );
     return false;
@@ -244,7 +245,7 @@ function applySmithyHttp1Patch(): boolean {
 function enableBedrockHttp1ForGuardrailProxy(): void {
   process.env.AWS_BEDROCK_FORCE_HTTP1 = "1";
   const smithyPatched = applySmithyHttp1Patch();
-  console.log(
+  logInfo(
     smithyPatched
       ? "[defenseclaw] Amazon Bedrock → HTTP/1 for guardrail: AWS_BEDROCK_FORCE_HTTP1=1 (pi-ai) and Smithy NodeHttp2Handler→NodeHttpHandler patch."
       : "[defenseclaw] Amazon Bedrock → HTTP/1 for guardrail: AWS_BEDROCK_FORCE_HTTP1=1 (pi-ai).",
@@ -263,14 +264,14 @@ export function patchAwsSdkHttp1ForGuardrail(
   g[DONE_FLAG] = true;
 
   if (process.env.DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM === "1") {
-    console.log(
+    logInfo(
       "[defenseclaw] AWS HTTP/1 shim skipped (DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM=1)",
     );
     return;
   }
 
   if (process.env.DEFENSECLAW_FORCE_AWS_HTTP1_SHIM === "1") {
-    console.log(
+    logInfo(
       "[defenseclaw] AWS HTTP/1 shim forced (DEFENSECLAW_FORCE_AWS_HTTP1_SHIM=1)",
     );
     enableBedrockHttp1ForGuardrailProxy();
@@ -280,7 +281,7 @@ export function patchAwsSdkHttp1ForGuardrail(
   const mode: AwsHttp1ShimMode = opts?.pluginConfig?.awsHttp1Shim ?? "auto";
 
   if (mode === "off") {
-    console.log(
+    logInfo(
       "[defenseclaw] AWS HTTP/1 shim disabled (plugins.entries.defenseclaw.awsHttp1Shim=off)",
     );
     return;
@@ -293,7 +294,7 @@ export function patchAwsSdkHttp1ForGuardrail(
 
   // auto
   if (!openClawConfigUsesAmazonBedrock(opts?.openclawConfig)) {
-    console.log(
+    logInfo(
       "[defenseclaw] AWS HTTP/1 shim skipped (no Amazon Bedrock in model config). Set plugins.entries.defenseclaw.awsHttp1Shim to \"on\" or DEFENSECLAW_FORCE_AWS_HTTP1_SHIM=1 if your setup needs it.",
     );
     return;

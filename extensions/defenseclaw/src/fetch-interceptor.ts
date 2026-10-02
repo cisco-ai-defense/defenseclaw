@@ -43,6 +43,7 @@ import {
 // Canonical provider config — single source of truth shared with the Go proxy.
 // Copied from internal/configs/providers.json by `make plugin`.
 import providersConfig from "./providers.json" with { type: "json" };
+import { logInfo } from "./log.js";
 const _require = createRequire(import.meta.url);
 // Use CommonJS require() for https/http — ESM module objects are frozen and
 // cannot have properties reassigned, but the CJS exports object is mutable.
@@ -1163,6 +1164,7 @@ export function createFetchInterceptor(
   let egressReporter: EgressReporter | null = null;
   let chatgptCodexPassthroughWarned = false;
   let selfTestTimer: ReturnType<typeof setInterval> | null = null;
+  let lastSelfTestLine = "";
   const loggedInterceptHosts = new Set<string>();
   let lastUndiciProbeDestination = "";
 
@@ -1181,7 +1183,7 @@ export function createFetchInterceptor(
   }
 
   function logStartupBanner(layers: InterceptorLayers): void {
-    console.log(
+    logInfo(
       `[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
         `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
         `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`,
@@ -1198,7 +1200,7 @@ export function createFetchInterceptor(
     const key = `${layer}:${host}`;
     if (loggedInterceptHosts.has(key)) return;
     loggedInterceptHosts.add(key);
-    console.log(`[defenseclaw] intercept via=${layer} host=${host}`);
+    logInfo(`[defenseclaw] intercept via=${layer} host=${host}`);
   }
 
   // Extract { host, path } from a URL string without throwing. Missing
@@ -1397,11 +1399,11 @@ export function createFetchInterceptor(
       };
 
       if (shapeBranch === "shape") {
-        console.log(
+        logInfo(
           `[defenseclaw] intercepted LLM-shaped call → ${scrubUrlForLog(urlStr)} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
         );
       } else {
-        console.log(
+        logInfo(
           `[defenseclaw] intercepted LLM call → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`,
         );
       }
@@ -1680,9 +1682,9 @@ export function createFetchInterceptor(
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
+          logInfo(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
         } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
+          logInfo(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
         }
         // Egress telemetry for the https.request branches. body_shape
         // is intentionally "none" because req.write happens after we
@@ -1858,7 +1860,7 @@ export function createFetchInterceptor(
       undici.setGlobalDispatcher(proxyDispatcher);
     }
 
-    console.log(
+    logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
     const layers = describeLayers();
@@ -1977,10 +1979,15 @@ export function createFetchInterceptor(
 
   async function runSelfTest(): Promise<InterceptionSelfTest> {
     const result = await verifyInterception();
-    console.log(
+    const line =
       `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
-        `reason=${result.reason}`,
-    );
+      `reason=${result.reason}`;
+    // GAP-1454: the self-test repeats every interval; print only a change.
+    if (line !== lastSelfTestLine) {
+      lastSelfTestLine = line;
+      if (result.ok) logInfo(line);
+      else console.warn(line);
+    }
     await publishSelfTest(result);
     return result;
   }
@@ -2032,7 +2039,7 @@ export function createFetchInterceptor(
     }
     _shared.installed = false;
     _shared.guardrailPort = null;
-    console.log("[defenseclaw] LLM fetch interceptor stopped");
+    logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
   return { start, stop, describeLayers, verifyInterception, runSelfTest };

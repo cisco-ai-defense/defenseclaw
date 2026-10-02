@@ -142,7 +142,7 @@ scope at each such row.
 
 | Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
-| `DEFENSECLAW_DEBUG` | low | `unset` | `1`, `unset` | Gateway client logs every request/response frame to stderr. | — | `internal/gateway/client.go` — Client struct gates verbose logging on this var |
+| `DEFENSECLAW_DEBUG` | low | `unset` | `1`, `unset` | Gateway client logs every request/response frame to stderr. | — | `internal/gateway/client.go` — Client struct gates verbose logging on this var<br/>`extensions/defenseclaw/src/log.ts` — OpenClaw plugin also prints its routine diagnostics when stdout is an interactive terminal |
 | `DEFENSECLAW_JUDGE_TRACE` | **medium** | `unset` | `1`, `true`, `unset` | LLM judge logs every prompt + response. | — | `internal/gateway/llm_judge.go` — Judge debug toggle |
 | `DEFENSECLAW_LLM_DEBUG` | **medium** | `unset` | `1`, `true`, `unset` | Python LLM bridge logs per-request prompt + response bodies. | — | `cli/defenseclaw/llm.py` — LLM bridge _DEBUG flag |
 | `DEFENSECLAW_NO_UPDATE_CHECK` | — | `unset` | `1`, `unset` | Turns off the once-a-day 'new release available' notice in the CLI and TUI. | — | `cli/defenseclaw/update_notice.py` — Skips the latest-release lookup and notice |
