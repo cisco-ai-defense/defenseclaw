@@ -91,6 +91,18 @@ func unitEnabled(ctx context.Context, services ServiceManager, unit Unit) bool {
 	return ok && reporter.Enabled(ctx, unit)
 }
 
+// disabledReporter is implemented by service managers that can tell whether
+// an administrator disabled a unit, so that it does not start at boot
+// (launchd's disabled override).
+type disabledReporter interface {
+	Disabled(ctx context.Context, unit Unit) bool
+}
+
+func unitDisabled(ctx context.Context, services ServiceManager, unit Unit) bool {
+	reporter, ok := services.(disabledReporter)
+	return ok && reporter.Disabled(ctx, unit)
+}
+
 // restarter is implemented by service managers that restart a unit in one
 // job.
 type restarter interface {
@@ -425,12 +437,28 @@ func (m *launchdManager) waitUnloaded(ctx context.Context, unit Unit) bool {
 // entries in launchd's disabled-services database after uninstall
 // (GAP-1443). If the overrides cannot be read, it enables as before.
 func (m *launchdManager) Enable(ctx context.Context, unit Unit) error {
-	if result, err := m.env.Runner.Run(ctx, "launchctl", "print-disabled", "system"); err == nil &&
-		!launchdDisabledPattern(unit.Name).Match(result.Stdout) {
+	if disabled, known := m.disabledOverride(ctx, unit); known && !disabled {
 		return nil
 	}
 	_, err := m.env.Runner.Run(ctx, "launchctl", "enable", "system/"+unit.Name)
 	return err
+}
+
+// Disabled reports a disabled override for the label: launchd does not
+// start the job at the next boot (GAP-1802).
+func (m *launchdManager) Disabled(ctx context.Context, unit Unit) bool {
+	disabled, _ := m.disabledOverride(ctx, unit)
+	return disabled
+}
+
+// disabledOverride reads launchd's override for the label; known is false
+// when the overrides cannot be read.
+func (m *launchdManager) disabledOverride(ctx context.Context, unit Unit) (disabled, known bool) {
+	result, err := m.env.Runner.Run(ctx, "launchctl", "print-disabled", "system")
+	if err != nil {
+		return false, false
+	}
+	return launchdDisabledPattern(unit.Name).Match(result.Stdout), true
 }
 
 // launchdDisabledPattern matches label's disabled override in

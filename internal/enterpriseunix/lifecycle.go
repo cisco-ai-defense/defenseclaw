@@ -1321,8 +1321,12 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		if !unit.Activate {
 			continue
 		}
+		wasDisabled := unitDisabled(ctx, env.Services, unit)
 		if err := env.Services.Enable(ctx, unit); err != nil {
 			return fmt.Errorf("enable %s: %w", unit.Name, err)
+		}
+		if wasDisabled {
+			l.noteChange("re-enabled %s, which was disabled and would not start after a reboot", unit.Name)
 		}
 		if unit.Name == env.SelfUnit {
 			// Already running: this transaction executes inside it.
