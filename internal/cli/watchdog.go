@@ -326,7 +326,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	pidInfo.ControlName = controlName
 	pidFile, err := acquireWatchdogPIDFile(pidPath, pidInfo)
 	if err != nil {
-		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
+		return watchdogForegroundAcquireError(pidPath, err)
 	}
 	defer func() {
 		_ = pidFile.Close()
@@ -366,6 +366,20 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "[watchdog] stopped\n")
 	return nil
+}
+
+// watchdogForegroundAcquireError explains a foreground start that lost the
+// ownership lock to a running watchdog in plain words, with its PID and the
+// next step, instead of the raw lock errno (GAP-1819).
+func watchdogForegroundAcquireError(pidPath string, err error) error {
+	const next = "Stop it first to run it in the foreground: defenseclaw-gateway watchdog stop"
+	if inspection := inspectWatchdogPIDOwnership(pidPath); inspection.locked {
+		if inspection.info.PID > 0 {
+			return fmt.Errorf("the watchdog already runs in the background (PID %d). %s", inspection.info.PID, next)
+		}
+		return fmt.Errorf("the watchdog already runs in the background. %s", next)
+	}
+	return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
 }
 
 func watchdogHealthURL(cfg *config.Config) string {
