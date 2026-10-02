@@ -6068,6 +6068,49 @@
         }
       ],
       "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_AGENT_HOME",
+      "category": "hook_internal",
+      "purpose": "The account's real HOME, saved unexported by the Unix hook hardening before it swaps in the per-hook HOME, so a hook can cold-start the account's stopped per-user gateway with the right HOME. The hook sets it itself, so an inherited value is overwritten.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening and the per-user gateway cold start"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_AUTOSTART",
+      "category": "security_opt_out",
+      "purpose": "Set to 0, false, no or off in the agent's environment to stop the Unix hooks from starting a stopped per-user gateway when their request is refused. Fail-closed hooks then block and fail-open hooks let the call through until the gateway is started.",
+      "default": "unset (hooks start a stopped per-user gateway)",
+      "accepted_values": [
+        "0",
+        "false",
+        "no",
+        "off"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Per-user gateway cold start from the hooks"
+        },
+        {
+          "location": "internal/gateway/connector/hook_test_env_helpers_test.go",
+          "description": "Turns the cold start off in the sanitized hook test environment"
+        }
+      ],
+      "since": "1.0.1"
     }
   ]
 }

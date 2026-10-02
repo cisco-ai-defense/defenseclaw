@@ -38,7 +38,7 @@ func TestRemoveOrphanedCopilotVSCodeLocalRenders(t *testing.T) {
 		t.Helper()
 		home := t.TempDir()
 		files := map[string][]byte{
-			".copilot/hooks/" + orphanCopilotVSCodeHookFile:                      hookDoc,
+			".copilot/hooks/" + orphanCopilotVSCodeHookFile:                       hookDoc,
 			".copilot/installed-plugins/defenseclaw/defenseclaw/hooks/hooks.json": hookDoc,
 			".copilot/installed-plugins/defenseclaw/defenseclaw/plugin.json":      []byte(`{"name":"defenseclaw"}`),
 		}

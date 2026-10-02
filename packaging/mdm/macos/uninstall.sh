@@ -9,7 +9,10 @@
 # stops the services and removes DefenseClaw's hooks and machine-policy
 # entries while preserving administrator-owned entries, then removes the
 # package (dpkg / rpm; the macOS lifecycle forgets its pkg receipt itself).
-# --purge also removes the administrator config, credentials, state and logs.
+# --purge also removes the administrator config, credentials, state and logs,
+# and each enrolled account's ~/.defenseclaw and per-user binaries (the
+# lifecycle purge runs before the package goes, so it can act as each user).
+# Without it each account keeps ~/.defenseclaw.
 #
 # Idempotent: on a host without the deployment it prints a no-op result and
 # exits 0. Exit codes: 0 removed or nothing to do, 1 failure, 2 invalid
