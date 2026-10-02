@@ -284,9 +284,10 @@ the guard fails closed instead of trusting an impersonated gateway. The
 contract lock pins the selected guard and agent executable paths
 and SHA-256 digests, the exact client configuration path and digest, plus ACP
 [schema-v1.21.0](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0).
-Normal upgrades replace the guard and rebind every matching user-owned lock in
-one rollback-capable transaction, after first proving the old lock still
-matches the active guard. A managed lock is not rewritten by that transaction;
+An upgrade replaces the guard, and the installer then re-pins the new guard in
+every user-owned lock that pinned the guard it replaced (`defenseclaw acp
+refresh --from-sha256 <old digest>`); a rolled-back upgrade restores the old
+locks with the rest of the data. A managed lock is not rewritten by that transaction;
 it instead permits an administrator upgrade to change guard bytes only while
 the complete guard path continues to pass the platform root/Admin ownership,
 no-symlink, and no-untrusted-writer custody checks. Agent and editor

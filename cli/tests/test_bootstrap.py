@@ -874,6 +874,39 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
         )
 
+    def test_added_connector_with_same_primary_restarts_on_the_new_roster(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        # GAP-1270: re-running init to add cursor keeps the primary (codex);
+        # the gateway is still on its old roster and must be restarted.
+        self.cfg.guardrail.connector = "codex"
+        self.cfg.claw.mode = "codex"
+        self.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "hermes": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
+        }
+        self._write_pid_file()
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "names": ["codex", "hermes"], "name": "codex"}, fh)
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted to load the 3 selected connectors")
+        self.assertEqual([c[1] for c in recorder], ["restart"])
+
+        # Same roster: no restart, although "name" mirrors the alphabetical
+        # first entry rather than the primary.
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "names": ["codex", "cursor", "hermes"], "name": "codex"}, fh)
+        recorder = []
+        with self._patch_subprocess(recorder):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual((result.detail, recorder), ("already running", []))
+
     def test_not_running_calls_start_not_restart(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 

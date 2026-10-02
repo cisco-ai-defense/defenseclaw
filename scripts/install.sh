@@ -995,6 +995,11 @@ swap_in() {
         # contract lock and doctor can check compatibility. Best effort.
         info "Refreshing agent discovery"
         "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
+        # The new defenseclaw-acp has a new digest: re-pin it in configured
+        # editor entries, which would otherwise fail closed. Best effort.
+        if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
+            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
+        fi
     fi
 }
 

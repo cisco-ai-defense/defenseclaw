@@ -1521,6 +1521,29 @@ def _running_connector_from_state_file(data_dir: str) -> str | None:
     return name or None
 
 
+def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
+    """Return the sorted connector roster the running sidecar booted with.
+
+    Reads ``names`` from ``active_connector.json`` (the v2+ roster), falling
+    back to the legacy single ``name``. ``None`` keeps the I-don't-know rule of
+    :func:`_running_connector_from_state_file`.
+    """
+    path = os.path.join(data_dir, "active_connector.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    names = data.get("names")
+    if isinstance(names, list) and names:
+        roster = sorted({n.strip().lower() for n in names if isinstance(n, str) and n.strip()})
+        return roster or None
+    single = _running_connector_from_state_file(data_dir)
+    return [single] if single else None
+
+
 def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
@@ -1561,9 +1584,20 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         # while the gateway was up — restart so the new config
         # takes effect now instead of "next time the operator
         # bounces the daemon themselves".
+        # Compare the whole roster: re-running init to add a connector keeps
+        # the same primary, and the gateway only loads (and writes hooks for)
+        # the connectors it booted with (GAP-1270).
         desired = cfg.active_connector()
-        running = _running_connector_from_state_file(cfg.data_dir)
-        if running is not None and running != desired:
+        desired_roster = sorted(
+            {str(c).strip().lower() for c in cfg.active_connectors() if str(c).strip()} or {desired}
+        )
+        roster = _running_connectors_from_state_file(cfg.data_dir)
+        running = None
+        if roster is not None and roster != desired_roster:
+            running = roster[0] if len(roster) == 1 else f"{len(roster)} connectors"
+            if len(desired_roster) > 1:
+                desired = f"{len(desired_roster)} connectors"
+        if running is not None:
             try:
                 result = subprocess.run(
                     [gw, "restart"],

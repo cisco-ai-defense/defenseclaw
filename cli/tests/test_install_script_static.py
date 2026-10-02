@@ -126,6 +126,10 @@ def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
     windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
     assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
     assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+    # GAP-1294: the upgraded ACP guard is re-pinned in locks that pinned the
+    # guard it replaced, so configured editor entries keep working.
+    assert posix.index('acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")"') > posix_refresh
+    assert windows.index('@("acp", "refresh", "--from-sha256", (Get-Sha256 $oldGuard))') > windows_refresh
 
 
 def test_windows_process_listing_survives_a_wmi_refusal() -> None:

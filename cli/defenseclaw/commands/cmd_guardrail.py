@@ -3428,6 +3428,40 @@ def mode_cmd(
         )
         return
 
+    # The gateway refuses to start a connector in action mode when its
+    # installed version is not verified against a hook contract (for example
+    # after an observe-mode quickstart that never probed it). Probe, and record
+    # the discovery evidence the gateway reads, before saving, so the switch
+    # either works or changes nothing.
+    becomes_action = mode == "action" or (clear and policy_catalog.mode_label(gc.mode) == "action")
+    if becomes_action:
+        from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+        unverified = [
+            c
+            for c in affected
+            if policy_catalog.mode_label(gc.effective_mode(c)) != "action"
+            and not _check_connector_version_supported_for_setup(
+                c, mode="action", emit=not json_out, data_dir=app.cfg.data_dir, _allow_prompt=False
+            )
+        ]
+        if unverified:
+            names = ", ".join(_connector_label(c) for c in unverified)
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                message=(
+                    f"Nothing was changed: {names} can't run in action mode because its installed "
+                    "version could not be verified against a DefenseClaw hook contract, so the "
+                    "gateway would refuse to start it."
+                ),
+                notes=[
+                    "Fix what the check above reports (see: defenseclaw agent discover --refresh), "
+                    f"then run: defenseclaw guardrail mode action{f' --connector {scope}' if connector_key else ''}"
+                ],
+            )
     _preflight_config_write(app)
     if connector_key is None:
         gc.mode = mode
