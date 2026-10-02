@@ -35,8 +35,12 @@ import (
 // the guardian selects; anything else stays unmanaged and is reported, rather
 // than failing the reconcile for every other user.
 var windowsStandaloneManagedExecutableRelative = map[string][][]string{
-	// npm's amp.cmd launches this native image.
-	"amp": {{"AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli", "bin", "amp.exe"}},
+	// npm's amp.cmd launches this native image; `npm i -g @sourcegraph/amp`
+	// nests the same package one level down.
+	"amp": {
+		{"AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli", "bin", "amp.exe"},
+		{"AppData", "Roaming", "npm", "node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe"},
+	},
 	// The connector's executable admission accepts the official SST WinGet
 	// image and the native image npm's opencode.cmd launches from the
 	// opencode-ai package. WinGet wins when both exist.

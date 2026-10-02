@@ -546,11 +546,12 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             candidates.extend(_codex_npm_native_candidates(root))
         if connector == "amp" and os.name == "nt":
             # npm puts only amp.cmd/amp.ps1 shims on PATH; the native image
-            # they launch sits at this fixed package-relative path, the same
-            # one the per-user admission table names.
-            candidate = os.path.join(root, *_AMP_NPM_NATIVE_RELATIVE)
-            if os.path.isfile(candidate):
-                candidates.append(candidate)
+            # they launch sits at one of these fixed package-relative paths,
+            # the same ones the per-user admission table names.
+            for relative in _AMP_NPM_NATIVE_RELATIVES:
+                candidate = os.path.join(root, *relative)
+                if os.path.isfile(candidate):
+                    candidates.append(candidate)
 
     # Prefer a native image over a script wrapper. This both avoids shell
     # interpretation and binds the protected digest to the process that
@@ -570,7 +571,11 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     return tuple(result)
 
 
-_AMP_NPM_NATIVE_RELATIVE = ("node_modules", "@ampcode", "cli", "bin", "amp.exe")
+_AMP_NPM_NATIVE_RELATIVES = (
+    ("node_modules", "@ampcode", "cli", "bin", "amp.exe"),
+    # `npm i -g @sourcegraph/amp` nests the same native package (GAP-1437).
+    ("node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe"),
+)
 _OPENCODE_NPM_NATIVE_RELATIVE = ("npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
 
 
