@@ -107,8 +107,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         first_run.assert_not_called()
 
     def test_openclaw_on_a_hook_roster_suggests_commands_that_work(self):
-        # GAP-1407: "setup openclaw --yes" is refused next to hook connectors,
-        # and setup openclaw has no --replace.
+        # GAP-1407: "setup openclaw --yes" is refused next to hook connectors;
+        # GAP-1455: "setup openclaw --replace" switches in one command.
         forbidden = AssertionError("quickstart narrowed an existing roster")
         with (
             patch("defenseclaw.platform_support.host_os", return_value="macos"),
@@ -122,9 +122,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 2, result.output)
         output = result.output + (result.stderr or "")
-        self.assertIn("defenseclaw setup remove <connector>", output)
-        self.assertIn("defenseclaw setup openclaw --mode action", output)
-        self.assertNotIn("--replace", output)
+        self.assertIn("defenseclaw setup openclaw --replace --mode action", output)
         self.assertNotIn("--yes --mode action", output)
 
     def test_explicit_connector_matching_existing_roster_is_allowed(self):

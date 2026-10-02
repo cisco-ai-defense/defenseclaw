@@ -796,6 +796,27 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
+    # GAP-1455: --replace switches a hook-connector install to OpenClaw in one
+    # command, after listing (and confirming) what it removes.
+    def test_openclaw_replace_removes_hook_connectors(self):
+        self._seed_map("codex", "cursor")
+        with _setup_patches():
+            declined = CliRunner().invoke(
+                setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
+            )
+        self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
+        self.assertIn("Aborted", declined.output)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
+
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail") as backend:
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        backend.assert_called_once()
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.connectors, {})
+        self.assertEqual(gc.connector, "openclaw")
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+
     # GAP-1179: DefenseClaw adopts OpenClaw's gateway token before restarting.
     def test_openclaw_gateway_token_is_adopted_up_front(self):
         oc = os.path.join(self.tmp_dir, "openclaw.json")
