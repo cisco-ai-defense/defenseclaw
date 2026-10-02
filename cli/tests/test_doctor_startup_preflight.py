@@ -84,7 +84,8 @@ def test_doctor_renders_raw_validation_when_runtime_config_load_fails() -> None:
     assert any(item["label"] == "Config validation" and "guardrail.port" in item["detail"] for item in checks)
     load_failure = next(item for item in checks if item["label"] == "Config load")
     assert load_failure["status"] == "fail"
-    assert "no startup mutation or automatic repair was attempted" in load_failure["detail"]
+    assert "nothing was changed or repaired" in load_failure["detail"]
+    assert "TypeError" not in load_failure["detail"]
     assert "defenseclaw config validate" in load_failure["detail"]
     validate.assert_called_once_with()
     store.assert_not_called()

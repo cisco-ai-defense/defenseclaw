@@ -463,19 +463,16 @@ def _ensure_codeguard_skill(cfg) -> None:
 
 
 def _try_launch_tui() -> bool:
-    """When invoked with no subcommand on a TTY, launch the Textual TUI.
+    """When invoked with no arguments on a TTY, launch the Textual TUI.
 
-    We only fall through to the Click CLI when stdin is not a TTY, when
-    the user passed an actual subcommand, or when ``--help``/``--version``
-    is on the command line.
+    Any argument goes to the Click CLI: a subcommand, ``--help``/``--version``,
+    and a mistyped option too, which Click rejects with its usage error and
+    exit code 2 instead of opening the dashboard (GAP-1769).
     """
     if not sys.stdin.isatty():
         return False
 
-    argv = sys.argv[1:]
-    if argv and not all(a.startswith("-") for a in argv):
-        return False
-    if any(a in {"-h", "--help", "--version", "--version-json"} for a in argv):
+    if sys.argv[1:]:
         return False
 
     if not ux.terminal_supports_tui():

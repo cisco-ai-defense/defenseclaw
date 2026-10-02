@@ -153,14 +153,15 @@ def scan(
     LLM analysis uses the same configuration as the skill scanner
     (reads from config.yaml: inspect_llm).
 
-    Examples:\n
-      defenseclaw plugin scan my-plugin\n
-      defenseclaw plugin scan --all\n
-      defenseclaw plugin scan my-plugin --policy strict\n
-      defenseclaw plugin scan my-plugin --use-llm\n
-      defenseclaw plugin scan my-plugin --no-llm\n
-      defenseclaw plugin scan my-plugin --use-llm --llm-model gpt-4\n
-      defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml\n
+    \b
+    Examples:
+      defenseclaw plugin scan my-plugin
+      defenseclaw plugin scan --all
+      defenseclaw plugin scan my-plugin --policy strict
+      defenseclaw plugin scan my-plugin --use-llm
+      defenseclaw plugin scan my-plugin --no-llm
+      defenseclaw plugin scan my-plugin --use-llm --llm-model gpt-4
+      defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml
       defenseclaw plugin scan /path/to/plugin --profile strict --lenient
       defenseclaw plugin scan ~/.defenseclaw/extensions/defenseclaw --include-self
     """

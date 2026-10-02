@@ -30,3 +30,14 @@ func TestParseV8YAMLSyntaxErrorNamesTheBadLine(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1767: the gateway prints the line and the parser's reason, not the
+// internal code or the "$" path.
+func TestParseV8YAMLSyntaxErrorReadsPlainly(t *testing.T) {
+	_, err := ParseV8YAML("config.yaml", []byte("config_version: 8\na: 1\nguardrail: [unclosed\n"))
+	got := err.Error()
+	want := "config.yaml:3: invalid YAML (did not find expected ',' or ']'); fix that line"
+	if got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}

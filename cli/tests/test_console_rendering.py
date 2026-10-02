@@ -297,6 +297,49 @@ def test_implicit_tui_launches_on_capable_terminal() -> None:
     run_tui.assert_called_once_with()
 
 
+def test_unknown_top_level_option_goes_to_click_not_the_dashboard() -> None:
+    # GAP-1769: "defenseclaw --no-such-flag" opened the dashboard and exited 0.
+    with (
+        _render_mode(True),
+        mock.patch.object(sys, "stdin", _Stream(tty=True)),
+        mock.patch.object(sys, "stdout", _Stream(tty=True)),
+        mock.patch.object(sys, "argv", ["defenseclaw", "--no-such-flag-xyz"]),
+        mock.patch("defenseclaw.tui.run_textual_tui") as run_tui,
+    ):
+        assert main_mod._try_launch_tui() is False
+    run_tui.assert_not_called()
+    result = CliRunner().invoke(main_mod.cli, ["--no-such-flag-xyz"])
+    assert result.exit_code == 2
+    assert "No such option" in result.output
+
+
+def test_piped_rich_table_keeps_its_columns_after_the_ascii_swap() -> None:
+    # GAP-1757: glyphs were swapped after Rich sized the cells, and Rich's
+    # Windows renderer writes a row piece by piece.
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title="Skills")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Description", no_wrap=True, overflow="ellipsis", max_width=14)
+    table.add_row("✓ ready", "A harmless demo skill used for a test")
+    rendered = io.StringIO()
+    Console(file=rendered, width=60, color_system=None, legacy_windows=False).print(table)
+    piped = _Stream(tty=False)
+    with (
+        mock.patch.object(ux.sys, "platform", "win32"),
+        mock.patch.object(ux, "_console_output_code_page", return_value=437),
+    ):
+        stream = ux.ascii_safe_redirected_stream(piped)
+    for char in rendered.getvalue():
+        stream.write(char)
+    text = piped.getvalue()
+    rows = [line for line in text.splitlines() if line[:1] in "|+"]
+    assert len(rows) == 5 and len({len(line) for line in rows}) == 1, text
+    assert "OK ready" in text and "..." in text
+    assert "\\" not in text and not any(ord(c) > 127 for c in text)
+
+
 def test_explicit_tui_uses_the_same_capability_guard() -> None:
     runner = CliRunner()
     with mock.patch.object(ux, "terminal_supports_tui", return_value=False):
