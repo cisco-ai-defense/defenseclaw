@@ -190,7 +190,7 @@ func gatewayStatusConfigLoadError(err error) error {
 			where, subject, secretErr.Reference, state, secretErr.Reference, dest, config.ConfigPath(),
 			gatewayStatusNextVerb(running))
 	}
-	if problem, ok := configEnumProblem(err); ok {
+	if problem, ok := configSchemaProblem(err); ok {
 		return fmt.Errorf("failed to load config: %s. %s Fix the file (check it with: defenseclaw config validate)",
 			problem, state)
 	}

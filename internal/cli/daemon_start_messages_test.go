@@ -114,3 +114,29 @@ func TestGatewayConfigLoadErrorNamesTheBadEnumValue(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1990: a value of the wrong type gets the same short form as a bad enum
+// value, not the raw schema diagnostic.
+func TestGatewayConfigLoadErrorNamesTheWrongValueType(t *testing.T) {
+	for value, got := range map[string]string{"42": "a number", "[observe]": "a list"} {
+		configPath := writeGatewayMessageConfig(t, "guardrail:\n  mode: "+value+"\n")
+		loadErr := loadGatewayCommandConfigFor(statusCmd)
+		if loadErr == nil {
+			t.Fatalf("config with guardrail.mode: %s loaded", value)
+		}
+		for _, msg := range []string{
+			daemonConfigLoadError("start", loadErr).Error(),
+			gatewayStatusConfigLoadError(loadErr).Error(),
+		} {
+			want := configPath + " line 7: guardrail.mode: expected a value of type string (got " + got + ")"
+			if !strings.Contains(msg, want) {
+				t.Errorf("error %q does not contain %q", msg, want)
+			}
+			for _, internal := range []string{"config_schema_invalid", "canonical v8 schema", "received "} {
+				if strings.Contains(msg, internal) {
+					t.Errorf("error %q still shows %q", msg, internal)
+				}
+			}
+		}
+	}
+}

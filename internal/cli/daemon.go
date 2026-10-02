@@ -1044,7 +1044,7 @@ func daemonConfigLoadError(verb string, err error) error {
 		untouched += " Nothing was changed."
 		next = "restart"
 	}
-	if problem, ok := configEnumProblem(err); ok {
+	if problem, ok := configSchemaProblem(err); ok {
 		return fmt.Errorf(
 			"cannot %s the gateway: %s.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
 			verb, problem, untouched, next,
