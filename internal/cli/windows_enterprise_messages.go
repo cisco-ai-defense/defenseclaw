@@ -98,5 +98,5 @@ func windowsEnterpriseStandardUserInspectionAnswer(action string) string {
 	return "the managed deployment's " + action + " needs an elevated prompt: a standard account cannot run the installer's own checks, " +
 		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with `& '" +
 		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`, and your account's agents with `& '" +
-		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccount() + "`. Nothing was changed"
+		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccount() + "`. Nothing was changed."
 }

@@ -56,10 +56,13 @@ func TestWindowsEnterpriseSessionAndStandardUserWording(t *testing.T) {
 	t.Cleanup(func() { managedHostCurrentAccount = restore })
 	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
 	answer := windowsEnterpriseStandardUserInspectionAnswer("status")
-	for _, want := range []string{"needs an elevated prompt", "enterprise windows status --profile standalone", `--user HOST\dcw-std1`, "Nothing was changed"} {
+	for _, want := range []string{"needs an elevated prompt", "enterprise windows status --profile standalone", `--user HOST\dcw-std1`, "Nothing was changed."} {
 		if !strings.Contains(answer, want) {
 			t.Fatalf("answer lacks %q: %q", want, answer)
 		}
+	}
+	if !strings.HasSuffix(answer, "Nothing was changed.") {
+		t.Fatalf("answer does not end as a sentence: %q", answer)
 	}
 	if strings.Contains(answer, "AllowUnsigned") || strings.Contains(answer, "Authenticode") {
 		t.Fatalf("answer leaks installer internals: %q", answer)

@@ -137,7 +137,7 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 func managedWindowsAdminCommandAnswer(where, command string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
-		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed",
+		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed.",
 		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccount())
 }
 
@@ -146,7 +146,7 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 func managedWindowsUpgradeAnswer(where string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so upgrades are installed "+
 		"by your organization, not with `upgrade`; there is nothing for you to do. Your administrator can check "+
-		"the installed version %s. Nothing was changed",
+		"the installed version %s. Nothing was changed.",
 		where, managedWindowsAdminStatusHint())
 }
 
@@ -344,7 +344,7 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
 			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
-			"`sudo %s enterprise %s status`. Nothing was changed",
+			"`sudo %s enterprise %s status`. Nothing was changed.",
 			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
@@ -361,7 +361,7 @@ func managedWindowsSetupRefusal(where string, args []string) error {
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
-		"%sNothing was changed", where, detail)
+		"%sNothing was changed.", where, detail)
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {
