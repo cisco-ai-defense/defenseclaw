@@ -201,8 +201,14 @@ def _event_connector(event) -> str:
     return _kv(event.details or "").get("connector", "").lower()
 
 
-def _hook_decision(hook_details: list[str]) -> str:
-    """Decision of the connector-hook rows recorded for the same request."""
+def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
+    """Decision of the connector-hook rows recorded for the same request.
+
+    A post-tool finding (PostToolUse, ...) cannot block the call that already
+    ran, so it is not labelled observe mode on an action-mode connector
+    (GAP-1303)."""
+    from defenseclaw.hook_metrics import is_post_tool_hook_event  # noqa: PLC0415
+
     decision = ""
     for raw in hook_details:
         kv = _kv(_strip_details_json(raw))
@@ -210,7 +216,11 @@ def _hook_decision(hook_details: list[str]) -> str:
         if action == "block":
             return "blocked"
         if kv.get("would_block", "").lower() == "true":
-            decision = "would block (observe mode)"
+            decision = (
+                "detected after the tool ran (cannot block)"
+                if is_post_tool_hook_event(hook_event)
+                else "would block (observe mode)"
+            )
         elif not decision and action:
             decision = action
     return decision
@@ -290,15 +300,30 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
     request.
     """
     structured = getattr(e, "structured", None)
-    if e.action != "scan-finding" or not isinstance(structured, dict):
+    if e.action not in ("scan-finding", "sandbox-finding") or not isinstance(structured, dict):
         return None
     rule_id = str(structured.get("defenseclaw.finding.rule_id") or "").strip()
     if not rule_id:
         return None
     title = _finding_title(rule_id, str(structured.get("defenseclaw.finding.title") or "").strip())
+    target = e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip()
+    if e.action == "sandbox-finding":
+        # GAP-1303: a sandbox finding row has no target and only
+        # ``finding.observed`` as details; name the sandbox (or the
+        # destination) and the OpenShell disposition ("FINDING:BLOCKED ...").
+        sandbox = str(structured.get("defenseclaw.sandbox.name") or "").strip()
+        evidence = str(structured.get("defenseclaw.guardrail.evidence_summary") or "")
+        disposition = re.match(r"FINDING:([A-Z_]+)\b", evidence.strip())
+        return {
+            "target": target or sandbox,
+            "decision": disposition.group(1).lower().replace("_", " ") if disposition else "",
+            "connector": _event_connector(e),
+            "rule": f"{rule_id}: {title}" if title else rule_id,
+            "sandbox": sandbox if sandbox != (target or sandbox) else "",
+        }
     facts = {
-        "target": e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip(),
-        "decision": _hook_decision(hook_details.get(e.id, [])),
+        "target": target,
+        "decision": _hook_decision(hook_details.get(e.id, []), target),
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
         "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
@@ -308,7 +333,7 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
 
 def _finding_details(facts: dict[str, str]) -> str:
     return " ".join(
-        f"{key}={facts[key]}" for key in ("decision", "connector", "rule", "scanner") if facts.get(key)
+        f"{key}={facts[key]}" for key in ("decision", "connector", "rule", "scanner", "sandbox") if facts.get(key)
     )
 
 
@@ -580,7 +605,7 @@ def _alerts_default(
             click.echo(f"  {label('Target')} {target}")
         if facts:
             for key, name in (("decision", "Decision"), ("connector", "Connector"),
-                              ("rule", "Rule"), ("scanner", "Scanner")):
+                              ("rule", "Rule"), ("scanner", "Scanner"), ("sandbox", "Sandbox")):
                 if facts.get(key):
                     click.echo(f"  {label(name)} {facts[key]}")
         elif e.details:

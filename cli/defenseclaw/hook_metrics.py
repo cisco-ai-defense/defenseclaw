@@ -70,6 +70,22 @@ def _iter_detail_tokens(value: str) -> Iterator[tuple[str, str]]:
         yield key, text[value_start:i]
 
 
+# Hook events that fire after the tool already ran: a finding there cannot
+# block the call, whatever the connector's mode (GAP-1303).
+_POST_TOOL_HOOK_EVENTS = frozenset({
+    "posttooluse", "posttoolusefailure", "posttoolbatch", "toolresult",
+    "aftertool", "aftershellexecution", "aftermcpexecution", "afterfileedit",
+})
+
+
+def is_post_tool_hook_event(event: str) -> bool:
+    """True for a hook event that runs after the tool call (PostToolUse, ...).
+
+    Accepts a bare event name or a ``connector:Event`` hook target."""
+    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
+    return name in _POST_TOOL_HOOK_EVENTS
+
+
 def parse_detail_tokens(value: str) -> dict[str, str]:
     """Parse exact whitespace-delimited ``key=value`` tokens.
 
