@@ -285,7 +285,8 @@ def _render_table(statuses: list[CredentialStatus], show_values: bool) -> None:
 
     # Header
     click.echo()
-    hdr = "  " + "  ".join(ux.bold(h).ljust(widths[i]) for i, h in enumerate(headers))
+    # Pad before styling: ANSI codes count toward str.ljust widths.
+    hdr = "  " + "  ".join(ux.bold(h.ljust(widths[i])) for i, h in enumerate(headers))
     click.echo(hdr)
     click.echo("  " + "  ".join(ux.dim("─" * widths[i]) for i in range(len(headers))))
     for r in rows:
