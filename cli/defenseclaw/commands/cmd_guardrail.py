@@ -275,7 +275,7 @@ def _toggle_connector_guardrail(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
@@ -826,7 +826,7 @@ def disable_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
@@ -947,7 +947,7 @@ def enable_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
@@ -1133,6 +1133,10 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         click.echo()
         return
 
+    pinned = _cursor_pinned_fail_mode(gc, key)
+    if pinned is not None and mode != pinned:
+        _refuse_cursor_fail_mode(gc, key, mode, pinned)
+
     if mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
         click.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
@@ -1170,7 +1174,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -1207,8 +1211,13 @@ def _apply_global_fail_mode_transaction(
     fail_mode_targets: list[str],
     single_connector: str,
     single_runtime: bool,
+    target_modes: dict[str, str] | None = None,
 ) -> None:
-    """Persist global/fan-out fail mode and atomically refresh registrations."""
+    """Persist global/fan-out fail mode and atomically refresh registrations.
+
+    ``target_modes`` overrides the value written for a target (Cursor keeps
+    the value its guardrail mode pins).
+    """
 
     gc = app.cfg.guardrail
     transaction_targets = fail_mode_targets or ([single_connector] if single_runtime else [])
@@ -1234,7 +1243,7 @@ def _apply_global_fail_mode_transaction(
                 # Explicit fan-out makes the operation truthful in mixed
                 # observe/action installs and prevents old overrides from
                 # silently defeating the requested global posture.
-                entry.hook_fail_mode = mode
+                entry.hook_fail_mode = (target_modes or {}).get(name, mode)
         try:
             app.cfg.save()
             if fail_mode_targets:
@@ -1466,17 +1475,25 @@ def fail_mode_cmd(
             stored = str(getattr(entry, "hook_fail_mode", "") or "").strip().lower()
             target_modes[name] = stored if stored in ("open", "closed") else current
             runtime_states[name] = resolve_connector_fail_mode(app.cfg, name)
+    # Cursor keeps the value its guardrail mode pins (GAP-1432).
+    desired_modes = {name: _cursor_pinned_fail_mode(gc, name) or mode for name in fail_mode_targets}
 
     if (
         fail_mode_targets
-        and all(value == mode for value in target_modes.values())
-        and all(state.desired == mode and state.current for state in runtime_states.values())
+        and all(target_modes[name] == desired_modes[name] for name in fail_mode_targets)
+        and all(
+            runtime_states[name].desired == desired_modes[name] and runtime_states[name].current
+            for name in fail_mode_targets
+        )
     ):
         click.echo(
             f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('for all active connectors — nothing to do.')}"
         )
         return
     single_connector = _resolve_active_connector(app.cfg)
+    single_pinned = None if fail_mode_targets else _cursor_pinned_fail_mode(gc, single_connector)
+    if single_pinned is not None and mode != single_pinned:
+        _refuse_cursor_fail_mode(gc, single_connector, mode, single_pinned)
     single_state = (
         resolve_connector_fail_mode(app.cfg, single_connector)
         if not fail_mode_targets and normalize_connector(single_connector) in _RUNTIME_FAIL_MODE_CONNECTORS
@@ -1501,6 +1518,15 @@ def fail_mode_cmd(
         click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
         for name in fail_mode_targets:
             old = target_modes.get(name, current)
+            if desired_modes[name] != mode:
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): stays {desired_modes[name]} "
+                    + ux.dim(
+                        f"(Cursor {'action' if desired_modes[name] == 'closed' else 'observe'} mode "
+                        f"keeps hook failures {desired_modes[name]})"
+                    )
+                )
+                continue
             # Show what guardrail status shows: an observe connector without
             # its own value already runs fail-open, and a hook-installed
             # connector shows its installed runtime value (GAP-1370).
@@ -1565,7 +1591,7 @@ def fail_mode_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         # click.Abort routes through Click's exception handler and
         # cooperates with the result callbacks the setup group
@@ -1581,6 +1607,7 @@ def fail_mode_cmd(
         fail_mode_targets=fail_mode_targets,
         single_connector=single_connector,
         single_runtime=single_state is not None,
+        target_modes=desired_modes,
     )
 
     _log_guardrail_action(
@@ -1592,6 +1619,33 @@ def fail_mode_cmd(
             else f"old={current} new={mode} restart={restart}"
         ),
     )
+
+
+def _cursor_pinned_fail_mode(gc, name: str) -> str | None:
+    """Cursor's hook failure mode follows its guardrail mode, or None for others.
+
+    Cursor's managed hooks are fail-closed in action mode and fail-open in
+    observe mode, as ``setup cursor`` writes them. A fail-mode change that
+    stored the other value left doctor failing "inconsistent Cursor posture"
+    until ``setup cursor`` (GAP-1432).
+    """
+    if normalize_connector(name) != "cursor":
+        return None
+    mode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")
+    return "closed" if str(mode or "").strip().lower() == "action" else "open"
+
+
+def _refuse_cursor_fail_mode(gc, name: str, mode: str, pinned: str) -> None:
+    other = "observe" if pinned == "closed" else "action"
+    current = "action" if pinned == "closed" else "observe"
+    multi = bool(getattr(gc, "connectors", {}) or {})
+    ux.err(f"Cursor in {current} mode keeps hook failures {pinned}; fail mode {mode} is not applied.", indent="  ")
+    ux.subhead(
+        f"To change it, switch Cursor's guardrail mode: defenseclaw guardrail mode {other}"
+        + (" --connector cursor" if multi else ""),
+        indent="    ",
+    )
+    raise SystemExit(1)
 
 
 def _observe_keeps_fail_open(gc, name: str) -> bool:
@@ -1730,7 +1784,7 @@ def _set_connector_hilt(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -1947,7 +2001,7 @@ def hilt_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -2095,7 +2149,7 @@ def _set_connector_block_message(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
@@ -2297,7 +2351,7 @@ def block_message_cmd(
         )
     click.echo()
 
-    if not yes and not click.confirm("  Proceed?", default=True):
+    if not yes and not click.confirm("  Proceed?", default=True, err=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 

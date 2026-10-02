@@ -471,7 +471,8 @@ def test_llm_ping_sends_the_bedrock_region_and_plain_errors() -> None:
         ok, msg = llm_mod.ping(cfg)
     assert completion.call_args.kwargs["aws_region_name"] == "us-east-1"
     assert litellm.suppress_debug_info is True
-    assert not ok and msg == "internal: The provided model identifier is invalid."
+    # GAP-1673: the provider and the problem in user terms, no internal class name.
+    assert not ok and msg == "Bedrock rejected the request: The provided model identifier is invalid."
 
 
 def test_unverified_version_hint_names_action_mode() -> None:

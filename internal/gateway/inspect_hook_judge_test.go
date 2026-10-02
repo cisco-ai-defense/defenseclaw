@@ -141,8 +141,8 @@ func TestHookJudge_RegexOnlyStrategySkipsJudge(t *testing.T) {
 	}
 }
 
-// Under the default regex_judge strategy a HIGH+ regex/AID verdict is
-// already decisive — the judge round-trip must be skipped.
+// Under the default regex_judge strategy a regex/AID verdict that already
+// blocks is decisive — the judge round-trip must be skipped.
 func TestHookJudge_RegexJudgeSkipsWhenLocalLanesDecisive(t *testing.T) {
 	mock := injectionHitProvider()
 	// Empty strategy resolves to the regex_judge default.
@@ -159,6 +159,23 @@ func TestHookJudge_RegexJudgeSkipsWhenLocalLanesDecisive(t *testing.T) {
 	}
 	if len(mock.captured) != 0 {
 		t.Fatalf("judge provider called %d time(s) despite decisive regex verdict", len(mock.captured))
+	}
+}
+
+// GAP-1677: a HIGH regex verdict that only alerts is not decisive under
+// regex_judge, so the judge still runs; a CRITICAL one is.
+func TestHookJudge_RegexJudgeRunsWhenHighOnlyAlerts(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		"", mock)
+	req := &ToolInspectRequest{Tool: "message", Direction: "prompt", Connector: "hermes"}
+
+	if v := a.hookJudgeInspect(t.Context(), req, "some content", &ToolInspectVerdict{Action: "alert", Severity: "HIGH"}); v == nil {
+		t.Fatal("judge skipped on an alert-only HIGH verdict, want it to run")
+	}
+	if v := a.hookJudgeInspect(t.Context(), req, "some content", &ToolInspectVerdict{Action: "alert", Severity: "CRITICAL"}); v != nil {
+		t.Fatalf("verdict=%+v, want no judge call on a CRITICAL verdict", v)
 	}
 }
 

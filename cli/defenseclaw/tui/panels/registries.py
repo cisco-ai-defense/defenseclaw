@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -433,11 +434,21 @@ class RegistriesPanelModel:
         return tuple(sources or ())
 
 
+# Sync scans every entry; a remote MCP scan connects to the server and runs
+# the MCP scanner, so a one-entry source can take most of a minute while
+# approve/reject take seconds (GAP-1681).
+SYNC_CONSEQUENCE = (
+    "Fetches the source, scans each entry and promotes clean or approved entries into policy. "
+    "A remote MCP scan connects to the server and runs the MCP scanner, so it can take up to a minute."
+)
+
+
 def sync_source_intent(source_id: str) -> RegistryCommandIntent:
     return RegistryCommandIntent(
         label=f"registry sync {source_id}",
         args=("registry", "sync", source_id, "--json"),
         hint=f"Syncing {source_id} ...",
+        consequence=SYNC_CONSEQUENCE,
     )
 
 
@@ -446,6 +457,7 @@ def sync_all_intent() -> RegistryCommandIntent:
         label="registry sync --all",
         args=("registry", "sync", "--all", "--json"),
         hint="Syncing all enabled sources ...",
+        consequence=SYNC_CONSEQUENCE,
     )
 
 
@@ -541,12 +553,86 @@ def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = 
     return RegistryDetailInfo(f"SOURCE: {source.id}", tuple(fields))
 
 
+def entry_status_label(status: str) -> str:
+    """Say what a ``pending`` entry waits on: a scan (GAP-1681)."""
+    if status == "pending":
+        return "pending (no scan verdict yet; sync the source to scan it)"
+    return status or "-"
+
+
+def registry_result_summary(output: str) -> str:
+    """One readable line for a registry command's ``--json`` result.
+
+    The TUI runs registry commands with ``--json``, so the last output line
+    is a bare ``]`` or ``}`` (GAP-1681). Returns "" when ``output`` is not a
+    registry result.
+    """
+    try:
+        data = json.loads(output)
+    except ValueError:
+        return ""
+    if isinstance(data, list):
+        if not data:
+            return "nothing to sync"
+        parts = [_sync_report_summary(r) for r in data if isinstance(r, dict) and "source_id" in r]
+        return "; ".join(parts)
+    if not isinstance(data, dict):
+        return ""
+    action = str(data.get("action") or "")
+    verdict = data.get("verdict")
+    if isinstance(verdict, dict):
+        done = {"approve": "approved", "reject": "rejected"}.get(action, action)
+        text = f"{verdict.get('type', '')}:{verdict.get('name', '')} {done}".strip()
+        if "promoted_skills" in data or "promoted_mcps" in data:
+            promoted = _promoted_words(data.get("promoted_skills"), data.get("promoted_mcps"))
+            text += f" · policy now has {promoted} from this source"
+        if data.get("warning"):
+            text += f" · {data['warning']}"
+        elif verdict.get("status") == "pending":
+            text += " · status pending until the next sync scans it"
+        return text
+    if action == "remove" and data.get("source_id"):
+        return f"removed source {data['source_id']}"
+    if "registry_required" in data and data.get("asset_type"):
+        state = "required" if data["registry_required"] else "optional"
+        return f"registry approval now {state} for {data['asset_type']} assets"
+    return ""
+
+
+def _sync_report_summary(report: dict[str, Any]) -> str:
+    promoted = _promoted_words(report.get("promoted_skills"), report.get("promoted_mcps"))
+    text = (
+        f"{report.get('source_id')}: fetched {_int(report.get('fetched'))}, "
+        f"scanned {_int(report.get('scanned'))}, promoted {promoted}, "
+        f"blocked {_int(report.get('blocked'))}"
+    )
+    errors = [str(e) for e in report.get("errors") or ()]
+    if errors:
+        text += f" · {len(errors)} error{'' if len(errors) == 1 else 's'}: {errors[0]}"
+    return text
+
+
+def _promoted_words(skills: object, mcps: object) -> str:
+    parts = []
+    for count, noun in ((_int(skills), "skill"), (_int(mcps), "MCP")):
+        if count:
+            parts.append(f"{count} {noun}{'' if count == 1 else 's'}")
+    return ", ".join(parts) or "0"
+
+
+def _int(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def entry_detail_info(entry: RegistryEntryRow) -> RegistryDetailInfo:
     fields: list[tuple[str, str]] = [
         ("Source ID", entry.source_id),
         ("Name", entry.name),
         ("Type", entry.type),
-        ("Status", entry.status or "-"),
+        ("Status", entry_status_label(entry.status)),
         ("Severity", entry.severity or "-"),
         ("Findings", str(entry.findings)),
         ("Approved", "yes" if entry.approved else "no"),

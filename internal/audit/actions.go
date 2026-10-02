@@ -300,6 +300,8 @@ const (
 	ActionRegistryAdd              Action = "registry-add"
 	ActionRegistryEdit             Action = "registry-edit"
 	ActionRegistryRemove           Action = "registry-remove"
+	ActionRegistrySync             Action = "registry-sync"
+	ActionRegistryRequire          Action = "registry-require"
 	ActionScanEnforced             Action = "scan-enforced"
 	ActionScanFinding              Action = "scan-finding"
 	ActionDismissAlert             Action = "dismiss-alert"
@@ -516,6 +518,8 @@ func AllActions() []Action {
 		ActionRegistryAdd,
 		ActionRegistryEdit,
 		ActionRegistryRemove,
+		ActionRegistrySync,
+		ActionRegistryRequire,
 		ActionScanEnforced,
 		ActionScanFinding,
 		ActionDismissAlert,

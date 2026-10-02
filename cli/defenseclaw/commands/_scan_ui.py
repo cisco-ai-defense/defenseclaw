@@ -395,3 +395,31 @@ def categories_for(component: str) -> tuple[str, ...]:
 def supported_components() -> tuple[str, ...]:
     """Return the stable list of scan components."""
     return (COMPONENT_PLUGIN, COMPONENT_SKILL, COMPONENT_MCP)
+
+
+_SCAN_NOT_RECORDED_NOTED = False
+
+
+def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
+    """Record a finished scan; a stopped gateway only skips the record.
+
+    A scan is local, so a gateway that is not running yet (for example right
+    after ``init --no-start-gateway``) must not hide the result behind a
+    traceback (GAP-1672). The note is printed once per command. Any other
+    admission failure still raises.
+    """
+    global _SCAN_NOT_RECORDED_NOTED
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    if not logger:
+        return
+    try:
+        logger.log_scan(result, **kwargs)
+    except CanonicalObservabilityUnavailableError:
+        if not _SCAN_NOT_RECORDED_NOTED:
+            _SCAN_NOT_RECORDED_NOTED = True
+            click.echo(
+                "  \u26a0 The gateway isn't running, so this scan result was not recorded "
+                "(start it: defenseclaw-gateway start).",
+                err=True,
+            )

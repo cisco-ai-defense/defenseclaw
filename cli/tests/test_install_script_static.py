@@ -926,3 +926,15 @@ def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> N
     assert "warn: The gateway that was running before did not start again" in out, out
     assert "info: Start it with: defenseclaw-gateway start" in out
     assert "note: Your previous install is back, but its gateway is not running (see above)." in out
+
+
+def test_python_environment_step_says_it_can_take_minutes() -> None:
+    # GAP-1665: a first Windows install sat on this line for about 7 minutes.
+    hint = "Building the Python environment (a first install can take several minutes)"
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert hint in windows
+    assert hint in INSTALL_SH.read_text(encoding="utf-8")
+    body = windows[windows.index("function New-Venv") :]
+    body = body[: body.index("\n}\n")]
+    assert body.index("Installing the Python packages") < body.index("Invoke-UvPipInstall $lockArgs")
+    assert body.index("Installing the DefenseClaw package") < body.index("$Wheel")

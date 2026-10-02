@@ -244,7 +244,10 @@ def _api_port_free(host: str, port: int) -> bool:
             if platform_support.host_os() == "windows":
                 # On Windows SO_REUSEADDR lets a bind succeed over another
                 # account's listener, so ask for the port exclusively instead.
-                sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", -5), 1)
+                # Only Windows sockets have the option; elsewhere a plain bind.
+                exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                if exclusive is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
             else:
                 # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
                 # connection does not count as a holder.
@@ -350,6 +353,31 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
+def _reserve_api_port(port: int) -> bool:
+    """Claim ``port`` for this account now, as its gateway start would.
+
+    Two accounts running init at the same time could otherwise both pick a
+    port neither gateway listens on yet (GAP-1462). O_EXCL makes the claim
+    atomic; False only when another account claimed the port first. Windows
+    claims carry the account SID and are left to the gateway start.
+    """
+    if os.name == "nt" or _windows_port_claims():
+        return True
+    try:
+        os.close(
+            os.open(
+                os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        )
+    except FileExistsError:
+        return not _api_port_claimed_by_other_account(port)
+    except OSError:
+        return True  # a claim is only a hint
+    return True
+
+
 def suggest_free_api_port(host: str, port: int) -> int:
     """A port after ``port``, in the first-run steps, this account can use now; 0 if none."""
     host = (host or "127.0.0.1").strip("[]")
@@ -387,11 +415,11 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT):
+    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port):
+        if _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
@@ -400,6 +428,38 @@ def choose_first_run_api_port(cfg: Config) -> str:
     return (
         f"{host}:{_DEFAULT_API_PORT} is in use; choose a free port with "
         "`defenseclaw setup gateway --api-port <free port> --non-interactive`"
+    )
+
+
+_DEFAULT_GUARDRAIL_PORT = 4000
+
+
+def choose_first_run_guardrail_port(cfg: Config) -> str:
+    """Move a new config's guardrail proxy port off 4000 when something holds it.
+
+    Like the API port: a second account's proxy (OpenClaw) on the same host
+    could not listen on the first account's 4000, so its gateway never
+    started (GAP-1701). Returns a line for the first-run output, or "".
+    """
+    gc = cfg.guardrail
+    if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
+        return ""
+    host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+    if host.lower() in {"", "localhost", "::1"}:
+        host = "127.0.0.1"
+    if _api_port_free(host, _DEFAULT_GUARDRAIL_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _api_port_free(host, port):
+            gc.port = port
+            return (
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
+                f"proxy), so this account's guardrail proxy uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use; choose a free guardrail proxy port with "
+        "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
 
 
@@ -626,6 +686,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
+        proxy_note = choose_first_run_guardrail_port(cfg)
+        if proxy_note:
+            status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
+            setup.append(StepResult("Guardrail proxy port", status, proxy_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
@@ -1027,6 +1091,9 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
                 "defenseclaw-gateway status" if not running else "",
             )
         )
+        runtime_step = _connector_runtime_readiness(cfg, connector) if running else None
+        if runtime_step is not None:
+            steps.append(runtime_step)
 
     llm = cfg.resolve_llm("guardrail")
     if cfg.guardrail.enabled and llm.is_local_provider():
@@ -1567,6 +1634,44 @@ def _running_connector_from_state_file(data_dir: str) -> str | None:
         return None
     name = name.strip().lower()
     return name or None
+
+
+def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | None:
+    """Read back whether the running gateway guards *connector* (GAP-1589).
+
+    Setup and "Sidecar already running" only prove the config was written and
+    some gateway is up. The gateway can still have refused the connector, or
+    its hook files can have drifted, which ``status`` shows as DEGRADED and
+    ``doctor`` as a failed hook row. Use the same checks here so first run
+    does not report the agent as guarded when it is not.
+    """
+
+    if connector in ("", "none"):
+        return None
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    roster = _running_connectors_from_state_file(cfg.data_dir)
+    if roster is not None and connector not in roster:
+        return StepResult(
+            "Connector runtime",
+            "warn",
+            f"the running gateway has not loaded {label}, so it is not guarded yet",
+            "defenseclaw-gateway restart",
+        )
+    try:
+        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the doctor hook rows report unreadable state.
+        return None
+    if not problems:
+        return None
+    return StepResult(
+        "Connector runtime",
+        "warn",
+        f"{label} is not guarded: {problems[0]}",
+        setup_command(connector),
+    )
 
 
 def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:

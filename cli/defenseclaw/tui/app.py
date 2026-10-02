@@ -85,7 +85,11 @@ from defenseclaw.tui.panels.overview import (
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
 from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_keymap_rows, policy_posture_text
-from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
+from defenseclaw.tui.panels.registries import (
+    RegistriesPanelModel,
+    RegistryPanelAction,
+    registry_result_summary,
+)
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
@@ -1358,6 +1362,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._strip_started_at: float = 0.0
         self._strip_frozen_duration: float | None = None
         self._strip_last_output: str = ""
+        # Every output line of the current run (capped), so a --json result
+        # can be summarised instead of showing its last "}" (GAP-1681).
+        self._strip_output_lines: list[str] = []
         self._strip_summary: str = ""
         self._strip_spinner_tick: int = 0
         self._command_registry = build_registry()
@@ -8271,6 +8278,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._strip_started_at = monotonic()
         self._strip_frozen_duration = None
         self._strip_last_output = ""
+        self._strip_output_lines = []
         self._strip_summary = ""
         self._strip_spinner_tick = 0
         self._render_command_strip()
@@ -8282,6 +8290,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not text:
             return
         self._strip_last_output = text
+        if len(self._strip_output_lines) < STRIP_OUTPUT_LINE_CAP:
+            self._strip_output_lines.append(text)
         if self._strip_state == "running":
             self._render_command_strip()
 
@@ -8299,16 +8309,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # it's short and looks like a result, otherwise just acknowledge
         # exit code; for failure show the last (likely error) line so the
         # user sees the actual reason without leaving the panel.
+        result = self._strip_json_result_summary()
         if self._strip_state == "cancelled":
             self._strip_summary = "cancelled by operator"
         elif self._strip_state == "success":
             tail = self._strip_last_output
-            self._strip_summary = (
-                tail if (tail and len(tail) <= 120) else "exit 0 · finished cleanly"
-            )
+            if result:
+                self._strip_summary = result
+            elif tail and len(tail) <= 120 and not _is_bare_json_punctuation(tail):
+                self._strip_summary = tail
+            else:
+                self._strip_summary = "exit 0 · finished cleanly"
         else:
             tail = self._strip_last_output
-            self._strip_summary = tail or f"exit {exit_code} · no output captured"
+            if _is_bare_json_punctuation(tail):
+                tail = ""
+            self._strip_summary = result or tail or f"exit {exit_code} · no output captured"
         # Append a contextual "next thing to try" hint when we have a
         # confident suggestion (e.g. ``rerun readiness`` after `setup
         # guardrail`). Empty string means "no hint" — skip the footer
@@ -8346,6 +8362,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _auto_hide_success_strip(self, token: object) -> None:
         if self._strip_state == "success" and getattr(self, "_strip_auto_hide_token", None) is token:
             self._strip_clear()
+
+    def _strip_json_result_summary(self) -> str:
+        """Readable result of a registry ``--json`` run, or "" (GAP-1681)."""
+
+        if not self._strip_label.startswith("registry ") or not self._strip_output_lines:
+            return ""
+        return registry_result_summary("\n".join(self._strip_output_lines))
 
     def _strip_rejected(self, reason: str) -> None:
         """Strip enters rejected state for parse errors or busy-executor."""
@@ -15527,6 +15550,16 @@ def _format_elapsed(seconds: float) -> str:
         return f"{seconds:.1f}s"
     minutes, remaining = divmod(int(seconds), 60)
     return f"{minutes}m{remaining:02d}s"
+
+
+STRIP_OUTPUT_LINE_CAP = 2000
+
+
+def _is_bare_json_punctuation(text: str) -> bool:
+    """True for the closing ``]`` / ``}`` of --json output: no use as a summary."""
+
+    stripped = text.strip()
+    return bool(stripped) and not stripped.strip("[]{},")
 
 
 def _truncate_for_strip(value: str, width: int) -> str:

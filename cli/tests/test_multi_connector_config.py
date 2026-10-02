@@ -619,6 +619,33 @@ class TestResolveListConnector(unittest.TestCase):
         message = str(cm.exception)
         self.assertIn("Configured connectors: codex", message)
         self.assertNotIn("Active connectors:", message)
+        self.assertIn("To add it: defenseclaw setup <connector>", message)
+
+    def test_known_connector_not_configured_names_setup_command(self):
+        import click
+        from defenseclaw.commands import resolve_list_connector
+
+        app = self._app(connector="claudecode", connectors=["codex"])
+        with self.assertRaises(click.UsageError) as cm:
+            resolve_list_connector(app, "cursor")
+        self.assertIn("To add it: defenseclaw setup cursor", str(cm.exception))
+
+    def test_no_connector_configured_says_so_without_openclaw(self):
+        # GAP-1690: after "init --connector none" nothing is configured, so
+        # the error must not list the phantom "openclaw" default.
+        import click
+        from defenseclaw.commands import resolve_list_connector
+
+        app = self._app(connector="")
+        app.cfg.claw.mode = ""
+        with self.assertRaises(click.ClickException) as cm:
+            resolve_list_connector(app, "claudecode")
+        self.assertNotIsInstance(cm.exception, click.UsageError)
+        self.assertEqual(cm.exception.exit_code, 1)
+        message = str(cm.exception)
+        self.assertIn("no connector is configured yet", message)
+        self.assertIn("defenseclaw setup claude-code", message)
+        self.assertNotIn("openclaw", message)
 
 
 if __name__ == "__main__":

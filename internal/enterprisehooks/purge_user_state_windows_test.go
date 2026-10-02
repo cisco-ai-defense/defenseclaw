@@ -28,6 +28,8 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 	target := currentWindowsTestSID(t).String()
 	home := filepath.Join(t.TempDir(), "home")
 	dataDir := filepath.Join(home, ".defenseclaw")
+	// GAP-1567: a rolled-back enrollment keeps a copy aside beside it.
+	rollbackDir := filepath.Join(home, ".defenseclaw.rollback-0123456789abcdef0123456789abcdef")
 	outside := filepath.Join(t.TempDir(), "outside")
 	for path, body := range map[string]string{
 		filepath.Join(dataDir, "hooks", "amp-hook.sh"):                         "#!/bin/sh\n# defenseclaw-managed-hook v5\nexec forward\n",
@@ -37,6 +39,8 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"): "{}",
 		filepath.Join(dataDir, "agent_selection.json"):                         "{}",
 		filepath.Join(dataDir, "logs", "denied", "secret.txt"):                 "secret",
+		filepath.Join(rollbackDir, "hooks", "amp-hook.sh"):                     "kept aside",
+		filepath.Join(home, ".defenseclaw.rollback-notes", "keep.txt"):         "keep",
 		filepath.Join(outside, "keep.txt"):                                     "keep",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -72,6 +76,12 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 			names = append(names, entry.Name())
 		}
 		t.Fatalf("the purge left %s: %v %v", dataDir, err, names)
+	}
+	if _, err := os.Lstat(rollbackDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the purge left the rolled-back copy %s: %v", rollbackDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".defenseclaw.rollback-notes", "keep.txt")); err != nil {
+		t.Fatalf("the purge removed a folder DefenseClaw did not name: %v", err)
 	}
 	entries, err := os.ReadDir(outside)
 	if err != nil {

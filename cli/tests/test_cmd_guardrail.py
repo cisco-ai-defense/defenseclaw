@@ -965,6 +965,32 @@ class PerConnectorFailModeTests(unittest.TestCase):
             {"codex", "cursor"},
         )
 
+    def test_bare_set_open_keeps_cursor_action_fail_closed(self):
+        # GAP-1432: Cursor's action mode pins its hooks fail-closed (as
+        # `setup cursor` writes them). Storing open left doctor failing
+        # "inconsistent Cursor posture" until `setup cursor --yes --restart`.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "cursor": None})
+        app.cfg.guardrail.hook_fail_mode = "closed"
+        for name in ("codex", "cursor"):
+            app.cfg.guardrail.connectors[name].mode = "action"
+            app.cfg.guardrail.connectors[name].hook_fail_mode = "closed"
+        state = SimpleNamespace(current=True, drift=(), desired="closed")
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services"),
+            patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state),
+        ):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
+        self.assertIn("stays closed", result.output)
+
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("guardrail mode observe --connector cursor", result.output)
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
+
     def test_bare_set_reload_failure_restores_config_and_runtime(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
@@ -1413,6 +1439,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # action without re-running setup, and protection turns the opt-in
         # protection packs on and off per scope. block-at / alert-at set the
         # tool-call block and alert levels, globally or per connector.
+        # allow-private-upstream records private upstream hosts the
+        # gateway may reach (guardrail.allow_private_upstreams).
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(

@@ -475,6 +475,9 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
+	if record != nil {
+		l.describePerUserGateways(ctx)
+	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
 	}

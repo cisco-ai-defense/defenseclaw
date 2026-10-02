@@ -164,7 +164,7 @@ def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path:
     # as the service account; a 0700 parent kept the gateway from starting.
     layout = _shell_function(_text(MDM / os_dir / "defenseclaw-enterprise.sh"), "dc_layout")
     log = tmp_path / "Logs" / "Cisco" / "DefenseClaw" / "mdm-wrapper.log"
-    script = "umask 077\nDC_SCRIPT_OS=darwin\nDC_LOG='%s'\n%s\ndc_layout\n" % (log, layout)
+    script = f"umask 077\nDC_SCRIPT_OS=darwin\nDC_LOG='{log}'\n{layout}\ndc_layout\n"
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     for directory in (log.parent.parent, log.parent):
@@ -294,6 +294,15 @@ def test_windows_shared_helpers_never_trust_environment_paths() -> None:
     assert "$env:PSModulePath = Join-Path $PSHOME 'Modules'" in region
     for variable in ("DOTNET_", "COMPLUS_", "CORECLR_", "COR_PROFILER", "PSMODULEPATH"):
         assert variable in region
+
+
+def test_windows_shared_helpers_start_the_cli_outside_the_install() -> None:
+    # GAP-1684: a CLI started with its working directory in InstallRoot\bin
+    # holds that folder open, so the uninstall could not retire InstallRoot
+    # and failed 1603 halfway, on every retry too.
+    region = _shared_region(_text(WINDOWS_SHARED[0]))
+    assert "$info.WorkingDirectory = [System.Environment]::SystemDirectory" in region
+    assert "GetDirectoryName($FilePath)" not in region
 
 
 # PowerShell 7 / .NET Core only constructs that break Windows PowerShell 5.1.

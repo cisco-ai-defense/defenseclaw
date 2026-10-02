@@ -599,3 +599,30 @@ func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {
 		t.Fatalf("other details dropped:\n%s", out)
 	}
 }
+
+// TestJudgeProblemNextStepMatchesCause pins GAP-1669: a judge that cannot
+// reach its provider (dead proxy, credential fetch) is told to check the
+// network, not to re-run 'setup llm', which changes nothing; a provider that
+// rejects the configuration still points at 'setup llm'.
+func TestJudgeProblemNextStepMatchesCause(t *testing.T) {
+	for _, tc := range []struct {
+		lastError string
+		network   bool
+	}{
+		{"Bedrock request failed: failed to retrieve aws credentials", true},
+		{`Bedrock request failed: Post "https://bedrock-runtime.us-east-1.amazonaws.com": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused`, true},
+		{"Bedrock returned 400: The provided model identifier is invalid.", false},
+		{"OpenAI returned 401: Incorrect API key provided", false},
+	} {
+		got := judgeProblem(map[string]interface{}{
+			"judge_state": "failing", "judge_recent_calls": float64(20), "judge_failed_calls": float64(20),
+			"judge_last_error": tc.lastError,
+		})
+		if network := strings.Contains(got, "check the network") && strings.Contains(got, "NO_PROXY"); network != tc.network {
+			t.Errorf("%q: network next step = %v, want %v:\n%s", tc.lastError, network, tc.network, got)
+		}
+		if setup := strings.Contains(got, "setup llm --role judge"); setup == tc.network {
+			t.Errorf("%q: setup llm next step = %v, want %v:\n%s", tc.lastError, setup, !tc.network, got)
+		}
+	}
+}

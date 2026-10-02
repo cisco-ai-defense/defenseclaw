@@ -3151,6 +3151,35 @@ def _rotate_token_hook_path(data_dir: str, connector: str) -> str:
     return os.path.join(data_dir, "hooks", f".hook-{scope}.token")
 
 
+def _rotate_token_preflight_writable(paths: list[str]) -> None:
+    """Prove every credential folder takes a new file before the gateway stops.
+
+    Rotation writes each credential through a temporary file in its folder.
+    An unwritable folder used to fail only after the gateway and watchdog
+    were stopped, leaving every hook failing closed (GAP-1636). A folder that
+    does not exist yet is left to the writer, which creates it.
+    """
+
+    import tempfile
+
+    for directory in sorted({os.path.dirname(os.path.abspath(path)) for path in paths}):
+        if not os.path.isdir(directory):
+            continue
+        try:
+            fd, probe = tempfile.mkstemp(prefix=".rotate-probe.", suffix=".tmp", dir=directory)
+        except OSError as exc:
+            raise click.ClickException(
+                f"Token rotation cannot write to {directory} ({exc.strerror or exc}). Nothing was "
+                "changed and the gateway was not stopped. Make the folder writable for your "
+                "account, then run the command again."
+            ) from exc
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
 def _rotate_token_trusted_posix_owner(info: os.stat_result) -> bool:
     if os.name == "nt" or not hasattr(info, "st_uid"):
         return True
@@ -3877,6 +3906,9 @@ def _rotate_token_transaction(
     hook_publish_lock_base = os.path.join(
         data_dir,
         _TOKEN_ROTATION_HOOK_PUBLISH_LOCK_BASE_NAME,
+    )
+    _rotate_token_preflight_writable(
+        [dotenv_path, *(_rotate_token_hook_path(data_dir, connector) for connector in requested_scopes)]
     )
     with (
         locked_file_update(hook_publish_lock_base),
@@ -8578,7 +8610,7 @@ def _restore_setup_config_in_memory(app: AppContext, snapshot: _SetupConfigSnaps
     return cfg
 
 
-def _restart_restored_connector_runtime(app: AppContext) -> None:
+def _restart_restored_connector_runtime(app: AppContext, *, skip_openclaw: bool = False) -> None:
     cfg = app.cfg
     restored = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else []
     primary = normalize_connector(cfg.active_connector()) if hasattr(cfg, "active_connector") else "openclaw"
@@ -8587,6 +8619,11 @@ def _restart_restored_connector_runtime(app: AppContext) -> None:
         # --force`). active_connector() still floors to "openclaw", but there
         # is no OpenClaw gateway to bounce, so restart only DefenseClaw's
         # gateway (GAP-1470).
+        primary = ""
+    if skip_openclaw and primary == "openclaw":
+        # The OpenClaw gateway is down: waiting for it again only repeats the
+        # same 30 s timeout. It loads the restored plugin when it starts
+        # (GAP-1702).
         primary = ""
     _restart_services(
         cfg.data_dir,
@@ -8636,6 +8673,7 @@ def _rollback_failed_connector_application(
                 f"failed-generation hook authority unavailable [{_setup_runtime_ref(type(exc).__name__)}]"
             )
     restore_complete = True
+    gateway_still_down = False
     try:
         _restore_setup_config_snapshot(
             app,
@@ -8711,13 +8749,20 @@ def _rollback_failed_connector_application(
                 if lifecycle_error is not None:
                     raise lifecycle_error
             else:
-                _restart_restored_connector_runtime(app)
+                _restart_restored_connector_runtime(
+                    app,
+                    skip_openclaw=isinstance(cause, _OpenClawGatewayNotRunning),
+                )
         except BaseException as exc:  # Report both non-secret transaction failures.
             if _secret_safe:
                 secret_rollback_failed = True
             elif not isinstance(exc, Exception):
                 raise
-            if not _secret_safe:
+            if not _secret_safe and not exact_runtime and str(exc) == str(cause):
+                # GAP-1139: the restored config is in place; the gateway
+                # cannot start for the same reason the setup failed.
+                gateway_still_down = True
+            elif not _secret_safe:
                 detail = (
                     f"restore prior gateway lifecycle [{_setup_runtime_ref(type(exc).__name__)}]"
                     if exact_runtime
@@ -8759,11 +8804,15 @@ def _rollback_failed_connector_application(
         raise _GuardrailSecretFailure(failure_code) from None
 
     cause_text = f"[ref {_setup_runtime_ref(type(cause).__name__)}]" if exact_runtime else f"({cause})"
-    outcome = (
-        "rollback was incomplete: " + "; ".join(rollback_errors)
-        if rollback_errors
-        else "restored the prior connector configuration and runtime"
-    )
+    if rollback_errors:
+        outcome = "rollback was incomplete: " + "; ".join(rollback_errors)
+    elif gateway_still_down:
+        outcome = (
+            "restored the prior connector configuration, but the gateway still cannot start for the "
+            "same reason; fix that, then run `defenseclaw-gateway start`"
+        )
+    else:
+        outcome = "restored the prior connector configuration and runtime"
     if isinstance(cause, _GatewayRestartFailed):
         # GAP-1705: the gateway did not start; say that (with its next steps)
         # instead of a reference that is the same for every such failure.
@@ -13551,12 +13600,23 @@ class _GatewayRestartFailed(click.ClickException):
     """A setup restart or start of the gateway failed (fixed, secret-free text)."""
 
 
+class _OpenClawGatewayNotRunning(_GatewayRestartFailed):
+    """Only OpenClaw's own gateway did not come up; defenseclaw-gateway did."""
+
+
 def _fail_if_restart_failed(failed: list[str]) -> None:
     """Raise a ``ClickException`` (non-zero exit) when any service restart
     failed, so setup fails closed instead of silently reporting success
     against a gateway that never came back up (Avarice F-0142/F-0143)."""
     if not failed:
         return
+    if failed == ["openclaw-gateway"]:
+        # GAP-1702: defenseclaw-gateway is running; the generic advice to
+        # start it named the wrong gateway.
+        raise _OpenClawGatewayNotRunning(
+            "The OpenClaw gateway is not running. Start it with `openclaw gateway run` "
+            "(or `openclaw gateway restart`), then run the same setup command again."
+        )
     raise _GatewayRestartFailed(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)

@@ -49,7 +49,7 @@ class TestConfigVersionPreflight(unittest.TestCase):
             path = os.path.join(tmpdir, "config.yaml")
             with open(path, "wb") as stream:
                 stream.write(b"config_version: 7\ninvalid: \xff\n")
-            with self.assertRaisesRegex(config_module.ConfigVersionError, "schema version"):
+            with self.assertRaisesRegex(config_module.ConfigVersionError, "not valid UTF-8"):
                 config_module.source_config_version(path=path)
 
 

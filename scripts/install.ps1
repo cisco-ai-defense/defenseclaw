@@ -866,7 +866,9 @@ function New-Venv([string]$Path) {
     # (over a minute on a Windows host while the files are also first scanned).
     $lockArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
         "-r", (Join-Path $Staging $Requirements))
+    Write-Info "Installing the Python packages"
     if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
+    Write-Info "Installing the DefenseClaw package and compiling it"
     return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
 }
 
@@ -1576,7 +1578,10 @@ function Invoke-Install {
     if (-not (Test-Path -LiteralPath $stagedGateway)) { Die "$Archive has no defenseclaw-gateway.exe" }
     if (-not (Get-NativeOutput $stagedGateway @("--version")).Contains($Ver)) { Die "The downloaded gateway does not report version $Ver" }
 
-    Write-Info "Building the Python environment"
+    # A first install with an empty uv cache downloads Python and every
+    # package, then compiles the bytecode: about 7 minutes on a busy Windows
+    # host with nothing printed (GAP-1665), so say so up front.
+    Write-Info "Building the Python environment (a first install can take several minutes)"
     if (-not (New-Venv (Join-Path $Staging "venv"))) { Die "Could not install the DefenseClaw $Ver Python package; nothing was changed" }
     $stagedCli = Join-Path $Staging "venv\Scripts\defenseclaw.exe"
     if (-not (Get-NativeOutput $stagedCli @("--version")).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
