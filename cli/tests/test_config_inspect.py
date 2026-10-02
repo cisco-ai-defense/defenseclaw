@@ -101,6 +101,8 @@ def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=15,
         check=False,
     )
@@ -385,3 +387,21 @@ def test_custody_refusal_names_the_writable_folder_not_the_link(tmp_path):
     message = str(refused.value)
     assert f"folder {os.path.realpath(shared)} " in message
     assert f"chmod go-w {os.path.realpath(shared)}" in message
+
+
+def test_reference_decodes_utf8_and_never_crashes_on_missing_stdout() -> None:
+    """GAP-1414: Windows decoded the box-drawing YAML with the ANSI code page."""
+    with (
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "run_pinned_executable", return_value=_completed(stdout="# \u250c\u2500\n")) as run,
+    ):
+        assert config_inspect.config_v8_reference("yaml") == "# \u250c\u2500\n"
+    assert run.call_args.kwargs["encoding"] == "utf-8"
+
+    missing = subprocess.CompletedProcess([], 0, stdout=None, stderr=None)
+    with (
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
+        patch.object(config_inspect, "run_pinned_executable", return_value=missing),
+        pytest.raises(config_inspect.ConfigInspectError, match="empty reference"),
+    ):
+        config_inspect.config_v8_reference("yaml")

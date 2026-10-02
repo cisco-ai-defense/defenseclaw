@@ -241,11 +241,14 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
     _print_write_result(result, connector=connector_name)
 
     if app.logger and not dry_run:
-        app.logger.log_action(
-            ACTION_SETUP_WEBHOOK,
-            "config",
-            f"action=add type={result.type} name={result.name}"
-            + (f" connector={connector_name}" if connector_name else ""),
+        _record_audit(
+            "Webhook saved",
+            lambda: app.logger.log_action(
+                ACTION_SETUP_WEBHOOK,
+                "config",
+                f"action=add type={result.type} name={result.name}"
+                + (f" connector={connector_name}" if connector_name else ""),
+            ),
         )
 
 
@@ -499,18 +502,22 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     # Log the outcome *before* possibly exiting non-zero so failed
     # dispatches still leave an audit trail.
     if app.logger and not dry_run:
-        app.logger.log_webhook_delivery(
-            webhook_kind=v.type,
-            target_url=v.url,
-            status_code=result.status_code or 0,
-            duration_ms=result.duration_ms,
-            succeeded=result.ok,
-        )
-        app.logger.log_action(
-            ACTION_SETUP_WEBHOOK,
-            "test",
-            f"name={v.name} type={v.type} ok={result.ok}",
-        )
+
+        def _record_test() -> None:
+            app.logger.log_webhook_delivery(
+                webhook_kind=v.type,
+                target_url=v.url,
+                status_code=result.status_code or 0,
+                duration_ms=result.duration_ms,
+                succeeded=result.ok,
+            )
+            app.logger.log_action(
+                ACTION_SETUP_WEBHOOK,
+                "test",
+                f"name={v.name} type={v.type} ok={result.ok}",
+            )
+
+        _record_audit("Test delivery done", _record_test)
 
     if not dry_run and not result.ok:
         raise SystemExit(1)
@@ -519,6 +526,26 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _record_audit(done: str, record: Any) -> None:
+    """Record the audit event of a finished change; a stopped gateway only skips it.
+
+    The change is already on disk (or the test already sent), so a stopped or
+    refusing gateway prints one plain line instead of a traceback and rc=1,
+    like ``keys set`` and ``guardrail fail-mode`` (GAP-1250, GAP-1399).
+    """
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        record()
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded.",
+            err=True,
+        )
+    except CanonicalObservabilityError as exc:
+        click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _prompt_missing(

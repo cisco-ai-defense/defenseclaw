@@ -147,7 +147,7 @@ def config_v8_reference(fmt: str, *, section: str = "observability") -> str:
     completed = _run(argv)
     if completed.returncode != 0:
         raise ConfigInspectError(_helper_failure(completed.stderr, "reference"))
-    if not completed.stdout.strip():
+    if not (completed.stdout or "").strip():
         raise ConfigInspectError("configuration helper returned an empty reference; run defenseclaw upgrade")
     return completed.stdout
 
@@ -186,13 +186,18 @@ def _run(
     if environment_overrides is not None:
         environment = _validation_environment(environment_overrides)
     # Run the checked gateway file itself, as the lifecycle does: running it
-    # by path let a swap after the custody check run another file.
+    # by path let a swap after the custody check run another file. The helper
+    # always writes UTF-8 (the YAML reference has box-drawing characters); the
+    # locale code page on Windows can't decode them and left stdout as None
+    # (GAP-1414).
     try:
         if environment is None:
             return run_pinned_executable(
                 argv,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -200,6 +205,8 @@ def _run(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
             check=False,
             env=environment,

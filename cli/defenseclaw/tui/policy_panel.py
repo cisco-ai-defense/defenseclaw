@@ -899,7 +899,7 @@ def policy_threshold_modal(kind: str, level: str, policy: Any) -> ConsequenceMod
     ]
     if not active:
         details.append(f"The {name} policy isn't active, so nothing changes until you activate it (Enter).")
-    if getattr(policy, "builtin", False):
+    if getattr(policy, "builtin", False) and not getattr(policy, "edited", False):
         details.append(f"The built-in {name} policy is copied to your policy folder first.")
     details.append(_run_line(intent, "; the gateway reloads the policy." if active else ""))
     consequence = f"This weakens protection: the policy {verb} {level} instead of {old}." if weaker else ""
