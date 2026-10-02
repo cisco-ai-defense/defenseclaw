@@ -1774,12 +1774,19 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "one and keeps the block/allow lists; or stop the gateway and restore "
                 f"{db_path} from a trusted backup"
             )
-        elif reason in {
-            "audit-db-integrity-unavailable",
-            "audit-db-changed-during-inspection",
-        }:
+        elif reason == "audit-db-integrity-unavailable":
             detail = f"read-only integrity check failed ({reason})"
-            remediation = "restore the audit database from a trusted backup"
+            remediation = (
+                "run 'defenseclaw-gateway restart': the gateway moves the unreadable store aside, starts a new "
+                "one and keeps the block/allow lists; or stop the gateway and restore "
+                f"{db_path} from a trusted backup"
+            )
+        elif reason == "audit-db-changed-during-inspection":
+            detail = f"read-only integrity check failed ({reason})"
+            remediation = (
+                "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
+                "and if it keeps failing, run 'defenseclaw-gateway restart'"
+            )
         else:
             detail = f"private custody validation failed ({reason})"
             remediation = "restore the audit database from a trusted backup"
@@ -1821,6 +1828,12 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
             size_remediation = (
                 f"to give back the {reclaim_mib} MiB: run 'defenseclaw-gateway stop', then "
                 f"sqlite3 {quoted_db} 'VACUUM;', then 'defenseclaw-gateway start'"
+            )
+        elif retention_days == 0:
+            size_remediation = (
+                "local retention is off (observability.local.retention_days: 0 keeps every event); set it "
+                "to the days of history you need in config.yaml, run 'defenseclaw-gateway restart', and "
+                "once older events are deleted, run this check again for the VACUUM step"
             )
         else:
             size_remediation = (
@@ -7119,7 +7132,8 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     # guardrail LLM key is a false failure: local regex/Cisco-AID policy lanes
     # remain fully functional without one.
     judge = getattr(gc, "judge", None)
-    if _guardrail_proxy_intentionally_closed(cfg) and not bool(getattr(judge, "enabled", False)):
+    proxy_closed = _guardrail_proxy_intentionally_closed(cfg)
+    if proxy_closed and not bool(getattr(judge, "enabled", False)):
         _emit(
             "skip",
             "LLM API key",
@@ -7128,8 +7142,19 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    llm = cfg.resolve_llm("guardrail")
+    # With the proxy closed, only the judge calls an LLM: check its block.
+    llm = cfg.resolve_llm("guardrail.judge" if proxy_closed else "guardrail")
     model = llm.model or gc.model or ""
+
+    keyless_mode = llm.keyless_auth_mode()
+    if keyless_mode:
+        _emit(
+            "skip",
+            "LLM API key",
+            f"bedrock auth_mode={keyless_mode} uses AWS credentials, not an API key",
+            r=r,
+        )
+        return
 
     if llm.is_local_provider():
         base = llm.base_url or "(default)"
@@ -7162,7 +7187,13 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         api_key = _resolve_api_key(env_name, dotenv_path)
 
     if not api_key:
-        _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})", r=r)
+        _emit(
+            "fail",
+            "LLM API key",
+            f"{env_name} not set (checked env + {dotenv_path})",
+            r=r,
+            remediation=f"run 'defenseclaw setup llm' to store the key, or add {env_name}=<key> to {dotenv_path}",
+        )
         return
     # Route by the resolved provider prefix first. A bare Bedrock model
     # with ``provider: bedrock`` is valid config; treating the bare model
@@ -7939,6 +7970,8 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             conditions.append("managed-exporter state is unverifiable")
         elif item.managed_config_state == "verified":
             conditions.append(f"managed-exporter verified ({item.managed_config_files} files)")
+        elif item.managed_config_state == "untracked":
+            conditions.append("no exporter setup record to compare, so drift is not checked")
         else:
             conditions.append(f"managed-exporter={item.managed_config_state}")
 
@@ -7974,6 +8007,12 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             f"count={report.unattributed_authentication_failures}; "
             f"last={report.last_unattributed_authentication_failure or 'unknown'}",
             r=r,
+            remediation=(
+                "the gateway rejected OTLP sent to it without a valid DefenseClaw token (nothing was stored); "
+                "a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config usually causes it. "
+                "Re-run 'defenseclaw setup <connector>' for each agent that exports telemetry; if it keeps "
+                "growing, look for other OTLP senders pointed at the gateway port"
+            ),
         )
     if report.event_rows_truncated:
         _emit(
@@ -7982,6 +8021,28 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             "recent evidence reached the bounded read limit; drop-only and credential counts are partial",
             r=r,
         )
+
+
+def _destination_remediation(destination, live) -> str:
+    """Next step for a Destination row that warns or fails."""
+    name = shlex.quote(destination.name)
+    test = f"'defenseclaw observability destination test {name}'"
+    if live is None:
+        return "start the gateway ('defenseclaw-gateway start') so doctor can read live delivery health"
+    if live.circuit_state == "open":
+        return ""  # the row already says what to do
+    state = live.state or "unavailable"
+    if state in {"initializing", "draining"}:
+        return (
+            f"the gateway is still {state} this route; run 'defenseclaw doctor' again in a minute, "
+            f"and if it stays {state}, run {test}"
+        )
+    target = f" at {destination.endpoint}" if destination.endpoint else ""
+    return (
+        f"check that the collector{target} is running and reachable from this machine ({test}), "
+        "then run 'defenseclaw-gateway restart'; to stop using this route, run "
+        f"'defenseclaw setup observability disable {name}'"
+    )
 
 
 def _check_galileo_trace_canaries(
@@ -8124,6 +8185,7 @@ def _check_observability_v8_status(
             f"Destination: {destination.name}",
             detail if destination.enabled else f"disabled; {detail}",
             r=r,
+            remediation=_destination_remediation(destination, live) if tag in {"warn", "fail"} else "",
         )
 
     retention_state, retention_failure = retention_health_from_gateway(live_health)
@@ -10959,6 +11021,14 @@ def _check_hook_contract_lock(
                 + (f" ({current.reason})" if current.status != "known" else "")
                 + (f"; {native_runtime.runtime_description}" if native_runtime is not None else ""),
                 r=r,
+                remediation=(
+                    ""
+                    if _enterprise_profile(cfg) == "secure_client"
+                    else (
+                        f"check that '{connector} --version' prints a version, reinstall or update "
+                        f"{connector} if it does not, then run 'defenseclaw setup {connector}' to re-record it"
+                    )
+                ),
             )
             return
         detail += (
@@ -10974,11 +11044,25 @@ def _check_hook_contract_lock(
             _emit("fail", "Hook contract", detail + f" expected_hook_fail_mode={expected_cursor_fail_mode}", r=r)
             return
     if windows_protected_authority_missing or windows_protected_authority_invalid:
+        from defenseclaw.hook_integrity import setup_command
+
+        if windows_protected_authority_invalid == "digest":
+            # Amp updates itself at launch, which changes the sealed executable
+            # (GAP-1050); agent= above is the version setup sealed.
+            detail += f"; the {connector} executable changed since setup sealed it (an agent update does this)"
+        action = "re-seal" if windows_protected_authority_invalid else "seal"
+        detail += f"; run `{setup_command(connector)} --yes` to {action} it"
         _emit("fail", "Hook contract", detail, r=r)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r)
     elif status == "unknown":
-        _emit("fail", "Hook contract", detail, r=r)
+        _emit(
+            "fail",
+            "Hook contract",
+            detail,
+            r=r,
+            remediation=f"update {connector} to a supported version, then run 'defenseclaw setup {connector}'",
+        )
     elif status in {"known", "unversioned"}:
         _emit("pass", "Hook contract", detail, r=r)
     else:

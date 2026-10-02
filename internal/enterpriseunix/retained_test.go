@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// A non-purge uninstall keeps state; reinstalling (e.g. an MDM uninstall then
+// An uninstall with --keep-state keeps the machine state; reinstalling (e.g. an MDM uninstall then
 // install, or a pkg reinstall that cannot pass --adopt-existing) must succeed
 // without adoption, while a replaced state directory is still refused.
 func TestReinstallAfterNonPurgeUninstallRecognizesRetainedState(t *testing.T) {
@@ -25,11 +25,11 @@ func TestReinstallAfterNonPurgeUninstallRecognizesRetainedState(t *testing.T) {
 			if err := os.WriteFile(h.env.P(l.DataDir)+"/audit.db", []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
 			if !exists(h.env.retainedStatePath()) {
 				t.Fatal("non-purge uninstall did not record its retained state")
 			}
-			again := h.run(Options{Action: ActionUninstall})
+			again := h.run(Options{Action: ActionUninstall, KeepState: true})
 			requireOK(t, again)
 			if hasWarning(again, codeLeftovers) {
 				t.Fatal("retained state reported as unmanaged leftovers on a second uninstall")
@@ -43,7 +43,7 @@ func TestReinstallAfterNonPurgeUninstallRecognizesRetainedState(t *testing.T) {
 			}
 
 			// A state directory replaced after the uninstall is not ours.
-			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
 			if err := os.RemoveAll(h.env.P(l.DataDir)); err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +89,7 @@ func TestRetainedStateNeedsTheUninstallMarker(t *testing.T) {
 					if err := os.WriteFile(h.env.P(l.DataDir)+"/audit.db", []byte("x"), 0o600); err != nil {
 						t.Fatal(err)
 					}
-					requireOK(t, h.run(Options{Action: ActionUninstall}))
+					requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
 					marker := retainedMarkerPath(h.env.P(l.DataDir))
 					if !exists(marker) {
 						t.Fatal("non-purge uninstall left no marker in the kept state directory")
@@ -111,7 +111,7 @@ func TestReinstallRemovesTheRetainedMarkers(t *testing.T) {
 	if err := os.WriteFile(h.env.P(l.DataDir)+"/audit.db", []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	if exists(retainedMarkerPath(h.env.P(l.DataDir))) {
 		t.Fatal("the retained marker survived the reinstall")

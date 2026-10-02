@@ -141,7 +141,15 @@ if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; 
             }
             exit 0
         }'; then
-        echo "DefenseClaw $installed is installed; refusing to downgrade to $package_version. For a deliberate rollback, create $marker as root first." >&2
+        message="DefenseClaw $installed is installed; refusing to downgrade to $package_version. For a deliberate rollback, create $marker as root first."
+        echo "$message" >&2
+        # The Installer shows only a generic error, so leave the reason in
+        # the package result an MDM detection or an administrator reads.
+        umask 077
+        printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":true,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[{"code":"downgrade_refused","message":"%s"}],"exit_code":1}\n' \
+            "$package_version" "$installed" "$message" >"$state/last-package-result.json.tmp" &&
+            mv -f "$state/last-package-result.json.tmp" "$state/last-package-result.json" &&
+            echo "See $state/last-package-result.json." >&2
         exit 1
     fi
 fi

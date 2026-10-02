@@ -837,6 +837,10 @@ def _installer_uv_leftovers(
     uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
     if not any(os.path.basename(target) == uv_name for target in binary_targets):
         return ()
+    # Current installers keep uv's cache and Python in data_dir/.uv, so uv's
+    # default folders then hold the user's own uv data, never DefenseClaw's.
+    if os.path.isdir(os.path.join(data_dir, ".uv")):
+        return ()
     root = _normalized(install_root)
     for directory in os.get_exec_path():
         if directory and _normalized(directory) != root and os.path.isfile(os.path.join(directory, uv_name)):

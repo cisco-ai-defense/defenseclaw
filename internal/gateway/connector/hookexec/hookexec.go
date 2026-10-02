@@ -1126,12 +1126,23 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
-				"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
+				"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, unreachableDetail(opts, reason))
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
+	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, unreachableDetail(opts, reason))
 	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+// unreachableDetail is the text after the colon of the unreachable line. The
+// lead already says "gateway unreachable", so a per-user hook names the next
+// step instead of repeating it (GAP-1204); a managed hook's gateway is not the
+// user's to restart, and every other reason is kept.
+func unreachableDetail(opts Options, reason string) string {
+	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return reason
+	}
+	return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
 }
 
 // managedSIDUnregisteredReason is enterprisehooks'

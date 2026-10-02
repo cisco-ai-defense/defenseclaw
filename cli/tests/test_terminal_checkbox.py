@@ -262,3 +262,21 @@ def test_redraw_clears_the_empty_choice_warning_on_the_next_key(capsys) -> None:
     assert screen[-2:] == ["    [ ] hermes", "  > [x] codex"]
     assert sum("hermes" in line for line in screen) == 1
     assert not any("Select at least one connector." in line for line in screen)
+
+
+def test_redraw_shows_a_toggle_read_together_with_enter(capsys) -> None:
+    """GAP-1263: Space and Enter in one read are redrawn before returning."""
+
+    keys = iter(["j", " \r"])
+    selected = terminal_checkbox.prompt_checkbox_selection(
+        ["hermes", "codex"],
+        default_selected=[],
+        title="Select connectors",
+        empty_ok=False,
+        redraw=True,
+        getchar=lambda: next(keys),
+    )
+
+    assert selected == ["codex"]
+    screen = _replay_screen(capsys.readouterr().out)
+    assert screen[-2:] == ["    [ ] hermes", "  > [x] codex"]

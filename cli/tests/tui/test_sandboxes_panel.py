@@ -1559,6 +1559,34 @@ async def test_the_wrapper_toggle_runs_enable_or_disable(fetch, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_the_wrapper_toggle_does_not_enable_while_sandboxes_are_off(fetch, monkeypatch) -> None:
+    """GAP-1219: a wrapper while sandboxes are off breaks the plain command."""
+    app = DefenseClawTUI(config=_config())
+    commands: list[tuple[str, ...]] = []
+    menus: list[tuple[str, ...]] = []
+    toasts: list[str] = []
+
+    async def run_command(binary: str, args: tuple[str, ...], *, display_name: str | None = None) -> None:
+        commands.append(args)
+
+    async def answer(screen):
+        menus.append(tuple(action.description for action in screen.actions))
+        return "claudecode"
+
+    monkeypatch.setattr(app, "_run_command", run_command)
+    monkeypatch.setattr(app, "push_screen_wait", answer)
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append(message))
+    async with app.run_test(size=(160, 44)):
+        monkeypatch.setattr(app.sandbox_model, "state", lambda: "off")
+        await app._sandbox_wrappers_menu()  # noqa: SLF001
+        app.sandbox_model.wrappers = ("claudecode",)
+        await app._sandbox_wrappers_menu()  # noqa: SLF001
+    assert "Sandboxes are off; run the Sandbox wizard (0 Setup) first" in menus[0]
+    assert toasts == ["Sandboxes are off; run the Sandbox wizard (0 Setup) first."]
+    assert commands == [("sandbox", "disable", "claude")]
+
+
+@pytest.mark.asyncio
 async def test_stream_events_raise_toasts_on_any_panel(fetch, monkeypatch) -> None:
     app = DefenseClawTUI(config=_config())
     toasts: list[tuple[str, str]] = []

@@ -32,7 +32,7 @@ import os
 import re
 import sqlite3
 import stat
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,11 @@ _CUSTODY_VALUES = frozenset(("defenseclaw", "external", "hook_only"))
 _CONNECTOR_TOKEN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SIGNALS = frozenset(("logs", "traces", "metrics"))
+# Drop reasons that only mean "DefenseClaw has no mapping for this record
+# type": agents send vendor telemetry the catalog does not cover, and the
+# gateway skips it by design. Anything else (invalid records, ambiguous
+# identity, persistence failures) is a real drop worth a warning.
+_UNMAPPED_DROP_REASONS = frozenset(("unsupported_identity",))
 _EVENT_NAMES = (
     "telemetry.authentication.failed",
     "telemetry.batch.normalized",
@@ -74,9 +79,14 @@ class ConnectorCustodyStatus:
     last_native_activity: str = ""
     last_authentication_failure: str = ""
     drop_only_signals: tuple[str, ...] = ()
+    drop_only_reasons: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Lists, so the JSON round trip (plan --json) compares equal.
+        data["drop_only_signals"] = list(self.drop_only_signals)
+        data["drop_only_reasons"] = list(self.drop_only_reasons)
+        return data
 
 
 @dataclass(frozen=True)
@@ -172,12 +182,23 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
         elif drop_only == normalized:
             state = "all_drop_only"
             detail = f"drop-only native stream ({drop_only}/{normalized} batches); no accepted native delivery observed"
+        elif drop_only and item.drop_only_reasons and set(item.drop_only_reasons) <= _UNMAPPED_DROP_REASONS:
+            # Every dropped batch held only record types DefenseClaw does
+            # not map. That is normal for a healthy agent, not data loss.
+            state = "accepted"
+            signals = ", ".join(item.drop_only_signals) or "native"
+            detail = (
+                f"accepted native delivery observed ({normalized} batches; {drop_only} held only "
+                f"{signals} records DefenseClaw does not map, skipped by design)"
+            )
         elif drop_only:
             state = "partial_drop_only"
             signals = ", ".join(item.drop_only_signals)
+            reasons = ", ".join(reason.replace("_", " ") for reason in item.drop_only_reasons)
             detail = (
-                f"partial drop-only evidence ({drop_only}/{normalized} batches"
+                f"partial drop-only evidence ({drop_only}/{normalized} batches dropped whole"
                 + (f"; dropped signals: {signals}" if signals else "")
+                + (f"; reason: {reasons}" if reasons else "")
                 + "); accepted native delivery observed in remaining batches"
             )
         else:
@@ -212,6 +233,7 @@ class _Evidence:
     unattributed_auth_count: int = 0
     last_unattributed_auth: datetime | None = None
     truncated: bool = False
+    drop_reasons: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
 
 
 def inspect_connector_custody(
@@ -275,6 +297,7 @@ def inspect_connector_custody(
             evidence_connector = connector if is_default else ""
             normalized, drop_only = _batch_counts(evidence, evidence_connector)
             drop_signals = _drop_only_signals(evidence, evidence_connector)
+            drop_reasons = _drop_only_reasons(evidence, evidence_connector)
             last_native = evidence.last_native.get(evidence_connector)
             last_auth = evidence.last_auth.get(evidence_connector)
             instances.append(
@@ -289,6 +312,7 @@ def inspect_connector_custody(
                     normalized_batches=normalized,
                     drop_only_batches=drop_only,
                     drop_only_signals=drop_signals,
+                    drop_only_reasons=drop_reasons,
                     authentication_failures=evidence.auth_count.get(evidence_connector, 0),
                     credential_state=_credential_state(last_auth, last_native),
                     last_native_activity=_format_time(last_native),
@@ -399,6 +423,8 @@ def _load_recent_evidence(db: sqlite3.Connection, now: datetime) -> _Evidence:
             evidence.last_native[connector] = max(when, evidence.last_native.get(connector, when))
         elif event_name == "telemetry.records.dropped":
             evidence.dropped[key] = evidence.dropped.get(key, 0) + count
+            reason = facts.get("reason", "")
+            evidence.drop_reasons.setdefault(key, set()).add(reason or "unknown")
     return evidence
 
 
@@ -416,6 +442,8 @@ def _telemetry_facts(raw: Any) -> dict[str, Any]:
         return {}
     count = attributes.get("defenseclaw.telemetry.record_count")
     signal = attributes.get("defenseclaw.telemetry.signal")
+    reason = attributes.get("defenseclaw.telemetry.rejection_reason_class")
+    reason = reason if isinstance(reason, str) and _CONNECTOR_TOKEN.fullmatch(reason) else ""
     if (
         isinstance(count, bool)
         or not isinstance(count, (int, float))
@@ -426,7 +454,11 @@ def _telemetry_facts(raw: Any) -> dict[str, Any]:
         count = 0
     else:
         count = int(count)
-    return {"record_count": count, "signal": signal if isinstance(signal, str) else ""}
+    return {
+        "record_count": count,
+        "signal": signal if isinstance(signal, str) else "",
+        "reason": reason,
+    }
 
 
 def _batch_counts(evidence: _Evidence, connector: str) -> tuple[int, int]:
@@ -449,6 +481,15 @@ def _drop_only_signals(evidence: _Evidence, connector: str) -> tuple[str, ...]:
         if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count
     }
     return tuple(sorted(signals))
+
+
+def _drop_only_reasons(evidence: _Evidence, connector: str) -> tuple[str, ...]:
+    """Name the gateway's drop reasons for the drop-only batches."""
+    reasons: set[str] = set()
+    for key, count in evidence.normalized.items():
+        if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count:
+            reasons |= evidence.drop_reasons.get(key, {"unknown"})
+    return tuple(sorted(reasons))
 
 
 def _credential_state(last_auth: datetime | None, last_native: datetime | None) -> str:

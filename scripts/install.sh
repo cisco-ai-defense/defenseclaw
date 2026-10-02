@@ -522,6 +522,22 @@ export UV_NO_CONFIG=1
 # dir, so `uninstall --all` leaves nothing of them in ~/.cache or ~/.local.
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}"
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${DEFENSECLAW_HOME}/.uv/python}"
+# uv's cache, the Python it fetches and the new environment take about 1 GB on
+# a first install and less once the cache exists. Refuse before writing them.
+UV_DIR_NEW=""
+[[ -e "${DEFENSECLAW_HOME}/.uv" ]] || UV_DIR_NEW=1
+space_needed_kb=$((400 * 1024))
+[[ -d "${UV_CACHE_DIR}" ]] || space_needed_kb=$((1100 * 1024))
+space_free_kb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print $4}')"
+if [[ "${space_free_kb}" =~ ^[0-9]+$ && "${space_free_kb}" -lt "${space_needed_kb}" ]]; then
+    err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((space_needed_kb / 1024)) MB and $((space_free_kb / 1024)) MB is free"
+    die "Free at least $(((space_needed_kb - space_free_kb + 1023) / 1024)) MB on that filesystem (df -h ${DEFENSECLAW_HOME}), then rerun; nothing was changed"
+fi
+# A uv already in BIN_DIR belongs to the user (or an earlier run) even when
+# BIN_DIR is not on this shell's PATH yet: use it, never overwrite it.
+if ! has uv && [[ -x "${BIN_DIR}/uv" && ! -d "${BIN_DIR}/uv" ]]; then
+    export PATH="${BIN_DIR}:${PATH}"
+fi
 if ! has uv; then
     info "Installing uv ${UV_VERSION} (Python package manager)"
     install_uv || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
@@ -602,7 +618,13 @@ make_venv() {
     uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
         && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
 }
-make_venv "${STAGING}/venv" || die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
+if ! make_venv "${STAGING}/venv"; then
+    # Leave nothing of a failed build behind: the staging dir, and uv's cache
+    # and Python when this run created them.
+    rm -rf "${STAGING}"
+    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
+    die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
+fi
 "${STAGING}/venv/bin/defenseclaw" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The staged CLI does not start; nothing was changed"
 
@@ -756,6 +778,8 @@ install_uv() {
         linux/arm64) target=aarch64-unknown-linux-musl ;;
         *) return 1 ;;
     esac
+    # Never replace a uv or uvx this installer did not just download.
+    [[ -e "${BIN_DIR}/uv" || -e "${BIN_DIR}/uvx" ]] && return 1
     asset="uv-${target}.tar.gz"
     tmp="$(mktemp -d)" || return 1
     if curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/${asset}" \

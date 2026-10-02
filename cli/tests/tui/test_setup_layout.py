@@ -212,3 +212,25 @@ def test_every_tab_fits_at_80_columns_with_unread_badges(monkeypatch) -> None:
     labels = fit_tab_labels(FIFTEEN_PANELS, "overview", unread, 66)
     assert strip_width(tuple(labels.values())) <= 66
     assert labels["alerts"] == "2(2)"
+
+
+async def test_a_wide_then_80_column_screen_names_tabs_and_keeps_validation(hermetic) -> None:
+    """GAP-1283: at 200 columns every tab has a name. GAP-1166: shrinking to
+    80x24 rebuilds the config table so the Validation column stays on screen."""
+
+    from defenseclaw.config import default_config
+
+    app = snapshot_app(hermetic, setup_config=default_config())
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.pause()
+        tabs = screen_text(app).splitlines()[0]
+        assert "R Registr" in tabs, tabs
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press("c", "/", *"device", "enter")
+        await pilot.pause()
+        await pilot.resize_terminal(80, 24)
+        for _ in range(3):
+            await pilot.pause()
+        rows = _table_rows_on_screen(app)
+        assert "Validation" in rows[0], "\n".join(rows)

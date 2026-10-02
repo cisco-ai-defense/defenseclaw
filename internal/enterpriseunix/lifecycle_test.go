@@ -559,28 +559,47 @@ func TestRulePackServiceReadProblemNamesAnUnreadablePack(t *testing.T) {
 	}
 }
 
-func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
+// The owner's uninstall scope (2026-10-01): the default uninstall removes
+// the services and the machine state (config, secrets, gateway and guardian
+// state, logs, lifecycle state, the service account); only --keep-state
+// keeps that state for a reinstall. Each account's own data is the purge's.
+func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	l := h.env.Layout
+	install := func() {
+		t.Helper()
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		for _, path := range []string{filepath.Join(l.DataDir, "audit.db"), filepath.Join(l.GuardianAuthDir, "authorization.json"), filepath.Join(l.LogDir, "gateway.log")} {
+			if err := os.MkdirAll(filepath.Dir(h.env.P(path)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(path), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	install()
 	r := h.run(Options{Action: ActionUninstall})
 	requireOK(t, r)
 	// GAP-1227: the result says what went and what stayed.
 	summary := strings.Join(r.Changes, "\n")
-	for _, want := range []string{"stopped and removed the DefenseClaw services", "kept: the managed config", "~/.defenseclaw", "--purge"} {
+	for _, want := range []string{"stopped and removed the DefenseClaw services", "removed the machine state",
+		"and the service account", "kept: each enrolled user's ~/.defenseclaw", "--purge"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("uninstall summary lacks %q:\n%s", want, summary)
 		}
 	}
-	l := h.env.Layout
 	if exists(h.env.P(filepath.Join(l.BinDir, binGateway))) || exists(h.env.P(l.DescriptorPath)) ||
 		exists(h.env.P("/etc/systemd/system/"+unitGateway)) || exists(h.env.deploymentPath()) {
 		t.Fatal("uninstall left deployment files behind")
 	}
-	if !exists(h.env.P(l.ConfigPath)) {
-		t.Fatal("uninstall removed the administrator config")
+	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir, l.LogDir, l.VendorPolicyDir} {
+		if exists(h.env.P(dir)) {
+			t.Fatalf("uninstall left %s", dir)
+		}
 	}
-	if exists(h.env.P(l.VendorPolicyDir)) {
-		t.Fatal("uninstall left the vendor policies behind")
+	if _, ok := h.accounts.accounts["defenseclaw"]; ok {
+		t.Fatal("uninstall kept the service account")
 	}
 	if h.services.isActive(unitGateway) || h.services.isActive(unitAPISocket) {
 		t.Fatal("uninstall left services running")
@@ -594,12 +613,34 @@ func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 	}
 	again := h.run(Options{Action: ActionUninstall})
 	requireOK(t, again)
-	if !again.Noop || again.NoopReason != "not_installed" {
-		t.Fatalf("second uninstall should be a no-op: %+v", again)
+	if !again.Noop || again.NoopReason != "not_installed" || hasWarning(again, codeLeftovers) {
+		t.Fatalf("second uninstall should be a clean no-op: %+v", again)
 	}
-	purge := h.run(Options{Action: ActionUninstall, Purge: true, RemoveServiceAccount: true})
+	// The rerun (the package preremove after an uninstall, say) leaves no
+	// lifecycle directory holding only its lock.
+	if exists(h.env.P(l.LifecycleDir)) {
+		t.Fatal("a no-op uninstall left the lifecycle directory behind")
+	}
+
+	// --keep-state keeps all of it, and the account.
+	install()
+	kept := h.run(Options{Action: ActionUninstall, KeepState: true})
+	requireOK(t, kept)
+	if summary := strings.Join(kept.Changes, "\n"); !strings.Contains(summary, "kept for a reinstall") || strings.Contains(summary, "removed the machine state") {
+		t.Fatalf("uninstall --keep-state summary:\n%s", summary)
+	}
+	if !exists(h.env.P(l.ConfigPath)) || !exists(h.env.P(filepath.Join(l.DataDir, "audit.db"))) || !exists(h.env.P(filepath.Join(l.LogDir, "gateway.log"))) {
+		t.Fatal("uninstall --keep-state removed the machine state")
+	}
+	if _, ok := h.accounts.accounts["defenseclaw"]; !ok {
+		t.Fatal("uninstall --keep-state removed the service account")
+	}
+
+	// --keep-service-account keeps only the account; a purge removes the rest.
+	purge := h.run(Options{Action: ActionUninstall, Purge: true, KeepServiceAccount: true})
 	requireOK(t, purge)
-	if summary := strings.Join(purge.Changes, "\n"); !strings.Contains(summary, "removed the managed config") || strings.Contains(summary, "kept:") {
+	if summary := strings.Join(purge.Changes, "\n"); !strings.Contains(summary, "removed the machine state") ||
+		!strings.Contains(summary, "kept the service account") || strings.Contains(summary, "kept: each enrolled user") {
 		t.Fatalf("purge summary:\n%s", summary)
 	}
 	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir} {
@@ -607,8 +648,15 @@ func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 			t.Fatalf("purge left %s", dir)
 		}
 	}
+	if _, ok := h.accounts.accounts["defenseclaw"]; !ok {
+		t.Fatal("--keep-service-account removed the service account")
+	}
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true, RemoveServiceAccount: true}))
 	if _, ok := h.accounts.accounts["defenseclaw"]; ok {
 		t.Fatal("purge kept the service account")
+	}
+	if r := h.run(Options{Action: ActionUninstall, Purge: true, KeepState: true}); r.ExitCode == 0 {
+		t.Fatal("--keep-state with --purge must be refused")
 	}
 }
 

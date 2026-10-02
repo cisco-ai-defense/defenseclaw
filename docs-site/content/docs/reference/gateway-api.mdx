@@ -63,11 +63,18 @@ scheme instead of the gateway token:
   token alone gets 401 there.
 - In a managed install on the standalone profile,
   `GET /api/v1/hook-listener-proof` answers before authentication. A loopback
-  request that names a current per-user key ID
-  (`X-DefenseClaw-Listener-Key-Id`) and a nonce
-  (`X-DefenseClaw-Listener-Nonce`) gets 204 with an HMAC over that nonce in
-  `X-DefenseClaw-Listener-Proof`; any other request gets 401. The answer is a
-  digest, never a credential. The Amp and OpenCode plugins use it to check
+  request sends three headers: `X-DefenseClaw-Connector` (the connector the
+  credential belongs to, for example `amp` or `opencode`),
+  `X-DefenseClaw-Listener-Key-Id` (the lowercase hex SHA-256 of the user's
+  per-user hook credential for that connector) and
+  `X-DefenseClaw-Listener-Nonce` (64 lowercase hex characters, 32 random
+  bytes). When the key ID names a current hook credential for that
+  connector, the answer is 204 with `X-DefenseClaw-Listener-Proof`: the hex
+  HMAC-SHA256, keyed with that credential, over
+  `defenseclaw.listener-proof.v1`, a NUL byte, the connector, a NUL byte and
+  the nonce. Any other request, including one without
+  `X-DefenseClaw-Connector`, gets 401. The answer is a digest, never a
+  credential. The Amp and OpenCode plugins use it to check
   that the listener is the gateway before they send the user's credential.
 
 For every other route the shared authentication middleware accepts these
@@ -163,9 +170,12 @@ home directory), the active connectors with per-agent request and block
 counts, and the guardrail, routing and telemetry state, including
 telemetry destinations. In a managed install on the standalone profile it
 also carries `inspection` (whether local and AI Defense inspection are
-active) and `user_scoped_credentials.key_ids`, the non-secret fingerprints
-of the per-user credential keys that authenticate right now (the key IDs the
-listener proof names). It carries no tokens, key material or request
+active) and `user_scoped_credentials.key_ids`, the non-secret SHA-256
+fingerprints of the per-machine keys from which the per-user credentials
+that authenticate right now are derived (the current key, plus a staged or
+retiring one during a key rotation). They let the lifecycle check a key
+rotation; they are not the key IDs the listener proof takes, which are the
+SHA-256 of one user's hook credential. It carries no tokens, key material or request
 content. On Linux and macOS managed installs the hook socket also answers
 `GET /health` with the same document without peer authorization; every
 other path there keeps peer authorization. This is accepted so that every

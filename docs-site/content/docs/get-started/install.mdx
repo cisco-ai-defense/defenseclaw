@@ -226,6 +226,11 @@ agent calls, and fail-open hooks (the observe default) let them through with a
 `gateway unreachable` line on stderr. On Windows a hook also starts a stopped
 gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
+A gateway that is running but does not answer (frozen or hung) is not
+restarted by a hook. The hook's line says the gateway did not answer and names
+the next step: check `defenseclaw-gateway status`, or run
+`defenseclaw-gateway restart`.
+
 ## Verify
 
 ```bash

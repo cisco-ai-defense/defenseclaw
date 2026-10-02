@@ -454,6 +454,7 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     """
     from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
+    before = _restart_only_config(app.cfg)
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
     if app.logger:
@@ -469,16 +470,50 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
             )
     if not reload_gateway:
         return
-    _reload_and_report(app, name)
+    _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
 
 
-def _reload_and_report(app: AppContext, name: str) -> None:
+def _restart_only_config(cfg) -> tuple[str, ...]:  # noqa: ANN001 - Config, imported lazily
+    """The config.yaml sections a policy writes that the gateway cannot hot-reload.
+
+    The gateway's config watcher refuses a change to ``skill_actions``,
+    ``watch`` or (outside managed installs) ``cisco_ai_defense`` with
+    "config reload requires gateway restart", so a policy change that
+    touches them needs a restart to take effect.
+    """
+    return tuple(repr(getattr(cfg, section, None)) for section in ("skill_actions", "watch", "cisco_ai_defense"))
+
+
+def _gateway_pid_alive(app: AppContext) -> bool:
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
+
+
+def _reload_and_report(app: AppContext, name: str, *, needs_restart: bool = False) -> None:
     """Ask the running gateway to reload its policy and say how that went.
 
     Shared by ``policy activate`` and ``policy edit``: reloaded → ok;
     gateway not running → the change is saved for its next start (exit 0);
-    rejected → exit 1 pointing at ``defenseclaw policy validate``.
+    rejected → exit 1 pointing at ``defenseclaw policy validate``. When
+    ``needs_restart`` (the change also touched config sections the gateway
+    only reads at start) a running gateway is restarted instead.
     """
+    if needs_restart and _gateway_pid_alive(app):
+        from defenseclaw.commands import cmd_setup
+
+        if cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False):
+            ux.ok("Restarted the gateway; it is enforcing the policy now.")
+            return
+        click.echo(
+            f"error: policy '{name}' was saved, but the gateway restart failed. "
+            "Run `defenseclaw-gateway restart`, then `defenseclaw doctor`.",
+            err=True,
+        )
+        raise SystemExit(1)
     outcome, detail = _reload_gateway_policy(app)
     if outcome == "reloaded":
         ux.ok("Gateway reloaded the policy; it is enforcing it now.")
@@ -906,6 +941,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
+    before = _restart_only_config(app.cfg)
     if synced:
         # CLI skill-action paths fall back to config.yaml's skill_actions,
         # which `policy activate` writes; an edit to the active policy
@@ -913,7 +949,13 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         app.cfg.skill_actions = _skill_actions_from_policy(data)
         app.cfg.save()
     ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
-    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
+    _reload_after_edit(
+        app,
+        name,
+        synced=synced,
+        reload_gateway=reload_gateway,
+        needs_restart=_restart_only_config(app.cfg) != before,
+    )
 
 
 @edit.command("scanner")
@@ -1293,10 +1335,12 @@ def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> b
     return False
 
 
-def _reload_after_edit(app: AppContext, name: str, *, synced: bool, reload_gateway: bool) -> None:
+def _reload_after_edit(
+    app: AppContext, name: str, *, synced: bool, reload_gateway: bool, needs_restart: bool = False
+) -> None:
     """After editing the active policy, reload it like ``policy activate``."""
     if synced and reload_gateway:
-        _reload_and_report(app, name)
+        _reload_and_report(app, name, needs_restart=needs_restart)
 
 
 def _opa_runtime_action(runtime: str) -> str:

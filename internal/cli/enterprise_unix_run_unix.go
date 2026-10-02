@@ -75,6 +75,8 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		AllowDowngrade:       opts.allowDowngrade,
 		Purge:                opts.purge,
 		RemoveServiceAccount: opts.removeServiceAccount,
+		KeepState:            opts.keepState,
+		KeepServiceAccount:   opts.keepServiceAccount,
 		ProductVersion:       opts.productVersion,
 		Reason:               opts.reason,
 	})
@@ -225,6 +227,12 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	if action != "status" && env.Geteuid() != 0 {
 		return withExitCode(errors.New("run this command as root"), enterprisestatus.UnixExitFailure)
+	}
+	if opts.lockWait < 0 || opts.lockWait > enterpriseunix.MaxLockWait {
+		return withExitCode(fmt.Errorf("--lock-wait must be between 0 and %s", enterpriseunix.MaxLockWait), enterprisestatus.UnixExitInvalidArgs)
+	}
+	if opts.lockWait > 0 {
+		env.LockTimeout = opts.lockWait
 	}
 	switch action {
 	case "status":

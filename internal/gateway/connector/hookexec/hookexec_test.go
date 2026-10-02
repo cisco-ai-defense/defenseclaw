@@ -2562,3 +2562,23 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 		t.Fatalf("sessionStart = %d %q", code, stdout.String())
 	}
 }
+
+// A per-user hook names the next step after "gateway unreachable" instead of
+// repeating it; a managed hook and any other reason keep the reason (GAP-1204).
+func TestUnreachableDetailNamesTheNextStep(t *testing.T) {
+	const next = "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+	for _, tc := range []struct {
+		opts   Options
+		reason string
+		want   string
+	}{
+		{Options{}, "gateway unreachable", next},
+		{Options{}, "gateway returned HTTP 502", "gateway returned HTTP 502"},
+		{Options{ManagedEnterprise: true}, "gateway unreachable", "gateway unreachable"},
+		{Options{ManagedUnixSocket: "/run/defenseclaw/hook.sock"}, "gateway unreachable", "gateway unreachable"},
+	} {
+		if got := unreachableDetail(tc.opts, tc.reason); got != tc.want {
+			t.Errorf("unreachableDetail(%+v, %q) = %q, want %q", tc.opts, tc.reason, got, tc.want)
+		}
+	}
+}

@@ -501,6 +501,49 @@ class TestInitFirstRunBackend(unittest.TestCase):
             sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
             self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
 
+    def test_wizard_trusted_path_survives_the_init_transaction(self):
+        """GAP-1058: a directory trusted in the wizard is kept by init, so setup
+        can run that agent in the same run."""
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.commands.cmd_setup import _add_trusted_bin_prefix
+
+        # An earlier init left a config.yaml without the agent's directory.
+        self._invoke([
+            "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+            "--skip-install", "--no-verify", "--no-start-gateway", "--json-summary",
+        ])
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp_dir, "config.yaml")))
+        bin_dir = os.path.join(self.tmp_dir, "agent-bin")
+        os.makedirs(bin_dir)
+        settings = [
+            {
+                "connector": "codex",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            }
+        ]
+
+        def wizard(**_kwargs):
+            # The wizard's "Trusted binary paths" prompt answered Yes.
+            self.assertTrue(_add_trusted_bin_prefix(bin_dir, self.tmp_dir))
+            return (settings, "local", False, None, False, False)
+
+        with (
+            patch.object(cmd_init, "_stdin_is_tty", return_value=True),
+            patch.object(cmd_init, "_prompt_first_run", side_effect=wizard),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            result = self._invoke(["--skip-install"])
+
+        self.assertNotIn("did not retain the pre-init trusted binary prefix", result.output)
+        self.assertIn(os.path.realpath(bin_dir), _trusted_prefixes_from_config(self.tmp_dir), result.output)
+
     def test_guided_opencode_primary_records_complete_roster_once(self):
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands import cmd_init
@@ -1165,6 +1208,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(summary["profile"], "action")
         setup = {step["name"]: step for step in summary["setup"]}
         self.assertIn("hermes, mode=action", setup["Guardrail"]["detail"])
+        # GAP-1251: the summary names the resulting hook fail mode.
+        self.assertIn("fail mode=closed", setup["Guardrail"]["detail"])
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -3373,6 +3418,34 @@ class TestMultiConnectorInit(unittest.TestCase):
             # backward-compatible (single-connector) readers.
             self.assertEqual(gc.connector, "claudecode")
             self.assertEqual(reloaded.claw.mode, "claudecode")
+
+    def test_activate_additional_connectors_observe_extras_follow_global_mode(self):
+        """GAP-1218: observe extras carry no per-connector override, so one
+        global mode switch moves them; an action extra keeps its own mode."""
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.claw.mode = "codex"
+            cfg.guardrail.mode = "observe"
+            cfg.guardrail.enabled = True
+            cfg.save()
+            none = {"fail_mode": None, "human_approval": None, "hilt_min_severity": None}
+            _activate_additional_connectors(
+                {"connector": "codex", "profile": "observe", **none},
+                [{"connector": "hermes", "profile": "observe", **none},
+                 {"connector": "claudecode", "profile": "action", **none}],
+                start_gateway=False,
+            )
+            gc = cfg_mod.load().guardrail
+            self.assertEqual(gc.connectors["hermes"].mode, "")
+            self.assertEqual(gc.connectors["codex"].mode, "")
+            self.assertEqual(gc.connectors["claudecode"].mode, "action")
 
     def test_activate_additional_connectors_leaves_out_unverified_macos_openhands(self):
         from defenseclaw import config as cfg_mod

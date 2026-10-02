@@ -380,21 +380,50 @@ def alerts(
     _alerts_default(app, limit, show_idx, tui, connector)
 
 
+# Delivery failure codes (internal/observability/delivery) in plain words.
+_DELIVERY_FAILURE_REASONS = {
+    "http_authentication": "the destination rejected the credentials (HTTP 401/403); check the API key or token",
+    "hec_ack_authentication": "the destination rejected the credentials; check the HEC token",
+    "http_retryable": "the destination was busy or failing (HTTP 408, 429 or 5xx)",
+    "hec_ack_retryable": "the destination was busy and asked for a retry",
+    "http_rejected": "the destination rejected the data (HTTP 4xx)",
+    "hec_ack_rejected": "the destination rejected the data",
+    "resolution_failed": "the endpoint host name did not resolve; check the endpoint and DNS",
+    "connection_failed": "could not connect to the endpoint; check the endpoint and the network",
+    "request_timeout": "the export timed out",
+    "request_canceled": "the export was canceled (usually a gateway restart)",
+    "acknowledgement_lost": "the export was sent but no reply arrived",
+    "transport_failed": "a network error interrupted the export",
+    "endpoint_prohibited": "the endpoint is blocked by the egress policy",
+    "queue_full": "the export queue was full, so records were dropped",
+}
+
+
 def _alert_next_step(event) -> str:
     """Return a next step for alerts whose details alone do not say what to do."""
-    if event.action != "telemetry-destination":
+    details = (event.details or "").strip()
+    if event.action == "telemetry-destination":
+        destination = details.split("/", 1)[0].strip()
+        code = details.rsplit(":", 1)[1].strip() if ":" in details else ""
+        reason = _DELIVERY_FAILURE_REASONS.get(code, "")
+        lead = "the gateway retries on its own"
+    elif event.action == "circuit_breaker_open":
+        destination = details.split(" ", 1)[0].strip()
+        reason = ""
+        lead = "the gateway paused exports to this destination and retries on its own"
+    else:
         return ""
-    destination = (event.details or "").split("/", 1)[0].strip()
     status_cmd = (
         "defenseclaw setup galileo status"
         if destination == "galileo"
         else "defenseclaw setup observability list"
     )
     selector = f"--id {event.id}" if event.id else "--severity HIGH"
+    prefix = f"{reason[0].upper()}{reason[1:]}. " if reason else ""
     return (
-        f"run '{status_cmd}' to see whether delivery has recovered (the gateway "
-        "retries on its own). This alert records the failure and stays listed "
-        f"after recovery; clear it with 'defenseclaw alerts dismiss {selector}'."
+        f"{prefix}Run '{status_cmd}' to see whether delivery has recovered ({lead}). "
+        "This alert records the failure and stays listed after recovery; clear it "
+        f"with 'defenseclaw alerts dismiss {selector}'."
     )
 
 

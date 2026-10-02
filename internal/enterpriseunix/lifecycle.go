@@ -63,8 +63,19 @@ type Options struct {
 	// AllowDowngrade permits installing a payload older than the recorded
 	// deployment (a deliberate rollback). Without it downgrades are refused.
 	AllowDowngrade bool
-	Purge          bool
-	// RemoveServiceAccount deletes the gateway account on purge.
+	// Purge makes uninstall also remove each enrolled account's per-user
+	// DefenseClaw data and binaries.
+	Purge bool
+	// KeepState makes a (non-purge) uninstall keep the machine state: the
+	// config, secrets, gateway and guardian state, logs and lifecycle
+	// state, and the service account, so a reinstall resumes with them.
+	// Without it uninstall removes all of it.
+	KeepState bool
+	// KeepServiceAccount makes uninstall keep the gateway service account,
+	// which it removes otherwise.
+	KeepServiceAccount bool
+	// RemoveServiceAccount is the older flag for what uninstall now does by
+	// default; it is still accepted.
 	RemoveServiceAccount bool
 	// ProductVersion, when set, must equal the payload's version.
 	ProductVersion string
@@ -218,6 +229,19 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return 0
 	}
 	defer lock.release()
+	if l.opts.Action == ActionUninstall {
+		// An uninstall leaves no lifecycle directory holding only its lock
+		// (a rerun, or the package preremove after an uninstall, found
+		// nothing installed and would otherwise recreate it). A kept
+		// deployment record or retained state keeps the directory.
+		defer func() {
+			dir := env.P(env.Layout.LifecycleDir)
+			if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
+				_ = os.Remove(filepath.Join(dir, lockFileName))
+				_ = os.Remove(dir)
+			}
+		}()
+	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
 		// The previous deployment's files are only in the kept snapshot;
@@ -364,8 +388,14 @@ func (l *lifecycle) validateOptions() int {
 	if o.Purge && o.Action != ActionUninstall {
 		return bad("--purge applies only to uninstall")
 	}
-	if o.RemoveServiceAccount && !o.Purge {
-		return bad("--remove-service-account requires uninstall --purge")
+	if (o.KeepState || o.KeepServiceAccount || o.RemoveServiceAccount) && o.Action != ActionUninstall {
+		return bad("--keep-state, --keep-service-account and --remove-service-account apply only to uninstall")
+	}
+	if o.KeepState && o.Purge {
+		return bad("--keep-state and --purge are mutually exclusive")
+	}
+	if o.RemoveServiceAccount && (o.KeepServiceAccount || o.KeepState) {
+		return bad("--remove-service-account contradicts --keep-service-account and --keep-state")
 	}
 	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
 		return bad("--config must be an absolute path")
@@ -751,6 +781,9 @@ func recordBinaries(env *Env, record *Deployment) map[string]string {
 func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	env := l.env
 	if l.opts.ConfigFile != "" {
+		if err := trustedInputFile(l.opts.ConfigFile, "--config"); err != nil {
+			return nil, false, err
+		}
 		data, err = readBounded(l.opts.ConfigFile, maxInputBytes)
 		return data, false, err
 	}
@@ -1556,8 +1589,11 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
-// uninstall stops and removes the deployment. Config, secrets and state
-// stay unless purge is set.
+// uninstall stops and removes the deployment, with its machine state (the
+// config, secrets, gateway and guardian state, logs and lifecycle state) and
+// the service account. Each account keeps its own ~/.defenseclaw and
+// per-user binaries unless purge is set. KeepState keeps the machine state
+// for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
@@ -1646,8 +1682,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		if path == env.Layout.ConfigPath && !l.opts.Purge {
-			continue
+		if path == env.Layout.ConfigPath {
+			continue // machine state: removed with its directory below
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)
@@ -1731,7 +1767,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	_ = os.RemoveAll(filepath.Join(env.P(env.Layout.LifecycleDir), snapshotsDirName))
 	env.removeSideStores("")
 
-	if l.opts.Purge {
+	// The machine state goes too (owner decision: the default uninstall
+	// removes the services and the machine state; only each account's own
+	// data stays). A purge removes it whatever failed above; the default
+	// uninstall only once everything above succeeded, so a failed one keeps
+	// the deployment record, the config and the state for a rerun, or for
+	// an ensure that restores the deployment.
+	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
+	if removeState {
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
 			if err := os.RemoveAll(env.P(dir)); err != nil {
 				errs = append(errs, err)
@@ -1746,14 +1789,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P("/opt/cisco"))
 			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
-		if l.opts.RemoveServiceAccount {
+		if !l.opts.KeepServiceAccount {
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		if !l.opts.Purge && record != nil {
+		if !removeState && record != nil {
 			// The deployment record stays until the removal is complete:
 			// without it a rerun of uninstall is a no-op and a reinstall
 			// (the package postinstall, an MDM ensure) refuses the kept state
@@ -1765,7 +1808,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		return 0
 	}
 	_ = removeFile(env.deploymentPath())
-	if !l.opts.Purge && record != nil {
+	if l.opts.KeepState && record != nil {
 		// Record what stays so a reinstall resumes with it instead of
 		// refusing it as an unmanaged layout.
 		if err := env.recordRetainedState(); err != nil {
@@ -1779,10 +1822,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 
 // uninstallSummary says what a completed uninstall removed and kept, like
 // the change list of ensure and repair. A bare "uninstall: done" did not
-// tell the administrator that the config and the users' data stay
-// (GAP-1227).
+// tell the administrator what happened to the machine state or to the
+// users' own data (GAP-1227).
 func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	env, r := l.env, l.result
+	layout := env.Layout
 	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
 	if record != nil && record.Channel == ChannelPackage && env.GOOS == "linux" {
 		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
@@ -1794,13 +1838,20 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	if len(r.MachinePolicy) > 0 {
 		lines = append(lines, "removed DefenseClaw's machine policy entries for "+strings.Join(sortedKeys(r.MachinePolicy), ", "))
 	}
-	if l.opts.Purge {
-		lines = append(lines, fmt.Sprintf("removed the managed config, secrets, data, logs and lifecycle state (%s, %s, %s, %s)",
-			env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.LogDir, env.Layout.LifecycleDir))
-		return lines
+	state := fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s, %s), the logs (%s)",
+		layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	switch {
+	case l.opts.KeepState:
+		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+	case l.opts.KeepServiceAccount:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	default:
+		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
-	lines = append(lines, fmt.Sprintf("kept: the managed config and secrets (%s), the gateway data and audit log (%s), the logs (%s) "+
-		"and each enrolled user's ~/.defenseclaw; `%s --purge` removes them", env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.LogDir, l.uninstallCommand()))
+	if !l.opts.Purge {
+		lines = append(lines, "kept: each enrolled user's ~/.defenseclaw and per-user binaries; `"+
+			env.lifecycleCommand(ActionUninstall)+" --purge` removes them too")
+	}
 	return lines
 }
 
@@ -1873,8 +1924,11 @@ func (l *lifecycle) uninstallCommand() string {
 	if l.opts.Purge {
 		command += " --purge"
 	}
-	if l.opts.RemoveServiceAccount {
-		command += " --remove-service-account"
+	if l.opts.KeepState {
+		command += " --keep-state"
+	}
+	if l.opts.KeepServiceAccount {
+		command += " --keep-service-account"
 	}
 	return command
 }

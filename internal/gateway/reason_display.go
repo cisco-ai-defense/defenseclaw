@@ -168,6 +168,29 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	}
 }
 
+// agentObservedReason names the rules of a finding DefenseClaw lets through
+// (observe mode, or an alert) the way agentVerdictReason names them in a
+// block: "rule R1: Title". The observe notice used to show a rule pack's
+// title as a "<redacted len=N sha=...>" token while the action-mode block
+// printed it (GAP-1187). The gates are agentVerdictReason's: a managed
+// deployment or an explicit redaction directive keeps displayReason, and so
+// does any reason that is not a plain local rule match.
+func agentObservedReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	if action == "block" || action == "confirm" || action == agentReviewAction {
+		return displayReason
+	}
+	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
+		return displayReason
+	}
+	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
+		return displayReason
+	}
+	if rules := agentMatchedRules(sourceReason); rules != "" {
+		return rules
+	}
+	return displayReason
+}
+
 // agentBlockListReasonPattern matches the two ship-authored block-list
 // reasons (inspect.go): `tool "<name>" is on the static block list` and
 // `mcp server "<name>" is blocked`. The name is the tool or server the agent

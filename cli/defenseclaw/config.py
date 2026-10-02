@@ -848,6 +848,18 @@ class LLMConfig:
             return self.model.split("/", 1)[0].strip().lower()
         return ""
 
+    def keyless_auth_mode(self) -> str:
+        """Return the Bedrock auth mode when it needs no API key, else "".
+
+        ``instance_role``, ``profile`` and ``iam_credentials`` authenticate
+        with the AWS credential chain, so an unset ``api_key_env`` is
+        expected and must not be reported as a missing key.
+        """
+        if self.provider_prefix() not in ("bedrock", "amazon-bedrock") or self.bedrock is None:
+            return ""
+        mode = (self.bedrock.auth_mode or "").strip().lower() or "api_key"
+        return "" if mode == "api_key" else mode
+
     def is_local_provider(self) -> bool:
         """Return True when the resolved provider runs on-box and
         doesn't need an API key (ollama, vllm, lm_studio) or when the

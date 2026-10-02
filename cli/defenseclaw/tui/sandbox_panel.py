@@ -975,17 +975,20 @@ class SandboxPanelMixin:
     async def _sandbox_wrappers_menu(self) -> None:
         model = self.sandbox_model
         names = model.harnesses or DEFAULT_SANDBOX_HARNESSES
+        # A wrapper runs `sandbox run`, so while sandboxes cannot run the
+        # plain command would fail in every new shell; enable refuses then.
+        blocked = {
+            "off": "Sandboxes are off; run the Sandbox wizard (0 Setup) first",
+            "unavailable": "Sandboxes are unavailable; see: defenseclaw sandbox doctor",
+        }.get(model.state(), "")
         actions = []
         for name in names:
             command = harness_command(name)
             on = name in model.wrappers
-            actions.append(
-                MenuAction(
-                    name,
-                    f"`{command}` sandboxed: {'on' if on else 'off'}",
-                    f"Turn {'off' if on else 'on'}: defenseclaw sandbox {'disable' if on else 'enable'} {command}",
-                )
-            )
+            hint = f"Turn {'off' if on else 'on'}: defenseclaw sandbox {'disable' if on else 'enable'} {command}"
+            if blocked and not on:
+                hint = blocked
+            actions.append(MenuAction(name, f"`{command}` sandboxed: {'on' if on else 'off'}", hint))
         actions.append(MenuAction("cancel", "Cancel"))
         choice = await self.push_screen_wait(  # type: ignore[attr-defined]
             ActionMenuScreen(
@@ -999,6 +1002,9 @@ class SandboxPanelMixin:
         if choice in (None, "cancel"):
             return
         verb = "disable" if choice in model.wrappers else "enable"
+        if verb == "enable" and blocked:
+            self.notify_toast("info", f"{blocked}.")  # type: ignore[attr-defined]
+            return
         command = harness_command(choice)
         await self._run_command(  # type: ignore[attr-defined]
             "defenseclaw", ("sandbox", verb, command), display_name=f"sandbox {verb} {command}"

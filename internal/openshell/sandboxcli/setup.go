@@ -513,7 +513,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		if wrap {
 			for _, s := range wrappable {
-				if err := a.Enable(WrapperOptions{Harness: s.Name}); err != nil {
+				if err := a.enableWrapper(s, WrapperOptions{Harness: s.Name}); err != nil {
 					a.warn("wrapper for " + s.Command + ": " + err.Error())
 				}
 			}

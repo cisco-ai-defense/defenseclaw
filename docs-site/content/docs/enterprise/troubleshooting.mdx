@@ -127,8 +127,8 @@ Warnings do not fail an action. They appear in `warnings[]`.
 
 The wrapper scripts in `packaging/mdm` check their inputs before they start
 the lifecycle. Most codes that start with `mdm_` mean the wrapper stopped
-before the lifecycle ran. `mdm_secret_failed`, and `mdm_not_installed` after
-an apply, are reported after the lifecycle succeeded. In every `mdm_`
+before the lifecycle ran. `mdm_not_installed` after an apply, and
+`mdm_secret_failed` on Windows, are reported after the lifecycle succeeded. In every `mdm_`
 document, `installed: false` means "not checked". They use the exit
 codes above. For the full contract, see [Exit codes](/docs/enterprise/mdm#exit-codes).
 
@@ -149,7 +149,7 @@ codes above. For the full contract, see [Exit codes](/docs/enterprise/mdm#exit-c
 | `mdm_download_failed`, `mdm_download_unavailable` | Linux and macOS: the HTTPS download failed, or there is no curl or wget |
 | `mdm_not_installed` | A read-only action, or an `ensure` without a source, found no deployment |
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | The lifecycle did not start or printed no result |
-| `mdm_secret_failed` | The deployment was applied, but storing the credential failed |
+| `mdm_secret_failed` | Storing the credential failed: on Windows after the deployment applied; on Linux and macOS before the config was applied |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | The private staging folder or the Intune content is not as expected |
 
 Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,

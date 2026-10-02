@@ -981,7 +981,7 @@ def setup_llm(
         click.echo(f"    {ux.dim('model:')}       {resolved.model or '(unset)'}")
         key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
         key_val = resolved.resolved_api_key()
-        key_state = _mask(key_val) if key_val else "(not set)"
+        key_state = _llm_key_state(resolved, key_val)
         click.echo(f"    {ux.dim('api_key_env:')} {key_env} = {key_state}")
         if resolved.base_url:
             click.echo(f"    {ux.dim('base_url:')}    {resolved.base_url}")
@@ -1032,7 +1032,7 @@ def setup_llm(
         ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
         resolved = cfg.resolve_llm(target_path)
         key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
-        key_state = _mask(os.environ.get(key_env, "")) if os.environ.get(key_env, "") else "(not set)"
+        key_state = _llm_key_state(resolved, os.environ.get(key_env, ""))
         label_prefix = "llm" if not target_path else f"{target_path}.llm"
         ux.kv(f"{label_prefix}.provider", resolved.provider or "(unset)")
         ux.kv(f"{label_prefix}.model", resolved.model or "(unset)")
@@ -1971,6 +1971,16 @@ def _mask(key: str) -> str:
     if len(key) <= 8:
         return "****"
     return key[:4] + "..." + key[-4:]
+
+
+def _llm_key_state(resolved, key_val: str) -> str:
+    """Masked key, or why no key is needed, for the setup llm summary."""
+    if key_val:
+        return _mask(key_val)
+    keyless_mode = resolved.keyless_auth_mode()
+    if keyless_mode:
+        return f"(not needed: bedrock auth_mode={keyless_mode} uses AWS credentials)"
+    return "(not set)"
 
 
 def _parse_dotenv_lines(lines) -> dict[str, str]:

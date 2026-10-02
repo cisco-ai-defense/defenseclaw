@@ -651,6 +651,10 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
                 llm_api_key_env=llm_api_key_env,
                 llm_base_url=llm_base_url,
             )
+        # The wizard's trusted-paths prompts write config.yaml. Take the
+        # snapshot again so the init transaction keeps what was just trusted
+        # and setup can run that agent in the same run (GAP-1058).
+        trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir, warn=False)
 
     # Non-interactive / no-TTY path. With --observe-all / --action-connectors
     # this fans out to every detected hook connector (observe by default, the
@@ -831,8 +835,14 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
 def _validated_preinit_trusted_binary_prefixes(
     data_dir: str | os.PathLike[str],
+    *,
+    warn: bool = True,
 ) -> tuple[str, ...] | None:
-    """Snapshot exact config-backed trust before the init transaction."""
+    """Snapshot exact config-backed trust before the init transaction.
+
+    *warn* False skips the quarantine warnings (the second snapshot after the
+    wizard would print them twice).
+    """
 
     from defenseclaw import config as cfg_mod
 
@@ -863,7 +873,7 @@ def _validated_preinit_trusted_binary_prefixes(
             continue
         seen.add(key)
         resolved_values.append(resolved)
-    if quarantined:
+    if quarantined and warn:
         import shlex
         for entry, reason in quarantined:
             # {entry!r} would render a Python repr ('D:\\staging\\bin'),
@@ -2106,6 +2116,12 @@ def _activate_additional_connectors(
                 )
             mode = "observe"
         pc.mode = "action" if mode == "action" else "observe"
+        # An observe extra under a global observe mode follows the global
+        # mode (empty override), as the primary does, so a later global
+        # `guardrail mode action` moves it too. A downgraded action request
+        # keeps its explicit observe.
+        if pc.mode == "observe" and (gc.mode or "observe").lower() == "observe" and not s.get("mode_warning"):
+            pc.mode = ""
         if s["fail_mode"]:
             pc.hook_fail_mode = "closed" if s["fail_mode"].lower() == "closed" else "open"
         if s["human_approval"] is not None:

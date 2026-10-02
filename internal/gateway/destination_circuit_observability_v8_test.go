@@ -115,6 +115,20 @@ func TestDestinationCircuitTransitionV8EmitsOpenThenClosedExactlyOnce(t *testing
 		t.Fatalf("open transition projection wrong: mandatory=%d subsystem=%s state=%s code=%s",
 			mandatory, subsystem, healthState, errorCode)
 	}
+	var details string
+	detailsDB, err := sql.Open("sqlite", capture.store.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := detailsDB.QueryRow(`SELECT COALESCE(details,'') FROM audit_events
+		WHERE bucket = 'platform.health' AND action = 'circuit_breaker_open'`).Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	_ = detailsDB.Close()
+	if want := "soc_primary degraded: splunk_hec export paused after 3 failures " +
+		"(the destination was unreachable or busy)"; details != want {
+		t.Fatalf("open transition details=%q, want %q", details, want)
+	}
 
 	sidecar.recordDestinationCircuitTransitionsV8(
 		ctx, time.Now().UTC(), runtime,
@@ -262,5 +276,26 @@ func TestDestinationCircuitTransitionV8HalfOpenDoesNotResetBaseline(t *testing.T
 	)
 	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_closed"); got != 1 {
 		t.Fatalf("expected exactly one closed log after genuine recovery, got %d", got)
+	}
+}
+
+func TestDestinationCircuitOpenSummaryIsReadable(t *testing.T) {
+	cases := []struct {
+		kind     string
+		failures uint64
+		class    delivery.FailureClass
+		want     string
+	}{
+		{"otlp", 1, delivery.FailureClassAuthentication,
+			"otlp export paused after 1 failure (authentication: check the API key or token)"},
+		{"splunk_hec", 5, delivery.FailureClassPermanentPayload,
+			"splunk_hec export paused after 5 failures (the destination rejected the data)"},
+		{"", 2, "", "telemetry export paused after 2 failures"},
+	}
+	for _, tc := range cases {
+		if got := destinationCircuitOpenSummary(tc.kind, tc.failures, tc.class); got != tc.want {
+			t.Errorf("destinationCircuitOpenSummary(%q, %d, %q) = %q, want %q",
+				tc.kind, tc.failures, tc.class, got, tc.want)
+		}
 	}
 }

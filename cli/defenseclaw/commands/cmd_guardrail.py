@@ -61,6 +61,7 @@ from defenseclaw.config import _assert_config_write_allowed, config_path_for_dat
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.fail_mode import (
+    _UPSTREAM_FAIL_OPEN_CONNECTORS,
     fail_mode_transaction_lock,
     reconcile_connector_registration,
     resolve_connector_fail_mode,
@@ -634,7 +635,9 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             if runtime_state.drift:
                 fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
-        elif normalize_connector(name) == "hermes":
+        elif normalize_connector(name) in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+            # Copilot CLI, Antigravity and Hermes fail open upstream whatever
+            # is configured; `defenseclaw status` reports the same.
             cfm = "open"
             runtime_limit_rows.append(
                 f"{_connector_label(name)} ({name}) is upstream-enforced fail-open"
@@ -1323,11 +1326,10 @@ def fail_mode_cmd(
 
       \b
       open   — allow the tool/prompt and log the failure.
-               A misbehaving gateway never bricks your agent.
-               Recommended for almost all installs.
+               A gateway outage never blocks your agent.
       closed — block supported events when inspection is unavailable.
-               Choose for regulated workflows where every prompt
-               MUST be inspected.
+               The default on a new install: every prompt and
+               tool call is inspected or blocked.
 
     Transport failures (gateway unreachable / timeout / 5xx) follow the
     same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``

@@ -209,3 +209,7 @@ class HintState:
     panel_has_rows: bool = True
     # True when no config.yaml was loaded (first run, wizard declined).
     not_configured: bool = False
+    # Under a connector filter: that connector's name, and the critical/high
+    # alerts that the filter hides (GAP-1253).
+    connector_filter: str = ""
+    hidden_critical_alerts: int = 0

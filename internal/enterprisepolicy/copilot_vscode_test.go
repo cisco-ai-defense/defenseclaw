@@ -223,3 +223,53 @@ func TestCopilotVSCodeOwnsAnEarlierBuildsWindowsPlugin(t *testing.T) {
 		t.Fatalf("uninstall left the earlier plugin: %v", err)
 	}
 }
+
+// The guardian created ~/.copilot, ~/.copilot/hooks and
+// ~/.copilot/installed-plugins for the Local files, and their removal left
+// them in the home, empty. The write reports the folders it created; the
+// removal given them takes out the ones still empty, and a folder that
+// existed before (or now holds the user's files) stays.
+func TestCopilotVSCodeRemovalTakesOutTheFoldersItCreated(t *testing.T) {
+	home := t.TempDir()
+	ensure := func(keep bool, removeDirs []string) CopilotVSCodeUserResult {
+		t.Helper()
+		result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+			Home: home, GOOS: "linux", HookBinary: testHookBinary, HookFile: keep, Plugin: keep, RemoveDirs: removeDirs,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	created := ensure(true, nil).CreatedDirs
+	for _, want := range []string{".copilot", ".copilot/hooks", ".copilot/installed-plugins"} {
+		if !containsString(created, filepath.Join(home, filepath.FromSlash(want))) {
+			t.Fatalf("created %v, want it to list ~/%s", created, want)
+		}
+	}
+	if again := ensure(true, nil).CreatedDirs; len(again) != 0 {
+		t.Fatalf("a second write created nothing, reported %v", again)
+	}
+	ensure(false, created)
+	if _, err := os.Lstat(filepath.Join(home, ".copilot")); !os.IsNotExist(err) {
+		t.Fatalf("~/.copilot stayed after the removal: %v", err)
+	}
+
+	// An existing ~/.copilot is the user's: only the folders below it go.
+	own := filepath.Join(home, ".copilot", "config.json")
+	if err := os.MkdirAll(filepath.Dir(own), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(own, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created = ensure(true, nil).CreatedDirs
+	if containsString(created, filepath.Join(home, ".copilot")) {
+		t.Fatalf("created %v lists the user's existing ~/.copilot", created)
+	}
+	ensure(false, append(created, filepath.Join(home, ".copilot"), "/etc", filepath.Join(home, "..")))
+	entries, err := os.ReadDir(filepath.Join(home, ".copilot"))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "config.json" {
+		t.Fatalf("~/.copilot holds %v (%v), want only the user's config.json", entries, err)
+	}
+}

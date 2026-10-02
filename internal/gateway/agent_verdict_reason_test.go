@@ -99,7 +99,47 @@ func TestAgentVerdictReasonNamesDefenseClawPolicyAndTheRule(t *testing.T) {
 // A rule from a loaded rule pack keeps its title: the pack author wrote it,
 // unlike a scanner title that can carry matched text.
 func TestAgentVerdictReasonNamesALoadedRulePackTitle(t *testing.T) {
-	const connectorName = "agent-verdict-title-pack"
+	applyMarkerRulePack(t, "agent-verdict-title-pack")
+
+	useAgentVerdictProfile(t, true, false)
+	display := agentDisplayReason(markerRuleReason, redaction.SinkPolicyDefault)
+	want := "DefenseClaw blocked this action under your organization's policy (rule TEST-MARKER-BLOCK: Test marker (block)). Do not retry it in another form. Contact your administrator if you need it allowed."
+	if got := agentVerdictReason("block", markerRuleReason, display, redaction.SinkPolicyDefault); got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	// A title the pack does not have stays in the audit only.
+	other := "matched: TEST-MARKER-BLOCK:secret value 1234"
+	if got := agentVerdictReason("block", other, agentDisplayReason(other, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); strings.Contains(got, "secret value") {
+		t.Fatalf("a title outside the loaded pack reached the agent: %q", got)
+	}
+}
+
+// The observe-mode notice names the rule the way the action-mode block does,
+// not as "matched: TEST-MARKER-BLOCK:<redacted len=N sha=...>" (GAP-1187).
+func TestObserveNoticeNamesTheRuleLikeTheBlock(t *testing.T) {
+	applyMarkerRulePack(t, "agent-observe-title-pack")
+	useAgentVerdictProfile(t, false, false)
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"}
+	resp := claudeCodeResponseFor(req, "allow", "block", "CRITICAL", markerRuleReason, nil, "observe", true)
+	want := "DefenseClaw would block this in action mode: CRITICAL Claude Code hook finding: rule TEST-MARKER-BLOCK: Test marker (block)"
+	if resp.AdditionalContext != want {
+		t.Fatalf("observe notice = %q\nwant %q", resp.AdditionalContext, want)
+	}
+	generic := agentHookResponseForProfile(connector.HookProfile{Name: "hermes"}, agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"},
+		"allow", "block", "HIGH", markerRuleReason, nil, "observe", true, connector.HookCapability{})
+	if !strings.HasSuffix(generic.AdditionalContext, ": rule TEST-MARKER-BLOCK: Test marker (block)") {
+		t.Fatalf("generic observe notice = %q", generic.AdditionalContext)
+	}
+	// Secure Client keeps its pinned (redacted) wording.
+	useAgentVerdictProfile(t, false, true)
+	resp = claudeCodeResponseFor(req, "allow", "block", "CRITICAL", markerRuleReason, nil, "observe", true)
+	if !strings.Contains(resp.AdditionalContext, redactedTokenPrefix) {
+		t.Fatalf("managed observe notice = %q, want the redacted reason", resp.AdditionalContext)
+	}
+}
+
+func applyMarkerRulePack(t *testing.T, connectorName string) {
+	t.Helper()
 	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))
 	added := false
 	for index := range pack.RuleFiles {
@@ -123,18 +163,6 @@ func TestAgentVerdictReasonNamesALoadedRulePackTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
-
-	useAgentVerdictProfile(t, true, false)
-	display := agentDisplayReason(markerRuleReason, redaction.SinkPolicyDefault)
-	want := "DefenseClaw blocked this action under your organization's policy (rule TEST-MARKER-BLOCK: Test marker (block)). Do not retry it in another form. Contact your administrator if you need it allowed."
-	if got := agentVerdictReason("block", markerRuleReason, display, redaction.SinkPolicyDefault); got != want {
-		t.Fatalf("got %q\nwant %q", got, want)
-	}
-	// A title the pack does not have stays in the audit only.
-	other := "matched: TEST-MARKER-BLOCK:secret value 1234"
-	if got := agentVerdictReason("block", other, agentDisplayReason(other, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); strings.Contains(got, "secret value") {
-		t.Fatalf("a title outside the loaded pack reached the agent: %q", got)
-	}
 }
 
 func TestAgentVerdictReasonKeepsSecureClientWording(t *testing.T) {

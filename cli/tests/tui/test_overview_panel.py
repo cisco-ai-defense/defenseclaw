@@ -473,7 +473,8 @@ def test_opencode_agent_state_requires_fresh_authenticated_heartbeat() -> None:
 
     model.set_health(snapshot(heartbeat=(now - timedelta(minutes=1)).isoformat()))
     model.set_gateway_probe("offline", "sidecar API is unreachable")
-    assert model.subsystem_state("agent") == "degraded"
+    # The gateway is down, so the services it hosts read offline (GAP-1280).
+    assert model.subsystem_state("agent") == "offline"
     assert "gateway status is unavailable" in model.agent_detail()
 
 
@@ -1160,3 +1161,99 @@ def test_no_config_overview_says_not_set_up() -> None:
     assert not any("not available yet" in m for m in messages)
     hint = HintEngine().hint_for(HintState(active_panel="overview", not_configured=True))
     assert "not set up yet" in hint
+
+
+def test_stopped_gateway_takes_its_services_offline_and_drops_stale_notices() -> None:
+    """GAP-1262/GAP-1280: once the probe says the gateway is down, the rows it
+    hosts stop reading "running" from the last /health payload."""
+
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="claudecode", connector_modes=(("claudecode", "action"), ("codex", "observe"))),
+        version="test",
+    )
+    model.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(minutes=3).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            watcher=SubsystemHealth(state="running"),
+            guardrail=SubsystemHealth(state="running"),
+            api=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="claudecode", state="running", requests=0),
+            connectors=(ConnectorHealth(name="claudecode", state="running", requests=0),),
+        )
+    )
+    model.set_gateway_probe("offline", "sidecar API is unreachable")
+
+    cards = {card.key: card for card in model.service_cards()}
+    assert cards["gateway"].state == "offline"
+    assert cards["gateway"].detail == "not running"
+    assert {cards[key].state for key in ("agent", "watcher", "guardrail", "api")} == {"offline"}
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("Gateway is not running" in m for m in messages), messages
+    assert not any("hook event" in m for m in messages), messages
+
+    fresh = OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test")
+    fresh.set_gateway_probe("offline", "sidecar API is unreachable")
+    assert fresh.subsystem_state("gateway") == "offline"
+
+
+def test_multi_connector_overview_has_no_false_drift_and_counts_modes() -> None:
+    """GAP-1220: the gateway's primary being another rostered connector is not
+    drift; the guardrail label shows the per-connector modes."""
+
+    cfg = OverviewConfig(
+        claw_mode="claudecode",
+        guardrail_enabled=True,
+        guardrail_mode="observe",
+        guardrail_connector="claudecode",
+        connector_modes=(("claudecode", "action"), ("amp", "observe"), ("codex", "observe")),
+    )
+    model = OverviewPanelModel(cfg, version="test")
+    model.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(minutes=3).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="amp", state="running", requests=0),
+            connectors=(
+                ConnectorHealth(name="amp", state="running", requests=0),
+                ConnectorHealth(name="claudecode", state="running", requests=5),
+            ),
+        )
+    )
+
+    messages = [notice.message for notice in model.build_notices()]
+    assert not any("drift" in m for m in messages), messages
+    assert not any("hook event" in m for m in messages), messages
+    assert model.guardrail_mode_label() == "observe, 1 action"
+    assert model.guardrail_mode_label("claudecode") == "action"
+    assert model.guardrail_detail().startswith("observe, 1 action")
+
+
+def test_overview_and_audit_say_loading_until_the_first_read() -> None:
+    """GAP-1240: a slow first read is "loading", not "no audit events yet"."""
+
+    from defenseclaw.tui.panels.audit import AuditPanelModel
+
+    model = _model()
+    model.history_loading = True
+    assert any("Loading the audit history" in n.message for n in model.build_notices())
+
+    audit = AuditPanelModel()
+    audit.loading = True
+    assert "Loading audit events" in audit.render_text()
+    audit.loading = False
+    assert "No audit events yet" in audit.render_text()
+
+
+def test_overview_alert_hint_follows_the_connector_filter() -> None:
+    """GAP-1253: under a connector filter the banner doesn't send the user to
+    an empty Alerts list."""
+
+    from defenseclaw.tui.models import HintState
+    from defenseclaw.tui.widgets.hint_bar import HintEngine
+
+    hint = HintEngine().hint_for(
+        HintState(active_panel="overview", critical_alerts=0, connector_filter="Claude Code", hidden_critical_alerts=1)
+    )
+    assert "outside the Claude Code filter" in hint
+    assert "Press m" in hint

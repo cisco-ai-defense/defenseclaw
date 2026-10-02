@@ -768,6 +768,47 @@ MDM = ROOT / "packaging" / "mdm"
 SCHEMA = MDM / "contract" / "lifecycle-result.schema.json"
 
 
+def _macos_pkg_preinstall(host: _Host, version: str) -> str:
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    match = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert match, "the pkg preinstall heredoc was not found"
+    _write_stub(host.bin, "stat", "echo 0")  # the record and marker are root-owned
+    return _rooted(
+        match.group(1) + "\n",
+        {"state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}", "@DC_PKG_VERSION@": version},
+    )
+
+
+# GAP-1199: a refused downgrade showed only the Installer's generic error,
+# and last-package-result.json still held the previous success. The
+# refusal now rewrites the result with downgrade_refused and the next step.
+@pytest.mark.parametrize("version", ["1.0.0", "1.0.2"])
+def test_macos_pkg_preinstall_records_a_refused_downgrade(tmp_path: Path, version: str) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    result_path = host.state / "last-package-result.json"
+    result_path.write_text('{"ok":true}', encoding="utf-8")
+    (host.state / "deployment.json").write_text('{"product_version": "1.0.1"}', encoding="utf-8")
+    result = host.run(_macos_pkg_preinstall(host, version))
+    if version == "1.0.2":
+        assert result.returncode == 0, result.stderr
+        assert result_path.read_text(encoding="utf-8") == '{"ok":true}'
+        return
+    assert result.returncode == 1
+    assert str(result_path) in result.stderr
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["installed_version"] == "1.0.1"
+    assert document["errors"][0]["code"] == "downgrade_refused"
+    assert "allow-downgrade" in document["errors"][0]["message"]
+    assert result_path.stat().st_mode & 0o077 == 0
+    try:
+        import jsonschema
+    except ImportError:
+        return
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
+    assert not sorted(validator.iter_errors(document), key=str)
+
+
 def _shell_function(text: str, name: str) -> str:
     match = re.search(rf"^{re.escape(name)}\(\) \{{.*?^\}}$", text, re.MULTILINE | re.DOTALL)
     assert match, f"{name} not found"
@@ -883,3 +924,72 @@ cat "$DC_RESULT"
             continue
         validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
         assert not sorted(validator.iter_errors(document), key=str), shell
+
+
+# The removal script wrote its result into /var/lib/defenseclaw-enterprise
+# after the uninstall had removed it, so a clean package removal left that
+# folder behind. Only a removal that reports a problem keeps its result.
+@pytest.mark.parametrize("rc", [0, 1])
+def test_linux_preremove_keeps_its_result_only_when_the_uninstall_failed(tmp_path: Path, rc: int) -> None:
+    host = _Host(tmp_path, gateway_rc=rc)
+    result = host.run(_linux_scriptlet(host, "preremove.sh").replace("${TMPDIR:-/tmp}", str(tmp_path)), "remove")
+    assert result.returncode == 0, result.stderr
+    assert list(tmp_path.glob("defenseclaw-preremove.*")) == []
+    if rc:
+        assert (host.state / "last-package-result.json").is_file()
+    else:
+        assert not host.state.exists()
+
+
+# GAP-1254, GAP-1258: the wrapper applied the config before it stored
+# --secret-name, so a config that references the credential never applied,
+# and the store then failed busy against the apply its own config change
+# started. It now stores the credential first and both steps wait.
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("secret_rc", [0, 75])
+def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_path: Path, os_dir: str, secret_rc: int) -> None:
+    wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
+    functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_run_lifecycle", "dc_main"))
+    log = tmp_path / "calls.log"
+    gateway = tmp_path / "defenseclaw-gateway"
+    gateway.write_text(f"""#!/bin/sh
+echo "$*" >>'{log}'
+case "$2" in secret) cat >/dev/null; echo secret-busy >&2; exit {secret_rc} ;; esac
+echo '{{"ok":true}}'
+""", encoding="utf-8")
+    gateway.chmod(0o755)
+    (tmp_path / "config.yaml").write_text("x: 1\n", encoding="utf-8")
+    (tmp_path / "key").write_text("value\n", encoding="utf-8")
+    group = "macos" if os_dir == "macos" else "linux"
+    script = f"""
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_MAX_CONFIG_BYTES=4096 DC_MAX_SECRET_BYTES=4096
+dc_parse_args() {{ DC_ACTION=ensure DC_CONFIG_STDIN=0 DC_CONFIG_FILE='{tmp_path}/config.yaml' DC_SECRET_NAME=k DC_SECRET_STDIN=0 DC_SECRET_FILE='{tmp_path}/key' DC_SOURCE='' DC_SOURCE_URL='' DC_PRODUCT_VERSION=''; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_layout() {{ DC_GATEWAY='{gateway}' DC_OS_GROUP={group}; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
+dc_cleanup() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_log() {{ :; }}
+dc_trusted_path() {{ :; }}
+dc_stage_file() {{ cp "$1" "$2"; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+{functions}
+dc_main
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=60)
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == secret_rc, result.stdout + result.stderr
+    assert calls[0] == "enterprise secret set --name k --from-stdin --lock-wait 10m --json"
+    if secret_rc:
+        assert calls == calls[:1], calls
+        assert "FAIL mdm_secret_failed" in result.stdout and "config was not applied" in result.stdout
+        return
+    assert len(calls) == 2 and re.fullmatch(
+        rf"enterprise {group} ensure --reason mdm --lock-wait 10m --config=.*/stage\.\w+/config\.yaml --json", calls[1]
+    ), calls
+

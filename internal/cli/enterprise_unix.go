@@ -32,6 +32,8 @@ type unixLifecycleOptions struct {
 	allowDowngrade       bool
 	purge                bool
 	removeServiceAccount bool
+	keepState            bool
+	keepServiceAccount   bool
 	productVersion       string
 	reason               string
 	lockWait             time.Duration
@@ -44,6 +46,9 @@ type enterpriseSecretOptions struct {
 	fromStdin bool
 	fromFile  string
 	json      bool
+	// lockWait is how long set and remove wait for another lifecycle run
+	// (Linux and macOS).
+	lockWait time.Duration
 }
 
 var (
@@ -103,7 +108,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		"rotate-credentials": "Rotate the per-user credential key, moving every user before the new key takes effect",
 		"status":             "Report the deployment state (read-only)",
 		"verify":             "Verify every file, permission, service and readiness check (read-only)",
-		"uninstall":          "Stop and remove the deployment and every account's hooks (each account keeps ~/.defenseclaw); --purge removes everything",
+		"uninstall":          "Stop and remove the deployment, its machine state and every account's hooks (each account keeps ~/.defenseclaw); --purge removes everything",
 	}
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "rotate-credentials", "status", "verify", "uninstall"} {
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
@@ -148,8 +153,10 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs, and each enrolled account's ~/.defenseclaw and per-user binaries in ~/.local/bin (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
-		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "with --purge, also delete the gateway service account")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, and its per-user binaries in ~/.local/bin (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
+		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
+		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
+		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "delete the gateway service account (the default now; kept for older scripts)")
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "reconcile", "rotate-credentials":
 		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
@@ -186,6 +193,9 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	if action == "set" {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
+	}
+	if action != "status" && runtime.GOOS != "windows" {
+		cmd.Flags().DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
 	return cmd

@@ -162,6 +162,17 @@ Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
+skill, MCP and AI component records it feeds) is off unless the config sets
+it. A config you write is read as written, so add this block to turn it on:
+
+```yaml
+ai_discovery:
+  enabled: true
+```
+
+See [Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise).
+
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:
 
@@ -317,17 +328,19 @@ Add `--all` to also delete `~/.defenseclaw`. See
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment and its binaries. Keep the config, secrets, data and logs. | `defenseclaw-gateway enterprise macos uninstall --json` |
-| Also remove the config, secrets, data, logs and lifecycle state | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
-| Also delete the `_defenseclaw` account | `defenseclaw-gateway enterprise macos uninstall --purge --remove-service-account --json` |
+| Stop and remove the deployment, its binaries, config, secrets, data, logs, lifecycle state and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
+| Keep only the `_defenseclaw` account | Add `--keep-service-account` |
 
 Run these as root from `/opt/cisco/defenseclaw/bin`. Uninstall removes each
 user's DefenseClaw hook registrations and DefenseClaw's own machine-policy
 entries first. Administrator entries in those files stay as they were.
 Each user keeps `~/.defenseclaw` unless you purge. With `--purge` it also
 stops each enrolled user's per-user gateway and removes all of that user's
-`~/.defenseclaw` and the per-user binaries and launcher links in
-`~/.local/bin`, and the result names every user it purged or left alone.
+`~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
+and the per-user binaries and launcher links in `~/.local/bin`, and the
+result names every user it purged or left alone.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. For

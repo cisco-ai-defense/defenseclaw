@@ -8,9 +8,11 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -38,7 +40,7 @@ for arg in "$@"; do
     -K|--config) want=config ;;
   esac
 done
-if [ "$n" = 1 ]; then exit 7; fi
+if [ "$n" = 1 ]; then exit "${DC_COLD_FIRST_RC:-7}"; fi
 printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 `
 
@@ -222,6 +224,46 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			assertGatewayDownNotice(t, run.stdout, tc.hint != "")
 		})
 	}
+}
+
+// A frozen or hung gateway keeps its listener, so the request times out
+// (curl 28) while gateway.pid names a live process. The line says so once,
+// with the next step, instead of "gateway unreachable ...: gateway
+// unreachable" (GAP-1204).
+func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
+	alive := func(dataDir string) {
+		_ = os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	}
+	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, alive,
+		"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FIRST_RC=28")
+	want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): " +
+		"the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+	if got := strings.TrimSpace(run.stderr); got != want {
+		t.Fatalf("stderr = %q\nwant %q", got, want)
+	}
+	if code := exitCodeOf(run.err); code != 2 {
+		t.Fatalf("exit code = %d, want 2 (fail closed)", code)
+	}
+	if log := readColdStartCapture(t, run.capDir, "gateway.log"); log != "" {
+		t.Fatalf("a timed-out request started the gateway: %q", log)
+	}
+
+	open := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, alive,
+		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FIRST_RC=28")
+	if !strings.Contains(open.stdout, "the gateway is running but did not answer. Run `defenseclaw-gateway restart`") {
+		t.Errorf("fail-open stdout = %q, want the restart notice", open.stdout)
+	}
+}
+
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 // Codex, like Claude Code, shows only the systemMessage of a fail-open hook.

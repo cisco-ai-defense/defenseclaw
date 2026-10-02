@@ -14,7 +14,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-func prepareOpenCodePluginArtifactDestination(path string) error {
+// createOpenCodePluginArtifactDestination makes the plugin folder of path
+// and checks the plugin target (see prepareOpenCodePluginArtifactDestination).
+func createOpenCodePluginArtifactDestination(path string) error {
 	dir := filepath.Dir(path)
 	created, err := safefile.CreatePrivateDirectory(dir)
 	if err != nil {
