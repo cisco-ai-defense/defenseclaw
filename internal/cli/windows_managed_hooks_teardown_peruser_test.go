@@ -361,3 +361,42 @@ func TestRemoveEmptyWindowsClaudeManagedSettingsFolders(t *testing.T) {
 		t.Fatalf("the empty ClaudeCode folder stayed: %v", err)
 	}
 }
+
+// GAP-1765: finalize revokes the gateway's AI-discovery read ACEs before it
+// removes users' registrations, and names a revoke failure.
+func TestCompleteWindowsManagedHooksTeardownUserCleanupRevokesInventoryACEsFirst(t *testing.T) {
+	originalRemover := windowsManagedHooksStandaloneUserRegistrationRemover
+	originalRevoker := windowsManagedHooksStandaloneInventoryACERevoker
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = originalRemover
+		windowsManagedHooksStandaloneInventoryACERevoker = originalRevoker
+	})
+	var order []string
+	windowsManagedHooksStandaloneInventoryACERevoker = func(manifest enterprisehooks.Manifest) error {
+		order = append(order, "revoke")
+		if len(manifest.Targets) != 1 {
+			t.Fatalf("revoker got %+v", manifest)
+		}
+		return errors.New("set DACL: access denied")
+	}
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(
+		_ context.Context,
+		_ string,
+		_ enterprisehooks.Manifest,
+	) enterpriseHookUserCleanupResult {
+		order = append(order, "remove")
+		return enterpriseHookUserCleanupResult{Removed: []string{"amp/" + userCleanupSIDA}}
+	}
+	manifest := perUserTeardownManifest("amp")
+	manifest.Targets[0].UserHome = t.TempDir()
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	var report windowsManagedHooksTeardownReport
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if strings.Join(order, ",") != "revoke,remove" || report.UserRegistrationsRemoved != 1 {
+		t.Fatalf("order %v report %+v", order, report)
+	}
+	if len(report.UserRegistrationsFailed) != 1 ||
+		!strings.Contains(report.UserRegistrationsFailed[0], "read access on users' agent folders: set DACL: access denied") {
+		t.Fatalf("failed = %v", report.UserRegistrationsFailed)
+	}
+}
