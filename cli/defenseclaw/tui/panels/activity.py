@@ -12,44 +12,92 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from rich.markup import escape as rich_escape
 
 from defenseclaw.tui.services.event_models import ActivityMutation, timestamp_label
 from defenseclaw.tui.services.v8_event_history import (
     V8EventHistoryRow,
-    load_v8_event_history,
+    load_v8_mutation_history,
     payload_text,
 )
 
 ActivityTab = Literal["commands", "mutations"]
 
 
+def _mutation_diff(row: V8EventHistoryRow) -> tuple[dict[str, Any], ...]:
+    """Field changes from ``defenseclaw.admin.diff`` (a JSON list), else before/after state."""
+
+    raw = row.payload.get("defenseclaw.admin.diff")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if isinstance(raw, list):
+        items = tuple(item for item in raw if isinstance(item, dict))
+        if items:
+            return items
+    before = payload_text(row.payload, "defenseclaw.admin.before_state")
+    after = payload_text(row.payload, "defenseclaw.admin.after_state")
+    if before or after:
+        return ({"op": "replace", "path": "", "before": before, "after": after},)
+    return ()
+
+
+def _mutation_reason(row: V8EventHistoryRow) -> str:
+    reason = payload_text(
+        row.payload,
+        "defenseclaw.guardrail.reason",
+        "defenseclaw.enforcement.failure_class",
+        "defenseclaw.error.summary",
+        "details",
+    ) or row.details
+    if reason in {row.event_name, row.action}:
+        # "config.change.applied" repeated the event name; say what ran instead.
+        operation = payload_text(row.payload, "defenseclaw.admin.operation")
+        return operation.replace("_", " ") if operation and operation != row.action else ""
+    return reason
+
+
 def activity_mutations_from_v8_history(
     rows: tuple[V8EventHistoryRow, ...],
 ) -> tuple[ActivityMutation, ...]:
-    """Project Activity mutations without touching SQLite."""
+    """Project Activity mutations without touching SQLite.
+
+    Rows name what changed (``config:dotenv:NAME``, the policy, the webhook)
+    and carry the field diff, instead of "compliance.activity:config.change.
+    applied" and "(no structured diff)" (GAP-1217).
+    """
 
     return tuple(
         ActivityMutation(
-            actor=payload_text(row.payload, "defenseclaw.operator.id", "enduser.id")
+            actor=payload_text(
+                row.payload,
+                "defenseclaw.operator.id",
+                "enduser.id",
+                "defenseclaw.admin.actor_ref",
+                "actor",
+            )
             or row.actor
             or row.source,
             action=row.action or row.event_name,
-            target_type=row.bucket,
+            target_type="",
             target_id=payload_text(
                 row.payload,
+                "defenseclaw.admin.target_ref",
                 "defenseclaw.config.path",
                 "defenseclaw.policy.id",
                 "defenseclaw.approval.id",
                 "defenseclaw.enforcement.id",
                 "defenseclaw.finding.target_ref",
-            )
-            or row.event_name,
+                "target",
+            ),
             version_from=payload_text(
                 row.payload,
                 "defenseclaw.config.generation.previous",
@@ -60,13 +108,8 @@ def activity_mutations_from_v8_history(
                 "defenseclaw.config.generation",
                 "defenseclaw.policy.version",
             ),
-            reason=payload_text(
-                row.payload,
-                "defenseclaw.guardrail.reason",
-                "defenseclaw.enforcement.failure_class",
-                "defenseclaw.error.summary",
-            )
-            or row.details,
+            reason=_mutation_reason(row),
+            diff=_mutation_diff(row),
             timestamp=row.timestamp,
         )
         for row in rows
@@ -305,7 +348,7 @@ class ActivityPanelModel:
                 self.diff_open.add(self.mutation_cursor)
 
     def load_mutations(self) -> None:
-        rows = load_v8_event_history(self.store, limit=500)
+        rows = load_v8_mutation_history(self.store, limit=500)
         self.apply_v8_history(rows)
 
     def apply_v8_history(self, rows: tuple[V8EventHistoryRow, ...]) -> None:
@@ -369,22 +412,40 @@ class ActivityPanelModel:
         start = max(0, self.mutation_cursor - max_rows + 1)
         for index, mutation in enumerate(self.mutations[start : start + max_rows], start=start):
             prefix = "▸ " if index == self.mutation_cursor else "  "
-            from_version = mutation.version_from or "∅"
-            to_version = mutation.version_to or "∅"
-            reason = f" -- {mutation.reason[:40]}" if mutation.reason else ""
-            lines.append(
-                prefix
-                + rich_escape(
-                    f"{timestamp_label(mutation.timestamp)}  {mutation.actor}  {mutation.action}  "
-                    f"{mutation.target_label}  {from_version} -> {to_version}{reason}"
-                )
-            )
+            parts = [timestamp_label(mutation.timestamp), mutation.actor, mutation.action]
+            if mutation.target_label:
+                parts.append(mutation.target_label)
+            if mutation.version_from or mutation.version_to:
+                parts.append(f"v{mutation.version_from or '?'} -> v{mutation.version_to or '?'}")
+            if len(mutation.diff) == 1:
+                parts.append(_diff_line(mutation.diff[0]))
+            elif mutation.diff:
+                parts.append(f"{len(mutation.diff)} changes")
+            elif mutation.reason:
+                parts.append(mutation.reason[:60])
+            lines.append(prefix + rich_escape("  ".join(part for part in parts if part)))
             if index in self.diff_open:
                 if mutation.diff:
-                    lines.extend(
-                        "      " + rich_escape(f"{item.get('op', '')} {item.get('path', '')}") for item in mutation.diff
-                    )
+                    lines.extend("      " + rich_escape(_diff_line(item)) for item in mutation.diff)
+                    if mutation.reason:
+                        lines.append("      " + rich_escape(mutation.reason))
+                elif mutation.reason:
+                    lines.append("      " + rich_escape(mutation.reason))
                 else:
-                    lines.append("      (no structured diff)")
-        lines.append("\n  [Enter] expand diff")
+                    lines.append("      No field-level change was recorded for this event.")
+        lines.append("\n  [Enter] show the change")
         return "\n".join(lines)
+
+
+def _diff_line(item: dict[str, Any]) -> str:
+    """``/.env/NAME: unset -> set`` for one diff entry."""
+
+    path = str(item.get("path", "") or "")
+    before = item.get("before")
+    after = item.get("after")
+    change = ""
+    if before is not None or after is not None:
+        change = f"{'' if before is None else before} -> {'' if after is None else after}".strip()
+    op = str(item.get("op", "") or "")
+    label = path or op
+    return f"{label}: {change}" if change and label else (change or f"{op} {path}".strip())

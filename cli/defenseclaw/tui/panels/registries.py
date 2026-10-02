@@ -49,6 +49,8 @@ class RegistryCommandIntent:
     # asset_policy, approve/reject/require change policy), so the preview
     # must never call it read-only (GAP-1152).
     risk: str = "mutation"
+    # Plain-words effect the confirm modal shows (GAP-1281).
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -488,6 +490,9 @@ def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> 
         label=f"registry require --type {row.type} {flag}",
         args=("registry", "require", "--type", row.type, flag, "--json"),
         hint=hint,
+        # The status bar is hidden behind the modal, so the modal itself
+        # names the consequence (GAP-1281).
+        consequence=f"{hint}.",
     )
 
 

@@ -46,6 +46,9 @@ class CommandPreview:
     # What the command receives besides argv, with every value hidden:
     # "Secret: sent on stdin (hidden)" and "Environment: NAME=<hidden>".
     hidden_inputs: tuple[str, ...] = ()
+    # What running it changes, in plain words, when the intent says
+    # (e.g. "any mcp not approved in a registry will be refused").
+    consequence: str = ""
 
     @property
     def masked_display(self) -> str:
@@ -66,6 +69,7 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
         restart=_restart_effect(risk, command.args),
         summary=_risk_summary(risk, command.category),
         hidden_inputs=hidden_input_lines(command),
+        consequence=command.consequence,
     )
 
 
@@ -238,7 +242,8 @@ class CommandPreviewScreen(ModalScreen[bool]):
         hidden = "".join(f"\n{rich_escape(line)}" for line in self.preview.hidden_inputs)
         with Vertical(id="preview-dialog"):
             yield Static("Confirm Command", id="preview-title")
-            yield Static(f"[{color}]{summary}[/]", id="preview-risk")
+            consequence = f"\n{rich_escape(self.preview.consequence)}" if self.preview.consequence else ""
+            yield Static(f"[{color}]{summary}[/]{consequence}", id="preview-risk")
             yield Static(
                 "[bold]Command[/]\n"
                 f"{masked}{hidden}\n\n"

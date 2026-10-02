@@ -29,6 +29,9 @@ class ParsedCommand:
     # Secret-bearing environment variables injected into the child process
     # environment rather than exposed as ``--env KEY=secret`` argv. See F-0803.
     env_overrides: tuple[tuple[str, str], ...] = ()
+    # Plain-words effect shown in the confirm modal (the intent's
+    # ``consequence``), so the modal says what the command changes.
+    consequence: str = ""
 
 
 def display_argv(argv: tuple[str, ...] | list[str]) -> str:
@@ -186,6 +189,10 @@ def infer_command_risk(category: str, args: tuple[str, ...]) -> str:
         "allow",
         "unblock",
         "unset",
+        # ``alerts acknowledge``/``dismiss`` change alert state; the preview
+        # called them read-only (GAP-1213).
+        "acknowledge",
+        "dismiss",
     ):
         return "mutation"
     if lowered[0] == "doctor" and "--fix" in lowered:
