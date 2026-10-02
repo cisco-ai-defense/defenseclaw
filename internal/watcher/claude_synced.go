@@ -17,9 +17,11 @@
 package watcher
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // claudeSyncedSkillDirs expands Claude Code's account-synced skill container,
@@ -72,4 +74,59 @@ func claudeSyncedSkillDirs(path string) (skills []string, ok bool) {
 func hasSkillMarker(dir string) bool {
 	info, err := os.Lstat(filepath.Join(dir, "SKILL.md"))
 	return err == nil && info.Mode().IsRegular()
+}
+
+// isClaudeSyncedContainer reports whether path is a real (non-symlink)
+// skills/synced folder that is not itself a skill.
+func isClaudeSyncedContainer(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir() && !hasSkillMarker(path)
+}
+
+// claudeSyncedDepth places path under a watched .claude/skills/synced
+// container: 0 is the container, 1 an account folder, 2 a synced skill
+// (GAP-1409). ok is false for any other path.
+func (w *InstallWatcher) claudeSyncedDepth(path string) (depth int, ok bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return 0, false
+	}
+	for _, dir := range w.skillDirs {
+		dirAbs, absErr := filepath.Abs(dir)
+		if absErr != nil || !strings.EqualFold(filepath.Base(dirAbs), "skills") ||
+			!strings.EqualFold(filepath.Base(filepath.Dir(dirAbs)), ".claude") {
+			continue
+		}
+		root := filepath.Join(dirAbs, "synced")
+		relative, relErr := filepath.Rel(root, pathAbs)
+		if relErr != nil || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if !isClaudeSyncedContainer(root) {
+			return 0, false
+		}
+		if relative == "." {
+			return 0, true
+		}
+		depth = len(strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		}))
+		if depth > 2 {
+			return 0, false
+		}
+		return depth, true
+	}
+	return 0, false
+}
+
+// queueSyncedSkill records a watcher event for a synced skill folder and
+// queues it for the debounced admission scan.
+func (w *InstallWatcher) queueSyncedSkill(ctx context.Context, path string) {
+	w.recordWatcherEvent(ctx, "create", InstallSkill.String(), "")
+	w.mu.Lock()
+	if _, exists := w.pending[path]; !exists {
+		w.pending[path] = time.Now()
+	}
+	w.mu.Unlock()
 }

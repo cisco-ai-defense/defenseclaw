@@ -245,7 +245,15 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		return true
 	}
 	for _, dir := range w.skillDirs {
-		watchOnce(dir, "skill")
+		if watchOnce(dir, "skill") {
+			// Claude Code syncs account skills two levels down
+			// (skills/synced/<account>/<skill>); watch those folders too so
+			// a newly synced skill is scanned on arrival (GAP-1409).
+			synced := filepath.Join(dir, "synced")
+			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
+				addDirWatches(fsw, synced, 1, watchedDirs)
+			}
+		}
 	}
 	for _, dir := range w.pluginDirs {
 		if !watchOnce(dir, "plugin") {
@@ -294,6 +302,31 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					if depth != 3 {
 						continue
 					}
+				}
+			}
+			if depth, inside := w.claudeSyncedDepth(event.Name); inside {
+				if info, statErr := os.Stat(event.Name); statErr != nil || !info.IsDir() {
+					continue
+				}
+				switch depth {
+				case 0:
+					// The synced folder itself: watch it and its account
+					// folders; the event below expands it into its skills.
+					addDirWatches(fsw, event.Name, 1, watchedDirs)
+				case 1:
+					// A new account folder: watch it and queue the skills
+					// already inside (they can land before the watch).
+					addDirWatches(fsw, event.Name, 0, watchedDirs)
+					children, _ := os.ReadDir(event.Name)
+					for _, child := range children {
+						if child.IsDir() && !strings.HasPrefix(child.Name(), ".") {
+							w.queueSyncedSkill(ctx, filepath.Join(event.Name, child.Name()))
+						}
+					}
+					continue
+				default:
+					w.queueSyncedSkill(ctx, event.Name)
+					continue
 				}
 			}
 			if !w.isDirectChildDir(event.Name) {
@@ -355,6 +388,10 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 // the original category event so it fails open to scanning.
 func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 	fallback := w.classifyEvent(path)
+	if depth, ok := w.claudeSyncedDepth(path); ok && depth == 2 {
+		fallback.Type = InstallSkill
+		return []InstallEvent{fallback}
+	}
 	if synced, ok := claudeSyncedSkillDirs(path); ok {
 		out := make([]InstallEvent, 0, len(synced))
 		for _, skill := range synced {
@@ -1403,6 +1440,17 @@ func addClaudeCacheWatches(
 	root string,
 	watched map[string]struct{},
 ) {
+	addDirWatches(fsw, root, 2, watched)
+}
+
+// addDirWatches watches root and its real (non-symlink) subfolders down to
+// maxDepth levels below it.
+func addDirWatches(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+) {
 	root = filepath.Clean(root)
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -1428,7 +1476,7 @@ func addClaudeCacheWatches(
 				return r == '/' || r == '\\'
 			}))
 		}
-		if depth > 2 {
+		if depth > maxDepth {
 			return fs.SkipDir
 		}
 		key := strings.ToLower(filepath.Clean(path))
