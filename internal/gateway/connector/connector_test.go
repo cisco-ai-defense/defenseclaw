@@ -9608,6 +9608,44 @@ func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 	}
 }
 
+// TestHookScript_FailureLogWriteErrorStaysQuiet: when the failure log cannot
+// be written (full disk, unwritable home), the block reason the agent shows
+// holds only DefenseClaw's own sentence, never a shell diagnostic naming the
+// hook script and line (GAP-1974).
+func TestHookScript_FailureLogWriteErrorStaysQuiet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	dcHome := t.TempDir()
+	// A directory where the log file should be makes the append fail.
+	if err := os.MkdirAll(filepath.Join(dcHome, "logs", "hook-failures.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"), "DEFENSECLAW_HOME="+dcHome)
+	err := cmd.Run()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook should still fail closed (exit 2), got: %v", err)
+	}
+	out := stdout.String() + stderr.String()
+	for _, leak := range []string{"hook-failures.jsonl", "_hardening.sh", "Is a directory"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("block output leaks %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "defenseclaw") {
+		t.Errorf("block output lost DefenseClaw's own sentence:\n%s", out)
+	}
+}
+
 func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
