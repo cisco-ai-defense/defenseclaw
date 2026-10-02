@@ -29,11 +29,13 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 )
 
 // aiDiscoveryPartialResult is the summary value the inventory scanner writes
@@ -111,7 +113,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	acquirer := chooseAcquirer(activeConfig, runtimeConfig)
+	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(activeConfig, runtimeConfig))
 	service, err := sensor.New(sensor.Options{
 		Config:    runtimeConfig,
 		Acquirer:  acquirer,
@@ -301,6 +303,38 @@ func (s *Sidecar) aiRuntimeSnapshot() *sensor.Service {
 	s.aiRuntimeMu.RLock()
 	defer s.aiRuntimeMu.RUnlock()
 	return s.aiRuntime
+}
+
+// ownAccountProcesses limits a per-user, unmanaged gateway's runtime planes
+// to this account's processes: other accounts' argv must not reach this
+// user's findings and telemetry (GAP-1105). Managed and standalone enterprise
+// gateways keep the machine-wide view.
+func ownAccountProcesses(activeConfig *config.Config, acquirer acquire.Acquirer) acquire.Acquirer {
+	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) || activeConfig.StandaloneEnterprise() {
+		return acquirer
+	}
+	name, _ := inventory.CurrentProcessOwner()
+	if name == "" {
+		return acquirer
+	}
+	return ownerProcessAcquirer{Acquirer: acquirer, owner: name}
+}
+
+// ownerProcessAcquirer drops process rows another account owns.
+type ownerProcessAcquirer struct {
+	acquire.Acquirer
+	owner string
+}
+
+func (a ownerProcessAcquirer) Processes(ctx context.Context) ([]procprobe.Process, int, error) {
+	rows, skipped, err := a.Acquirer.Processes(ctx)
+	owned := rows[:0]
+	for _, row := range rows {
+		if row.User == a.owner {
+			owned = append(owned, row)
+		}
+	}
+	return owned, skipped, err
 }
 
 // chooseAcquirer decides where the privileged reads come from.

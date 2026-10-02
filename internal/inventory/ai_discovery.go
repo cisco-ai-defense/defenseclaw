@@ -603,7 +603,9 @@ func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryServ
 		return nil, err
 	}
 	opts := AIDiscoveryOptionsFromConfig(cfg)
-	return NewContinuousDiscoveryServiceWithOptions(opts, catalog), nil
+	svc := NewContinuousDiscoveryServiceWithOptions(opts, catalog)
+	svc.processOwners = perUserProcessOwners(opts)
+	return svc, nil
 }
 
 func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, legacy ...any) *ContinuousDiscoveryService {
