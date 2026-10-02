@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -564,7 +565,9 @@ def test_preflight_skips_a_python3_that_does_not_run(tmp_path: Path) -> None:
     assert "no working Python 3 interpreter" in none.stderr
     assert "identity" not in none.stderr
 
-    (fake / "python").symlink_to(python)
+    # A wrapper, not a symlink: a Windows venv python.exe reached through a
+    # symlink in another folder cannot find its pyvenv.cfg.
+    _write_executable(fake / "python", f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
     found = subprocess.run(args, capture_output=True, text=True, check=False, env=env)
     assert "no working Python 3 interpreter" not in found.stderr
     assert found.returncode == 64, found.stderr  # detection passed; then the bad mode is refused

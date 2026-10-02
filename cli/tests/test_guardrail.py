@@ -2797,6 +2797,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows native setup readiness")
     def test_multi_connector_validation_still_stops_at_absolute_cap(self):
+        from defenseclaw.commands import cmd_setup
         from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
 
         expected = [
@@ -2817,7 +2818,8 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
         def readiness(_cfg, name):
             visited.append(name)
-            clock.now = 301.0
+            # Past the absolute cap, which the per-connector budget below exceeds.
+            clock.now = cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS + 1.0
             return SimpleNamespace(connector=name, invariant="ready", detail="configured")
 
         def read_snapshot(path):
@@ -2832,7 +2834,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             patch("defenseclaw.commands.cmd_doctor.connector_setup_readiness", side_effect=readiness),
             patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=monotonic),
         ):
-            result = _wait_for_connector_runtime("unused", expected, None, None, timeout=60.0)
+            result = _wait_for_connector_runtime("unused", expected, None, None, timeout=180.0)
 
         self.assertFalse(result)
         self.assertEqual(result.invariant, "deadline")

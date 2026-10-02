@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -338,6 +339,10 @@ def test_destination_test_names_the_delivery_failure_the_gateway_recorded(tmp_pa
 
     app = _app(tmp_path, monkeypatch)
     now = datetime.now(timezone.utc)
+    # Date the config change a minute back: Windows can stamp the file just
+    # after "now", which would hide this run's alerts.
+    changed = (now - timedelta(minutes=1)).timestamp()
+    os.utime(tmp_path / "config.yaml", (changed, changed))
     app.store = SimpleNamespace(
         list_alerts=lambda _limit: [
             SimpleNamespace(details="observability_runtime failed: reload_initialization_failed", timestamp=now),

@@ -284,7 +284,9 @@ def _remove_after_exit(dirs: list[str], empty_dirs: list[str]) -> None:
         rename = f'ren "{path}" "{tombstone_name}" 2>nul'
         steps.append(
             f"({rename} || (ping -n 5 127.0.0.1 >nul & {rename}))"
-            f' & if exist "{tombstone}" (rd /s /q "{tombstone}") else (rd /s /q "{path}")'
+            # Parenthesize the if: cmd would run a trailing "& next step" only
+            # in the else branch.
+            f' & (if exist "{tombstone}" (rd /s /q "{tombstone}") else (rd /s /q "{path}"))'
         )
     steps.extend(f'rd "{path}"' for path in empty_dirs if not _CMD_METACHARACTERS & set(path))
     command = " & ".join(steps)
