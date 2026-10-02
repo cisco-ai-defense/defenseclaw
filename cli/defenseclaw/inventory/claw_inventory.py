@@ -1102,6 +1102,10 @@ def _policy_detail_suffix(policy: dict[str, int] | None) -> str:
         parts.append(f"[red]{policy['blocked']} blocked[/red]")
     if policy.get("rejected"):
         parts.append(f"[red]{policy['rejected']} rejected[/red]")
+    # GAP-1748: an allow-listed item is still a scanned item; count it as the
+    # TUI Inventory panel does, or the row says only "1 scanned".
+    if policy.get("allowed"):
+        parts.append(f"[cyan]{policy['allowed']} allowed[/cyan]")
     if policy.get("warning"):
         parts.append(f"[yellow]{policy['warning']} warning[/yellow]")
     if policy.get("clean"):

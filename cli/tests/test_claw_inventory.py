@@ -1746,6 +1746,14 @@ class TestPolicyDetailSuffix(unittest.TestCase):
         result = _policy_detail_suffix(counts)
         self.assertLess(result.index("blocked"), result.index("clean"))
 
+    def test_allowed_items_are_counted(self):
+        # GAP-1748: an allow-listed skill or plugin read "1 scanned" only.
+        result = _policy_detail_suffix({"allowed": 1, "clean": 0})
+        self.assertEqual(result, " · [cyan]1 allowed[/cyan]")
+        result = _policy_detail_suffix({"rejected": 1, "allowed": 2, "clean": 3})
+        self.assertLess(result.index("rejected"), result.index("allowed"))
+        self.assertLess(result.index("allowed"), result.index("clean"))
+
 
 # ---------------------------------------------------------------------------
 # Policy enrichment — enrich_with_policy end-to-end

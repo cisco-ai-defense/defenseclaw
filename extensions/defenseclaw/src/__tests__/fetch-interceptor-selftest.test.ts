@@ -17,7 +17,7 @@ import {
   createFetchInterceptor,
   INTERCEPTION_PROBE_HEADER,
 } from "../fetch-interceptor.js";
-import { logInfo } from "../log.js";
+import { isOpenClawClientProcess, logInfo } from "../log.js";
 
 const guardrailPort = 14173;
 
@@ -91,6 +91,24 @@ describe("OpenClaw interception self-test", () => {
       vi.unstubAllEnvs();
       if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
       else delete (process.stdout as { isTTY?: boolean }).isTTY;
+    }
+  });
+
+  it("keeps routine lines out of OpenClaw CLI commands even when piped (GAP-1737)", () => {
+    expect(isOpenClawClientProcess("openclaw")).toBe(true);
+    expect(isOpenClawClientProcess("openclaw-tui")).toBe(true);
+    expect(isOpenClawClientProcess("openclaw-gateway")).toBe(false);
+    expect(isOpenClawClientProcess("node")).toBe(false);
+    const title = process.title;
+    try {
+      vi.stubEnv("DEFENSECLAW_DEBUG", "");
+      process.title = "openclaw";
+      vi.mocked(console.log).mockClear();
+      logInfo("[defenseclaw] routine");
+      expect(console.log).not.toHaveBeenCalled();
+    } finally {
+      process.title = title;
+      vi.unstubAllEnvs();
     }
   });
 

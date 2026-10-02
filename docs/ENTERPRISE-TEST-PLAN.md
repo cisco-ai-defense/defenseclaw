@@ -2525,7 +2525,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R3 | Amp: no machine plugin path, undefined handler order; another config dir loads no DefenseClaw plugin | Amp |
 | R4 | OpenCode: plugin order undefined on the per-user route; `--pure`, `OPENCODE_PURE=1`, `OPENCODE_TEST_MANAGED_CONFIG_DIR` start without any DefenseClaw plugin | OpenCode |
 | R5 | Hermes blocks only on a valid block answer (and exit 2 from 0.21); other failures and a timeout let the call run (some builds block on a stalled hook timeout, undocumented) | Hermes |
-| R6 | Copilot command hooks that time out fail open | Copilot CLI |
+| R6 | Copilot command hooks that time out: earlier releases ran the call, Copilot CLI 1.0.91 denies it ("hook errored"); record the version | Copilot CLI |
 | R7, L residual 3, macOS residual 6, Windows residual 5 | A user can hold the API port while the gateway restarts (every restart on macOS and Windows; on Linux only after an admin stops the socket unit): availability loss; hooks are unaffected (peer/PID check), but the native OTLP exporters of Codex, Claude Code, OpenHands and OmniGent send telemetry and the sender's per-user telemetry credential to the holder; the Windows Amp and per-user OpenCode listener proof is a separate request from the hook POST | Every OS |
 | R8, Windows residual 13, macOS residual 4 | Hash-pinned (unsigned) payloads do not satisfy publisher-signature application control or Gatekeeper | Windows, macOS |
 | Windows residual 4 | Application control and vendor MDM/GPO policy can add protection against old or copied clients, but are optional | Windows |
