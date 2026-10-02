@@ -535,6 +535,41 @@ def test_setup_wait_does_not_skip_an_idle_opencode_peer(monkeypatch, tmp_path: P
     assert "Re-run setup" not in output
 
 
+def test_setup_wait_skips_a_peer_the_restarted_gateway_refused(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-1710: a fresh roster without Cursor must not fail and roll back setup amp."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("amp", "codex", "cursor")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["amp", "codex"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["amp", "codex", "cursor"], None, None, timeout=0.5, required={"amp"}
+    )
+
+    assert result
+    output = capsys.readouterr().out
+    assert "skipping cursor: the restarted gateway did not activate it" in output
+    assert "defenseclaw setup cursor" in output
+    # The connector being set up is never skipped.
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["codex"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    assert not cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["amp", "codex"], None, None, timeout=0.3, required={"amp"}
+    )
+
+
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(
     monkeypatch,
     tmp_path: Path,
