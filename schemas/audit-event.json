@@ -213,6 +213,7 @@
             "plugin-enable",
             "plugin-quarantine",
             "plugin-restore",
+            "plugin-unblock",
             "block-mcp",
             "allow-mcp",
             "mcp-unblock",

@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -25,7 +26,8 @@ type trustedPOSIXHomeRewrite struct {
 }
 
 // rewriteTrustedPOSIXHomeTilde replaces the leading unquoted "~" of a lone
-// POSIX simple command's "~" and "~/..." operands with the trusted
+// POSIX simple command's "~" and "~/..." operands and "~/..." file redirect
+// targets (`echo x >> ~/.ssh/id_ed25519`, GAP-1666) with the trusted
 // ActiveHome, the one expansion ActionFacts already resolves from it (see
 // projectTrustedPOSIXHomeCatRead).
 //
@@ -34,10 +36,10 @@ type trustedPOSIXHomeRewrite struct {
 // the input can have changed HOME first. The rewrite is therefore limited to
 // one simple command without prefix assignments: no earlier command,
 // pipeline member or assignment runs before its words are expanded. "~user"
-// forms, the command name and redirect targets are left as they are, and so
-// is every other expansion: the caller re-parses the rewritten text and
-// keeps it only when that parse is complete, so a command with any other
-// dynamic word (which could itself assign HOME) stays partial.
+// forms and the command name are left as they are, and so is every other
+// expansion: the caller re-parses the rewritten text and keeps it only when
+// that parse is complete, so a command with any other dynamic word (which
+// could itself assign HOME) stays partial.
 func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRewrite, bool) {
 	if !trustedPOSIXHomeLiteral.MatchString(activeHome) || !strings.Contains(source, "~") {
 		return trustedPOSIXHomeRewrite{}, false
@@ -50,17 +52,24 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	stmt := file.Stmts[0]
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || stmt.Negated || stmt.Background || stmt.Coprocess ||
-		len(call.Assigns) != 0 || len(call.Args) < 2 {
+		len(call.Assigns) != 0 || len(call.Args) == 0 {
 		return trustedPOSIXHomeRewrite{}, false
 	}
+	words := append([]*syntax.Word(nil), call.Args[1:]...)
+	for _, redirect := range stmt.Redirs {
+		switch redirect.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrIn, syntax.ClbOut:
+			if literal, ok := firstLiteral(redirect.Word); ok && strings.HasPrefix(literal.Value, "~/") {
+				words = append(words, redirect.Word)
+			}
+		}
+	}
+	sort.Slice(words, func(i, j int) bool { return words[i].Pos().Offset() < words[j].Pos().Offset() })
 	var out strings.Builder
 	last := 0
 	rewrite := trustedPOSIXHomeRewrite{tildeOperands: map[string]string{}}
-	for _, word := range call.Args[1:] {
-		if word == nil || len(word.Parts) == 0 {
-			continue
-		}
-		literal, ok := word.Parts[0].(*syntax.Lit)
+	for _, word := range words {
+		literal, ok := firstLiteral(word)
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			continue
 		}
@@ -83,6 +92,14 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	out.WriteString(source[last:])
 	rewrite.source = out.String()
 	return rewrite, true
+}
+
+func firstLiteral(word *syntax.Word) (*syntax.Lit, bool) {
+	if word == nil || len(word.Parts) == 0 {
+		return nil, false
+	}
+	literal, ok := word.Parts[0].(*syntax.Lit)
+	return literal, ok
 }
 
 // respellTrustedPOSIXHomeTilde gives the path facts of rewritten operands

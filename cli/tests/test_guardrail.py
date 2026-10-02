@@ -1697,6 +1697,43 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Select mode (1, 2) [2]", result.output)
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
+    def test_interactive_human_approval_flag_preselects_hilt_prompts(self):
+        """GAP-1614: Enter at every prompt keeps --human-approval and
+        --hilt-min-severity instead of the stored HILT values."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connectors = {}
+        gc.connector = "codex"
+        gc.mode = "observe"
+        gc.hilt.enabled = False
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "guardrail", "--mode", "action", "--human-approval",
+                    "--hilt-min-severity", "MEDIUM", "--no-restart",
+                ],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("default to the flags you passed; add --yes to skip them", result.output)
+        self.assertIn("Human approval for risky actions? [Y/n]", result.output)
+        self.assertIn("Approval minimum severity", result.output)
+        self.assertTrue(self.app.cfg.guardrail.hilt.enabled)
+        self.assertEqual(self.app.cfg.guardrail.hilt.min_severity, "MEDIUM")
+
     def test_interactive_multi_connector_uses_per_connector_mode_picker(self):
         """Two configured connectors: the connector picker and singular
         observe/action prompt are skipped, but the wizard offers a

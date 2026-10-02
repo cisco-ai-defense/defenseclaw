@@ -1343,8 +1343,9 @@ function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
     if (Test-Path -LiteralPath (Join-Path $Previous "legacy-setup")) {
-        Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. Its files and " +
-            "your data from before the upgrade are in $Previous; nothing was changed")
+        Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. To go back to it, " +
+            "run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from https://github.com/$Repo/releases/tag/$backTo " +
+            "and run it in your desktop session. Its files and your data from before the upgrade are in $Previous; nothing was changed")
     }
     $current = Get-InstalledVersion
     $currentLabel = if ($current) { $current } else { "?" }

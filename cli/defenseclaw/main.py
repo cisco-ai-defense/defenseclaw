@@ -545,9 +545,25 @@ def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
     _force_utf8_io()
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
     try:
         if not _try_launch_tui():
             cli()
+    except CanonicalObservabilityUnavailableError as exc:
+        # The command's audit event needs the gateway (for example after
+        # init --no-start-gateway): one line with the fix, no traceback
+        # (GAP-1689).
+        click.echo(
+            f"Error: the audit event was not recorded: {exc}. Start the gateway with "
+            "'defenseclaw-gateway start' (or run 'defenseclaw setup gateway' to configure it), "
+            "then run the command again.",
+            err=True,
+        )
+        sys.exit(1)
+    except CanonicalObservabilityError as exc:
+        click.echo(f"Error: the gateway did not confirm the audit event: {exc}", err=True)
+        sys.exit(1)
     except OSError as exc:
         if not _output_pipe_closed(exc):
             raise

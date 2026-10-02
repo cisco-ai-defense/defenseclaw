@@ -149,11 +149,17 @@ type localLogComponent struct {
 func (component *localLogComponent) applyAlertAcknowledgement(
 	ctx context.Context,
 	command audit.AlertAcknowledgementCommand,
-) (audit.AlertAcknowledgementResult, error) {
+) (audit.AlertAcknowledgementResult, pipeline.LocalLogOutcome, error) {
 	if component == nil || component.alertWriter == nil || !component.active.Load() || component.closed.Load() {
-		return audit.AlertAcknowledgementResult{}, &localFactoryError{}
+		return audit.AlertAcknowledgementResult{}, pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
-	return component.alertWriter.ApplyAlertAcknowledgement(ctx, command)
+	result, committed, err := component.alertWriter.ApplyAlertAcknowledgementForExport(ctx, command)
+	if err != nil || committed == nil || component.pipeline == nil {
+		return result, pipeline.LocalLogOutcome{}, err
+	}
+	// The compliance event is already in SQLite; route it to the optional
+	// destinations like any other log (GAP-1635).
+	return result, component.pipeline.ProjectCommitted(ctx, *committed), nil
 }
 
 func (component *localLogComponent) Activate() {

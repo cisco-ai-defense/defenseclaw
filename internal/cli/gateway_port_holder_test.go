@@ -36,6 +36,19 @@ func TestForeignGatewayListenerNamesHolderPID(t *testing.T) {
 	if fix := foreignGatewayListenerFix(c); !strings.Contains(fix, "defenseclaw setup gateway --api-port ") {
 		t.Fatalf("fix = %q, want the setup gateway --api-port command", fix)
 	}
+	// GAP-1706: one command form everywhere, and another account's process
+	// is not this account's to stop.
+	previous := gatewayPortHeldByOtherAccount
+	t.Cleanup(func() { gatewayPortHeldByOtherAccount = previous })
+	for _, other := range []bool{true, false} {
+		gatewayPortHeldByOtherAccount = func(string, int) bool { return other }
+		fix := foreignGatewayListenerFix(c)
+		if !strings.Contains(fix, " --non-interactive, then run: defenseclaw-gateway start") ||
+			strings.HasPrefix(fix, "Stop that process") == other ||
+			strings.Contains(fix, "belongs to another account") != other {
+			t.Fatalf("other account %v: fix = %q", other, fix)
+		}
+	}
 	listener.Close()
 	if problem := foreignGatewayListener(c); problem != "" {
 		t.Fatalf("free port reported as held: %q", problem)

@@ -32,6 +32,15 @@ func TestForeignListenerGetsNoTokenAndIsNamed(t *testing.T) {
 	if !strings.Contains(all, "another account's process (PID 13496)") || strings.Contains(all, "token drift") {
 		t.Fatalf("block text = %q, want the holder named and no token-drift advice", all)
 	}
+	// GAP-1706: the port answers, so the lead does not say "unreachable" and
+	// names the blocked event rather than a tool.
+	if strings.Contains(r.stderr, "gateway unreachable") || !strings.Contains(r.stderr, "defenseclaw: blocking this ") {
+		t.Fatalf("stderr = %q, want a lead naming the blocked event", r.stderr)
+	}
+	if lead := unreachableLead(Options{Event: "UserPromptSubmit"}, spec{subject: "claude-code tool"},
+		foreignListenerReason("127.0.0.1:8787", 1), "blocking"); lead != "blocking this prompt" {
+		t.Fatalf("prompt lead = %q", lead)
+	}
 
 	// A managed hook keeps its own service-listener verification.
 	foreignListenerPID = func(string, int, string) int { t.Fatal("managed hook ran the per-user check"); return 0 }

@@ -171,6 +171,10 @@ func dispatchTrustedAction(
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
+			// pwsh -Command "<body>" without -NoProfile: a profile only runs
+			// more commands before the body, so a match on the body counts.
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
 		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
 			if partialArgv {

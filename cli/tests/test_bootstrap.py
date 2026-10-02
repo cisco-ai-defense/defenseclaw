@@ -1236,6 +1236,42 @@ class FirstRunApiPortTests(unittest.TestCase):
                 bootstrap.remove_own_api_port_claims()
             self.assertEqual(os.listdir(claims), ["unrelated"])
 
+    def test_windows_claims_hold_the_account_sid(self):
+        # GAP-1569: on Windows the claims are in %ProgramData% and name the
+        # claiming account's SID.
+        import tempfile
+
+        from defenseclaw import bootstrap
+
+        own, other = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+        with tempfile.TemporaryDirectory() as claims:
+            for port, sid in ((18970, other), (18980, own)):
+                with open(os.path.join(claims, f"defenseclaw-api-port-{port}"), "w") as handle:
+                    handle.write(sid)
+            with (
+                patch.object(bootstrap.platform_support, "host_os", return_value="windows"),
+                patch.dict(os.environ, {"ProgramData": claims}),
+                patch.object(bootstrap, "_windows_own_sid", return_value=own),
+                patch.object(bootstrap, "_windows_account_exists", side_effect=lambda sid: sid == other),
+            ):
+                self.assertTrue(bootstrap._api_port_claimed_by_other_account(18970))
+                self.assertFalse(bootstrap._api_port_claimed_by_other_account(18980), "own claim")
+                self.assertFalse(bootstrap._api_port_claimed_by_other_account(18990), "no claim")
+                with patch.object(bootstrap, "_windows_account_exists", return_value=False):
+                    self.assertFalse(bootstrap._api_port_claimed_by_other_account(18970), "deleted account")
+                bootstrap.remove_own_api_port_claims()
+            self.assertEqual(os.listdir(claims), ["defenseclaw-api-port-18970"])
+
+    def test_suggested_port_leaves_its_sandbox_ports_free(self):
+        # GAP-1706: the same rule as the gateway's suggestion, so doctor,
+        # status and start name the same port.
+        from defenseclaw import bootstrap
+
+        with patch.object(bootstrap, "_api_port_available", return_value=True), patch.object(
+            bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18982
+        ):
+            self.assertEqual(bootstrap.suggest_free_api_port("127.0.0.1", 18970), 18990)
+
     def test_windows_also_moves_and_probes_the_port_exclusively(self):
         import socket
 
@@ -1330,7 +1366,7 @@ def test_init_waits_past_the_windows_gateway_readiness_wait():
     from defenseclaw import bootstrap
     from defenseclaw.commands import cmd_init
 
-    assert "_GATEWAY_START_TIMEOUT = 300 if os.name == \"nt\" else 90" in inspect.getsource(bootstrap)
+    assert "_GATEWAY_START_TIMEOUT = 660 if os.name == \"nt\" else 90" in inspect.getsource(bootstrap)
     for fn in (bootstrap._start_gateway_structured, cmd_init._start_gateway, cmd_init._restart_gateway_quiet):
         src = inspect.getsource(fn)
         assert "timeout=_GATEWAY_START_TIMEOUT" in src

@@ -1736,7 +1736,10 @@ func TestEventHistoryWriterReportsBoundedProjectionUnsignedAndWriteHealth(t *tes
 	}
 }
 
-func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) {
+// GAP-1537/GAP-1660: any signed commit after a write failure clears it (the
+// gateway kept reporting "audit events cannot be written" while optional
+// rows were being written); a healthy writer reports nothing for it.
+func TestEventHistoryWriterRecoversAfterAnySignedCommitFollowingFailure(t *testing.T) {
 	store := newV8HistoryStore(t)
 	health := &testEventHistoryHealthReporter{}
 	writer, err := NewEventHistoryWriterForGeneration(
@@ -1753,6 +1756,13 @@ func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) 
 		WHEN NEW.id = 'history-recovery-failure' BEGIN SELECT RAISE(ABORT, 'private path'); END`); err != nil {
 		t.Fatal(err)
 	}
+	healthy := newV8HistoryRecord(t, "history-recovery-healthy", "private")
+	if err := writer.Append(healthy, projectV8HistoryRecord(t, healthy, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	if len(health.transitions) != 0 {
+		t.Fatalf("optional commit of a healthy writer reported health: %+v", health.transitions)
+	}
 	failed := newV8HistoryRecord(t, "history-recovery-failure", "private")
 	if err := writer.Append(failed, projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone)); err == nil {
 		t.Fatal("write failure was hidden")
@@ -1763,9 +1773,6 @@ func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) 
 	}
 	if err := writer.Append(optional, projectV8HistoryRecord(t, optional, observabilityredaction.ProfileNone)); err != nil {
 		t.Fatal(err)
-	}
-	if len(health.transitions) != 1 {
-		t.Fatalf("optional signed commit recovered write health: %+v", health.transitions)
 	}
 	mandatory := newMandatoryV8HistoryRecord(t, "history-recovery-mandatory")
 	if err := writer.Append(mandatory, projectV8HistoryRecord(t, mandatory, observabilityredaction.ProfileNone)); err != nil {
