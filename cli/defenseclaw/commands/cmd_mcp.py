@@ -165,10 +165,14 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     allow_legacy_plain=allow_legacy_plain_scans,
                 )
                 actions_map = _build_mcp_actions_map(app.store, c)
+                failed_map = _build_mcp_failed_scan_map(
+                    app.store, servers, c,
+                    allow_legacy_plain=allow_legacy_plain_scans,
+                )
                 groups.append({
                     "connector": c,
                     "mcp_servers": _mcp_list_json_items(
-                        servers, scan_map, actions_map, connector=c,
+                        servers, scan_map, actions_map, connector=c, failed_map=failed_map,
                     ),
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -186,12 +190,16 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 allow_legacy_plain=allow_legacy_plain_scans,
             )
             actions_map = _build_mcp_actions_map(app.store, connectors[0])
+            failed_map = _build_mcp_failed_scan_map(
+                app.store, servers, connectors[0],
+                allow_legacy_plain=allow_legacy_plain_scans,
+            )
             # Flat shape (no per-connector wrapper) keeps single-connector
             # installs byte-compatible with the pre-fan-out output. An explicit
             # --connector request gets an envelope even when empty so JSON
             # automation never has to remember argv to know the scope.
             items = _mcp_list_json_items(
-                servers, scan_map, actions_map, connector=connectors[0],
+                servers, scan_map, actions_map, connector=connectors[0], failed_map=failed_map,
             )
             payload = (
                 {"connector": connectors[0], "mcp_servers": items}
@@ -207,6 +215,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     shown_any = False
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
+    failed_rows: list[tuple[str, str]] = []
     for connector in connectors:
         locations, servers, diagnostics = _collect_mcp_discovery(app, connector)
         source_diagnostics.extend((connector, diagnostic) for diagnostic in diagnostics)
@@ -235,9 +244,22 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 f"(checked: {_mcp_source_hint(app, connector)}).",
             )
             continue
-        _print_mcp_list_table(servers, scan_map, actions_map, connector)
+        failed_map = _build_mcp_failed_scan_map(
+            app.store, servers, connector,
+            allow_legacy_plain=allow_legacy_plain_scans,
+        )
+        _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
+        failed_rows.extend((connector, name) for name in failed_map)
         shown_any = True
 
+    if failed_rows:
+        # GAP-1906: a server whose last scan failed is unverified, not "never scanned".
+        ux.warn(
+            f"{len(failed_rows)} MCP server(s) could not be scanned (last scan failed): "
+            + ", ".join(f"{name} ({connector})" for connector, name in failed_rows)
+        )
+        connector, name = failed_rows[0]
+        ux.subhead(f"Fix reachability, then scan again: defenseclaw mcp scan {name} --connector {connector}")
     if shown_any:
         from defenseclaw.commands import hint
         hint("Scan all servers:  defenseclaw mcp scan --all")
@@ -351,12 +373,17 @@ def _mcp_source_hint(app: AppContext, connector: str) -> str:
     return rendered
 
 
+def _has_enforcement_action(action_entry) -> bool:
+    return bool(action_entry and not action_entry.actions.is_empty())
+
+
 def _mcp_list_json_items(
     servers: list[MCPServerEntry],
     scan_map: dict[str, dict],
     actions_map: dict,
     *,
     connector: str = "",
+    failed_map: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Build the flat JSON item list for one connector's MCP servers.
 
@@ -390,6 +417,10 @@ def _mcp_list_json_items(
         verdict_label, _ = _compute_verdict(
             actions_map.get(s.name), scan_map.get(s.name),
         )
+        if failed_map and s.name in failed_map:
+            entry["last_scan_error"] = failed_map[s.name]["error"]
+            if not _has_enforcement_action(actions_map.get(s.name)):
+                verdict_label = "scan failed"
         if connector_paths.is_bundled_mcp_server(s, connector=connector):
             entry["bundled"] = True
             verdict_label = "bundled"
@@ -403,6 +434,7 @@ def _print_mcp_list_table(
     scan_map: dict[str, dict],
     actions_map: dict,
     connector: str,
+    failed_map: dict[str, dict] | None = None,
 ) -> None:
     """Render one connector-tagged MCP server table."""
     from rich.console import Console
@@ -440,6 +472,8 @@ def _print_mcp_list_table(
         verdict_label, verdict_style = _compute_verdict(
             actions_map.get(s.name), scan_map.get(s.name),
         )
+        if failed_map and s.name in failed_map and not _has_enforcement_action(actions_map.get(s.name)):
+            verdict_label, verdict_style = "scan failed", "yellow"
         if connector_paths.is_bundled_mcp_server(s, connector=connector):
             verdict_label, verdict_style = "bundled", "cyan"
 
@@ -522,26 +556,12 @@ def _build_mcp_scan_map(
     scan_rank: dict[str, int] = {}
     for ls in latest:
         target = ls["target"]
-        if target in url_to_name:
-            name = url_to_name[target]
-            rank = 1
-        else:
-            scoped_connector, scoped_name = _parse_mcp_scoped_scan_target(target)
-            if scoped_connector:
-                if (
-                    normalized_connector
-                    and scoped_connector == normalized_connector
-                    and scoped_name in configured_names
-                ):
-                    name = scoped_name
-                    rank = 2
-                else:
-                    continue
-            elif "/" not in target and allow_legacy_plain:
-                name = target
-                rank = 0
-            else:
-                continue
+        matched = _mcp_scan_target_name(
+            target, url_to_name, configured_names, normalized_connector, allow_legacy_plain,
+        )
+        if matched is None:
+            continue
+        name, rank = matched
         if rank < scan_rank.get(name, -1):
             continue
         finding_count = ls["finding_count"]
@@ -553,6 +573,55 @@ def _build_mcp_scan_map(
         }
         scan_rank[name] = rank
     return scan_map
+
+
+def _mcp_scan_target_name(
+    target: str,
+    url_to_name: dict[str, str],
+    configured_names: set[str],
+    normalized_connector: str,
+    allow_legacy_plain: bool,
+) -> tuple[str, int] | None:
+    """Map a stored mcp-scanner target to ``(server name, match rank)``."""
+    if target in url_to_name:
+        return url_to_name[target], 1
+    scoped_connector, scoped_name = _parse_mcp_scoped_scan_target(target)
+    if scoped_connector:
+        if normalized_connector and scoped_connector == normalized_connector and scoped_name in configured_names:
+            return scoped_name, 2
+        return None
+    if "/" not in target and allow_legacy_plain:
+        return target, 0
+    return None
+
+
+def _build_mcp_failed_scan_map(
+    store, servers: list[MCPServerEntry], connector: str = "",
+    *, allow_legacy_plain: bool | None = None,
+) -> dict[str, dict]:
+    """Map server-name -> latest scan when that scan failed (GAP-1906)."""
+    if store is None or not hasattr(store, "latest_failed_scans_by_scanner"):
+        return {}
+    try:
+        failed = store.latest_failed_scans_by_scanner("mcp-scanner")
+    except Exception:
+        return {}
+    url_to_name = {s.url: s.name for s in servers if s.url}
+    configured_names = {s.name for s in servers}
+    normalized_connector = connector_paths.normalize(connector) if connector else ""
+    if allow_legacy_plain is None:
+        allow_legacy_plain = not bool(normalized_connector)
+    out: dict[str, dict] = {}
+    rank_of: dict[str, int] = {}
+    for row in failed:
+        matched = _mcp_scan_target_name(
+            row["target"], url_to_name, configured_names, normalized_connector, allow_legacy_plain,
+        )
+        if matched is None or matched[1] < rank_of.get(matched[0], -1):
+            continue
+        out[matched[0]] = row
+        rank_of[matched[0]] = matched[1]
+    return out
 
 
 def _effective_mcp_action_entry(
