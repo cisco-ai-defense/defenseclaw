@@ -793,7 +793,13 @@ def disable_cmd(
 
     click.echo()
     click.echo(f"  {ux.bold('Disabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
-    if restart:
+    if restart and not _gateway_running(app):
+        # GAP-1370: say plainly that a stopped gateway gets started.
+        ux.subhead(
+            "The gateway is stopped; it will be started so the connector teardown runs now.",
+            indent="  ",
+        )
+    elif restart:
         ux.subhead(
             "Will restart the gateway so the connector teardown runs immediately.",
             indent="  ",
@@ -1237,11 +1243,19 @@ def _apply_global_fail_mode_transaction(
 
         if restart and gc.enabled:
             used_full_restart = False
+            gateway_stopped = False
             try:
                 runtime_targets = [
                     name for name in transaction_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
                 ]
                 if transaction_targets and len(runtime_targets) == len(transaction_targets):
+                    for name in runtime_targets:
+                        reconcile_connector_registration(app.cfg, name)
+                elif not _gateway_running(app):
+                    # GAP-1370: like the --connector form, never start a
+                    # gateway the user stopped; it loads the saved value
+                    # when it starts.
+                    gateway_stopped = True
                     for name in runtime_targets:
                         reconcile_connector_registration(app.cfg, name)
                 else:
@@ -1293,7 +1307,10 @@ def _apply_global_fail_mode_transaction(
                         raise click.Abort() from rollback_exc
                 ux.err(f"Fail-mode update failed; previous config and registration restored: {exc}", indent="  ")
                 raise click.Abort() from exc
-            ux.ok("Selected connector runtime registrations refreshed and verified.", indent="  ")
+            if gateway_stopped:
+                _note_applies_on_start("new fail mode")
+            else:
+                ux.ok("Selected connector runtime registrations refreshed and verified.", indent="  ")
             click.echo()
         elif not restart:
             ux.warn(
@@ -1468,8 +1485,13 @@ def fail_mode_cmd(
         click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
         for name in fail_mode_targets:
             old = target_modes.get(name, current)
-            if old != mode:
-                click.echo(f"      - {_connector_label(name)} ({name}): {old} {ux.dim('→')} {ux.accent(mode)}")
+            # Show what guardrail status shows: an observe connector without
+            # its own value already runs fail-open (GAP-1370).
+            shown = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else old
+            if old != mode and shown == mode:
+                click.echo(f"      - {_connector_label(name)} ({name}): already {mode}; saved as its own setting")
+            elif old != mode:
+                click.echo(f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}")
             elif not runtime_states[name].current:
                 click.echo(f"      - {_connector_label(name)} ({name}): reconcile stale runtime")
     elif current == mode:
@@ -2068,7 +2090,9 @@ def _set_connector_block_message(
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
 
-    if restart and gc.enabled:
+    if restart and gc.enabled and not _gateway_running(app):
+        _note_applies_on_start(f"{label} block message")
+    elif restart and gc.enabled:
         from defenseclaw.commands import cmd_setup
 
         cmd_setup._restart_services(
@@ -2276,7 +2300,9 @@ def block_message_cmd(
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
 
-    if restart and gc.enabled:
+    if restart and gc.enabled and not _gateway_running(app):
+        _note_applies_on_start("block message")
+    elif restart and gc.enabled:
         from defenseclaw.commands import cmd_setup
 
         cmd_setup._restart_services(
@@ -2582,6 +2608,15 @@ def _gateway_running(app: AppContext) -> bool:
         return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
     except Exception:  # noqa: BLE001 — an unreadable PID file means "not running".
         return False
+
+
+def _note_applies_on_start(what: str) -> None:
+    """A saved change for a stopped gateway, which is never started here (GAP-1370)."""
+    ux.ok(
+        f"Saved. The gateway is not running, so it was left stopped; the {what} applies "
+        "once it starts: defenseclaw-gateway start",
+        indent="  ",
+    )
 
 
 def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: bool, quiet: bool) -> str:
