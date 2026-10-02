@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from contextlib import closing, nullcontext
 from pathlib import Path
 
@@ -200,18 +201,40 @@ def test_audit_db_inspection_checks_large_files_within_the_time_budget(tmp_path:
     assert health.integrity_scanned is True
 
 
-def test_audit_db_inspection_reports_unverified_when_the_time_budget_runs_out(
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 44, 0),
+    reason="SQLite before 3.44 does not poll interrupts inside the integrity walk",
+)
+def test_audit_db_inspection_stops_a_slow_walk_at_the_time_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # SWEEP-10: on a cold cache every page read was slow and a progress handler
+    # counted in VDBE steps let the walk run 29-46 s past the 5 s budget.
     data_dir = _private_data_dir(tmp_path)
     target = data_dir / "audit.db"
     plan = plan_missing_audit_db(target, data_dir=data_dir)
     apply_audit_db_recovery(plan, approved=True, unattended=True)
-    monkeypatch.setattr(recovery, "_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS", 0.0)
-    monkeypatch.setattr(recovery, "_AUDIT_INTEGRITY_PROGRESS_OPCODES", 1)
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("CREATE TABLE bulk (payload TEXT)")
+        connection.executemany("INSERT INTO bulk VALUES (?)", [("x" * 200,)] * 20_000)
+        connection.commit()
+    real_connect = sqlite3.connect
 
+    def slow_reads(*args, **kwargs):
+        # The walk polls this handler about once per b-tree cell, so a sleep
+        # here stands in for a slow page read (minutes for the whole walk).
+        connection = real_connect(*args, **kwargs)
+        connection.set_progress_handler(lambda: time.sleep(0.002) or 0, 1)
+        return connection
+
+    monkeypatch.setattr(recovery.sqlite3, "connect", slow_reads)
+    monkeypatch.setattr(recovery, "_AUDIT_INTEGRITY_TIME_BUDGET_SECONDS", 1.5)
+
+    started = time.monotonic()
     health = inspect_audit_db(target, data_dir=data_dir)
+    elapsed = time.monotonic() - started
 
+    assert elapsed < 5.0
     assert health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED
     assert health.reason_code == "audit-db-integrity-unverified"
     assert health.integrity_scanned is False
