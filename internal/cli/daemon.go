@@ -922,7 +922,7 @@ func daemonConfigLoadError(verb string, err error) error {
 	}
 	untouched := ""
 	if verb == "restart" {
-		untouched = " The running gateway was left as it is."
+		untouched = " Nothing was stopped."
 	}
 	return fmt.Errorf(
 		"cannot %s the gateway: %s does not load: %w.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",

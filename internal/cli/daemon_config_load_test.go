@@ -46,7 +46,7 @@ func TestRunRestartRefusesCorruptConfigBeforeStoppingGateway(t *testing.T) {
 	if err == nil {
 		t.Fatal("runRestart with a corrupt config.yaml succeeded")
 	}
-	for _, want := range []string{"cannot restart the gateway", "config.yaml does not load", "defenseclaw config validate", "left as it is"} {
+	for _, want := range []string{"cannot restart the gateway", "config.yaml does not load", "defenseclaw config validate", "Nothing was stopped"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
@@ -67,7 +67,7 @@ func TestDaemonConfigLoadErrorNamesTheConfig(t *testing.T) {
 	err := daemonConfigLoadError("start", os.ErrInvalid)
 	if err == nil || !strings.Contains(err.Error(), "cannot start the gateway") ||
 		!strings.Contains(err.Error(), "then run: defenseclaw-gateway start") ||
-		strings.Contains(err.Error(), "left as it is") {
+		strings.Contains(err.Error(), "Nothing was stopped") {
 		t.Fatalf("start refusal = %v", err)
 	}
 }
