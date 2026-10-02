@@ -2094,10 +2094,11 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
     for name in connectors:
         if gateway_supported:
+            errors: list[str] = []
             teardown_ok = (
-                _run_gateway_connector_teardown(name, plan=plan)
+                _run_gateway_connector_teardown(name, plan=plan, errors=errors)
                 if plan.gateway_path
-                else _run_gateway_connector_teardown(name)
+                else _run_gateway_connector_teardown(name, errors=errors)
             )
             if teardown_ok:
                 continue
@@ -2114,10 +2115,12 @@ def _connector_teardown(plan: UninstallPlan) -> None:
                 continue
             ux.warn(f"gateway connector teardown for {name} reported errors — see output above")
             if name != "openclaw":
+                reason = f" ({errors[-1]})" if errors else ""
                 raise click.ClickException(
-                    f"aborting uninstall: {name} teardown failed, so "
+                    f"aborting uninstall: {name} teardown failed{reason}, so "
                     "DefenseClaw will not remove data or binaries that may be "
-                    "needed to restore the agent configuration"
+                    "needed to restore the agent configuration. No data or binaries "
+                    "were removed; fix the error and run the same uninstall command again"
                 )
 
         if name in _PYTHON_FALLBACK_CONNECTORS:
@@ -2166,13 +2169,32 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
     return proc.returncode == _GATEWAY_UNKNOWN_CONNECTOR_EXIT and "unknown connector" in (proc.stderr or "")
 
 
-def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | None = None) -> bool:
+def _run_gateway_connector_teardown(
+    connector: str,
+    *,
+    plan: UninstallPlan | None = None,
+    errors: list[str] | None = None,
+) -> bool:
     """Invoke ``defenseclaw-gateway connector teardown --connector <name>``.
 
     Returns True on success (rc == 0), False on any error. stdout/stderr
     is forwarded to the operator so they can see exactly what each
-    adapter restored.
+    adapter restored. On failure the one-line reason is appended to
+    *errors*, so the final abort message can name it.
     """
+
+    def failed(detail: str) -> bool:
+        if errors is not None and detail.strip():
+            errors.append(detail.strip())
+        return False
+
+    def last_line(*texts: str | None) -> str:
+        for text in texts:
+            lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+        return ""
+
     gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
@@ -2193,7 +2215,7 @@ def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | Non
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")
-        return False
+        return failed(f"teardown did not run: {exc}")
     if proc.stdout:
         for line in proc.stdout.splitlines():
             click.echo(f"  {ux.dim('·')} {line}")
@@ -2219,14 +2241,14 @@ def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | Non
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             ux.warn(f"gateway connector verification failed to launch: {exc}")
-            return False
+            return failed(f"verification did not run: {exc}")
         if verified.returncode != 0:
             detail = (verified.stderr or verified.stdout or "residual connector state").strip()
             ux.warn(f"{connector} teardown verification failed: {detail}")
-            return False
+            return failed(last_line(detail))
         ux.ok(f"{connector} teardown via gateway sentinel")
         return True
-    return False
+    return failed(last_line(proc.stderr, proc.stdout))
 
 
 def _revert_openclaw_python(plan: UninstallPlan) -> None:

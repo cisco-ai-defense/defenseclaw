@@ -1135,6 +1135,27 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
             openclaw_home="/tmp/.openclaw",
         )
 
+    def test_failed_teardown_abort_names_the_error_and_the_retry(self):
+        # GAP-1048: only the last lines of the uninstall output were kept, and
+        # they did not say what failed or what to do next.
+        completed = type(
+            "Completed",
+            (),
+            {"returncode": 1, "stdout": "", "stderr": "Error: failed to open audit store: disk image is malformed\n"},
+        )()
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_gateway_connector_is_unknown", return_value=False),
+            patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"),
+            patch("subprocess.run", return_value=completed),
+            capture_click_output(),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_uninstall._connector_teardown(self._plan("claudecode"))
+        text = str(raised.exception)
+        self.assertIn("claudecode teardown failed (Error: failed to open audit store", text)
+        self.assertIn("run the same uninstall command again", text)
+
     def test_uses_gateway_sentinel_when_supported(self):
         with (
             patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
@@ -1142,7 +1163,7 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback,
         ):
             cmd_uninstall._connector_teardown(self._plan("codex"))
-            run_mock.assert_called_once_with("codex")
+            run_mock.assert_called_once_with("codex", errors=[])
             fallback.assert_not_called()
 
     def test_falls_back_to_python_for_openclaw_when_gateway_old(self):
