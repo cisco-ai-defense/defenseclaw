@@ -219,7 +219,14 @@ type SidecarHealth struct {
 	observabilityV8RetentionDays          int64
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
-	managed                               *SubsystemHealth
+	// observabilityV8LastChange is when the latest event-history or
+	// destination health change happened. telemetryShownState and
+	// telemetryShownSince remember the telemetry state the last snapshot
+	// rendered and when it began, so "since" moves with each change (GAP-1800).
+	observabilityV8LastChange time.Time
+	telemetryShownState       SubsystemState
+	telemetryShownSince       time.Time
+	managed                   *SubsystemHealth
 	// enumerator tracks the DefenseClawHookEnumerator SCM service
 	// (spec 005 Workstream D). Nil until SetEnumerator is called at
 	// least once — a nil pointer omits the "enumerator" block from
@@ -792,6 +799,8 @@ func (h *SidecarHealth) bindObservabilityV8HealthSource(source observabilityV8He
 	h.mu.Lock()
 	h.observabilityV8Source = source
 	h.telemetry = SubsystemHealth{State: StateRunning, Since: time.Now()}
+	h.telemetryShownState, h.telemetryShownSince = StateRunning, h.telemetry.Since
+	h.observabilityV8LastChange = time.Time{}
 	if h.observabilityV8Failures == nil {
 		h.observabilityV8Failures = make(map[string]observabilityV8FailureObservation)
 	}
@@ -812,6 +821,7 @@ func (h *SidecarHealth) clearObservabilityV8HealthSource() {
 		h.observabilityV8EventHistoryGeneration = 0
 		h.observabilityV8EventHistory = nil
 		h.telemetry = SubsystemHealth{State: StateStopped, Since: time.Now()}
+		h.telemetryShownState, h.telemetryShownSince = "", time.Time{}
 		changed = true
 	}
 	h.mu.Unlock()
@@ -853,6 +863,7 @@ func (h *SidecarHealth) observeObservabilityV8Failure(
 	h.observabilityV8Failures[destination] = observabilityV8FailureObservation{
 		generation: generation, code: code, occurredAt: occurredAt.UTC(),
 	}
+	h.noteObservabilityV8ChangeLocked(occurredAt)
 	h.mu.Unlock()
 	h.notifySubscribers()
 }
@@ -930,8 +941,34 @@ func (h *SidecarHealth) observeObservabilityV8EventHistory(
 		observation.lastFailurePrimary = transition.SQLitePrimaryCode
 	}
 	h.observabilityV8EventHistory[code] = observation
+	h.noteObservabilityV8ChangeLocked(transition.OccurredAt)
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) noteObservabilityV8ChangeLocked(at time.Time) {
+	if at.After(h.observabilityV8LastChange) {
+		h.observabilityV8LastChange = at
+	}
+}
+
+// telemetrySince returns when the rendered telemetry state began. The bind
+// time holds until the state changes; a change dates from the health event
+// behind it (now, when none is newer). Keeping the bind time made a recovered
+// audit store read "RUNNING since" the start of the outage (GAP-1800).
+func (h *SidecarHealth) telemetrySince(state SubsystemState, fallback time.Time) time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.telemetryShownState == "" {
+		h.telemetryShownState, h.telemetryShownSince = state, fallback
+	} else if state != h.telemetryShownState {
+		since := h.observabilityV8LastChange
+		if !since.After(h.telemetryShownSince) {
+			since = time.Now()
+		}
+		h.telemetryShownState, h.telemetryShownSince = state, since
+	}
+	return h.telemetryShownSince
 }
 
 func (h *SidecarHealth) bindObservabilityV8EventHistoryGeneration(generation uint64) {
@@ -1529,6 +1566,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
 		}
+		snap.Telemetry.Since = h.telemetrySince(snap.Telemetry.State, snap.Telemetry.Since)
 	}
 
 	return snap
