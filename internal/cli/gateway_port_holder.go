@@ -34,13 +34,20 @@ var (
 // holder is named by PID and program (GAP-1344): status showed another
 // account's gateway on this account's port as this account's, rc 0.
 func foreignGatewayListener(cfg *config.Config) string {
-	if cfg == nil || cfg.StandaloneEnterprise() ||
-		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) ||
-		managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg == nil {
 		return ""
 	}
-	port := cfg.Gateway.APIPort
-	host := gatewayClientHost(cfg)
+	return foreignGatewayListenerAt(cfg, gatewayClientHost(cfg), cfg.Gateway.APIPort)
+}
+
+// foreignGatewayListenerAt is foreignGatewayListener for the API listener at
+// host:port, for a caller that resolved the address from its own view of the
+// configuration (the observability-v8 helpers). cfg may be nil.
+func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string {
+	if (cfg != nil && (cfg.StandaloneEnterprise() || managed.IsManagedEnterprise(cfg.DeploymentMode))) ||
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return ""
+	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing

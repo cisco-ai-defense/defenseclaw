@@ -4848,6 +4848,16 @@ def _dedup_mcp_entries(entries: list[MCPServerEntry]) -> list[MCPServerEntry]:
 # ---------------------------------------------------------------------------
 
 
+class MCPServerNotRemovedError(RuntimeError):
+    """Raised by an MCP unset that leaves the server in the connector's config.
+
+    DefenseClaw removes only an entry it still owns. Once the file changed
+    after DefenseClaw wrote the entry (Claude Code rewrites ``~/.claude.json``
+    as it runs), the entry is left in place, and the caller must not report
+    it removed.
+    """
+
+
 class MCPWriteUnsupportedError(RuntimeError):
     """Raised when MCP set/unset is requested for a connector that
     doesn't expose a programmatic write surface.
@@ -7745,6 +7755,16 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
         if not state["managed"]:
             _finish_claude_mcp_episode(path, None, released)
             if target_was_owned or name in released:
+                # The file changed since DefenseClaw wrote the entry, so it
+                # is no longer DefenseClaw's to remove (GAP-1400): say so
+                # rather than let the caller report it removed.
+                servers = data.get("mcpServers")
+                if isinstance(servers, dict) and name in servers:
+                    raise MCPServerNotRemovedError(
+                        f"{path} changed after DefenseClaw added {name!r} (Claude Code rewrites it as it runs), "
+                        "so DefenseClaw no longer owns the entry and left it in place; "
+                        f"remove it with: claude mcp remove {name} -s user"
+                    )
                 return False
             return _unset_claude_without_state(path, name, raw, data, released)
 

@@ -79,6 +79,15 @@ esac`,
 		{name: "--permission-mode", value: func(v string) bool { return strings.TrimSpace(v) == "bypassPermissions" }},
 	},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
+		if cp.ProfileID == profiles.ClaudeBedrockMantleID {
+			if model, _ := claudeCodeModelArg(opts.Args); model != "" {
+				if mantle, ok := MantleClaudeModel(model); ok {
+					return nil, fmt.Errorf("--model %s is an Amazon Bedrock Runtime model id, but this sandbox reaches Bedrock through the Mantle "+
+						"Anthropic route, which names that model %s: run with -- --model %s, or without --model for %s",
+						model, mantle, mantle, ClaudeCodeMantleDefaultModel)
+				}
+			}
+		}
 		argv := []string{ClaudeCodeLauncherPath}
 		if opts.Yolo {
 			argv = append(argv, "--dangerously-skip-permissions")
@@ -132,6 +141,39 @@ esac`,
 // ClaudeCodeMantleDefaultModel is the model Claude Code runs on Amazon
 // Bedrock Mantle unless the caller picks another with --model.
 const ClaudeCodeMantleDefaultModel = "anthropic.claude-sonnet-5"
+
+// bedrockRuntimeClaudeModel matches an Amazon Bedrock Runtime Claude model
+// id: an optional inference-profile prefix (us., eu., global., ...) and an
+// optional -YYYYMMDD-vN:M version, around the Mantle id.
+var bedrockRuntimeClaudeModel = regexp.MustCompile(`^(?:[a-z]{2,6}(?:-[a-z]+)?\.)?(anthropic\.claude-[a-z0-9-]+?)(?:-[0-9]{8}-v[0-9]+(?::[0-9]+)?)?$`)
+
+// MantleClaudeModel returns the Mantle id of a Bedrock Runtime Claude model
+// id (us.anthropic.claude-haiku-4-5-20251001-v1:0 is
+// anthropic.claude-haiku-4-5), and false for a Mantle id or any other name.
+func MantleClaudeModel(model string) (string, bool) {
+	m := bedrockRuntimeClaudeModel.FindStringSubmatch(model)
+	if m == nil || m[1] == model {
+		return "", false
+	}
+	return m[1], true
+}
+
+// LaunchEnvProblem refuses --env settings that move a harness off the
+// provider route its credential profile runs it on: on the Mantle profile a
+// Bedrock API key reaches Claude Code as an Anthropic key, and
+// CLAUDE_CODE_USE_BEDROCK would send it to bedrock-runtime with AWS
+// credentials the sandbox does not have (GAP-1286).
+func LaunchEnvProblem(profileID string, env map[string]string) error {
+	if profileID != profiles.ClaudeBedrockMantleID {
+		return nil
+	}
+	if _, set := env["CLAUDE_CODE_USE_BEDROCK"]; set {
+		return fmt.Errorf("--env CLAUDE_CODE_USE_BEDROCK: this sandbox runs Claude Code on Amazon Bedrock through the Mantle Anthropic route " +
+			"with your Bedrock API key (AWS_BEARER_TOKEN_BEDROCK); CLAUDE_CODE_USE_BEDROCK switches Claude Code to bedrock-runtime " +
+			"with AWS credentials, which the sandbox does not have. Leave it out")
+	}
+	return nil
+}
 
 // ClaudeCodeLauncherPath is the in-image Claude Code launcher.
 const ClaudeCodeLauncherPath = LauncherDir + "/claudecode-launch"

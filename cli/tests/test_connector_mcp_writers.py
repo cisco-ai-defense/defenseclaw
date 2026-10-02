@@ -403,10 +403,34 @@ class TestClaudeCodeWrites:
         external["mcpServers"]["managed"] = {"command": "operator-replacement"}
         settings.write_text(json.dumps(external), encoding="utf-8")
 
-        unset_mcp_server("claudecode", "managed")
+        # GAP-1400: the entry stays, and the unset says so.
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove managed -s user"):
+            unset_mcp_server("claudecode", "managed")
 
         result = json.loads(settings.read_text(encoding="utf-8"))
         assert result["mcpServers"]["managed"] == {"command": "operator-replacement"}
+
+    def test_unset_after_claude_rewrites_settings_reports_entry_kept(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        # GAP-1400: Claude Code rewrites ~/.claude.json (a new file with its
+        # own state added); the entry stays and unset must not claim success.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
+        settings = tmp_path / ".claude.json"
+
+        set_mcp_server("claudecode", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})
+        rewritten = json.loads(settings.read_text(encoding="utf-8"))
+        rewritten["numStartups"] = 3
+        staged = settings.with_name(".claude.json.tmp")
+        staged.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
+        os.replace(staged, settings)
+
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
+            unset_mcp_server("claudecode", "deepwiki")
+        assert "deepwiki" in json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]
 
     @pytest.mark.parametrize("first_unset", ["first", "second"])
     def test_multiple_managed_servers_restore_only_after_last_unset(
@@ -1828,7 +1852,9 @@ class TestClaudeCodeWrites:
         replacement.write_bytes(managed_bytes)
         os.replace(replacement, settings)
 
-        unset_mcp_server("claudecode", "demo")
+        # GAP-1400: the replaced file keeps the entry, and the unset says so.
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns the entry"):
+            unset_mcp_server("claudecode", "demo")
 
         assert settings.exists()
         assert settings.read_bytes() == managed_bytes

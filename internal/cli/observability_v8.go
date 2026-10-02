@@ -116,6 +116,12 @@ var (
 	errObservabilityV8GatewayAccessAuth   = errors.New("observability-v8 gateway authentication is unavailable")
 )
 
+// observabilityV8ForeignListenerError means the API port is held by a
+// process that is not this account's gateway, so the bearer was not sent.
+type observabilityV8ForeignListenerError struct{ problem string }
+
+func (e *observabilityV8ForeignListenerError) Error() string { return e.problem }
+
 type traceCanaryHelperResult struct {
 	Destination  string `json:"destination,omitempty"`
 	TraceID      string `json:"trace_id,omitempty"`
@@ -265,8 +271,12 @@ func requestTraceCanary(
 	}
 	access, err := observabilityV8GatewayAccessForConfig(loaded)
 	if err != nil {
-		if errors.Is(err, errObservabilityV8GatewayAccessAuth) {
+		var foreign *observabilityV8ForeignListenerError
+		switch {
+		case errors.Is(err, errObservabilityV8GatewayAccessAuth):
 			return traceCanaryFailure(destination, "authentication_unavailable")
+		case errors.As(err, &foreign):
+			return traceCanaryFailure(destination, "gateway_not_this_account")
 		}
 		return traceCanaryFailure(destination, "configuration_unavailable")
 	}
@@ -374,6 +384,12 @@ func observabilityV8GatewayAccessForConfig(loaded *loadedConfigV8File) (observab
 	if token == "" {
 		return observabilityV8GatewayAccess{}, errObservabilityV8GatewayAccessAuth
 	}
+	// The bearer goes only to this account's gateway: another account's
+	// process on the API port would collect it (GAP-1563, as GAP-1260 for
+	// the Python client and the hooks).
+	if problem := foreignGatewayListenerAt(loaded.runtime, dialHost, loaded.gatewayAPIPort); problem != "" {
+		return observabilityV8GatewayAccess{}, &observabilityV8ForeignListenerError{problem: problem}
+	}
 	return observabilityV8GatewayAccess{host: dialHost, port: loaded.gatewayAPIPort, token: token}, nil
 }
 
@@ -408,6 +424,12 @@ func observabilityV8LoopbackDialHost(bind string) (string, bool) {
 
 func destinationTestAccess(loaded *loadedConfigV8File) (observabilityV8GatewayAccess, error) {
 	access, err := observabilityV8GatewayAccessForConfig(loaded)
+	var foreign *observabilityV8ForeignListenerError
+	if errors.As(err, &foreign) {
+		return observabilityV8GatewayAccess{}, errors.New(
+			"destination-test compliance recorder is unavailable: " + foreign.problem + "; the gateway token was not sent",
+		)
+	}
 	if errors.Is(err, errObservabilityV8GatewayAccessAuth) {
 		return observabilityV8GatewayAccess{}, errors.New(
 			"destination-test compliance authentication is unavailable; set DEFENSECLAW_GATEWAY_TOKEN or run defenseclaw setup gateway",

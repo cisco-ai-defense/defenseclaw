@@ -861,6 +861,17 @@ def sync_cmd(  # noqa: PLR0913
             ))
         cfg.save()
 
+    # A sync can promote entries into asset_policy.<type>.registry, which
+    # admission reads: audit every run with what it changed (GAP-1518).
+    if app.logger:
+        for r in reports:
+            app.logger.log_action(
+                "registry-sync", "config",
+                f"id={r.source_id} fetched={r.fetched} scanned={r.scanned} "
+                f"promoted_skills={r.promoted_skills} promoted_mcps={r.promoted_mcps} "
+                f"blocked={r.blocked} errors={len(r.errors)} promote={'off' if no_promote else 'on'}",
+            )
+
     if emit_json:
         _emit_json([r.to_dict() for r in reports])
     else:
@@ -1581,6 +1592,14 @@ def require_cmd(
         if result.storage_key is not None
         else f"asset_policy.{asset}"
     )
+    # Turning the requirement on can block every asset at admission: audit
+    # each toggle like the other registry changes (GAP-1518).
+    if app.logger:
+        affected = ",".join(f"{c.connector}:{c.status}" for c in result.connectors) or "-"
+        app.logger.log_action(
+            "registry-require", "config",
+            f"scope={scope_label}.registry required={'true' if enabled else 'false'} connectors={affected}",
+        )
 
     # Messaging reads the *effective* per-type policy for the scope: rule
     # lists stay global, so the empty-list check sees the global registry;

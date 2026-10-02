@@ -258,6 +258,11 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	if llm.Credential != nil {
+		if err := harness.LaunchEnvProblem(llm.Credential.Profile, env); err != nil {
+			return err
+		}
+	}
 	// A launch the harness cannot take (OmniGent with a profile that names
 	// no default model and no --model) fails before a sandbox exists.
 	pre := harness.LaunchOptions{Mode: harness.Interactive, Yolo: !o.Safe, Args: o.Args}

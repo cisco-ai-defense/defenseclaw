@@ -1487,7 +1487,7 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		c.Status, c.Detail = StatusWarn, "gateway info: "+infoErr.Error()
 	case r.driverErr != nil:
 		c.Status, c.Detail = StatusFail, strings.TrimPrefix(r.driverErr.Error(), "openshell: ")
-		c.Fix = &Fix{Summary: "run the local gateway with the docker compute driver (OPENSHELL_COMPUTE_DRIVER=docker in gateway.env)"}
+		c.Fix = r.dockerDriverFix()
 		if mac {
 			c.Fix = r.microVMFix()
 		}
@@ -1513,6 +1513,22 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		c.Status, c.Detail = StatusPass, string(r.running.Name)
 	}
 	return c
+}
+
+// dockerDriverFix switches a Linux gateway that runs a compute driver
+// DefenseClaw does not drive (podman, whose install pins it in
+// gateway.toml) to docker (GAP-1264).
+func (r *doctorRun) dockerDriverFix() *Fix {
+	where := "gateway.toml"
+	if r.config != nil && r.config.TOMLPath != "" {
+		where = r.config.TOMLPath
+	}
+	fix := r.gatewayChangeFix(`run sandboxes on the docker compute driver: set compute_driver = "docker" in `+where,
+		"(sandboxes made on the other driver cannot start after the switch)", r.applyGateway(GatewayChanges{ComputeDriver: DriverDocker}))
+	if fix != nil && fix.Automatic {
+		fix.Command = "defenseclaw sandbox doctor --fix"
+	}
+	return fix
 }
 
 func (r *doctorRun) checkGatewayConfig(ctx context.Context) {

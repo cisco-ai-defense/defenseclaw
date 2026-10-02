@@ -26,7 +26,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -345,6 +345,28 @@ class TestRegistrySync(RegistryCommandTestBase):
         names = {r.name for r in self.app.cfg.asset_policy.skill.registry}
         self.assertEqual(names, {"demo-skill"})
 
+    def test_sync_is_audited_with_what_it_promoted(self):
+        # GAP-1518: every sync run writes an audit action with its counts.
+        manifest = _make_skill_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+
+        def _fetch(_source, *, allow_private=False):
+            return manifest, raw
+
+        with patch.object(self.app, "logger", MagicMock()) as logger:
+            with patch("defenseclaw.registries.sync.fetch_manifest", _fetch):
+                with patch(
+                    "defenseclaw.commands.cmd_registry._make_scan_callback",
+                    return_value=lambda src, entry: _scan_clean(entry.name),
+                ):
+                    result = self.invoke(["sync", "corp-skills"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        logger.log_action.assert_any_call(
+            "registry-sync", "config",
+            "id=corp-skills fetched=1 scanned=1 promoted_skills=1 promoted_mcps=0 "
+            "blocked=0 errors=0 promote=on",
+        )
+
     def test_sync_no_promote_skips_asset_policy(self):
         manifest = _make_skill_manifest()
         raw = json.dumps(manifest.to_dict()).encode("utf-8")
@@ -472,6 +494,16 @@ class TestRegistryRequire(RegistryCommandTestBase):
         ])
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self.app.cfg.asset_policy.mcp.registry_required)
+
+    def test_require_toggle_is_audited(self):
+        # GAP-1518: turning the requirement on or off is an audited change.
+        for flag, state in (("--enabled", "true"), ("--disabled", "false")):
+            with patch.object(self.app, "logger", MagicMock()) as logger:
+                result = self.invoke(["require", "--type", "mcp", flag, "--connector", "openhands"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            actions = [c.args for c in logger.log_action.call_args_list if c.args[0] == "registry-require"]
+            self.assertEqual(len(actions), 1, actions)
+            self.assertIn(f"scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
 
     def test_require_plugin_rejected(self):
         # OTHER-5: --type plugin is no longer a valid choice. Nothing can

@@ -1397,6 +1397,34 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
         self.assertIn("failed [claudecode]", result.output)
 
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_reports_an_entry_left_in_place_and_exits_nonzero(self, mock_unset):
+        # GAP-1400: an entry the connector kept is not reported removed.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        def _kept(cfg, name, connector=None):
+            if connector == "claudecode":
+                raise connector_paths.MCPServerNotRemovedError(
+                    "left in place; remove it with: claude mcp remove ctx7 -s user"
+                )
+
+        mock_unset.side_effect = _kept
+
+        result = self.invoke(["unset", "ctx7"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not removed [claudecode]", result.output)
+        self.assertIn("claude mcp remove ctx7 -s user", result.output)
+        self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
+        self.assertNotIn("claudecode, codex", result.output)
+
+        result = self.invoke(["unset", "ctx7", "--connector", "claudecode"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertNotIn("Removed MCP server", result.output)
+        self.assertIn("was not removed from: claudecode", result.output)
+
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):
         mock_scan.return_value = ScanResult(

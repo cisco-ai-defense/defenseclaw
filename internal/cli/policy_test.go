@@ -332,6 +332,7 @@ func TestPolicyCommandsFailClosedOnCanonicalData(t *testing.T) {
 }
 
 func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
+	ownGatewayListener(t)
 	const token = "reload-fixture-value"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/policy/reload" || r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("X-DefenseClaw-Token") != token {

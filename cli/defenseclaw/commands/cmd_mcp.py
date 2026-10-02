@@ -2251,6 +2251,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     connectors = resolve_list_connectors(app, connector_flag)
     removed: list[str] = []
     skipped: list[str] = []
+    not_removed: list[str] = []  # the connector kept an entry DefenseClaw no longer owns
     write_failed: list[tuple[str, Exception]] = []  # unexpected write error
     for c in connectors:
         if not any(s.name == name for s in app.cfg.mcp_servers(c)):
@@ -2258,6 +2259,9 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
         try:
             _unset_mcp_via_connector(app.cfg, name, connector=c)
             removed.append(c)
+        except connector_paths.MCPServerNotRemovedError as exc:
+            click.secho(f"  not removed [{c}]: {exc}", fg="red")
+            not_removed.append(c)
         except connector_paths.MCPWriteUnsupportedError as exc:
             click.secho(f"  skipped [{c}]: {exc}", fg="yellow")
             skipped.append(c)
@@ -2276,6 +2280,12 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             raise click.ClickException(
                 f"MCP server {name!r} removal failed on: "
                 f"{', '.join(c for c, _ in write_failed)}."
+            )
+        if not_removed:
+            if app.logger:
+                app.logger.log_action("mcp-unset", name, f"result=not-removed connectors={','.join(not_removed)}")
+            raise click.ClickException(
+                f"MCP server {name!r} was not removed from: {', '.join(not_removed)}."
             )
         if skipped:
             raise click.ClickException(
@@ -2305,12 +2315,11 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     if app.logger:
         app.logger.log_action("mcp-unset", name, f"connectors={','.join(removed)}")
 
-    # Surface an unexpected per-connector removal failure with a non-zero exit
-    # so scripts/CI notice the partial removal, while peers that were cleaned
-    # up are kept.
-    if write_failed:
+    # Surface an unexpected per-connector removal failure, or an entry a
+    # connector kept, with a non-zero exit so scripts/CI notice the partial
+    # removal, while peers that were cleaned up are kept.
+    if write_failed or not_removed:
         if app.logger:
-            app.logger.log_action(
-                "mcp-unset", name, f"result=failed connectors={','.join(c for c, _ in write_failed)}"
-            )
+            failed = [c for c, _ in write_failed] + not_removed
+            app.logger.log_action("mcp-unset", name, f"result=failed connectors={','.join(failed)}")
         raise SystemExit(1)
