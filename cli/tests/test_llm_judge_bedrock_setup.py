@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import unittest
+from contextlib import closing
 from unittest import mock
 
 import yaml
@@ -159,6 +162,36 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         with mock.patch.object(cmd_doctor, "_json_mode", True):
             cmd_doctor._check_llm_api_key(cfg, r)
         self.assertEqual((r.failed, r.passed), (0, 1), r.checks)
+
+    def test_doctor_reports_failing_judge_calls(self) -> None:
+        """GAP-1120: a judge that errors on every call is a doctor failure."""
+        cfg = self.app.cfg
+        cfg.guardrail.enabled = True
+        cfg.guardrail.judge.enabled = True
+        error = "gateway: bifrost: 400 tools.0.custom.input_schema.properties: Property keys should match pattern"
+
+        def add(row_id: str, payload: dict) -> None:
+            with closing(sqlite3.connect(cfg.audit_db)) as db:
+                db.execute(
+                    "INSERT INTO audit_events (id, timestamp, action, structured_json) VALUES (?, ?, ?, ?)",
+                    (row_id, f"2099-01-01T00:00:0{row_id}Z", "llm-judge-response", json.dumps(payload)),
+                )
+                db.commit()
+
+        def run() -> _DoctorResult:
+            r = _DoctorResult()
+            with mock.patch.object(cmd_doctor, "_json_mode", True):
+                cmd_doctor._check_judge_calls(cfg, r)
+            return r
+
+        add("1", {"defenseclaw.judge.action": "error", "defenseclaw.judge.error_summary": error})
+        r = run()
+        self.assertEqual(r.failed, 1, r.checks)
+        self.assertIn("Property keys should match pattern", r.checks[0]["detail"])
+
+        add("2", {"defenseclaw.judge.action": "allow"})
+        r = run()
+        self.assertEqual((r.failed, r.warned), (0, 1), r.checks)
 
 
 if __name__ == "__main__":
