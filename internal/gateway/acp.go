@@ -153,6 +153,10 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
 		a.recordACPEvaluationV8(r.Context(), req, verdict, nil, agent.ConnectorID, profileName, time.Since(started))
+		a.emitGuardrailApplyTraceV8(r.Context(), agent.ConnectorID, "", acpTraceTargetType(req), &ToolInspectVerdict{
+			Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
+			Reason: verdict.Reason, Mode: mode, WouldBlock: verdict.WouldBlock,
+		}, time.Since(started), hookEvaluationContext{})
 		a.writeJSON(w, http.StatusOK, verdict)
 		return
 	}
@@ -195,16 +199,33 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 			env.Connector = agent.ConnectorID
 			findingCtx = audit.ContextWithEnvelope(findingCtx, env)
 		}
-		targetType := "prompt"
-		if req.Direction == acp.AgentToClient {
-			targetType = "completion"
-		}
-		a.emitInspectVerdictFindings(findingCtx, "inspect-http",
+		targetType := acpTraceTargetType(req)
+		evaluation := a.emitInspectVerdictFindings(findingCtx, "inspect-http",
 			hookEvaluationTarget(agent.ConnectorID, "acp"), targetType, verdict,
 			time.Since(started), "emit_acp_findings")
+		// The hook path records a decision as an apply_guardrail span; ACP
+		// wrote only the log row, so Tempo and a Galileo-only deployment
+		// never saw an ACP block (GAP-1836).
+		a.emitGuardrailApplyTraceV8(findingCtx, agent.ConnectorID, "", targetType, verdict,
+			time.Since(started), evaluation)
 	}
 	a.recordACPEvaluationV8(r.Context(), req, result, verdict.Findings, agent.ConnectorID, profileName, time.Since(started))
+	// The audit row keeps the source reason; the editor gets the wording the
+	// hook connectors show ("DefenseClaw policy blocked this action (rule
+	// SEC-AWS-KEY: AWS access key). Do not retry it in another form."), not
+	// the raw "matched: ID:title" text (GAP-1793), through the same sink
+	// barrier as the inspect response.
+	result.Reason = verdict.sanitizeForResponse(false).Reason
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// acpTraceTargetType is the guardrail target of an ACP frame: what the
+// editor sends is a prompt, what the agent sends is a completion.
+func acpTraceTargetType(req acp.Evaluation) string {
+	if req.Direction == acp.AgentToClient {
+		return "completion"
+	}
+	return "prompt"
 }
 
 // findings is carried separately from verdict because acp.Verdict is the wire
