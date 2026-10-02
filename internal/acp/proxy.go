@@ -119,9 +119,21 @@ type proxyState struct {
 	pendingClient map[string]string
 	pendingAgent  map[string]string
 	activePrompt  string
+	activeSession string
 	turnBuffer    []byte
 	turnFrames    []json.RawMessage
+	// abortedPrompts holds prompts the guard ended for the editor while the
+	// agent was still working on them; the agent's late answer is dropped
+	// instead of failing the whole proxy as an unmatched response.
+	abortedPrompts map[string]string
+	// mutedSessions drops the agent's further session/update output for an
+	// aborted turn until its late answer arrives or a new prompt starts.
+	mutedSessions map[string]struct{}
 }
+
+// errAbortedTurnFrame marks a frame of a turn the guard already ended. It is
+// dropped quietly.
+var errAbortedTurnFrame = errors.New("frame of an ACP turn the guard already ended")
 
 type lockedWriter struct {
 	mu     sync.Mutex
@@ -156,6 +168,8 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 				return "", errors.New("concurrent session/prompt requests are not supported in action mode")
 			}
 			s.activePrompt = key
+			s.activeSession = promptSessionID(msg)
+			delete(s.mutedSessions, s.activeSession)
 			s.turnBuffer = s.turnBuffer[:0]
 			s.turnFrames = s.turnFrames[:0]
 		}
@@ -168,12 +182,34 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 		}
 		method, exists := pending[msg.IDKey()]
 		if !exists {
+			if session, aborted := s.abortedPrompts[msg.IDKey()]; aborted && direction == AgentToClient {
+				delete(s.abortedPrompts, msg.IDKey())
+				delete(s.mutedSessions, session)
+				return "", errAbortedTurnFrame
+			}
 			return "", errors.New("ACP response has no matching request")
 		}
 		delete(pending, msg.IDKey())
 		return method, nil
 	}
+	if direction == AgentToClient && msg.Method == "session/update" && len(s.mutedSessions) > 0 {
+		if _, muted := s.mutedSessions[promptSessionID(msg)]; muted {
+			return "", errAbortedTurnFrame
+		}
+	}
 	return "", nil
+}
+
+// promptSessionID reads params.sessionId of a session/prompt or
+// session/update frame ("" when absent).
+func promptSessionID(msg Message) string {
+	var params struct {
+		SessionID string `json:"sessionId"`
+	}
+	if len(msg.Params) == 0 || json.Unmarshal(msg.Params, &params) != nil {
+		return ""
+	}
+	return params.SessionID
 }
 
 func (s *proxyState) bufferOrFlush(
@@ -181,50 +217,87 @@ func (s *proxyState) bufferOrFlush(
 	direction Direction,
 	matchedMethod string,
 	frame []byte,
-) ([]byte, json.RawMessage, error) {
+) ([]byte, json.RawMessage, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if direction != AgentToClient || s.activePrompt == "" {
-		return append(frame, '\n'), nil, nil
+		return append(frame, '\n'), nil, "", nil
 	}
 	// Agent requests must be delivered after evaluation so the editor can
 	// answer them; buffering them would deadlock the turn. Non-prompt
 	// responses likewise belong to an independently pending client request.
 	if msg.IsRequest() || (msg.Method == "" && matchedMethod != "session/prompt") {
-		return append(frame, '\n'), nil, nil
+		return append(frame, '\n'), nil, "", nil
 	}
 	if len(s.turnBuffer)+len(frame)+1 > MaxTurnBuffer {
-		return nil, nil, errors.New("ACP turn output exceeded the bounded action-mode buffer")
+		return nil, nil, "", errors.New("ACP turn output exceeded the bounded action-mode buffer")
 	}
 	s.turnBuffer = append(s.turnBuffer, frame...)
 	s.turnBuffer = append(s.turnBuffer, '\n')
 	s.turnFrames = append(s.turnFrames, append(json.RawMessage(nil), msg.Raw...))
 	if matchedMethod != "session/prompt" || msg.IDKey() != s.activePrompt {
-		return nil, nil, nil
+		return nil, nil, "", nil
 	}
 	out := append([]byte(nil), s.turnBuffer...)
 	aggregate, err := BuildTurnEvaluationPayload(s.turnFrames)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
+	session := s.activeSession
 	s.turnBuffer = s.turnBuffer[:0]
 	s.turnFrames = s.turnFrames[:0]
 	s.activePrompt = ""
-	return out, aggregate, nil
+	s.activeSession = ""
+	return out, aggregate, session, nil
 }
 
-func (s *proxyState) abortPrompt() json.RawMessage {
+// finishIfPromptResponse ends the active turn when msg is the agent's own
+// answer to it, so a blocked answer is replaced instead of being recorded as
+// an aborted turn whose late answer is still due. It returns the turn's
+// session and whether msg was that answer.
+func (s *proxyState) finishIfPromptResponse(msg Message) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if msg.Method != "" || s.activePrompt == "" || msg.IDKey() != s.activePrompt {
+		return "", false
+	}
+	session := s.activeSession
+	s.activePrompt = ""
+	s.activeSession = ""
+	s.turnBuffer = s.turnBuffer[:0]
+	s.turnFrames = s.turnFrames[:0]
+	return session, true
+}
+
+// abortPrompt ends the active turn for the editor while the agent is still
+// working on it. It returns the prompt ID and session; the agent's late
+// answer and further output for that session are dropped (track).
+func (s *proxyState) abortPrompt() (json.RawMessage, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activePrompt == "" {
-		return nil
+		return nil, ""
 	}
 	id := json.RawMessage(s.activePrompt)
+	session := s.activeSession
 	delete(s.pendingClient, s.activePrompt)
+	if len(s.abortedPrompts) < MaxPendingIDs {
+		if s.abortedPrompts == nil {
+			s.abortedPrompts = make(map[string]string)
+		}
+		s.abortedPrompts[s.activePrompt] = session
+		if session != "" {
+			if s.mutedSessions == nil {
+				s.mutedSessions = make(map[string]struct{})
+			}
+			s.mutedSessions[session] = struct{}{}
+		}
+	}
 	s.activePrompt = ""
+	s.activeSession = ""
 	s.turnBuffer = s.turnBuffer[:0]
 	s.turnFrames = s.turnFrames[:0]
-	return id
+	return id, session
 }
 
 type turnEvaluationPayload struct {
@@ -381,6 +454,7 @@ func (s *proxyState) reject(msg Message, direction Direction) {
 	// Leaving it active refused every later prompt as "concurrent".
 	if msg.Method == "session/prompt" && s.activePrompt == msg.IDKey() {
 		s.activePrompt = ""
+		s.activeSession = ""
 		s.turnBuffer = s.turnBuffer[:0]
 		s.turnFrames = s.turnFrames[:0]
 	}
@@ -389,15 +463,43 @@ func (s *proxyState) reject(msg Message, direction Direction) {
 // maxBlockReasonBytes bounds the policy reason echoed to the editor.
 const maxBlockReasonBytes = 512
 
-// blockResponse is the JSON-RPC error an editor sees for a blocked frame. The
-// policy reason goes in both the message (Zed) and data.details (Toad), so
-// the user learns why the prompt was refused instead of a bare failure.
-func blockResponse(id json.RawMessage, reason string) []byte {
-	message := "blocked by DefenseClaw ACP policy"
+// evaluationUnavailableReason is what the editor sees for a frame the guard
+// refused because the gateway did not answer its evaluation. Only that frame
+// is refused; the session stays usable (GAP-1834).
+const evaluationUnavailableReason = "DefenseClaw could not check this step because the gateway did not answer, " +
+	"so it was not delivered. Try again; run defenseclaw status if it keeps happening."
+
+func boundedBlockReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if len(reason) > maxBlockReasonBytes {
 		reason = strings.ToValidUTF8(reason[:maxBlockReasonBytes], "") + "..."
 	}
+	return reason
+}
+
+// blockMessage is the sentence the user reads for a block. The gateway words
+// policy blocks the way the hook connectors do ("DefenseClaw policy blocked
+// this action (rule ...). Do not retry it in another form."), so such a
+// reason is shown as is instead of behind a second "DefenseClaw blocked"
+// prefix (GAP-1793).
+func blockMessage(reason string) string {
+	reason = boundedBlockReason(reason)
+	switch {
+	case reason == "":
+		return "DefenseClaw blocked this request."
+	case strings.HasPrefix(reason, "DefenseClaw"):
+		return reason
+	}
+	return "DefenseClaw blocked this request: " + reason
+}
+
+// blockResponse is the JSON-RPC error a peer sees for a blocked request or
+// response other than a prompt turn. The policy reason goes in both the
+// message (Zed) and data.details (Toad), so the user learns why the request
+// was refused instead of a bare failure.
+func blockResponse(id json.RawMessage, reason string) []byte {
+	message := "blocked by DefenseClaw ACP policy"
+	reason = boundedBlockReason(reason)
 	if reason == "" {
 		return ErrorResponse(id, -32001, message)
 	}
@@ -417,9 +519,87 @@ func blockResponse(id json.RawMessage, reason string) []byte {
 	}{JSONRPC: "2.0", ID: id}
 	payload.Error.Code = -32001
 	payload.Error.Message = message + ": " + reason
-	payload.Error.Data.Details = "DefenseClaw blocked this request: " + reason
+	if strings.HasPrefix(reason, "DefenseClaw") {
+		payload.Error.Message = reason
+	}
+	payload.Error.Data.Details = blockMessage(reason)
 	out, _ := json.Marshal(payload)
 	return out
+}
+
+// blockedTurnFrames ends a session/prompt turn the guard refused. A JSON-RPC
+// error on session/prompt made Toad report "Agent failed to run ... install
+// an ACP adapter" under the reason although the session was fine
+// (GAP-1394). The turn instead ends normally: one agent_message_chunk with
+// the block message, then the prompt's result with stopReason end_turn. The
+// "refusal" stop reason is not used because an editor may rewind the user's
+// message on it and hide the reason. Without a session ID no session/update
+// can be addressed, so the JSON-RPC error remains the fallback.
+func blockedTurnFrames(id json.RawMessage, sessionID, reason string) []byte {
+	if sessionID == "" {
+		return append(blockResponse(id, reason), '\n')
+	}
+	type textContent struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	type update struct {
+		SessionUpdate string      `json:"sessionUpdate"`
+		Content       textContent `json:"content"`
+	}
+	notification := struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  struct {
+			SessionID string `json:"sessionId"`
+			Update    update `json:"update"`
+		} `json:"params"`
+	}{JSONRPC: "2.0", Method: "session/update"}
+	notification.Params.SessionID = sessionID
+	notification.Params.Update = update{
+		SessionUpdate: "agent_message_chunk",
+		Content:       textContent{Type: "text", Text: blockMessage(reason)},
+	}
+	result := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  struct {
+			StopReason string `json:"stopReason"`
+		} `json:"result"`
+	}{JSONRPC: "2.0", ID: id}
+	result.Result.StopReason = "end_turn"
+	first, _ := json.Marshal(notification)
+	second, _ := json.Marshal(result)
+	out := append(first, '\n')
+	out = append(out, second...)
+	return append(out, '\n')
+}
+
+// cancelNotification asks the agent to stop a turn the guard ended early.
+func cancelNotification(sessionID string) []byte {
+	out, _ := json.Marshal(struct {
+		JSONRPC string            `json:"jsonrpc"`
+		Method  string            `json:"method"`
+		Params  map[string]string `json:"params"`
+	}{JSONRPC: "2.0", Method: "session/cancel", Params: map[string]string{"sessionId": sessionID}})
+	return append(out, '\n')
+}
+
+func logf(w io.Writer, format string, args ...any) {
+	if w != nil {
+		fmt.Fprintf(w, format, args...)
+	}
+}
+
+// evaluate asks the evaluator once and, in action mode, once more after a
+// failure other than a mode mismatch: one slow gateway answer (a client
+// timeout on a busy host) ended the whole agent session (GAP-1834).
+func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, error) {
+	verdict, err := opts.Evaluator.Evaluate(ctx, in)
+	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || ctx.Err() != nil {
+		return verdict, err
+	}
+	return opts.Evaluator.Evaluate(ctx, in)
 }
 
 func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direction Direction, src io.Reader, dst, rejectDst io.Writer) error {
@@ -433,74 +613,65 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		if err == nil {
 			matchedMethod, err = state.track(msg, direction, opts.Mode)
 		}
+		if errors.Is(err, errAbortedTurnFrame) {
+			continue
+		}
 		if err != nil {
 			if opts.Mode == ModeAction {
 				return fmt.Errorf("ACP protocol blocked: %w", err)
 			}
-			fmt.Fprintf(opts.Stderr, "[defenseclaw-acp] observe protocol finding: %v\n", err)
+			logf(opts.Stderr, "[defenseclaw-acp] observe protocol finding: %v\n", err)
 			if _, writeErr := fmt.Fprintln(dst, string(frame)); writeErr != nil {
 				return writeErr
 			}
 			continue
 		}
-		verdict, evalErr := opts.Evaluator.Evaluate(ctx, Evaluation{
+		verdict, evalErr := evaluate(ctx, opts, Evaluation{
 			Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
 			Direction: direction, Surface: Classify(msg, direction), Method: msg.Method, Payload: msg.Raw,
 		})
 		if evalErr != nil {
-			if opts.Mode == ModeAction || errors.Is(evalErr, ErrModeMismatch) {
+			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
 			}
-			fmt.Fprintf(opts.Stderr, "[defenseclaw-acp] observe evaluation error: %v\n", evalErr)
-		} else if verdict.Action == "block" || verdict.Action == "confirm" {
 			if opts.Mode == ModeAction {
-				if msg.IsRequest() {
-					response := blockResponse(msg.ID, verdict.Reason)
-					state.reject(msg, direction)
-					_, err = fmt.Fprintln(rejectDst, string(response))
-					if err != nil {
-						return err
-					}
-				} else if msg.Method == "" {
-					// A response belongs to the peer in the direction it was
-					// already travelling. Never drop it silently: return a
-					// terminal JSON-RPC error for the same pending ID.
-					response := blockResponse(msg.ID, verdict.Reason)
-					if _, err = fmt.Fprintln(dst, string(response)); err != nil {
-						return err
-					}
-				}
-				if direction == AgentToClient {
-					if promptID := state.abortPrompt(); len(promptID) > 0 {
-						if msg.Method != "" || !bytes.Equal(bytes.TrimSpace(promptID), bytes.TrimSpace(msg.ID)) {
-							response := blockResponse(promptID, verdict.Reason)
-							if _, err = fmt.Fprintln(dst, string(response)); err != nil {
-								return err
-							}
-						}
-					}
+				// Fail closed for this frame only, exactly as for a block.
+				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
+				verdict = Verdict{Action: "block", Reason: evaluationUnavailableReason}
+			} else {
+				logf(opts.Stderr, "[defenseclaw-acp] observe evaluation error: %v\n", evalErr)
+				verdict = Verdict{Action: "allow"}
+			}
+		}
+		if verdict.Action == "block" || verdict.Action == "confirm" {
+			if opts.Mode == ModeAction {
+				if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
+					return err
 				}
 				continue
 			}
-			fmt.Fprintf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
+			logf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
 		}
 		if opts.Mode == ModeAction {
-			out, aggregate, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
+			out, aggregate, session, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
 			if bufferErr != nil {
 				return bufferErr
 			}
 			if len(aggregate) > 0 {
-				turnVerdict, turnErr := opts.Evaluator.Evaluate(ctx, Evaluation{
+				turnVerdict, turnErr := evaluate(ctx, opts, Evaluation{
 					Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
 					Direction: AgentToClient, Surface: SurfaceOutput, Method: "session/update",
 					Payload: aggregate, Aggregate: true,
 				})
 				if turnErr != nil {
-					return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
+					if errors.Is(turnErr, ErrModeMismatch) {
+						return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
+					}
+					logf(opts.Stderr, "[defenseclaw-acp] completed-turn evaluation unavailable, refused the turn: %v\n", turnErr)
+					turnVerdict = Verdict{Action: "block", Reason: evaluationUnavailableReason}
 				}
 				if turnVerdict.Action == "block" || turnVerdict.Action == "confirm" {
-					response := blockResponse(msg.ID, turnVerdict.Reason)
-					if _, err := fmt.Fprintln(dst, string(response)); err != nil {
+					if _, err := dst.Write(blockedTurnFrames(msg.ID, session, turnVerdict.Reason)); err != nil {
 						return err
 					}
 					continue
@@ -517,6 +688,55 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read ACP frame: %w", err)
+	}
+	return nil
+}
+
+// writeBlock answers a frame refused in action mode. dst is the peer the
+// frame was travelling to and rejectDst the peer that sent it.
+func writeBlock(state *proxyState, direction Direction, msg Message, reason string, dst, rejectDst io.Writer) error {
+	if direction == AgentToClient {
+		// The agent's own answer to the prompt: end the turn in its place.
+		if session, ok := state.finishIfPromptResponse(msg); ok {
+			_, err := dst.Write(blockedTurnFrames(msg.ID, session, reason))
+			return err
+		}
+	}
+	switch {
+	case msg.IsRequest() && direction == ClientToAgent && msg.Method == "session/prompt":
+		state.reject(msg, direction)
+		if _, err := rejectDst.Write(blockedTurnFrames(msg.ID, promptSessionID(msg), reason)); err != nil {
+			return err
+		}
+	case msg.IsRequest():
+		state.reject(msg, direction)
+		if _, err := fmt.Fprintln(rejectDst, string(blockResponse(msg.ID, reason))); err != nil {
+			return err
+		}
+	case msg.Method == "":
+		// A response belongs to the peer in the direction it was already
+		// travelling. Never drop it silently: return a terminal JSON-RPC
+		// error for the same pending ID.
+		if _, err := fmt.Fprintln(dst, string(blockResponse(msg.ID, reason))); err != nil {
+			return err
+		}
+	}
+	if direction != AgentToClient {
+		return nil
+	}
+	// Agent output was refused mid-turn: end the turn for the editor and ask
+	// the agent to stop; its late answer is dropped (track).
+	promptID, session := state.abortPrompt()
+	if len(promptID) == 0 {
+		return nil
+	}
+	if _, err := dst.Write(blockedTurnFrames(promptID, session, reason)); err != nil {
+		return err
+	}
+	if session != "" {
+		if _, err := rejectDst.Write(cancelNotification(session)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

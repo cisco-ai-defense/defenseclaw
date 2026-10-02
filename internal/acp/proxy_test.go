@@ -377,8 +377,9 @@ func TestCopyFramesEvaluatorFailureIsClosedOnlyInActionMode(t *testing.T) {
 		var forwarded, rejected, stderr bytes.Buffer
 		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
 		err := copyFrames(context.Background(), ProxyOptions{Mode: mode, Evaluator: evaluator, Stderr: &stderr}, state, ClientToAgent, input, &forwarded, &rejected)
-		if mode == ModeAction && (err == nil || forwarded.Len() != 0) {
-			t.Fatalf("action mode did not fail closed: err=%v forwarded=%q", err, forwarded.String())
+		// Action mode refuses the frame, not the whole session (GAP-1834).
+		if mode == ModeAction && (err != nil || forwarded.Len() != 0) {
+			t.Fatalf("action mode did not fail closed for the frame only: err=%v forwarded=%q", err, forwarded.String())
 		}
 		if mode == ModeObserve && (err != nil || forwarded.String() != frame) {
 			t.Fatalf("observe mode did not fail open: err=%v forwarded=%q", err, forwarded.String())
@@ -400,6 +401,66 @@ func TestCopyFramesActionBlockedPromptDoesNotWedgeNextPrompt(t *testing.T) {
 	if !strings.Contains(forwarded.String(), `"id":2`) {
 		t.Fatalf("second prompt was not forwarded: %s", forwarded.String())
 	}
+	text, stop := blockedTurn(t, rejected.Bytes(), "1")
+	if text != "DefenseClaw blocked this request: test content policy" || stop != "end_turn" {
+		t.Fatalf("blocked turn = %q / %q: %s", text, stop, rejected.String())
+	}
+}
+
+// blockedTurn decodes the two frames that end a refused prompt turn: the
+// agent_message_chunk text and the prompt result's stopReason.
+func blockedTurn(t *testing.T, out []byte, id string) (string, string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("blocked turn frames = %q, want a session/update and a result", out)
+	}
+	var update struct {
+		Method string `json:"method"`
+		Params struct {
+			Update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+				Content       struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"update"`
+		} `json:"params"`
+	}
+	var result struct {
+		ID     json.RawMessage `json:"id"`
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			StopReason string `json:"stopReason"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(lines[0]), &update) != nil || json.Unmarshal([]byte(lines[1]), &result) != nil {
+		t.Fatalf("blocked turn frames are not JSON: %q", out)
+	}
+	if update.Method != "session/update" || update.Params.Update.SessionUpdate != "agent_message_chunk" ||
+		string(result.ID) != id || len(result.Error) != 0 {
+		t.Fatalf("blocked turn frames = %q", out)
+	}
+	return update.Params.Update.Content.Text, result.Result.StopReason
+}
+
+// A blocked prompt ends the turn with the reason as agent text, not a
+// JSON-RPC error that Toad reports as "Agent failed to run" (GAP-1394), and
+// a gateway-worded reason is not prefixed twice (GAP-1793).
+func TestCopyFramesActionBlockedPromptEndsTurnWithReason(t *testing.T) {
+	const reason = "DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in another form."
+	input := bytes.NewBufferString(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	evaluator := staticEvaluator{Action: "block", Reason: reason}
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: evaluator}, state, ClientToAgent, input, &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.Len() != 0 {
+		t.Fatalf("blocked prompt reached the agent: %s", forwarded.String())
+	}
+	if text, stop := blockedTurn(t, rejected.Bytes(), "3"); text != reason || stop != "end_turn" {
+		t.Fatalf("blocked turn = %q / %q", text, stop)
+	}
 	var resp struct {
 		Error struct {
 			Message string `json:"message"`
@@ -408,10 +469,91 @@ func TestCopyFramesActionBlockedPromptDoesNotWedgeNextPrompt(t *testing.T) {
 			} `json:"data"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(rejected.Bytes()), &resp); err != nil {
-		t.Fatalf("block response %q: %v", rejected.String(), err)
+	if err := json.Unmarshal(blockResponse(json.RawMessage("4"), reason), &resp); err != nil ||
+		resp.Error.Message != reason || resp.Error.Data.Details != reason {
+		t.Fatalf("block response wording = %+v (%v)", resp, err)
 	}
-	if !strings.Contains(resp.Error.Message, "test content policy") || !strings.Contains(resp.Error.Data.Details, "test content policy") {
-		t.Fatalf("block response does not carry the policy reason: %s", rejected.String())
+}
+
+type staticEvaluator Verdict
+
+func (v staticEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict(v), nil
+}
+
+// failingEvaluator fails the first `failures` evaluations, then allows.
+type failingEvaluator struct{ failures, calls int }
+
+func (e *failingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	e.calls++
+	if e.calls <= e.failures {
+		return Verdict{}, errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// One slow gateway answer must not end the agent session: the guard retries
+// once, then refuses only that prompt and keeps proxying (GAP-1834).
+func TestCopyFramesActionEvaluationTimeoutRefusesOnlyThatFrame(t *testing.T) {
+	prompt := func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`+"\n", id)
+	}
+	retried := &failingEvaluator{failures: 1}
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: retried}, state, ClientToAgent, bytes.NewBufferString(prompt(3)), &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(forwarded.String(), `"id":3`) || rejected.Len() != 0 || retried.calls != 2 {
+		t.Fatalf("one failed evaluation was not retried: calls=%d forwarded=%q rejected=%q", retried.calls, forwarded.String(), rejected.String())
+	}
+
+	failing := &failingEvaluator{failures: 2}
+	forwarded.Reset()
+	var stderr bytes.Buffer
+	state = &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: failing, Stderr: &stderr}, state, ClientToAgent,
+		bytes.NewBufferString(prompt(3)+prompt(4)), &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("evaluation timeout ended the session: %v", err)
+	}
+	if strings.Contains(forwarded.String(), `"id":3`) || !strings.Contains(forwarded.String(), `"id":4`) {
+		t.Fatalf("forwarded = %q, want only the prompt evaluated after the gateway answered", forwarded.String())
+	}
+	if text, stop := blockedTurn(t, rejected.Bytes(), "3"); text != evaluationUnavailableReason || stop != "end_turn" {
+		t.Fatalf("refused turn = %q / %q", text, stop)
+	}
+	if !strings.Contains(stderr.String(), "evaluation unavailable") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// Agent output refused mid-turn ends the turn for the editor and cancels it
+// in the agent; the agent's late output and answer are dropped instead of
+// ending the proxy as an unmatched response.
+func TestCopyFramesActionAbortedTurnDropsLateAgentAnswer(t *testing.T) {
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	var agentInput, clientOutput bytes.Buffer
+	opts := ProxyOptions{Mode: ModeAction, Evaluator: contentBlockingEvaluator("blocked-text")}
+	if err := copyFrames(context.Background(), opts, state, ClientToAgent,
+		bytes.NewBufferString(`{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`+"\n"), &agentInput, &clientOutput); err != nil {
+		t.Fatal(err)
+	}
+	agentInput.Reset()
+	chunk := func(text string) string {
+		return `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + text + `"}}}}` + "\n"
+	}
+	agentOut := chunk("blocked-text") + chunk("late") + `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"cancelled"}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, AgentToClient, bytes.NewBufferString(agentOut), &clientOutput, &agentInput); err != nil {
+		t.Fatalf("late answer of an aborted turn ended the proxy: %v", err)
+	}
+	if text, stop := blockedTurn(t, clientOutput.Bytes(), "5"); text != "DefenseClaw blocked this request: test content policy" || stop != "end_turn" {
+		t.Fatalf("aborted turn = %q / %q", text, stop)
+	}
+	if !strings.Contains(agentInput.String(), `"method":"session/cancel"`) {
+		t.Fatalf("agent was not asked to cancel: %q", agentInput.String())
+	}
+	if len(state.abortedPrompts) != 0 || len(state.mutedSessions) != 0 {
+		t.Fatalf("aborted turn state left behind: %v %v", state.abortedPrompts, state.mutedSessions)
 	}
 }
