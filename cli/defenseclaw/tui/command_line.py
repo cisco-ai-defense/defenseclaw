@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from defenseclaw.main import cli
@@ -279,19 +281,21 @@ def _flag_is_secret(flag: str) -> bool:
     )
 
 
+# Readiness lives on Setup behind ``i``; a hint must name the keys that get
+# there, not just "rerun readiness" (GAP-1910).
+READINESS_HINT = "press 0 (Setup), then i for readiness"
+
+
 def suggested_next_action(command: str, exit_code: int) -> str:
     """Return a one-line nudge for what to do after a command finishes.
 
-    Mirrors :func:`suggestedNextAction` in
-    ``internal/tui/command_intent.go`` so the Python TUI surfaces the
-    same follow-on hints (``rerun readiness``, ``refresh gateway
-    health``, etc.) the Go TUI shows. Returns an empty string when
-    there is nothing useful to say — callers should treat that as
-    "skip the footer" rather than rendering "(none)".
+    Each hint names the key that gets there. Returns an empty string when
+    there is nothing useful to say — callers should treat that as "skip the
+    footer" rather than rendering "(none)". A gateway restart gets no hint:
+    the status bar already shows the gateway's health.
 
     Lower-cases the entire command before matching so e.g. ``KEYS
-    LIST`` and ``keys list`` produce the same hint; the Go version is
-    similarly case-insensitive.
+    LIST`` and ``keys list`` produce the same hint.
     """
 
     cmd = command.strip().lower()
@@ -299,14 +303,37 @@ def suggested_next_action(command: str, exit_code: int) -> str:
         if "keys" in cmd:
             return "open Credentials or run keys check"
         if "doctor" in cmd:
-            return "open readiness or rerun doctor"
+            return f"{READINESS_HINT}, or rerun doctor"
         return "review output and rerun when fixed"
-    if "keys" in cmd:
-        return "rerun readiness"
-    if "doctor" in cmd:
-        return "review readiness"
-    if "setup" in cmd:
-        return "rerun readiness"
-    if "restart" in cmd:
-        return "refresh gateway health"
+    if "keys" in cmd or "doctor" in cmd or "setup" in cmd:
+        return READINESS_HINT
     return ""
+
+
+_GATEWAY_PID_RE = re.compile(r"\bOK \(PID (\d+)\)")
+_KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
+
+
+def command_result_summary(command: str, lines: Sequence[str]) -> str:
+    """The result of a finished command, or "" to fall back to its last line.
+
+    ``keys list`` ends with a table footnote and a gateway restart with its
+    log path, so the last output line read as if it were the result
+    (GAP-1910). ``lines`` are the ANSI-free output lines.
+    """
+
+    if "restart" in command.lower():
+        for line in lines:
+            if match := _GATEWAY_PID_RE.search(line):
+                return f"Gateway restarted (PID {match.group(1)})"
+        return ""
+    if not any("ENV NAME" in line and "REQUIREMENT" in line for line in lines):
+        return ""
+    rows = [match for line in lines if (match := _KEYS_ROW_RE.match(line.strip()))]
+    if not rows:
+        return ""
+    required = [row for row in rows if "REQUIRED" in row.group(2).split()]
+    missing = [row.group(1) for row in required if "\u2713 set" not in row.group(2)]
+    noun = "credential" if len(rows) == 1 else "credentials"
+    text = f"{len(rows)} {noun}, {len(required)} required"
+    return f"{text}, missing: {', '.join(missing)}" if missing else f"{text}, all set"
