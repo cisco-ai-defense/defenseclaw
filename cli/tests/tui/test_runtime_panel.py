@@ -109,6 +109,15 @@ def test_plane_strip_is_always_present_and_expands_to_reasons() -> None:
     assert "shadow egress: idle" in collapsed
 
 
+def test_quiet_table_is_not_called_clean_while_a_plane_is_blind() -> None:
+    # WIN2-U3-13: DEGRADED / "agent actions: blind" sat next to "a quiet table
+    # is a clean host, not a blind sensor".
+    model = RuntimePanelModel()
+    model.set_snapshot({**_SNAPSHOT, "findings": []})
+    assert "not proof of a clean host" in model.empty_state()
+    assert "is a clean host" not in model.findings_context()
+
+
 def test_header_carries_coverage_not_just_a_finding_count() -> None:
     header = " ".join(_model().header_parts())
     assert "2/2 findings" in header
