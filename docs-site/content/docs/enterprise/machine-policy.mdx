@@ -584,8 +584,10 @@ These come from the agents themselves:
   `/etc/github-copilot/policy.d`, and its tool calls run with no audit
   record. Use application control to allow only Copilot CLI at or above the
   floor.
-- **Copilot.** A command hook that times out fails open, including policy
-  hooks. On Windows, Copilot also loads policy hooks from
+- **Copilot.** What a command hook that times out means, policy hooks
+  included, is not a documented contract. Earlier Copilot CLI releases ran
+  the call; Copilot CLI 1.0.91 denies it ("hook errored"). Re-check each
+  release you deploy. On Windows, Copilot also loads policy hooks from
   `HKLM\Software\Policies\GitHub\Copilot`; those run beside DefenseClaw's
   drop-in.
 - **OpenCode.** The order in which OpenCode runs plugins is not a

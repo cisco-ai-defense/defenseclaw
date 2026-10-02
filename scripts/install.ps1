@@ -853,7 +853,9 @@ function Restore-BinDir([string]$From) {
     }
 }
 
-function New-Venv([string]$Path) {
+# $Where names the environment in the progress lines: the installer builds
+# a staging one to check the release, then the final one (GAP-1727).
+function New-Venv([string]$Path, [string]$Where) {
     $python = Join-Path $Path "Scripts\python.exe"
     New-InstallDirectory $Path
     if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", "3.12") -Quiet) -ne 0) {
@@ -866,9 +868,9 @@ function New-Venv([string]$Path) {
     # (over a minute on a Windows host while the files are also first scanned).
     $lockArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
         "-r", (Join-Path $Staging $Requirements))
-    Write-Info "Installing the Python packages"
+    Write-Info "Installing the Python packages into $Where"
     if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
-    Write-Info "Installing the DefenseClaw package and compiling it"
+    Write-Info "Installing the DefenseClaw package into $Where and compiling it"
     return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
 }
 
@@ -948,7 +950,8 @@ function Protect-BinDir {
 
 function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
-    if (-not (New-Venv $Venv)) { return $false }
+    Write-Info "Building the final Python environment in $Venv (the checked packages come from the uv cache)"
+    if (-not (New-Venv $Venv "the final environment")) { return $false }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     Protect-BinDir
     # Binaries an earlier run renamed aside while they were running.
@@ -1582,7 +1585,7 @@ function Invoke-Install {
     # package, then compiles the bytecode: about 7 minutes on a busy Windows
     # host with nothing printed (GAP-1665), so say so up front.
     Write-Info "Building the Python environment (a first install can take several minutes)"
-    if (-not (New-Venv (Join-Path $Staging "venv"))) { Die "Could not install the DefenseClaw $Ver Python package; nothing was changed" }
+    if (-not (New-Venv (Join-Path $Staging "venv") "the staging environment")) { Die "Could not install the DefenseClaw $Ver Python package; nothing was changed" }
     $stagedCli = Join-Path $Staging "venv\Scripts\defenseclaw.exe"
     if (-not (Get-NativeOutput $stagedCli @("--version")).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
     $checkArgs = @("migrate", "--check", "--gateway-binary", $stagedGateway)

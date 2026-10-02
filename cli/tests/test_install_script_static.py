@@ -938,3 +938,18 @@ def test_python_environment_step_says_it_can_take_minutes() -> None:
     body = body[: body.index("\n}\n")]
     assert body.index("Installing the Python packages") < body.index("Invoke-UvPipInstall $lockArgs")
     assert body.index("Installing the DefenseClaw package") < body.index("$Wheel")
+
+
+def test_the_two_python_environment_builds_are_named() -> None:
+    # GAP-1727: the staging build and the final build printed the same two
+    # lines, so the second pair looked like the installer was looping.
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = windows[windows.index("function New-Venv") :]
+    body = body[: body.index("\n}\n")]
+    assert 'Write-Info "Installing the Python packages into $Where"' in body
+    assert 'Write-Info "Installing the DefenseClaw package into $Where and compiling it"' in body
+    assert 'New-Venv (Join-Path $Staging "venv") "the staging environment"' in windows
+    install_new = windows[windows.index("function Install-New") :]
+    install_new = install_new[: install_new.index("\n}\n")]
+    assert "Building the final Python environment in $Venv" in install_new
+    assert 'New-Venv $Venv "the final environment"' in install_new
