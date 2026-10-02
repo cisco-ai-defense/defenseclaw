@@ -1014,7 +1014,7 @@ restart_old() {
 }
 
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 waited=0 up=0 version delegate=""
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
     info "Starting the gateway"
     # A 0.8.x start gives up after 60 seconds and stops the gateway it
     # launched, so one restored on a large audit database is stopped before it
@@ -1040,9 +1040,10 @@ start_gateway() {
         [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
         info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
     fi
-    while [[ -z "${START_EXPLAINED:-}" && ${waited} -lt 180 && -n "$(gateway_pid || true)" ]]; do
+    # Wall-clock: a status probe of a gateway that does not answer takes seconds.
+    deadline=$((SECONDS + 180))
+    while [[ -z "${START_EXPLAINED:-}" && ${SECONDS} -lt ${deadline} && -n "$(gateway_pid || true)" ]]; do
         sleep 3
-        waited=$((waited + 3))
         explain_start_failure "${log}" "${from}"
         if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
             # Answering twice in a row, without a refusal in between: it is up.
