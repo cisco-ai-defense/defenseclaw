@@ -4724,7 +4724,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "audit": [
                 ("j/k or Up/Down", "Navigate entries"),
                 ("Enter", "Open detail"),
-                ("1-5", "All / risk / blocks / scans / credentials"),
+                ("h/l", "Previous / next filter chip (All, Risk, Blocks, Scans, Credentials)"),
                 ("/", "Search with field:value terms"),
                 ("t / u", "Same target / same run as the selected event"),
                 ("e", "Export to JSON"),

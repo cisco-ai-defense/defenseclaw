@@ -126,7 +126,7 @@ class HintEngine:
         # callers that haven't been updated yet.
         if status.missing_keys:
             return (
-                "Required credentials are missing. Open Credentials setup, press f to fill missing, or r refresh."
+                "Required API keys missing: select API keys & secrets, press f to fill missing."
             )
         segments = (status.gateway, status.watchdog, status.guardrail)
         for segment in segments:
@@ -135,7 +135,7 @@ class HintEngine:
             has_secret = any(token in text for token in ("credential", "api key", "key", "token", "secret"))
             if has_missing and has_secret:
                 return (
-                    "Required credentials are missing. Open Credentials setup, press f to fill missing, or r refresh."
+                    "Required API keys missing: select API keys & secrets, press f to fill missing."
                 )
         return ""
 
@@ -204,7 +204,7 @@ class HintEngine:
                 "Same target/run correlates rows."
             )
         return (
-            "KEYS  j/k move | Enter detail | 1 all 2 risk 3 blocks 4 scans 5 keys | / search field:value | "
+            "KEYS  j/k move | Enter detail | h/l filter chips | / search field:value | "
             "t same target | u same run | e export | Esc close."
         )
 

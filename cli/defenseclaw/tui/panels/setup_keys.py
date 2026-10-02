@@ -81,8 +81,8 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
         KeySpec("c", "config", "Edit config.yaml fields directly (config editor)", None, ("c",)),
-        KeySpec("f", "fill missing keys", "Prompt for every missing required key", None, ("f",), when="credentials"),
-        KeySpec("s", "set a key", "Set one API key", None, ("s",), when="credentials"),
+        KeySpec("f", "fill missing", "Prompt for every missing required key", None, ("f",), when="credentials"),
+        KeySpec("s", "set key", "Set one API key", None, ("s",), when="credentials"),
         KeySpec("r", "refresh", "Reload the list of API keys", None, ("r",)),
         *_RESTART,
     ),
@@ -195,10 +195,38 @@ def keymap(view: SetupView, conditions: Iterable[str] = ()) -> tuple[KeySpec, ..
     return tuple(spec for spec in SETUP_KEYMAPS[view] if not spec.when or spec.when in held)
 
 
-def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
-    """Hint bar text: ``↑/↓ choose · Enter open · …``."""
+# The task list's hint is one row at 80 columns (the bar pads one cell on
+# each side); it has no button bar to fall back on.
+HINT_WIDTH = 78
+ONE_ROW_VIEWS: frozenset[str] = frozenset({"wizards"})
+MORE_KEYS = "? all keys"
 
-    return " · ".join(f"{spec.key} {spec.label}" for spec in keymap(view, conditions) if spec.in_hint)
+
+def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
+    """Hint bar text: ``↑/↓ choose · Enter open · …``.
+
+    On the task list the keys of the selected task (``f``, ``s``, ``G``) win
+    over the general ones: those go from the end until the line fits one
+    80-column row, and ``? all keys`` points at the help sheet that still
+    lists them (GAP-1825).
+    """
+
+    specs = [spec for spec in keymap(view, conditions) if spec.in_hint]
+
+    def join(items: list[KeySpec], *more: str) -> str:
+        return " · ".join([*(f"{spec.key} {spec.label}" for spec in items), *more])
+
+    text = join(specs)
+    if view not in ONE_ROW_VIEWS or len(text) <= HINT_WIDTH:
+        return text
+    for spec in reversed(specs[1:]):
+        if spec.when:
+            continue
+        specs.remove(spec)
+        text = join(specs, MORE_KEYS)
+        if len(text) <= HINT_WIDTH:
+            break
+    return text
 
 
 def help_rows(view: SetupView, conditions: Iterable[str] = ()) -> list[tuple[str, str]]:
