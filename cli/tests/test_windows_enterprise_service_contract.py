@@ -5251,6 +5251,18 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
+    # A standalone purge then removes the Claude Code folders Setup created
+    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # folders (GAP-1734), and reports what it kept (behaviour in
+    # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
+    assert (
+        "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
+        "    $machineStateRemaining = [string[]]@()\n"
+        "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
+        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+    ) in module
+    assert "@(Remove-DefenseClawStalePowerShellTempDirectories -ProgramData $script:ProgramData)" in module
+    assert "-Name machine_state_remaining" in module
 
     # The traverse grant names a virtual account that only exists while the
     # service does, so it is dropped by the caller that deleted the service.
