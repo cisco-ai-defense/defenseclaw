@@ -59,6 +59,9 @@ _REQUIRED_COLUMNS = frozenset(
     }
 )
 _MAX_ROWS = 1000
+# The connector-hook decision row a current gateway writes (bucket
+# guardrail.evaluation); the alert view treats it like a bucket-less hook row.
+LEGACY_HOOK_EVENT_NAME = "legacy.audit.connector.hook"
 _MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_FINDING_TAGS_BYTES = 16 * 1024
 
@@ -186,6 +189,28 @@ _V8_ALERT_WHERE_SQL_TEMPLATE = """
                 ) = 'block'
             )
         )
+        OR (
+            -- Current gateways file the connector-hook row under
+            -- guardrail.evaluation. A block with no rule finding (a tool on
+            -- the static block list) is only this row, so it is the alert;
+            -- a block a finding explains stays one alert, the finding row,
+            -- as in 'defenseclaw alerts' (GAP-1747, GAP-1305).
+            event_name = '{legacy_hook_event}'
+            AND LOWER(COALESCE(action, '')) = 'connector-hook'
+            AND {hook_may_block} AND dc_hook_decision(
+                COALESCE(details, ''),
+                {structured_json},
+                {enforced}
+            ) = 'block'
+            AND NOT (
+                COALESCE(request_id, '') <> ''
+                AND EXISTS (
+                    SELECT 1 FROM audit_events AS finding
+                    WHERE finding.request_id = audit_events.request_id
+                      AND finding.action = 'scan-finding'
+                )
+            )
+        )
     )
 """
 
@@ -200,6 +225,7 @@ def _v8_alert_where_sql(columns: frozenset[str]) -> str:
         actionable_severities=_sql_string_values(ALERT_ACTIONABLE_SEVERITIES),
         non_allow_outcomes=_sql_string_values(ALERT_NON_ALLOW_OUTCOMES),
         legacy_finding_actions=_sql_string_values(ALERT_LEGACY_FINDING_ACTIONS),
+        legacy_hook_event=LEGACY_HOOK_EVENT_NAME,
         hook_may_block=hook_decision_may_block_sql(
             "COALESCE(details, '')",
             "structured_json" if "structured_json" in columns else "NULL",
@@ -224,6 +250,10 @@ _V8_ACTIONABLE_ALERT_WHERE_SQL = f"""
         )
         OR (
             bucket IS NULL
+            AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
+        )
+        OR (
+            event_name = '{LEGACY_HOOK_EVENT_NAME}'
             AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
         )
     )
@@ -264,7 +294,7 @@ _V8_SELECT_COLUMNS_TEMPLATE = """
         )
     ),
     CASE
-        WHEN bucket IS NULL
+        WHEN (bucket IS NULL OR event_name = 'legacy.audit.connector.hook')
          AND LOWER(COALESCE(action, '')) = 'connector-hook'
         THEN dc_hook_decision(
             COALESCE(details, ''),

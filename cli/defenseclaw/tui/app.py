@@ -4652,10 +4652,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("Enter", "Toggle detail pane"),
                 ("h/l", "Previous / next severity chip (Actionable, All, Critical, High, Medium, Low)"),
                 ("/", "Search target / action / details"),
-                ("Space", "Toggle select current alert"),
+                ("Space", "Mark / unmark the current alert"),
                 ("a / X", "Select all filtered / deselect all"),
                 ("x", "Acknowledge selected alerts"),
-                ("d", "Dismiss the highlighted alert"),
+                ("d", "Dismiss marked alerts (or the highlighted one)"),
                 ("c / C", "Dismiss filtered / dismiss ALL alerts"),
                 ("y", "Copy alert details to clipboard"),
                 ("r", "Refresh"),
@@ -4788,7 +4788,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         running_section: list[tuple[str, str]] = [
             ("Ctrl+C", "Send SIGINT to the running subprocess"),
             ("A", "Open Activity to watch the output live"),
-            ("Y / Ctrl+S", "Copy / save its output (~/.defenseclaw/tui/last-run.log)"),
+            ("Y / Ctrl+S", "Copy / save its output (~/.defenseclaw/last-run.log)"),
         ]
 
         return [
@@ -5918,7 +5918,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     #
     # ``Y`` copies the most recent Activity entry's output to the OS
     # clipboard; ``Ctrl+S`` writes that same output to a stable path
-    # (``~/.defenseclaw/tui/last-run.log``) so the operator can ``tail
+    # (``~/.defenseclaw/last-run.log``) so the operator can ``tail
     # -f`` it from another terminal or attach it to a bug report
     # without scrolling the TUI back to the start of a long run.
     # ------------------------------------------------------------------
@@ -6002,7 +6002,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             f"# saved   {datetime.now(timezone.utc).isoformat()}\n"
             "\n"
         )
-        body = "\n".join(entry.output)
+        # Plain text: colour codes made the saved log and the clipboard
+        # unreadable outside a terminal (GAP-1772).
+        body = "\n".join(_strip_ansi(line) for line in entry.output)
         return header, body
 
     def action_yank_output(self) -> None:
@@ -6192,7 +6194,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
             _write_owner_only_text(
                 target,
-                header + "\n".join(entry.output) + "\n",
+                header + "\n".join(_strip_ansi(line) for line in entry.output) + "\n",
                 protect_parent=self.data_dir is not None,
             )
             # F-0782: command output frequently contains tokens/secrets, so
@@ -11449,6 +11451,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self,
         columns: tuple[str, ...],
         rows: tuple[tuple[str, ...], ...],
+        *,
+        main_width: int = 0,
     ) -> tuple[tuple[str, ...], ...]:
         """Wrap the last cell (a hint) to the room the other columns leave.
 
@@ -11465,6 +11469,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             for index, column in enumerate(columns[:-1])
         )
         room = width - others - 2 - 8
+        if main_width:
+            # Beside the Setup nav the table has only the main column; the
+            # screen width cut the goal descriptions at the border (GAP-1775).
+            room = main_width - others - 2 - 4
         if room < 24:
             return rows
         return tuple(
@@ -11502,11 +11510,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # On a narrow terminal long goal names ("Set up a proxy connector
             # with the local stack") wrap too, so the description keeps room
             # to be read in full.
+            # The goal menu has the nav on its left and no aside: the body's
+            # margins and padding, then the nav and its gap (GAP-1775).
+            main_width = self._setup_width() - 6 - NAV_WIDTH - 1 if self._setup_nav_shown() else 0
             width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
-            if width and width - max(map(len, labels), default=0) - 12 < 36:
+            if width and ((main_width + 8) if main_width else width) - max(map(len, labels), default=0) - 12 < 36:
                 labels = ["\n".join(textwrap.wrap(label, 30)) if len(label) > 30 else label for label in labels]
             rows = tuple(zip(labels, (goal.summary for goal in self.setup_model.goals), strict=True))
-            return columns, self._wrap_last_table_column(columns, rows)
+            return columns, self._wrap_last_table_column(columns, rows, main_width=main_width)
         if self.setup_model.form_active:
             columns = ("Field", "Value", "Kind", "Hint")
             rows = tuple(

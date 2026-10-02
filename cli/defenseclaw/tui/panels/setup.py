@@ -4026,7 +4026,8 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.REDACTION:
         profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
-        return f"Default profile: {profile}  ·  Effective overrides come from the canonical v8 plan"
+        posture = "unredacted" if profile == "none" else "redacted"
+        return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:
         mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
         enabled = "on" if _guardrail_enabled(cfg) else "off"

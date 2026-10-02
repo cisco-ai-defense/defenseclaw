@@ -374,6 +374,32 @@ def _observability_status(observability: Any, error: str) -> TaskStatus:
     return TaskStatus("ok", _plural(len(destinations), "destination"))
 
 
+def _redaction_profiles(cfg: Any, observability: Any) -> set[str]:
+    """Redaction profiles in effect, read the way the status bar reads them."""
+
+    profiles: set[str] = set()
+    if observability is not None:
+        for destination in getattr(observability, "destinations", ()) or ():
+            profiles.update(str(value) for value in getattr(destination, "redaction_profiles", ()) or () if value)
+        for bucket in getattr(observability, "buckets", ()) or ():
+            if profile := str(getattr(bucket, "redaction_profile", "") or ""):
+                profiles.add(profile)
+    if not profiles:
+        profiles.add(_text(cfg, "observability.defaults.redaction_profile") or "none")
+    return profiles
+
+
+def _redaction_status(cfg: Any, observability: Any) -> TaskStatus:
+    # The default profile is "none": prompts and tool data are exported
+    # unredacted, so a green "on" misled the reader (GAP-1773).
+    profiles = _redaction_profiles(cfg, observability)
+    if profiles == {"none"}:
+        return TaskStatus("off", "unredacted")
+    if "none" in profiles:
+        return TaskStatus("ok", _short("some routes · " + ",".join(sorted(profiles - {"none"}))))
+    return TaskStatus("ok", _short("on · " + ",".join(sorted(profiles))))
+
+
 def _splunk_status(cfg: Any, observability: Any) -> TaskStatus:
     destinations = _destinations(observability)
     if destinations is not None:
@@ -441,7 +467,7 @@ def task_status(
     if wizard == SetupWizard.REDACTION:
         if _flag(cfg, "privacy.disable_redaction"):
             return TaskStatus("attention", "turned off")
-        return TaskStatus("ok", "on")
+        return _redaction_status(cfg, observability)
     if wizard == SetupWizard.TRUSTED_PATHS:
         added = len(_items(cfg, "ai_discovery.trusted_binary_prefixes"))
         return TaskStatus("ok", f"defaults + {added}" if added else "defaults")
