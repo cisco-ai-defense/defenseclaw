@@ -95,6 +95,9 @@ type cliObservabilityV8Scan struct {
 	Timestamp  time.Time                   `json:"timestamp"`
 	Findings   []cliObservabilityV8Finding `json:"findings"`
 	DurationMS int64                       `json:"duration_ms"`
+	// Error is set when the scan could not finish; it is recorded as
+	// scan.failed so failed scans are visible in audit and OTLP (GAP-1504).
+	Error string `json:"error,omitempty"`
 }
 
 // cliObservabilityV8Finding deliberately mirrors Finding.to_dict in the
@@ -279,7 +282,8 @@ func (scan cliObservabilityV8Scan) validate() error {
 		!cliObservabilityV8Text(scan.Target, cliObservabilityV8MaxTargetBytes, true) ||
 		scan.Timestamp.IsZero() || scan.Timestamp.Year() < 1 || scan.Timestamp.Year() > 9999 ||
 		scan.DurationMS < 0 || scan.DurationMS > math.MaxInt64/int64(time.Millisecond) ||
-		len(scan.Findings) > cliObservabilityV8MaxFindings {
+		len(scan.Findings) > cliObservabilityV8MaxFindings ||
+		!cliObservabilityV8Text(scan.Error, cliObservabilityV8MaxTitleBytes, false) {
 		return errors.New("invalid scan fields")
 	}
 	duration := time.Duration(scan.DurationMS) * time.Millisecond
@@ -453,6 +457,10 @@ func (a *APIServer) emitCLIObservabilityV8(
 		result := &scanner.ScanResult{
 			Scanner: scan.Scanner, Target: scan.Target, Timestamp: scan.Timestamp,
 			Findings: findings, Duration: time.Duration(scan.DurationMS) * time.Millisecond,
+		}
+		if strings.TrimSpace(scan.Error) != "" {
+			result.ScanError = scan.Error
+			result.ExitCode = 1
 		}
 		return a.logger.LogScanWithCorrelation(ctx, result, "", audit.ScanCorrelation{
 			RunID: envelope.RunID, RequestID: envelope.RequestID,

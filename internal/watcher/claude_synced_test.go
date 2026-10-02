@@ -5,10 +5,13 @@
 package watcher
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
+	"time"
 )
 
 // GAP-1243: Claude Code's account-synced container is expanded into its
@@ -67,5 +70,73 @@ func TestEnumerateTargetsExpandsClaudeSyncedSkills(t *testing.T) {
 		if evt.Type != InstallSkill || filepath.Dir(evt.Path) != account {
 			t.Fatalf("unexpected synced event %+v", evt)
 		}
+	}
+}
+
+// GAP-1409: a skill synced into an existing account folder, or a new account
+// folder with a skill, is admitted on arrival rather than at the next rescan.
+func TestWatcherAdmitsSkillSyncedIntoAccountFolder(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	root := filepath.Join(t.TempDir(), ".claude", "skills")
+	account := filepath.Join(root, "synced", "acct-1")
+	if err := os.MkdirAll(account, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"live-skill", "second-skill"} {
+		if err := store.SetActionField("skill", name, "install", "allow", "pre-approved"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var mu sync.Mutex
+	seen := map[string]string{}
+	w := New(cfg, []string{root}, nil, store, logger, nil, func(r AdmissionResult) {
+		mu.Lock()
+		seen[r.Event.Name] = r.Event.Path
+		mu.Unlock()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx) }()
+	time.Sleep(500 * time.Millisecond)
+
+	writeSkill := func(dir string) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# skill\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSkill(filepath.Join(account, "live-skill"))
+	writeSkill(filepath.Join(root, "synced", "acct-2", "second-skill"))
+
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			<-errCh
+			mu.Lock()
+			defer mu.Unlock()
+			t.Fatalf("admissions = %v, want live-skill and second-skill", seen)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-errCh
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["live-skill"] != filepath.Join(account, "live-skill") ||
+		seen["second-skill"] != filepath.Join(root, "synced", "acct-2", "second-skill") {
+		t.Fatalf("admissions = %v", seen)
 	}
 }

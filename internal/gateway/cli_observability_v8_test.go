@@ -403,3 +403,39 @@ func newCLIObservabilityV8Fixture(
 	api.bindObservabilityV8Runtimes(owner, owner, nil, owner)
 	return fixture, api, capture
 }
+
+// GAP-1504: a scan that could not finish is persisted as a failed scan.
+func TestCLIObservabilityV8RecordsFailedScan(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	const body = `{"kind":"scan","run_id":"failed-mcp-run","scan":{"scanner":"mcp-scanner","target":"deepwiki","timestamp":"2026-10-02T11:26:20Z","findings":[],"duration_ms":5000,"error":"scan failed: Connection to MCP server was cancelled"}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("failed scan status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var exitCode int
+	var scanError string
+	if err := database.QueryRow(
+		`SELECT COALESCE(exit_code, 0), COALESCE(error, '') FROM scan_results WHERE run_id = 'failed-mcp-run'`,
+	).Scan(&exitCode, &scanError); err != nil {
+		t.Fatal(err)
+	}
+	if exitCode == 0 || !strings.Contains(scanError, "was cancelled") {
+		t.Fatalf("scan_results exit_code=%d error=%q, want a failed scan", exitCode, scanError)
+	}
+	var audited int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM audit_events WHERE run_id = 'failed-mcp-run' AND action = 'scan'`,
+	).Scan(&audited); err != nil {
+		t.Fatal(err)
+	}
+	if audited != 1 {
+		t.Fatalf("audit scan rows=%d, want 1", audited)
+	}
+}

@@ -232,19 +232,33 @@ class Logger:
 
         return cls(_NoRuntimeRecorder())
 
-    def log_scan(self, result: ScanResult) -> None:
-        payload = {
-            "kind": "scan",
-            "run_id": _current_run_id(),
-            "scan": {
-                "scanner": result.scanner,
-                "target": result.target,
-                "timestamp": result.timestamp.isoformat(),
-                "findings": [_scan_finding_wire(finding) for finding in result.findings],
-                "duration_ms": int(result.duration.total_seconds() * 1000),
-            },
+    def log_scan(self, result: ScanResult, *, error: str = "") -> None:
+        scan: dict[str, Any] = {
+            "scanner": result.scanner,
+            "target": result.target,
+            "timestamp": result.timestamp.isoformat(),
+            "findings": [_scan_finding_wire(finding) for finding in result.findings],
+            "duration_ms": int(result.duration.total_seconds() * 1000),
         }
-        self._emit(payload)
+        if error:
+            # A scan that could not finish is recorded as scan.failed, so
+            # audit export, OTLP and alerts show it (GAP-1504).
+            scan["error"] = error.replace("\x00", "").encode("utf-8")[:4000].decode("utf-8", "ignore")
+        self._emit({"kind": "scan", "run_id": _current_run_id(), "scan": scan})
+
+    def log_scan_failed(self, scanner: str, target: str, error: str, *, duration_ms: int = 0) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        self.log_scan(
+            ScanResult(
+                scanner=scanner,
+                target=target,
+                timestamp=datetime.now(timezone.utc),
+                findings=[],
+                duration=timedelta(milliseconds=max(0, duration_ms)),
+            ),
+            error=error or "scan failed",
+        )
 
     def log_action(self, action: str, target: str, details: str) -> None:
         self._emit(
