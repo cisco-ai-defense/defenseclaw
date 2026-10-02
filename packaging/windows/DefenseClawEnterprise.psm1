@@ -3389,7 +3389,14 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
         [Security.AccessControl.RawSecurityDescriptor]$Actual,
-        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected,
+        # When set, the DACL-not-protected branch skips its icacls
+        # /inheritance:r self-heal and goes straight to throwing. Callers
+        # performing drift-detection (Repair-DefenseClawUninstallAdminFileAcl
+        # at line 7921) must not accidentally modify the inspected file
+        # mid-check: the detection is a signal to escalate deeper checks,
+        # not an invitation to repair.
+        [switch]$SkipSelfHeal
     )
     $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
         $Expected.GetSecurityDescriptorBinaryForm(),
@@ -3399,6 +3406,14 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+        if ($SkipSelfHeal) {
+            # Drift-detection caller: don't modify the file. The caller
+            # expects to see the exact drift state and route into its own
+            # deeper check pipeline (ancestor checks, authority RawAcl,
+            # hash validation). Mutating the file via icacls here would
+            # mask the drift from the caller and defeat its tamper gate.
+            throw "managed DACL is not protected after exact ACL replacement: $Path"
+        }
         # Self-heal: PowerShell's native Set-Acl can silently drop
         # PROTECTED_DACL_SECURITY_INFORMATION even when the input
         # descriptor had SetAccessRuleProtection($true, $false). Force
@@ -7919,10 +7934,16 @@ function Repair-DefenseClawUninstallAdminFileAcl {
     )
     $aclDrift = ''
     try {
+        # SkipSelfHeal: this call is drift-DETECTION, not drift-REPAIR.
+        # The verifier's icacls /inheritance:r self-heal would mutate the
+        # inspected file and mask drift the deeper check pipeline below
+        # relies on seeing. Only the stamp-and-verify callers through
+        # Set-DefenseClawPathAcl use the self-heal.
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $path `
             -Actual $actual `
-            -Expected $expected
+            -Expected $expected `
+            -SkipSelfHeal
     }
     catch {
         $aclDrift = $_.Exception.Message
@@ -20874,19 +20895,15 @@ function Complete-DefenseClawStatePurge {
                 -Algorithm SHA256
         ).Hash.ToLowerInvariant()
         if ([string]$intent.tombstone_sha256 -cne $actualHash) {
-            # Bulldoze posture: a tombstone SHA drift between intent
-            # publication and purge completion is almost always a prior
-            # aborted uninstall that wrote a tombstone which doesn't match
-            # today's deployment.json byte sequence (reasonable follow-up
-            # retry hits this path). Refusing here traps the box in the
-            # half-torn state. The subsequent purge still revalidates
-            # service/InstallRoot absence; the tombstone is informational.
-            if (Test-DefenseClawTrustStrictAncestors) {
-                throw 'state-purge tombstone changed after intent publication'
-            }
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path $Layout.MetadataPath `
-                -Reason "state-purge tombstone SHA drift (prior aborted uninstall); continuing bulldoze"
+            # Tombstone-SHA drift between intent publication and the current
+            # deployment.json bytes is NOT a candidate for bulldoze: an
+            # actively tampered purge intent (attacker-written SHA) is
+            # indistinguishable from a legitimate drift and the authenticated
+            # purge path must stay fail-closed to prevent an unauthorized
+            # state purge. Operators can retry uninstall from a clean intent
+            # (the pending transaction's state-purge intent is re-published
+            # by the next lifecycle invocation).
+            throw 'state-purge tombstone changed after intent publication'
         }
     }
     if ($intentSchema -eq 2 -and
