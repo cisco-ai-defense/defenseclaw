@@ -435,7 +435,13 @@ def processes(
         click.echo(_AI_DISCOVERY_OFF_PROCESSES_HINT)
         return
 
-    click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
+    click.echo(
+        _render_ai_processes_table(
+            process_signals,
+            limit=limit,
+            product_last_active=_product_last_active(raw_signals),
+        ).rstrip()
+    )
 
 
 _AI_DISCOVERY_OFF_PROCESSES_HINT = (
@@ -4652,10 +4658,57 @@ def _render_ai_usage_plain(
     return "\n".join(lines) + "\n"
 
 
+def _parse_iso_ts(value: Any) -> Any:
+    if not value:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _product_last_active(signals: list[dict[str, Any]]) -> dict[str, str]:
+    """Newest ``last_active_at`` per product across every live signal.
+
+    GAP-1503: a process signal's own ``last_active_at`` is its start time, so
+    the column only repeated Up. Hook and file signals for the same product
+    carry the real activity (what ``agent usage`` shows).
+    """
+    best: dict[str, tuple[Any, str]] = {}
+    for sig in signals:
+        if str(sig.get("state", "")).lower() == "gone":
+            continue
+        product = str(sig.get("product", "") or "")
+        raw = str(sig.get("last_active_at", "") or "")
+        ts = _parse_iso_ts(raw)
+        if product and ts is not None and (product not in best or ts > best[product][0]):
+            best[product] = (ts, raw)
+    return {product: raw for product, (_ts, raw) in best.items()}
+
+
+def _process_last_active(sig: dict[str, Any], product_last_active: dict[str, str] | None) -> str:
+    own = str(sig.get("last_active_at", "") or "")
+    newer = (product_last_active or {}).get(str(sig.get("product", "") or ""), "")
+    own_ts, newer_ts = _parse_iso_ts(own), _parse_iso_ts(newer)
+    if newer_ts is not None and (own_ts is None or newer_ts > own_ts):
+        return newer
+    return own
+
+
+_PROCESSES_LAST_ACTIVE_NOTE = (
+    "Last active is the newest activity seen for that product (as in 'agent usage'); "
+    "Up is the process uptime."
+)
+
+
 def _render_ai_processes_table(
     process_signals: list[dict[str, Any]],
     *,
     limit: int = 0,
+    product_last_active: dict[str, str] | None = None,
 ) -> str:
     """Render the live AI processes view: PID/PPID/uptime/user/comm/product."""
     displayed = process_signals[:limit] if limit > 0 else process_signals
@@ -4664,7 +4717,7 @@ def _render_ai_processes_table(
         from rich.console import Console
         from rich.table import Table
     except Exception:
-        return _render_ai_processes_plain(displayed)
+        return _render_ai_processes_plain(displayed, product_last_active=product_last_active)
 
     from io import StringIO
 
@@ -4691,7 +4744,7 @@ def _render_ai_processes_table(
             str(sig.get("product", "")),
             str(sig.get("vendor", "")),
             str(runtime.get("comm", "") or ""),
-            _format_relative_time(sig.get("last_active_at", "")),
+            _format_relative_time(_process_last_active(sig, product_last_active)),
         )
     console.print(table)
     hidden = len(process_signals) - len(displayed)
@@ -4700,10 +4753,16 @@ def _render_ai_processes_table(
         footer += f" ({hidden} hidden by --limit)"
     footer += ". Use --json for the full list."
     console.print(footer)
+    if displayed:
+        console.print(_PROCESSES_LAST_ACTIVE_NOTE)
     return stream.getvalue()
 
 
-def _render_ai_processes_plain(process_signals: list[dict[str, Any]]) -> str:
+def _render_ai_processes_plain(
+    process_signals: list[dict[str, Any]],
+    *,
+    product_last_active: dict[str, str] | None = None,
+) -> str:
     lines = [f"AI processes ({len(process_signals)} live)"]
     for sig in process_signals:
         runtime = _mapping_block(sig.get("runtime"))
@@ -4716,7 +4775,7 @@ def _render_ai_processes_plain(process_signals: list[dict[str, Any]]) -> str:
                 str(sig.get("product", "")),
                 str(sig.get("vendor", "")),
                 str(runtime.get("comm", "") or ""),
-                _format_relative_time(sig.get("last_active_at", "")),
+                _format_relative_time(_process_last_active(sig, product_last_active)),
             ])
         )
     return "\n".join(lines) + "\n"

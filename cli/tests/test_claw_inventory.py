@@ -4249,3 +4249,31 @@ class TestBuildAibomConnectorPathSkippedForOpenClaw(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEnrichConnectorScopedBlock(_StoreWithPolicyMixin, unittest.TestCase):
+    def test_connector_scoped_block_reads_blocked(self):
+        # GAP-1558: 'skill block X --connector claudecode' is "blocked" in the
+        # inventory too, not "warning" from the scan severity.
+        import uuid
+        from datetime import datetime, timezone
+
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/skills/fsa4-review",
+            datetime.now(timezone.utc), 100, 1, "INFO", "{}",
+        )
+        self._pe().block_for_connector("skill", "fsa4-review", "claudecode", "test block")
+        inv = {
+            "connector": "claudecode",
+            "skills": [{"id": "fsa4-review", "eligible": True, "path": "/skills/fsa4-review"}],
+            "summary": {"skills": {"count": 1}},
+        }
+
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        self.assertEqual(inv["skills"][0]["policy_verdict"], "blocked")
+        self.assertEqual(inv["summary"]["policy_skills"]["blocked"], 1)
+
+        other = {"connector": "codex", "skills": [{"id": "fsa4-review"}], "summary": {"skills": {"count": 1}}}
+        enrich_with_policy(other, self.store, self.skill_actions)
+        self.assertNotEqual(other["skills"][0]["policy_verdict"], "blocked")

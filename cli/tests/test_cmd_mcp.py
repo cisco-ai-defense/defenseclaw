@@ -2160,3 +2160,23 @@ class TestAttachErrorHandler(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMCPScanDirectURLPreamble(MCPCommandTestBase):
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_direct_url_scan_names_no_connector(self, mock_scan):
+        # GAP-1506: an ad-hoc URL is not "on amp" just because amp sorts first.
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp", "cursor"]  # type: ignore[method-assign]
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner",
+            target="https://mcp.example.test/mcp",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        result = self.invoke(["scan", "https://mcp.example.test/mcp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 MCP server at a direct URL", result.output)
+        self.assertNotIn("on amp", result.output)

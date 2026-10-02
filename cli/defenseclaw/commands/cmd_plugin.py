@@ -287,6 +287,9 @@ def scan(
         click.echo("  Provide a path, a DefenseClaw plugin name, or a connector plugin name.", err=True)
         raise SystemExit(1)
 
+    if len(matches) == 1 and _looks_like_explicit_path(name_or_path):
+        _refuse_plugin_folder_of_plugins(matches[0].path, connector=matches[0].connector)
+
     pack_cache: RulePackOverlayCache = {}
     for idx, match in enumerate(matches):
         connector, scan_dir = match
@@ -324,6 +327,53 @@ def scan(
             project_path=match.project_path,
             plugin_id=match.plugin_id,
         )
+
+
+def _has_plugin_manifest(path: str) -> bool:
+    from defenseclaw.scanner.plugin_scanner.scanner import _MANIFEST_CANDIDATES
+
+    return any(os.path.isfile(os.path.join(path, rel)) for rel, _label in _MANIFEST_CANDIDATES)
+
+
+def _plugin_folder_children(path: str) -> list[str]:
+    """Sub-folders holding a plugin manifest when *path* itself has none."""
+    if not os.path.isdir(path) or _has_plugin_manifest(path):
+        return []
+    try:
+        entries = sorted(os.scandir(path), key=lambda e: e.name)
+    except OSError:
+        return []
+    return [
+        e.name
+        for e in entries
+        if not e.name.startswith((".", "_"))
+        and e.is_dir(follow_symlinks=False)
+        and _has_plugin_manifest(e.path)
+    ]
+
+
+def _refuse_plugin_folder_of_plugins(path: str, *, connector: str = "") -> None:
+    """GAP-1580: a folder of plugins (Hermes ``plugins/browser``) is not a plugin.
+
+    Scanning it as one reported a BLOCKED HIGH "No plugin manifest found";
+    say what it is and how to scan the plugins inside it instead.
+    """
+    children = _plugin_folder_children(path)
+    if not children:
+        return
+    flag = f" --connector {connector}" if connector else ""
+    click.echo(
+        f"error: {path} is a folder of {len(children)} plugin(s), not a plugin "
+        "(it has no plugin manifest).",
+        err=True,
+    )
+    click.echo(f"  It holds: {', '.join(children)}", err=True)
+    click.echo(
+        f"  Scan one:  defenseclaw plugin scan {os.path.join(path, children[0])}",
+        err=True,
+    )
+    click.echo(f"  Scan all:  defenseclaw plugin scan --all{flag}", err=True)
+    raise SystemExit(2)
 
 
 def _scan_one_plugin_dir(
@@ -4162,9 +4212,12 @@ def _print_plugin_info_card(
         if scan_data.get("clean"):
             click.secho("  Verdict:  CLEAN", fg="green")
         else:
+            # GAP-1507: the count is the total and the severity the maximum;
+            # "2 HIGH findings" read as two HIGH ones (same wording as skill info).
             n = scan_data.get("total_findings", 0)
             sev = scan_data.get("max_severity", "INFO")
-            click.echo(f"  Verdict:  {n} {sev} findings")
+            noun = "finding" if n == 1 else "findings"
+            click.echo(f"  Findings: {n} {noun} (max severity: {sev})")
         click.echo(f"  Target:   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")

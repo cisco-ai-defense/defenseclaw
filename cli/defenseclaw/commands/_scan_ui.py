@@ -178,6 +178,9 @@ class ScanContext:
     categories: tuple[str, ...] = ()
     as_json: bool = False
     click_ctx: click.Context | None = None
+    # Replaces "on <connector>" in the preamble when the target does not come
+    # from a connector's config (GAP-1506: an ad-hoc ``mcp scan <url>``).
+    where: str = ""
 
     def __post_init__(self) -> None:
         # Normalize. Operators routinely paste connector names with
@@ -207,12 +210,15 @@ class ScanContext:
         )
 
     @classmethod
-    def for_mcp(cls, *, connector: str, paths: Iterable[str], as_json: bool = False) -> ScanContext:
+    def for_mcp(
+        cls, *, connector: str, paths: Iterable[str], as_json: bool = False, where: str = "",
+    ) -> ScanContext:
         return cls(
             component=COMPONENT_MCP,
             connector=connector,
             paths=list(paths),
             as_json=as_json,
+            where=where,
         )
 
     # -- helpers ------------------------------------------------------
@@ -239,7 +245,7 @@ def render_preamble(ctx: ScanContext, target_count: int) -> None:
     label = ctx.label(plural=target_count != 1)
     click.echo()
     click.echo(
-        f"  Scanning {target_count} {label} on {ctx.connector} for:"
+        f"  Scanning {target_count} {label} {ctx.where or 'on ' + ctx.connector} for:"
     )
     for cat in ctx.categories:
         click.echo(f"    - {cat}")

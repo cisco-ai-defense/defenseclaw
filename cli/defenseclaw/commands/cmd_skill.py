@@ -984,9 +984,10 @@ def _print_skill_info_card(
         click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
         note = _skill_policy_note(
             info_map.get("name", skill_name), verdict, held=held,
+            connector=str(info_map.get("connector") or ""),
         )
-        if note:
-            click.echo(f"  {note}")
+        for line in note.splitlines():
+            click.echo(f"  {line}")
 
     actions_data = info_map.get("actions")
     if actions_data or info_map.get("connector"):
@@ -1086,23 +1087,40 @@ def _skill_held_off(info_map: dict[str, Any] | None, action_entry: Any = None) -
     return False
 
 
-def _skill_policy_note(name: str, label: str, *, held: bool = True) -> str:
-    """One line on what a policy verdict means for an installed copy."""
+def _skill_policy_note(
+    name: str, label: str, *, held: bool = True, connector: str = "",
+) -> str:
+    """What a policy verdict means for an installed copy, plus next steps.
+
+    The first line explains the verdict; each next step follows on its own
+    line (GAP-1559), with ``--connector`` when one is known so the command
+    can be pasted as-is on a multi-connector install.
+    """
+    flag = f" --connector {connector}" if connector else ""
+
+    def steps(text: str, *commands: tuple[str, str]) -> str:
+        lines = [text] + [f"{what}: defenseclaw skill {cmd} {name}{flag}" for what, cmd in commands]
+        return "\n".join(lines)
+
     if label == "rejected":
-        return (
+        return steps(
             "the policy refuses this skill at install; the copy already on disk "
-            f"stays loaded until you act. Block it: defenseclaw skill block {name}  "
-            f"Accept it: defenseclaw skill allow {name}"
+            "stays loaded until you act.",
+            ("Block it", "block"),
+            ("Accept it", "allow"),
         )
     if label == "warning":
-        return f"allowed with findings. Block it: defenseclaw skill block {name}"
+        return steps("allowed with findings.", ("Block it", "block"))
     if label == "blocked":
         if held:
-            return f"on the block list, so DefenseClaw keeps it disabled. Unblock it: defenseclaw skill unblock {name}"
-        return (
-            "on the install block list; the copy already on disk still loads. "
-            f"Turn it off: defenseclaw skill disable {name}  "
-            f"Unblock it: defenseclaw skill unblock {name}"
+            return steps(
+                "on the block list, so DefenseClaw keeps it disabled.",
+                ("Unblock it", "unblock"),
+            )
+        return steps(
+            "on the install block list; the copy already on disk still loads.",
+            ("Turn it off", "disable"),
+            ("Unblock it", "unblock"),
         )
     return ""
 
@@ -1599,8 +1617,11 @@ def _print_skill_scan_policy(
             held = _skill_held_off(None, pe.get_action("skill", name, connector or ""))
         except Exception:
             held = True
-    note = _skill_policy_note(name, label, held=held) or reason
-    click.echo(f"        policy: {label}" + (f" — {note}" if note else ""))
+    note = _skill_policy_note(name, label, held=held, connector=connector) or reason
+    first, *steps = (note or "").splitlines() or [""]
+    click.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
+    for step in steps:
+        click.echo(f"          {step}")
 
 
 def _skill_scan_findings_verdict(result: Any, *, blocked: bool = False) -> str:

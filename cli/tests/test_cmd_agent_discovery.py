@@ -1491,3 +1491,26 @@ class AgentProcessesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_processes_last_active_uses_newest_product_activity():
+    # GAP-1503: a process signal's last_active_at is its start; show the
+    # product's newest activity (what 'agent usage' shows) instead.
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    started = (now - timedelta(minutes=32)).isoformat()
+    prompted = (now - timedelta(minutes=2)).isoformat()
+    signals = [
+        {"product": "Claude Code", "last_active_at": started,
+         "runtime": {"pid": 7549, "uptime_sec": 1904, "comm": "claude"}},
+        {"product": "Claude Code", "last_active_at": prompted},
+    ]
+
+    out = cmd_agent._render_ai_processes_table(
+        signals[:1], product_last_active=cmd_agent._product_last_active(signals),
+    )
+
+    assert "2m ago" in out
+    assert "32m ago" not in out
+    assert "newest activity seen for that product" in out

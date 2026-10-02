@@ -3825,3 +3825,17 @@ def test_info_card_block_list_only_points_at_disable(capsys):
     assert "keeps it off" not in out
     assert "keeps it disabled" not in out
     assert "defenseclaw skill disable fsav" in out
+
+
+def test_info_card_policy_steps_one_per_line_with_connector(capsys):
+    # GAP-1559: each next step on its own line, with --connector.
+    from defenseclaw.commands.cmd_skill import _print_skill_info_card
+
+    _print_skill_info_card(
+        {"name": "fsav", "eligible": True, "verdict": "blocked", "connector": "claudecode",
+         "actions": {"install": "block"}},
+        "fsav",
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert "  Turn it off: defenseclaw skill disable fsav --connector claudecode" in lines
+    assert "  Unblock it: defenseclaw skill unblock fsav --connector claudecode" in lines
