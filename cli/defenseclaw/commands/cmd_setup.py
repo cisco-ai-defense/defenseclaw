@@ -5615,8 +5615,19 @@ def _hilt_support_note(connector: str) -> str:
     return "Support depends on the connector surface."
 
 
-def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = None) -> None:
-    """Prompt for human approval settings from the guardrail advanced section."""
+def _configure_hilt_interactive(
+    gc,
+    *,
+    action_connectors: list[str] | None = None,
+    flag_enabled: bool | None = None,
+    flag_min_severity: str | None = None,
+) -> None:
+    """Prompt for human approval settings from the guardrail advanced section.
+
+    ``flag_enabled`` / ``flag_min_severity`` are ``--human-approval`` and
+    ``--hilt-min-severity``: when given, the prompts default to them, so
+    pressing Enter keeps what the command line asked for (GAP-1614).
+    """
     ux.section("Human Approval (HILT)")
     if action_connectors is not None:
         if not action_connectors:
@@ -5633,13 +5644,16 @@ def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = Non
         connector = gc.connector or "openclaw"
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
-    enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
+    enabled = click.confirm(
+        "  Human approval for risky actions?",
+        default=gc.hilt.enabled if flag_enabled is None else flag_enabled,
+    )
     gc.hilt.enabled = enabled
     if not enabled:
         gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
         return
 
-    default_min = (gc.hilt.min_severity or "HIGH").upper()
+    default_min = (flag_min_severity or gc.hilt.min_severity or "HIGH").upper()
     if default_min not in _HILT_MIN_SEVERITIES:
         default_min = "HIGH"
     gc.hilt.min_severity = click.prompt(
@@ -6531,12 +6545,16 @@ def setup_guardrail(
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
+        if guard_mode or human_approval is not None or hilt_min_severity:
+            click.echo("  The prompts below default to the flags you passed; add --yes to skip them.")
         try:
             interactive_completed = _interactive_guardrail_setup(
                 app,
                 gc,
                 agent_name=agent_name,
                 default_mode=guard_mode,
+                human_approval=human_approval,
+                hilt_min_severity=hilt_min_severity,
                 _pre_mutation_selection=preselect_guardrail_targets,
                 _pending_secrets=pending_guardrail_secrets,
             )
@@ -12576,6 +12594,8 @@ def _interactive_guardrail_setup(
     *,
     agent_name: str | None = None,
     default_mode: str | None = None,
+    human_approval: bool | None = None,
+    hilt_min_severity: str | None = None,
     _pre_mutation_selection=None,
     _pending_secrets: list[_PendingGuardrailSecret] | None = None,
 ) -> bool:
@@ -12801,7 +12821,12 @@ def _interactive_guardrail_setup(
         hilt_action_connectors = None
         hilt_applicable = gc.mode == "action"
     if hilt_applicable:
-        _configure_hilt_interactive(gc, action_connectors=hilt_action_connectors)
+        _configure_hilt_interactive(
+            gc,
+            action_connectors=hilt_action_connectors,
+            flag_enabled=human_approval,
+            flag_min_severity=hilt_min_severity,
+        )
 
     ux.section("Scanner engine")
     click.echo(
