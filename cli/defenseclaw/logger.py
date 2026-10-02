@@ -77,7 +77,7 @@ class _GatewayConfigRecorder:
                 token = token_resolver() if callable(token_resolver) else ""
         if not token:
             raise CanonicalObservabilityUnavailableError(
-                "gateway authentication is unavailable; start or reconfigure the v8 gateway"
+                "gateway authentication is unavailable"
             )
 
         try:
