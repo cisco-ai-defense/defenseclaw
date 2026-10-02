@@ -4269,6 +4269,9 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.assertEqual(cfg["guardrail"].get("mode", "observe"), "observe")
         self.assertEqual(cfg["guardrail"]["connectors"]["claudecode"]["mode"], "action")
         self.assertIn(cfg["guardrail"]["connectors"]["codex"].get("mode", ""), ("", "observe"))
+        # GAP-1517: the summary names each action connector's fail mode.
+        guardrail = [s for s in json.loads(result.output)["setup"] if s["name"] == "Guardrail"]
+        self.assertRegex(guardrail[0]["detail"], r"claudecode=action \(fail (open|closed)\), codex=observe$")
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
