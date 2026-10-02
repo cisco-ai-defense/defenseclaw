@@ -165,20 +165,45 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to open audit store: %w", err)
 		}
 	} else {
-		auditStore, err = audit.NewStore(cfg.AuditDB)
+		auditStore, err = openCommandAuditStore(cfg.AuditDB)
 		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
-		}
-		if err := auditStore.Init(); err != nil {
-			return fmt.Errorf("failed to init audit store: %w", err)
+			if cmd == nil || cmd.Annotations[auditOptionalAnnotation] != "true" {
+				return err
+			}
+			// Connector teardown and verify never write audit events. A
+			// damaged audit DB must not block restoring the agent's config
+			// (uninstall aborted on it, GAP-1048).
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v; continuing without the audit store\n", err)
+			auditStore = nil
 		}
 	}
-	auditLog = audit.NewLogger(auditStore)
+	auditLog = nil
+	if auditStore != nil {
+		auditLog = audit.NewLogger(auditStore)
+	}
 	installCorrelator(auditStore, os.Stderr)
 	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
 		loadDotEnvIntoOS(resolved)
 	}
 	return nil
+}
+
+// auditOptionalAnnotation marks a subcommand that writes no audit events, so
+// an audit store that does not open is a warning instead of an error.
+const auditOptionalAnnotation = "defenseclaw.audit-optional"
+
+// openCommandAuditStore opens and initializes the audit store for a CLI
+// subcommand (the daemon uses audit.OpenDaemonStore instead).
+func openCommandAuditStore(path string) (*audit.Store, error) {
+	store, err := audit.NewStore(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open audit store: %w", err)
+	}
+	if err := store.Init(); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("failed to init audit store: %w", err)
+	}
+	return store, nil
 }
 
 var rootCmd = &cobra.Command{

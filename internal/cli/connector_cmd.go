@@ -109,7 +109,8 @@ gateway token, or the audit DB. It is the idempotent inverse of
 Connector.Setup() for a single connector. It marks that connector inactive in
 the runtime state before removing files so a still-running hook guard cannot
 immediately reinstall the configuration being deliberately torn down.`,
-	RunE: runConnectorTeardown,
+	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	RunE:        runConnectorTeardown,
 }
 
 var connectorVerifyCmd = &cobra.Command{
@@ -127,6 +128,7 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
+	Annotations:       map[string]string{auditOptionalAnnotation: "true"},
 	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
 	RunE:              runConnectorVerify,
 }

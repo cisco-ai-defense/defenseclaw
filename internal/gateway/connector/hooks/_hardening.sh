@@ -884,10 +884,30 @@ defenseclaw_should_fail_closed_on_unreachable() {
 defenseclaw_emit_unreachable_stderr() {
   local subject="${1:-tool}"
   local reason="${2:-unknown}"
+  if [ "$reason" = "gateway unreachable" ]; then
+    reason="${reason}$(defenseclaw_unreachable_next_step)"
+  fi
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
+  fi
+}
+
+# defenseclaw_unreachable_next_step prints the next step for a per-user
+# account whose own gateway is down: after `defenseclaw-gateway stop` the
+# hooks deliberately do not start it again, so say how to resume. Managed
+# hooks print nothing (their service is not the user's to start).
+defenseclaw_unreachable_next_step() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ -e "${data}/gateway.stopped" ]; then
+    printf '%s' ' (the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection)'
+  elif defenseclaw_own_gateway_stopped; then
+    printf '%s' ' (this account'"'"'s gateway is not running; run `defenseclaw-gateway start`)'
   fi
 }
 

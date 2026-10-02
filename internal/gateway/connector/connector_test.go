@@ -9060,6 +9060,55 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 	}
 }
 
+// RHEL-U4-01: an operator snapshot that holds only an earlier release's
+// prompt-capture flag (an older teardown removed the rest of its block) must
+// not bring the flag back on uninstall. A flag next to the operator's own
+// telemetry settings stays.
+func TestClaudeCode_TeardownDropsOrphanedEarlierReleasePromptFlag(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pristine string
+		want     map[string]interface{}
+	}{
+		"orphaned flag": {
+			pristine: `{"env":{"AWS_REGION":"us-east-1","OTEL_LOG_USER_PROMPTS":"1"}}`,
+			want:     map[string]interface{}{"AWS_REGION": "us-east-1"},
+		},
+		"operator telemetry": {
+			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOG_USER_PROMPTS":"1"}}`,
+			want:     map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOG_USER_PROMPTS": "1"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "settings.json")
+			if err := os.WriteFile(settingsPath, []byte(tc.pristine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ClaudeCodeSettingsPathOverride = settingsPath
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+			c := NewClaudeCodeConnector()
+			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings map[string]interface{}
+			if err := json.Unmarshal(data, &settings); err != nil {
+				t.Fatal(err)
+			}
+			if got := settings["env"]; !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("env after teardown = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // RHEL-U3-06 (uninstall env): a stale earlier-release block put back over a
 // pristine file must not leave its fail mode or prompt-capture value behind.
 func TestClaudeCode_TeardownRemovesStaleEarlierReleaseEnv(t *testing.T) {
