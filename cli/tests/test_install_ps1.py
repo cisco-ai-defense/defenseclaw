@@ -452,3 +452,22 @@ def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
     resume = _ps1_function("Resume-InterruptedRun")
     assert "Start-SetupGateway $setupInstall.Root" in resume
     assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")
+
+
+def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_the_gateway() -> None:
+    # GAP-1988: the uv cache and Python in the data dir inherited its
+    # permissions, so the 1.0.0 gateway, which re-applies them on every private
+    # write, missed its 5-second start window after a rollback to 1.0.0.
+    protect = _ps1_function("Protect-UvDirectory")
+    assert protect.index("if (-not $Create) { return }") < protect.index("New-Item -ItemType Directory")
+    assert "if ($acl.AreAccessRulesProtected) { return }" in protect
+    assert "$acl.SetAccessRuleProtection($true, $true)" in protect
+    install = _ps1_function("Invoke-Install")
+    uv_env = install.index('$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"')
+    assert uv_env < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
+    rollback = _ps1_function("Invoke-Rollback")
+    assert (
+        rollback.index("Switch-WithPrevious")
+        < rollback.index("Protect-UvDirectory")
+        < rollback.index("if ($startAfter -and (Start-Gateway)")
+    )
