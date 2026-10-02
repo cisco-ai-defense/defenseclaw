@@ -4425,7 +4425,7 @@ def _refuse_held_api_port(cfg, port: int) -> None:
     Saving it would leave this account's gateway unable to start and send its
     hook calls, with its token, to that listener.
     """
-    from defenseclaw.bootstrap import _api_port_available, suggest_free_api_port
+    from defenseclaw.bootstrap import _api_port_available, _api_port_free, suggest_free_api_port
     from defenseclaw.config import api_bind_host
 
     host = (api_bind_host(cfg) or "127.0.0.1").strip("[]")
@@ -4433,19 +4433,30 @@ def _refuse_held_api_port(cfg, port: int) -> None:
         host = "127.0.0.1"
     if _api_port_available(host, port):
         return
-    try:
-        from defenseclaw.commands.cmd_doctor import _gateway_port_holder
-
-        holder = _gateway_port_holder(cfg)  # cfg.gateway.api_port is the new port here
-    except Exception:  # noqa: BLE001 - naming the holder is best effort
-        holder = ""
     free = suggest_free_api_port(host, port)
-    click.echo(
-        f"error: {host}:{port} is already in use"
-        + (f" by {holder}" if holder else " (often another account's DefenseClaw gateway)")
-        + "; this account's gateway could not listen there. config.yaml was not changed.",
-        err=True,
-    )
+    if _api_port_free(host, port):
+        # Nothing listens there, but another account's DefenseClaw config
+        # uses the port: its gateway takes it again on its next start
+        # (GAP-1762), so this is not "already in use".
+        click.echo(
+            f"error: {host}:{port} is reserved by another account's DefenseClaw gateway "
+            "(that gateway is not running now, but it uses this port when it starts). "
+            "config.yaml was not changed.",
+            err=True,
+        )
+    else:
+        try:
+            from defenseclaw.commands.cmd_doctor import _gateway_port_holder
+
+            holder = _gateway_port_holder(cfg)  # cfg.gateway.api_port is the new port here
+        except Exception:  # noqa: BLE001 - naming the holder is best effort
+            holder = ""
+        click.echo(
+            f"error: {host}:{port} is already in use"
+            + (f" by {holder}" if holder else " (often another account's DefenseClaw gateway)")
+            + "; this account's gateway could not listen there. config.yaml was not changed.",
+            err=True,
+        )
     click.echo(
         "  Choose a free port: defenseclaw setup gateway --api-port "
         + (str(free) if free else "<free port>")
@@ -14790,6 +14801,52 @@ def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
     return ""
 
 
+# A lifecycle command's own 30 s progress lines go to its captured output, so
+# the caller says the same while it waits (GAP-1858).
+_GATEWAY_LIFECYCLE_PROGRESS_SECONDS = 30.0
+
+
+class _GatewayLifecycleProgress:
+    """Print "still <verb> after Ns" every 30 s while a gateway lifecycle command runs.
+
+    The "defenseclaw-gateway: restarting..." line stays open (nl=False) for
+    the final mark; after a progress line, ``reopen`` starts a fresh one.
+    """
+
+    def __init__(self, verb: str, interval: float | None = None) -> None:
+        self.verb = verb
+        self.interval = _GATEWAY_LIFECYCLE_PROGRESS_SECONDS if interval is None else interval
+        self.printed = False
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = 0.0
+
+    def __enter__(self) -> _GatewayLifecycleProgress:
+        self._started = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        self.reopen()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            if not self.printed:
+                click.echo()
+                self.printed = True
+            elapsed = int(time.monotonic() - self._started)
+            click.echo(f"    still {self.verb} after {elapsed}s: waiting for the gateway to start and answer")
+
+    def reopen(self) -> None:
+        if self.printed:
+            self.printed = False
+            click.echo("  defenseclaw-gateway:", nl=False)
+
+
 def _restart_defense_gateway(
     data_dir: str,
     *,
@@ -14871,15 +14928,16 @@ def _restart_defense_gateway(
     generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
         # Run the object that passed custody, not whatever the path names now.
-        result = run_pinned_executable(
-            cmd,
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=child_env,
-            timeout=_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS,
-        )
+        with _GatewayLifecycleProgress(action):
+            result = run_pinned_executable(
+                cmd,
+                capture_output=True,
+                text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                env=child_env,
+                timeout=_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS,
+            )
         if result.returncode == 0:
             if _wait_for_defense_gateway_api(
                 data_dir,
@@ -15074,7 +15132,7 @@ def _restart_defense_gateway_native(
         # Hold the installed gateway without write or delete sharing until the
         # lifecycle command exits: its controller starts the long-running
         # gateway from this same path, which then still names this file (#643).
-        with pinned_executable(executable):
+        with pinned_executable(executable), _GatewayLifecycleProgress(f"{action}ing"):
             result = runner.run(
                 [executable, action],
                 timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,

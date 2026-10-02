@@ -91,6 +91,20 @@ type Daemon struct {
 	pidFile string
 	logFile string
 	started pidInfo
+	// progress, when set, is called every startProgressInterval while Start
+	// waits for the child to register its PID (GAP-1858).
+	progress func(elapsed time.Duration, step string)
+}
+
+// startProgressInterval is how often Start reports a slow child PID
+// registration, the same 30 s as the CLI's readiness progress lines.
+var startProgressInterval = 30 * time.Second
+
+// SetStartProgress makes Start call report every 30 s while it waits for the
+// gateway child to register, so an interactive start or restart does not
+// look hung (GAP-1858). nil turns it off.
+func (d *Daemon) SetStartProgress(report func(elapsed time.Duration, step string)) {
+	d.progress = report
 }
 
 func New(dataDir string) *Daemon {
@@ -683,9 +697,15 @@ func (d *Daemon) waitForChildPIDRegistration(
 	defer deadline.Stop()
 	ticker := time.NewTicker(childPIDRegistrationPoll)
 	defer ticker.Stop()
+	waitStarted := time.Now()
+	nextReport := waitStarted.Add(startProgressInterval)
 
 	var lastErr error
 	for {
+		if d.progress != nil && !time.Now().Before(nextReport) {
+			nextReport = time.Now().Add(startProgressInterval)
+			d.progress(time.Since(waitStarted), "waiting for the gateway process to register")
+		}
 		info, err := d.readPIDInfo()
 		if err == nil {
 			switch {

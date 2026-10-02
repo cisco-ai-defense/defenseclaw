@@ -631,7 +631,25 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertNotIn("Stop that process", other)
         self.assertIn("Stop that process, or move", own)
         for text in (other, own):
-            self.assertIn("`defenseclaw setup gateway --api-port 18980 --non-interactive`", text)
+            # Word for word the text defenseclaw-gateway status and start print.
+            self.assertIn(
+                "move this account's gateway to a free port with: defenseclaw setup gateway --api-port 18980 "
+                "--non-interactive, then run: defenseclaw-gateway start",
+                text,
+            )
+
+        # GAP-1706: on Windows a standard user cannot read an elevated
+        # holder's account; Windows refusing to open it means another account.
+        from defenseclaw import process_liveness
+
+        for denied in (True, False):
+            with (
+                patch.object(cmd_doctor.sys, "platform", "win32"),
+                patch.object(process_liveness, "process_access_denied", return_value=denied),
+                patch.object(cmd_doctor, "_free_api_port_hint", return_value="18980"),
+            ):
+                text = cmd_doctor._foreign_gateway_port_remediation(cfg, holder="PID 3792 (pwsh.exe)")
+            self.assertEqual(text.startswith("That process belongs to another account"), denied, text)
 
     def test_refused_token_send_is_not_a_transport_failure(self):
         from defenseclaw.commands import cmd_doctor

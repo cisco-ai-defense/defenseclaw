@@ -3713,6 +3713,28 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(after, before)
         self.app.logger.log_action.assert_not_called()
 
+    def test_new_api_port_only_claimed_by_another_account_is_called_reserved(self):
+        # GAP-1762: nothing listens there, so "already in use" was wrong, and
+        # the suggested port must not be another claimed one.
+        import socket
+
+        from defenseclaw import bootstrap
+
+        self.app.logger = MagicMock()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        claimed = {port, port + 10}
+        with patch.object(bootstrap, "_api_port_claimed_by_other_account", side_effect=lambda p: p in claimed):
+            result = _invoke(["gateway", "--api-port", str(port), "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(f"127.0.0.1:{port} is reserved by another account's DefenseClaw gateway", result.output)
+        self.assertNotIn("already in use", result.output)
+        self.assertIn("config.yaml was not changed", result.output)
+        self.assertNotIn(f"--api-port {port + 10} ", result.output)
+        self.app.logger.log_action.assert_not_called()
+
     def test_no_verify_keeps_non_availability_audit_errors_fatal(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = RuntimeError("audit rejected")
@@ -4216,3 +4238,19 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_gateway_lifecycle_progress_reports_a_slow_restart(capsys):
+    # GAP-1858: guardrail use-pack and setup printed "restarting..." and then
+    # nothing for minutes while defenseclaw-gateway restart waited.
+    import time as _time
+
+    with cmd_setup._GatewayLifecycleProgress("restarting", interval=0.01):
+        _time.sleep(0.05)
+    out = capsys.readouterr().out
+    assert "    still restarting after 0s: waiting for the gateway to start and answer" in out
+    assert out.endswith("  defenseclaw-gateway:")
+
+    with cmd_setup._GatewayLifecycleProgress("restarting", interval=60):
+        pass
+    assert capsys.readouterr().out == ""

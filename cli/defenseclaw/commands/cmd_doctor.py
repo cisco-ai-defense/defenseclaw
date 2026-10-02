@@ -2570,6 +2570,17 @@ def _holder_is_other_account(holder: str) -> bool:
     if sys.platform == "win32" and match and "\\" in match.group(1):
         account = match.group(1).rsplit("\\", 1)[-1].strip().lower()
         return account != (os.environ.get("USERNAME") or "").strip().lower()
+    if sys.platform == "win32":
+        # A standard account cannot see who owns an elevated or another
+        # user's process, so the label is only "PID N (image)". Windows then
+        # refuses to open it, which is how the gateway tells (Go
+        # daemon.ForeignListenerPID); doctor said "Stop that process" while
+        # status and start said it belongs to another account.
+        pid = re.match(r"PID (\d+)", holder)
+        if pid:
+            from defenseclaw.process_liveness import process_access_denied
+
+            return process_access_denied(int(pid.group(1)))
     return False
 
 
@@ -2579,10 +2590,11 @@ def _foreign_gateway_port_remediation(cfg, then: str = "start", holder: str = ""
     lead = "That process belongs to another account, so move" if _holder_is_other_account(holder) else (
         "Stop that process, or move"
     )
+    # Word for word the gateway's foreignGatewayListenerFix text.
     return (
-        f"{lead} this account's gateway to a free port with "
-        f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
-        f"then run `defenseclaw-gateway {then}`"
+        f"{lead} this account's gateway to a free port with: "
+        f"defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive, "
+        f"then run: defenseclaw-gateway {then}"
     )
 
 
