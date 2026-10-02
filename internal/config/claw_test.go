@@ -1285,7 +1285,7 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	configYAML := []byte("mcp_servers:\n  native-windows:\n    command: hermes-mcp\nmcp:\n  servers:\n    legacy-dc:\n      command: legacy-mcp\n")
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1307,6 +1307,9 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	}
 	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
 		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
+	}
+	if got := mcpEntriesByName(entries)["legacy-dc"].Command; got != "legacy-mcp" {
+		t.Fatalf("legacy Hermes MCP command = %q, want legacy-mcp; entries=%+v", got, entries)
 	}
 }
 

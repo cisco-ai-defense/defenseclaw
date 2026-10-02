@@ -3875,13 +3875,26 @@ def _openclaw_mcp_servers(
     )
 
 
+_HERMES_MCP_KEY = ("mcp_servers",)
+_HERMES_LEGACY_MCP_KEY = ("mcp", "servers")
+_HERMES_MCP_HINT = "add or remove the server with `hermes mcp add` / `hermes mcp remove` instead"
+
+
+def _drop_hermes_legacy_mcp_server(path: str, name: str) -> None:
+    """Remove a server older DefenseClaw builds wrote under ``mcp.servers``."""
+    try:
+        _atomic_yaml_delete(path, _HERMES_LEGACY_MCP_KEY + (name,))
+    except MCPWriteUnsupportedError:
+        pass  # best-effort cleanup of a key Hermes never reads
+
+
 def _hermes_mcp_servers(
     *,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     return _read_yaml_mcp_servers(
         hermes_config_path(),
-        key_paths=(("mcp", "servers"), ("mcpServers",)),
+        key_paths=(_HERMES_MCP_KEY, _HERMES_LEGACY_MCP_KEY, ("mcpServers",)),
         diagnostic_sink=diagnostic_sink,
     )
 
@@ -4945,7 +4958,11 @@ def set_mcp_server(
             "server with `amp mcp add`, then re-run `defenseclaw mcp scan`.",
         )
     if name_n == "hermes":
-        _atomic_yaml_merge(hermes_config_path(), ("mcp", "servers", name), entry)
+        # GAP-1591: Hermes loads top-level ``mcp_servers`` (what ``hermes mcp
+        # add`` writes); the old ``mcp.servers`` copy is legacy DefenseClaw.
+        path = hermes_config_path()
+        _atomic_yaml_merge(path, _HERMES_MCP_KEY + (name,), entry, hint=_HERMES_MCP_HINT)
+        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -5048,7 +5065,9 @@ def unset_mcp_server(
             "with Amp's MCP command, then re-run `defenseclaw mcp scan`.",
         )
     if name_n == "hermes":
-        _atomic_yaml_delete(hermes_config_path(), ("mcp", "servers", name))
+        path = hermes_config_path()
+        _atomic_yaml_delete(path, _HERMES_MCP_KEY + (name,), hint=_HERMES_MCP_HINT)
+        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -7927,55 +7946,197 @@ def _atomic_json_delete(
     return True
 
 
+def _yaml_is_content(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _yaml_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _yaml_find_key(lines: list[str], start: int, end: int, key: str):
+    """Find mapping key *key* among the direct children of ``lines[start:end]``.
+
+    Returns ``(index, indent, block_end, inline_value)`` for a hit, or
+    ``(None, child_indent, insert_at, None)`` when the key is absent.
+    """
+    child_indent = None
+    last_content = start - 1
+    for i in range(start, end):
+        line = lines[i]
+        if not _yaml_is_content(line):
+            continue
+        last_content = i
+        indent = _yaml_indent(line)
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue
+        try:
+            parsed = yaml.safe_load(line.strip())
+        except yaml.YAMLError:
+            continue
+        if not (isinstance(parsed, dict) and len(parsed) == 1 and str(next(iter(parsed))) == key):
+            continue
+        block_end = i + 1
+        for j in range(i + 1, end):
+            other = lines[j]
+            if not _yaml_is_content(other):
+                continue
+            other_indent = _yaml_indent(other)
+            item = other.strip()
+            # A block sequence may sit at its key's own indent ("key:\n- a").
+            if other_indent < indent or (other_indent == indent and not (item == "-" or item.startswith("- "))):
+                break
+            block_end = j + 1
+        return i, indent, block_end, next(iter(parsed.values()))
+    return None, child_indent, last_content + 1, None
+
+
+def _yaml_fragment(key: str, value: Any, indent: int, newline: str) -> list[str]:
+    text = yaml.safe_dump({key: value}, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    return [" " * indent + line + newline for line in text.splitlines()]
+
+
+def _yaml_text_set(lines: list[str], keys: tuple[str, ...], value: Any, newline: str) -> bool:
+    start, end, parent_indent = 0, len(lines), -2
+    for depth, key in enumerate(keys):
+        index, indent, block_end, inline = _yaml_find_key(lines, start, end, key)
+        nested = value
+        for inner in reversed(keys[depth + 1:]):
+            nested = {inner: nested}
+        if index is None:
+            at = len(lines) if depth == 0 else block_end
+            lines[at:at] = _yaml_fragment(key, nested, parent_indent + 2 if indent is None else indent, newline)
+            return True
+        if depth == len(keys) - 1:
+            lines[index:block_end] = _yaml_fragment(key, value, indent, newline)
+            return True
+        if block_end == index + 1:
+            if inline not in (None, {}):
+                return False
+            lines[index:block_end] = _yaml_fragment(key, nested, indent, newline)
+            return True
+        start, end, parent_indent = index + 1, block_end, indent
+    return False
+
+
+def _yaml_text_delete(lines: list[str], keys: tuple[str, ...]) -> bool:
+    spans = []
+    start, end = 0, len(lines)
+    for key in keys:
+        index, _indent, block_end, _inline = _yaml_find_key(lines, start, end, key)
+        if index is None:
+            return False
+        spans.append((index, block_end))
+        start, end = index + 1, block_end
+    index, block_end = spans.pop()
+    del lines[index:block_end]
+    removed = block_end - index
+    # Drop parents the delete left empty, like the parsed-data side does.
+    for parent, parent_end in reversed(spans):
+        parent_end -= removed
+        if any(_yaml_is_content(line) for line in lines[parent + 1:parent_end]):
+            break
+        del lines[parent]
+        removed += 1
+    return True
+
+
+_YAML_DELETE = object()
+
+
+def _yaml_edit_in_place(path: str, keys: tuple[str, ...], value: Any = _YAML_DELETE, *, hint: str = "") -> bool:
+    """Set or delete one nested mapping entry in a YAML file, text-level.
+
+    Only the lines of that entry change, so the user's comments, ordering
+    and formatting survive (GAP-1586: a full ``safe_dump`` rewrite dropped
+    every comment of Hermes' self-documenting config). The edited text must
+    parse to exactly the expected data; otherwise nothing is written.
+    """
+    deleting = value is _YAML_DELETE
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raw = b""
+    text = raw.decode("utf-8-sig")
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    refuse = f"refusing to rewrite {path}: {{}}" + (f"; {hint}" if hint else "")
+    try:
+        data = yaml.safe_load(text) if text.strip() else None
+    except yaml.YAMLError as exc:
+        raise MCPWriteUnsupportedError(refuse.format("it is not valid YAML")) from exc
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise MCPWriteUnsupportedError(refuse.format("its top level is not a mapping"))
+
+    expected = copy.deepcopy(data)
+    cursor: Any = expected
+    chain = []
+    for key in keys[:-1]:
+        node = cursor.get(key)
+        if node is None or node == {}:
+            if deleting:
+                return False
+            node = {}
+            cursor[key] = node
+        if not isinstance(node, dict):
+            raise MCPWriteUnsupportedError(refuse.format(f"{key!r} is not a mapping"))
+        chain.append((cursor, key))
+        cursor = node
+    if deleting:
+        if keys[-1] not in cursor:
+            return False
+        del cursor[keys[-1]]
+        for parent, key in reversed(chain):
+            if parent[key]:
+                break
+            del parent[key]
+    else:
+        cursor[keys[-1]] = value
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith(("\n", "\r")):
+        lines[-1] += newline
+    edited = _yaml_text_delete(lines, keys) if deleting else _yaml_text_set(lines, keys, value, newline)
+    new_text = "".join(lines)
+    try:
+        matches = edited and (yaml.safe_load(new_text) or {}) == expected
+    except yaml.YAMLError:
+        matches = False
+    if not matches:
+        raise MCPWriteUnsupportedError(refuse.format("its layout cannot be edited in place without losing comments"))
+    _capture_managed_mcp_backup(path)
+    atomic_write_private_bytes(path, (b"\xef\xbb\xbf" if bom else b"") + new_text.encode("utf-8"))
+    return True
+
+
 def _atomic_yaml_merge(
     path: str,
     keys: tuple[str, ...],
     value: dict[str, Any],
+    *,
+    hint: str = "",
 ) -> None:
     _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
-    _capture_managed_mcp_backup(path)
-    try:
-        with open(path, encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
-        data = loaded if isinstance(loaded, dict) else {}
-    except (FileNotFoundError, yaml.YAMLError):
-        data = {}
-    cursor = data
-    for k in keys[:-1]:
-        node = cursor.get(k)
-        if not isinstance(node, dict):
-            node = {}
-            cursor[k] = node
-        cursor = node
-    cursor[keys[-1]] = value
-    _atomic_write_yaml(path, data)
+    _yaml_edit_in_place(path, keys, value, hint=hint)
 
 
 def _atomic_yaml_delete(
     path: str,
     keys: tuple[str, ...],
+    *,
+    hint: str = "",
 ) -> bool:
-    try:
-        with open(path, encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
-    except (FileNotFoundError, yaml.YAMLError):
-        return False
-    if not isinstance(loaded, dict):
-        return False
-    cursor: Any = loaded
-    for k in keys[:-1]:
-        if not isinstance(cursor, dict) or k not in cursor:
-            return False
-        cursor = cursor[k]
-    if not isinstance(cursor, dict) or keys[-1] not in cursor:
-        return False
-    del cursor[keys[-1]]
-    _capture_managed_mcp_backup(path)
-    _atomic_write_yaml(path, loaded)
-    return True
+    _reject_symlink_config(path)
+    return _yaml_edit_in_place(path, keys, hint=hint)
 
 
 def restore_managed_mcp_backup(path: str) -> bool:
@@ -8332,11 +8493,6 @@ def lookup_managed_mcp_backup(path: str) -> str | None:
     the recorded backup location without performing a restore.
     """
     return _registry_backup_for(os.path.abspath(path))
-
-
-def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
-    payload = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
 
 
 def _atomic_write_text(path: str, text: str) -> None:
