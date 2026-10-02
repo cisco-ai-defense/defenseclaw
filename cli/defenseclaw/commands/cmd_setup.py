@@ -13968,6 +13968,21 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
         compatibility = resolve_connector_contract(normalize_connector(connector), raw_version)
     except Exception:  # noqa: BLE001 - diagnostics must not mask the gate result.
         return f"protected lock {invariant} is invalid"
+    if (
+        not raw_version
+        and invariant == "version"
+        and compatibility.status == STATUS_UNVERSIONED
+        and isinstance(entry, dict)
+        and entry.get("compatibility_status") == STATUS_UNVERSIONED
+    ):
+        # The agent reported no version, most often because it is not
+        # installed for this account (GAP-1285): nothing about the lock is
+        # invalid.
+        return (
+            f"DefenseClaw could not read the {connector} version, so no reviewed hook contract applies. "
+            f"Check that {connector} is installed and on PATH for this account, "
+            f"then run: defenseclaw setup {connector}"
+        )
     version = raw_version or "an unreported version"
     if version.casefold().startswith(f"{connector} ".casefold()):
         # Devin's banner starts with its own name ("devin 3000.11.3 (...)").
